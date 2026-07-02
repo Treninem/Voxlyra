@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block content %}
+{% if audio %}
+<section class="audio-player-page" id="audioPage" data-audio-id="{{ audio_id }}">
+  <div class="cover-big audio-cover">🎧</div>
+  <h1>{{ audio.title }}</h1>
+  <p class="muted">{{ audio.book_title }} · {{ audio.pen_name or 'Автор не указан' }}</p>
+  <div class="chips center">
+    <span>Диктор: {{ audio.narrator or 'не указан' }}</span>
+    <span>{% if audio.is_free %}бесплатно{% else %}{{ audio.price_stars }} Stars{% endif %}</span>
+  </div>
+
+  <section id="audioStatus" class="reader-status">Проверяем доступ через Telegram Mini App...</section>
+  <audio id="voxPlayer" controls preload="metadata"></audio>
+
+  <div class="audio-controls">
+    <button onclick="seekAudio(-15)">⏪ 15</button>
+    <button onclick="seekAudio(15)">15 ⏩</button>
+    <button onclick="setRate(1)">1x</button>
+    <button onclick="setRate(1.25)">1.25x</button>
+    <button onclick="setRate(1.5)">1.5x</button>
+    <button onclick="setRate(2)">2x</button>
+    <button id="saveAudioProgress">💾 Место</button>
+  </div>
+
+  <section id="audioPaywall" class="empty-card paywall-card" style="display:none">
+    <p>Эта аудиоглава платная. Если вы уже купили её, откройте страницу внутри Telegram — доступ подтянется автоматически.</p>
+    <p><b>{{ audio.price_stars }} Stars</b></p>
+    {% if purchase_url %}<a class="button-link purple-btn" href="{{ purchase_url }}">💫 Купить в боте</a>{% endif %}
+  </section>
+
+  <a class="button-link" href="/book/{{ audio.book_id }}">⬅️ К книге</a>
+</section>
+{% else %}
+<section class="empty-card">
+  <h1>Аудиоглава не найдена</h1>
+  <p>Вернитесь к книге и выберите другое аудио.</p>
+</section>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero compact purple">
+  <img src="/static/img/channel_avatar.png" alt="Voxlyra audio" class="logo">
+  <div>
+    <h1>Аудиокниги</h1>
+    <p>Истории, которые можно слушать.</p>
+  </div>
+</section>
+
+<section class="section-title">
+  <h2>Слушать</h2>
+  <p>Книги с аудиоверсией, прогрессом прослушивания и плеером внутри Telegram.</p>
+</section>
+
+<section class="player-demo">
+  <div class="play-circle">▶</div>
+  <div>
+    <h3>Аудиоплеер</h3>
+    <p>скорость · назад 15 сек · вперёд 15 сек · продолжить с места</p>
+  </div>
+</section>
+
+<section class="book-list">
+  {% for book in books %}
+    {% if book.audio_count > 0 or book.has_audio %}
+    <a class="book-card" href="/book/{{ book.id }}">
+      <div class="cover-mini audio">{{ book.title[:1] }}</div>
+      <div class="book-info">
+        <h3>{{ book.title }}</h3>
+        <p>{{ book.pen_name or 'Автор не указан' }}</p>
+        <p class="desc">{{ book.audio_count }} аудиоглав · {{ book.chapters_count }} текстовых глав</p>
+      </div>
+    </a>
+    {% endif %}
+  {% endfor %}
+</section>
+{% endblock %}

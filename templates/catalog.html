@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero compact">
+  <img src="/static/img/bot_avatar.png" alt="Voxlyra" class="logo">
+  <div>
+    <h1>Вокслира</h1>
+    <p>Истории, которые звучат.</p>
+  </div>
+</section>
+
+<section class="tabs">
+  <a class="tab active" href="/catalog">📚 Читать</a>
+  <a class="tab" href="/audio">🎧 Слушать</a>
+</section>
+
+<section class="section-title">
+  <h2>Витрина</h2>
+  <p>На этом этапе показываются черновики и опубликованные книги для проверки интерфейса.</p>
+</section>
+
+<section class="book-list">
+  {% if books %}
+    {% for book in books %}
+      <a class="book-card" href="/book/{{ book.id }}">
+        <div class="cover-mini">{{ book.title[:1] }}</div>
+        <div class="book-info">
+          <h3>{{ book.title }}</h3>
+          <p>{{ book.pen_name or 'Автор не указан' }} · {{ book.age_limit }} · {{ book.publication_status }}</p>
+          <p class="desc">{{ (book.description or '')[:120] }}{% if book.description and book.description|length > 120 %}...{% endif %}</p>
+          <div class="chips">
+            <span>{{ book.price_stars }} Stars</span>
+            {% if book.has_audio %}<span>🎧 аудио</span>{% endif %}
+            {% if book.allow_download %}<span>скачивание</span>{% endif %}
+          </div>
+        </div>
+      </a>
+    {% endfor %}
+  {% else %}
+    <article class="empty-card">
+      <h3>Книг пока нет</h3>
+      <p>Создайте профиль автора в боте и добавьте первую книгу.</p>
+    </article>
+  {% endif %}
+</section>
+{% endblock %}

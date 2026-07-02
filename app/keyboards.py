@@ -1,0 +1,694 @@
+from aiogram.types import InlineKeyboardMarkup, WebAppInfo
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+from app.config import settings
+from app.permissions import MODERATION_BUTTONS, PERMISSIONS
+
+
+def main_menu(is_owner: bool, has_admin_access: bool, has_author_profile: bool = False) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    if settings.WEBAPP_URL:
+        kb.button(text="📚 Читать", web_app=WebAppInfo(url=f"{settings.WEBAPP_URL.rstrip('/')}/catalog"))
+        kb.button(text="🎧 Слушать", web_app=WebAppInfo(url=f"{settings.WEBAPP_URL.rstrip('/')}/audio"))
+    else:
+        kb.button(text="📚 Читать", callback_data="main:read")
+        kb.button(text="🎧 Слушать", callback_data="main:listen")
+    kb.button(text="⭐ Моё", callback_data="main:my")
+    kb.button(text="➕ Ещё", callback_data="main:more")
+    if has_admin_access:
+        kb.button(text="🛡 Модерация", callback_data="mod:menu")
+    if is_owner:
+        kb.button(text="👑 Управление", callback_data="owner:menu")
+    kb.adjust(2, 2, 1, 1)
+    return kb.as_markup()
+
+
+def more_menu(has_author_profile: bool) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✍️ Автору", callback_data="author:menu")
+    kb.button(text="💎 Бонусы", callback_data="main:bonuses")
+    kb.button(text="🛟 Поддержка", callback_data="main:support")
+    kb.button(text="📜 Правила", callback_data="main:legal")
+    kb.button(text="⚙️ Настройки", callback_data="main:settings")
+    kb.button(text="⬅️ Назад", callback_data="menu:main")
+    kb.adjust(2, 2, 1, 1)
+    return kb.as_markup()
+
+
+def owner_menu() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    rows = [
+        ("👥 Администрация", "owner:admins"),
+        ("📚 Книги", "owner:books"),
+        ("✍️ Авторы", "owner:authors"),
+        ("👤 Пользователи", "owner:users"),
+        ("💰 Финансы", "owner:finance"),
+        ("📢 Канал", "owner:channel"),
+        ("🧾 Жалобы", "owner:complaints"),
+        ("📊 Статистика", "owner:stats"),
+        ("⚙️ Настройки", "owner:settings"),
+        ("🛡 Безопасность", "owner:security"),
+        ("🧩 Система", "owner:system"),
+        ("⬅️ Назад", "menu:main"),
+    ]
+    for text, data in rows:
+        kb.button(text=text, callback_data=data)
+    kb.adjust(2, 2, 2, 2, 2, 1, 1)
+    return kb.as_markup()
+
+
+def admins_menu() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➕ Добавить", callback_data="owner:add_admin")
+    kb.button(text="👥 Список", callback_data="owner:list_admins")
+    kb.button(text="📝 Журнал", callback_data="owner:audit")
+    kb.button(text="⬅️ Назад", callback_data="owner:menu")
+    kb.adjust(2, 1, 1)
+    return kb.as_markup()
+
+
+def admin_card_menu(target_user_id: int, allowed: set[str]) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for perm in PERMISSIONS:
+        mark = "✅" if perm.code in allowed else "▫️"
+        label = f"{mark} {perm.label}"
+        kb.button(text=label, callback_data=f"owner:perm:{target_user_id}:{perm.code}")
+    kb.button(text="🚫 Убрать доступ", callback_data=f"owner:remove_admin:{target_user_id}")
+    kb.button(text="⬅️ Назад", callback_data="owner:list_admins")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def admins_list_menu(admins) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for row in admins:
+        name = row["full_name"] or row["username"] or str(row["telegram_id"])
+        kb.button(text=f"👤 {name}", callback_data=f"owner:admin_card:{row['user_id']}")
+    kb.button(text="⬅️ Назад", callback_data="owner:admins")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def moderation_menu(permissions: set[str]) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for code, (text, callback) in MODERATION_BUTTONS.items():
+        if code in permissions:
+            kb.button(text=text, callback_data=callback)
+    kb.button(text="⬅️ Назад", callback_data="menu:main")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def author_menu(has_profile: bool) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    if has_profile:
+        rows = [
+            ("📚 Мои книги", "author:books"),
+            ("➕ Добавить книгу", "author:add_book"),
+            ("🎧 Аудиокниги", "author:audio"),
+            ("💰 Доход", "author:income"),
+            ("📢 Продвижение", "author:ads"),
+            ("👤 Профиль", "author:profile"),
+            ("📜 Правила авторов", "legal:view:authors"),
+        ]
+    else:
+        rows = [("✍️ Стать автором", "author:register")]
+    for text, data in rows:
+        kb.button(text=text, callback_data=data)
+    kb.button(text="⬅️ Назад", callback_data="main:more")
+    kb.adjust(2, 2, 2, 1)
+    return kb.as_markup()
+
+
+def age_menu(prefix: str) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for value in ["0+", "6+", "12+", "16+", "18+"]:
+        kb.button(text=value, callback_data=f"{prefix}:{value}")
+    kb.adjust(3, 2)
+    return kb.as_markup()
+
+
+def writing_status_menu() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Пишется", callback_data="book:status:writing")
+    kb.button(text="Завершена", callback_data="book:status:finished")
+    kb.button(text="Заморожена", callback_data="book:status:frozen")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def yes_no_menu(prefix: str) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Да", callback_data=f"{prefix}:yes")
+    kb.button(text="Нет", callback_data=f"{prefix}:no")
+    kb.adjust(2)
+    return kb.as_markup()
+
+
+def pricing_menu() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Бесплатно", callback_data="book:pricing:free")
+    kb.button(text="Платные главы", callback_data="book:pricing:chapters")
+    kb.button(text="Вся книга", callback_data="book:pricing:whole_book")
+    kb.button(text="Подписка позже", callback_data="book:pricing:subscription")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def cover_menu() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Пропустить", callback_data="book:cover:skip")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def book_created_menu(book_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➕ Главы", callback_data=f"author:chapters:{book_id}")
+    kb.button(text="🎧 Аудио", callback_data=f"author:audio:{book_id}")
+    kb.button(text="📤 На проверку", callback_data=f"author:submit_book:{book_id}")
+    kb.button(text="📚 Мои книги", callback_data="author:books")
+    kb.button(text="⬅️ В меню", callback_data="author:menu")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def author_books_menu(books) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for book in books:
+        status = {
+            "draft": "черновик",
+            "review": "на проверке",
+            "published": "опубликована",
+            "hidden": "скрыта",
+            "blocked": "заблокирована",
+        }.get(book["publication_status"], book["publication_status"])
+        kb.button(text=f"📘 {book['title']} · {status}", callback_data=f"author:book:{book['id']}")
+    kb.button(text="➕ Добавить книгу", callback_data="author:add_book")
+    kb.button(text="⬅️ Назад", callback_data="author:menu")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def author_book_card_menu(book_id: int, publication_status: str) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    if publication_status == "draft":
+        kb.button(text="📤 Отправить на проверку", callback_data=f"author:submit_book:{book_id}")
+    kb.button(text="➕ Главы", callback_data=f"author:chapters:{book_id}")
+    kb.button(text="🎧 Аудио", callback_data=f"author:audio:{book_id}")
+    kb.button(text="📚 Мои книги", callback_data="author:books")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def moderation_books_menu(books) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for book in books:
+        kb.button(text=f"📘 {book['title']}", callback_data=f"mod:book:{book['id']}")
+    kb.button(text="⬅️ Назад", callback_data="mod:menu")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def moderation_book_card_menu(book_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Опубликовать", callback_data=f"mod:book_publish:{book_id}")
+    kb.button(text="⛔ Отклонить", callback_data=f"mod:book_reject:{book_id}")
+    kb.button(text="⬅️ К списку", callback_data="mod:books")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def finance_owner_menu() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📤 Заявки на выплату", callback_data="owner:payouts")
+    kb.button(text="⚙️ Удержания и вывод", callback_data="owner:payout_settings")
+    kb.button(text="Комиссия книг", callback_data="owner:set_commission:commission_books")
+    kb.button(text="Комиссия аудио", callback_data="owner:set_commission:commission_audio")
+    kb.button(text="Комиссия донатов", callback_data="owner:set_commission:commission_donations")
+    kb.button(text="↩️ Возвраты", callback_data="owner:refunds")
+    kb.button(text="⬅️ Назад", callback_data="owner:menu")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def reader_ads_owner_menu(settings_dict) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    enabled = "✅" if settings_dict.get("enabled") else "▫️"
+    top = "✅" if settings_dict.get("top") else "▫️"
+    bottom = "✅" if settings_dict.get("bottom") else "▫️"
+    kb.button(text=f"{enabled} Реклама в читалке", callback_data="owner:reader_ads_toggle:reader_ads_enabled")
+    kb.button(text=f"{top} Блок сверху главы", callback_data="owner:reader_ads_toggle:reader_ads_top")
+    kb.button(text=f"{bottom} Блок снизу главы", callback_data="owner:reader_ads_toggle:reader_ads_bottom")
+    kb.button(text="⬅️ Назад", callback_data="owner:settings")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def back_to_main() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ В меню", callback_data="menu:main")
+    return kb.as_markup()
+
+
+def author_chapters_menu(book_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➕ Ввести главу вручную", callback_data=f"chapter:add_manual:{book_id}")
+    kb.button(text="📄 Загрузить файл", callback_data=f"chapter:upload:{book_id}")
+    kb.button(text="📚 Список глав", callback_data=f"chapter:list:{book_id}")
+    kb.button(text="📤 На проверку", callback_data=f"author:submit_book:{book_id}")
+    kb.button(text="⬅️ К книге", callback_data=f"author:book:{book_id}")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def chapter_import_confirm_menu(book_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Сохранить главы", callback_data=f"chapter:import_confirm:{book_id}")
+    kb.button(text="❌ Отмена", callback_data=f"chapter:import_cancel:{book_id}")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def author_chapter_list_menu(book_id: int, chapters) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for chapter in chapters[:40]:
+        free_mark = "бесплатно" if chapter["is_free"] else f"{chapter['price_stars']} Stars"
+        kb.button(text=f"{chapter['number']}. {chapter['title']} · {free_mark}", callback_data=f"chapter:view:{chapter['id']}")
+    kb.button(text="➕ Добавить", callback_data=f"chapter:add_manual:{book_id}")
+    kb.button(text="📄 Загрузить файл", callback_data=f"chapter:upload:{book_id}")
+    kb.button(text="⬅️ Назад", callback_data=f"author:chapters:{book_id}")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def chapter_view_menu(book_id: int, chapter_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🗑 Удалить главу", callback_data=f"chapter:delete:{chapter_id}")
+    kb.button(text="⬅️ К главам", callback_data=f"chapter:list:{book_id}")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def author_audio_menu(book_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➕ Добавить аудиоглаву", callback_data=f"audio:add:{book_id}")
+    kb.button(text="📦 Загрузить ZIP", callback_data=f"audio:zip:{book_id}")
+    kb.button(text="🎧 Список аудио", callback_data=f"audio:list:{book_id}")
+    kb.button(text="⬅️ К книге", callback_data=f"author:book:{book_id}")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def author_audio_list_menu(book_id: int, audios) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for audio in audios[:40]:
+        free_mark = "бесплатно" if audio["is_free"] else f"{audio['price_stars']} Stars"
+        duration = audio["duration_seconds"] or 0
+        minutes = duration // 60
+        kb.button(text=f"{audio['number']}. {audio['title']} · {minutes} мин · {free_mark}", callback_data=f"audio:view:{audio['id']}")
+    kb.button(text="➕ Добавить", callback_data=f"audio:add:{book_id}")
+    kb.button(text="📦 ZIP", callback_data=f"audio:zip:{book_id}")
+    kb.button(text="⬅️ Назад", callback_data=f"author:audio:{book_id}")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def audio_view_menu(book_id: int, audio_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🗑 Удалить аудио", callback_data=f"audio:delete:{audio_id}")
+    kb.button(text="⬅️ К аудио", callback_data=f"audio:list:{book_id}")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def pay_target_menu(kind: str, target_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="💫 Купить за Stars", callback_data=f"buy:{kind}:{target_id}")
+    kb.button(text="⬅️ В меню", callback_data="menu:main")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def user_purchases_menu(purchases) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for row in purchases[:20]:
+        if row["book_title"]:
+            title = f"Книга: {row['book_title']}"
+        elif row["chapter_title"]:
+            title = f"Глава: {row['chapter_title']}"
+        elif row["audio_title"]:
+            title = f"Аудио: {row['audio_title']}"
+        else:
+            title = "Покупка"
+        status = "возврат" if row["status"] == "refunded" else "оплачено"
+        kb.button(text=f"{title[:35]} · {row['amount_stars']} ⭐ · {status}", callback_data=f"purchase:view:{row['id']}")
+    kb.button(text="⬅️ В меню", callback_data="menu:main")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def purchase_card_menu(purchase_id: int, status: str) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    if status == "paid":
+        kb.button(text="↩️ Запросить возврат", callback_data=f"refund:request:{purchase_id}")
+    kb.button(text="⭐ Мои покупки", callback_data="main:my")
+    kb.button(text="⬅️ В меню", callback_data="menu:main")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def refund_requests_menu(refunds) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for row in refunds[:30]:
+        buyer = row["username"] or row["full_name"] or row["telegram_id"]
+        title = row["book_title"] or row["chapter_title"] or row["audio_title"] or "Покупка"
+        kb.button(text=f"#{row['id']} · {title[:28]} · {buyer}", callback_data=f"refund:card:{row['id']}")
+    kb.button(text="⬅️ В меню", callback_data="menu:main")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def refund_card_menu(refund_id: int, can_process: bool = True) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    if can_process:
+        kb.button(text="✅ Одобрить возврат", callback_data=f"refund:approve:{refund_id}")
+        kb.button(text="⛔ Отклонить", callback_data=f"refund:reject:{refund_id}")
+    kb.button(text="↩️ К возвратам", callback_data="refund:list")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def access_granted_menu(kind: str, target_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    if kind == "chapter":
+        kb.button(text="📖 Читать главу", callback_data=f"read:chapter:{target_id}")
+    elif kind == "audio":
+        kb.button(text="🎧 Получить аудио", callback_data=f"listen:audio:{target_id}")
+    elif kind == "book":
+        kb.button(text="📚 Открыть книгу", callback_data=f"open:book:{target_id}")
+    kb.button(text="⭐ Мои покупки", callback_data="main:my")
+    kb.button(text="⬅️ В меню", callback_data="menu:main")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def single_select_menu(prefix: str, choices, back_callback: str | None = None) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for choice in choices:
+        kb.button(text=choice.label, callback_data=f"single:{prefix}:{choice.code}")
+    if back_callback:
+        kb.button(text="⬅️ Назад", callback_data=back_callback)
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def multi_select_menu(prefix: str, choices, selected: set[str] | list[str] | tuple[str, ...], page: int = 0,
+                      per_page: int = 12) -> InlineKeyboardMarkup:
+    selected_set = set(selected or [])
+    total_pages = max(1, (len(choices) + per_page - 1) // per_page)
+    page = max(0, min(page, total_pages - 1))
+    start = page * per_page
+    end = start + per_page
+    kb = InlineKeyboardBuilder()
+    for choice in choices[start:end]:
+        mark = "✅" if choice.code in selected_set else "▫️"
+        kb.button(text=f"{mark} {choice.label}", callback_data=f"sel:{prefix}:t:{choice.code}")
+    if total_pages > 1:
+        if page > 0:
+            kb.button(text="⬅️ Назад", callback_data=f"sel:{prefix}:p:{page-1}")
+        kb.button(text=f"{page + 1}/{total_pages}", callback_data=f"sel:{prefix}:noop")
+        if page < total_pages - 1:
+            kb.button(text="Вперёд ➡️", callback_data=f"sel:{prefix}:p:{page+1}")
+    kb.button(text="✅ Готово", callback_data=f"sel:{prefix}:d")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def bonuses_menu(can_claim: bool = True) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    if can_claim:
+        kb.button(text="🎁 Получить ежедневный бонус", callback_data="bonus:daily")
+    kb.button(text="👥 Пригласить друга", callback_data="bonus:referral")
+    kb.button(text="📜 История бонусов", callback_data="bonus:history")
+    kb.button(text="⬅️ В меню", callback_data="menu:main")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def author_ads_menu() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➕ Создать рекламу", callback_data="ad:create")
+    kb.button(text="📢 Мои кампании", callback_data="ad:list")
+    kb.button(text="🎟 Промокоды", callback_data="promo:list")
+    kb.button(text="➕ Создать промокод", callback_data="promo:create")
+    kb.button(text="⬅️ Назад", callback_data="author:menu")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def author_books_pick_menu(books, prefix: str) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for book in books[:40]:
+        status = book["publication_status"]
+        kb.button(text=f"📘 {book['title']} · {status}", callback_data=f"{prefix}:{book['id']}")
+    kb.button(text="⬅️ Назад", callback_data="author:ads")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def ad_campaigns_menu(campaigns) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for row in campaigns[:30]:
+        left = max(0, int(row["budget_units"] or 0) - int(row["spent_units"] or 0))
+        kb.button(text=f"📢 {row['book_title'][:24]} · {row['status']} · остаток {left}", callback_data=f"ad:card:{row['id']}")
+    kb.button(text="➕ Создать рекламу", callback_data="ad:create")
+    kb.button(text="⬅️ Назад", callback_data="author:ads")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def promo_codes_menu(codes) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for row in codes[:30]:
+        kb.button(text=f"🎟 {row['code']} · {row['discount_percent']}% · {row['used_count']}/{row['max_uses']}", callback_data=f"promo:card:{row['id']}")
+    kb.button(text="➕ Создать промокод", callback_data="promo:create")
+    kb.button(text="⬅️ Назад", callback_data="author:ads")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def moderation_content_menu() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="💬 Комментарии", callback_data="mod:content:comments")
+    kb.button(text="⭐ Отзывы", callback_data="mod:content:reviews")
+    kb.button(text="⬅️ Назад", callback_data="mod:menu")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def moderation_comments_menu(comments) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for row in comments[:30]:
+        who = row["username"] or row["full_name"] or "читатель"
+        kb.button(text=f"💬 #{row['id']} · {who} · {row['book_title'][:22]}", callback_data=f"mod:comment:{row['id']}")
+    kb.button(text="⬅️ Назад", callback_data="mod:comments")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def moderation_reviews_menu(reviews) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for row in reviews[:30]:
+        who = row["username"] or row["full_name"] or "читатель"
+        kb.button(text=f"⭐ #{row['id']} · {row['rating']}★ · {who}", callback_data=f"mod:review:{row['id']}")
+    kb.button(text="⬅️ Назад", callback_data="mod:comments")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def moderation_hide_menu(kind: str, item_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🫥 Скрыть", callback_data=f"mod:{kind}_hide:{item_id}")
+    kb.button(text="⬅️ Назад", callback_data="mod:comments")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def moderation_ads_menu(campaigns) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for row in campaigns[:30]:
+        left = max(0, int(row["budget_units"] or 0) - int(row["spent_units"] or 0))
+        kb.button(text=f"📢 #{row['id']} · {row['book_title'][:24]} · остаток {left}", callback_data=f"mod:ad:{row['id']}")
+    kb.button(text="⬅️ Назад", callback_data="mod:menu")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def ad_moderation_card_menu(campaign_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⏸ Остановить", callback_data=f"mod:ad_pause:{campaign_id}")
+    kb.button(text="🚫 Заблокировать", callback_data=f"mod:ad_block:{campaign_id}")
+    kb.button(text="⬅️ К рекламе", callback_data="mod:ads")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def ad_campaign_card_menu(campaign_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➕ Пополнить на 10 Stars", callback_data=f"adbudget:pay:{campaign_id}:10")
+    kb.button(text="➕ Пополнить на 50 Stars", callback_data=f"adbudget:pay:{campaign_id}:50")
+    kb.button(text="➕ Пополнить на 100 Stars", callback_data=f"adbudget:pay:{campaign_id}:100")
+    kb.button(text="📊 Отчёт", callback_data=f"ad:report:{campaign_id}")
+    kb.button(text="⬅️ К кампаниям", callback_data="ad:list")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def promo_apply_menu(kind: str, target_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="💫 Купить за Stars", callback_data=f"buy:{kind}:{target_id}")
+    kb.button(text="🎟 Ввести промокод", callback_data=f"promo:apply:{kind}:{target_id}")
+    kb.button(text="⬅️ В меню", callback_data="menu:main")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def owner_search_menu() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="👤 Найти пользователя/автора", callback_data="owner:search_user")
+    kb.button(text="📚 Найти книгу", callback_data="owner:search_book")
+    kb.button(text="⬅️ Назад", callback_data="owner:menu")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def owner_users_search_results_menu(rows) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for row in rows[:20]:
+        name = row["pen_name"] or row["full_name"] or row["username"] or str(row["telegram_id"])
+        blocked = "🚫" if row["is_blocked"] else "👤"
+        kb.button(text=f"{blocked} {name}", callback_data=f"owner:user_card:{row['id']}")
+    kb.button(text="⬅️ Назад", callback_data="owner:users")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def owner_user_card_menu(user_id: int, is_blocked: bool) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Разблокировать" if is_blocked else "🚫 Заблокировать", callback_data=f"owner:user_block:{user_id}:{0 if is_blocked else 1}")
+    kb.button(text="⬅️ Поиск", callback_data="owner:users")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def owner_books_search_results_menu(rows) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for row in rows[:20]:
+        status = row["publication_status"]
+        kb.button(text=f"📘 {row['title'][:32]} · {status}", callback_data=f"owner:book_card:{row['id']}")
+    kb.button(text="⬅️ Назад", callback_data="owner:books")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def owner_book_card_menu(book_id: int, status: str) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    if status == "blocked":
+        kb.button(text="👁 Скрыть вместо блокировки", callback_data=f"owner:book_block:{book_id}:0")
+    else:
+        kb.button(text="🚫 Заблокировать книгу", callback_data=f"owner:book_block:{book_id}:1")
+    kb.button(text="⬅️ Поиск", callback_data="owner:books")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def complaints_menu(rows, prefix: str = "complaint") -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for row in rows[:30]:
+        who = row["username"] or row["full_name"] or row["telegram_id"] or "неизвестно"
+        kb.button(text=f"🧾 #{row['id']} · {row['target_type']} · {who}", callback_data=f"{prefix}:card:{row['id']}")
+    kb.button(text="⬅️ В меню", callback_data="menu:main")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def complaint_card_menu(complaint_id: int, prefix: str = "complaint") -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Закрыть", callback_data=f"{prefix}:close:{complaint_id}")
+    kb.button(text="⏳ Оставить в работе", callback_data=f"{prefix}:pending:{complaint_id}")
+    kb.button(text="⬅️ К жалобам", callback_data=f"{prefix}:list")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+
+def legal_menu() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📄 Пользовательское соглашение", callback_data="legal:view:terms")
+    kb.button(text="🔐 Персональные данные", callback_data="legal:view:privacy")
+    kb.button(text="↩️ Возвраты", callback_data="legal:view:refunds")
+    kb.button(text="©️ Авторские права", callback_data="legal:view:copyright")
+    kb.button(text="✍️ Правила авторов", callback_data="legal:view:authors")
+    kb.button(text="🛡 Контент и модерация", callback_data="legal:view:content")
+    kb.button(text="✅ Принять базовые условия", callback_data="legal:accept_required")
+    kb.button(text="✅ Принять правила автора", callback_data="legal:accept_author")
+    kb.button(text="🧾 Мои согласия", callback_data="legal:my_acceptances")
+    kb.button(text="⬅️ Назад", callback_data="main:more")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def legal_doc_menu(code: str) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Принять этот документ", callback_data=f"legal:accept:{code}")
+    kb.button(text="📜 Все правила", callback_data="main:legal")
+    kb.button(text="⬅️ В меню", callback_data="menu:main")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def author_income_menu(available: int = 0) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📤 Запросить выплату", callback_data="author:payout_request")
+    kb.button(text="🏦 Реквизиты", callback_data="author:payout_method")
+    kb.button(text="🧾 История выплат", callback_data="author:payout_history")
+    kb.button(text="⬅️ Назад", callback_data="author:menu")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def payout_requests_menu(rows) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for row in rows:
+        name = row["pen_name"] or row["username"] or str(row["telegram_id"])
+        kb.button(text=f"📤 {name} · {row['amount_stars']} Stars", callback_data=f"payout:card:{row['id']}")
+    kb.button(text="✅ Одобренные", callback_data="owner:payouts:approved")
+    kb.button(text="⬅️ Финансы", callback_data="owner:finance")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def payout_card_menu(payout_id: int, status: str) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    if status == "new":
+        kb.button(text="✅ Одобрить", callback_data=f"payout:approve:{payout_id}")
+        kb.button(text="🚫 Отклонить", callback_data=f"payout:reject:{payout_id}")
+        kb.button(text="🧊 Заморозить", callback_data=f"payout:freeze:{payout_id}")
+    elif status == "approved":
+        kb.button(text="✅ Отметить выплачено", callback_data=f"payout:paid:{payout_id}")
+        kb.button(text="🚫 Отклонить", callback_data=f"payout:reject:{payout_id}")
+        kb.button(text="🧊 Заморозить", callback_data=f"payout:freeze:{payout_id}")
+    kb.button(text="⬅️ К выплатам", callback_data="owner:payouts")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def payout_settings_menu() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Минимальная сумма", callback_data="owner:set_payout:payout_min_stars")
+    kb.button(text="Срок удержания", callback_data="owner:set_payout:hold_days_default")
+    kb.button(text="Резерв на споры", callback_data="owner:set_payout:reserve_percent")
+    kb.button(text="⬅️ Финансы", callback_data="owner:finance")
+    kb.adjust(1)
+    return kb.as_markup()
