@@ -31,5 +31,9 @@ async def run_bot() -> None:
     dp.include_router(owner.router)
     dp.include_router(moderation.router)
 
+    await bot.delete_webhook(drop_pending_updates=False)
     logger.info("Bot started")
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await bot.session.close()

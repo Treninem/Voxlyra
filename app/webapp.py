@@ -103,16 +103,18 @@ def create_app() -> FastAPI:
     async def index(request: Request):
         books = await list_catalog_books(limit=30, include_drafts=True)
         return templates.TemplateResponse(
+            request,
             "catalog.html",
-            {"request": request, "project_name": settings.PROJECT_NAME, "books": books},
+            {"project_name": settings.PROJECT_NAME, "books": books},
         )
 
     @app.get("/catalog", response_class=HTMLResponse)
     async def catalog(request: Request):
         books = await list_catalog_books(limit=30, include_drafts=True)
         return templates.TemplateResponse(
+            request,
             "catalog.html",
-            {"request": request, "project_name": settings.PROJECT_NAME, "books": books},
+            {"project_name": settings.PROJECT_NAME, "books": books},
         )
 
     @app.get("/book/{book_id}", response_class=HTMLResponse)
@@ -122,9 +124,9 @@ def create_app() -> FastAPI:
         audios = await list_audio_chapters_for_book(book_id) if book_row else []
         options = await get_book_options(book_id) if book_row else {}
         return templates.TemplateResponse(
+            request,
             "book.html",
             {
-                "request": request,
                 "book": book_row,
                 "book_id": book_id,
                 "chapters": chapters,
@@ -144,9 +146,9 @@ def create_app() -> FastAPI:
         if chapter and ad_settings.get("enabled"):
             ads = await list_contextual_book_ads(int(chapter["book_id"]), limit=4)
         return templates.TemplateResponse(
+            request,
             "reader.html",
             {
-                "request": request,
                 "chapter": chapter,
                 "chapter_id": chapter_id,
                 "purchase_url": purchase_url,
@@ -160,15 +162,15 @@ def create_app() -> FastAPI:
     @app.get("/audio", response_class=HTMLResponse)
     async def audio_index(request: Request):
         books = await list_catalog_books(limit=30, include_drafts=True)
-        return templates.TemplateResponse("audio.html", {"request": request, "project_name": settings.PROJECT_NAME, "books": books})
+        return templates.TemplateResponse(request, "audio.html", {"project_name": settings.PROJECT_NAME, "books": books})
 
     @app.get("/audio/{audio_id}", response_class=HTMLResponse)
     async def audio_player(request: Request, audio_id: int):
         audio = await get_audio_chapter(audio_id)
         return templates.TemplateResponse(
+            request,
             "audio_player.html",
             {
-                "request": request,
                 "audio": audio,
                 "audio_id": audio_id,
                 "purchase_url": _bot_purchase_url("audio", audio_id),
