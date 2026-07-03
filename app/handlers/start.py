@@ -3,8 +3,8 @@ from aiogram.filters import CommandStart
 from aiogram.types import CallbackQuery, Message
 
 from app.config import settings
-from app.db import claim_daily_bonus, get_admin_permissions, get_author_profile, get_bonus_balance, get_referral_stats, list_bonus_transactions, register_referral, reward_referral_if_needed, upsert_user
-from app.keyboards import back_to_main, bonuses_menu, main_menu, more_menu
+from app.db import claim_daily_bonus, get_admin_permissions, get_author_profile, get_bonus_balance, get_referral_stats, list_bonus_transactions, register_referral, reward_referral_if_needed, upsert_user, get_user_preferences, set_user_preference, reset_user_preferences
+from app.keyboards import back_to_main, bonuses_menu, main_menu, more_menu, user_settings_menu, user_theme_menu, user_font_menu
 
 router = Router()
 
@@ -66,8 +66,7 @@ async def callback_bonuses(call: CallbackQuery) -> None:
     await call.message.edit_text(
         "<b>💎 Бонусы</b>\n\n"
         f"Ваш баланс: <b>{balance}</b> бонусов.\n\n"
-        "Бонусы нужны для будущих скидок, промокодов, активности и мягкой мотивации читателей. "
-        "Сейчас доступен ежедневный бонус и реферальная ссылка.",
+        "Бонусы можно получать за ежедневный вход и приглашения. Они помогают читателю возвращаться к книгам, а автору — быстрее находить аудиторию.",
         reply_markup=bonuses_menu(True),
     )
     await call.answer()
@@ -101,21 +100,101 @@ async def callback_bonus_history(call: CallbackQuery) -> None:
     await call.answer()
 
 
-@router.callback_query(F.data.in_({"main:read", "main:listen", "main:my", "main:support", "main:settings"}))
-async def callback_stub(call: CallbackQuery) -> None:
-    titles = {
-        "main:read": "📚 Читать",
-        "main:listen": "🎧 Слушать",
-        "main:my": "⭐ Моё",
-        "main:support": "🛟 Поддержка",
-        "main:settings": "⚙️ Настройки",
-    }
+@router.callback_query(F.data == "main:read")
+async def callback_read_fallback(call: CallbackQuery) -> None:
+    url = settings.WEBAPP_URL.rstrip("/")
+    if url:
+        await call.message.edit_text(
+            "<b>📚 Читать</b>\n\nКаталог открывается во встроенном окне Telegram. Если оно не появилось, проверьте WEBAPP_URL в скрытой диагностике.",
+            reply_markup=back_to_main(),
+        )
+    else:
+        await call.message.edit_text("<b>📚 Читать</b>\n\nWEBAPP_URL не указан. Добавьте адрес Mini App в Bothost.", reply_markup=back_to_main())
+    await call.answer()
+
+
+@router.callback_query(F.data == "main:listen")
+async def callback_listen_fallback(call: CallbackQuery) -> None:
+    url = settings.WEBAPP_URL.rstrip("/")
+    if url:
+        await call.message.edit_text(
+            "<b>🎧 Слушать</b>\n\nАудиокниги открываются во встроенном окне Telegram. Если аудиоглав ещё нет, они появятся здесь после загрузки авторами.",
+            reply_markup=back_to_main(),
+        )
+    else:
+        await call.message.edit_text("<b>🎧 Слушать</b>\n\nWEBAPP_URL не указан. Добавьте адрес Mini App в Bothost.", reply_markup=back_to_main())
+    await call.answer()
+
+
+@router.callback_query(F.data == "main:support")
+async def callback_support(call: CallbackQuery) -> None:
     await call.message.edit_text(
-        f"<b>{titles.get(call.data, 'Раздел')}</b>\n\n"
-        "Раздел подготовлен. В следующих этапах сюда добавим полную логику.",
+        "<b>🛟 Поддержка</b>\n\n"
+        "Напишите одним сообщением, что случилось. Для платежей укажите книгу, главу, дату оплаты и что именно не открылось. "
+        "Для жалобы на книгу укажите название и причину. Обращение будет видно владельцу и администрации с доступом к поддержке.",
         reply_markup=back_to_main(),
     )
     await call.answer()
+
+
+@router.callback_query(F.data == "main:settings")
+async def callback_user_settings(call: CallbackQuery) -> None:
+    _, _, _, user_id = await build_context(call)
+    prefs = await get_user_preferences(user_id)
+    await call.message.edit_text(
+        "<b>⚙️ Настройки</b>\n\n"
+        "Здесь работают пользовательские настройки. Они сохраняются в базе и используются в интерфейсе чтения: тема, размер текста и уведомления.",
+        reply_markup=user_settings_menu(prefs),
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data == "settings:theme")
+async def callback_user_settings_theme(call: CallbackQuery) -> None:
+    await call.message.edit_text("<b>🎨 Тема</b>\n\nВыберите оформление читалки.", reply_markup=user_theme_menu())
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("settings:set_theme:"))
+async def callback_set_theme(call: CallbackQuery) -> None:
+    _, _, _, user_id = await build_context(call)
+    theme = call.data.split(":")[-1]
+    prefs = await set_user_preference(user_id, "theme", theme)
+    await call.message.edit_text("<b>⚙️ Настройки</b>\n\nТема сохранена.", reply_markup=user_settings_menu(prefs))
+    await call.answer("Сохранено")
+
+
+@router.callback_query(F.data == "settings:font")
+async def callback_user_settings_font(call: CallbackQuery) -> None:
+    await call.message.edit_text("<b>🔠 Размер шрифта</b>\n\nВыберите размер текста для чтения.", reply_markup=user_font_menu())
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("settings:set_font:"))
+async def callback_set_font(call: CallbackQuery) -> None:
+    _, _, _, user_id = await build_context(call)
+    font = call.data.split(":")[-1]
+    prefs = await set_user_preference(user_id, "font_size", font)
+    await call.message.edit_text("<b>⚙️ Настройки</b>\n\nРазмер шрифта сохранён.", reply_markup=user_settings_menu(prefs))
+    await call.answer("Сохранено")
+
+
+@router.callback_query(F.data == "settings:toggle_notifications")
+async def callback_toggle_notifications(call: CallbackQuery) -> None:
+    _, _, _, user_id = await build_context(call)
+    prefs = await get_user_preferences(user_id)
+    new_value = "0" if str(prefs.get("notifications", "1")) != "0" else "1"
+    prefs = await set_user_preference(user_id, "notifications", new_value)
+    await call.message.edit_text("<b>⚙️ Настройки</b>\n\nНастройка уведомлений сохранена.", reply_markup=user_settings_menu(prefs))
+    await call.answer("Сохранено")
+
+
+@router.callback_query(F.data == "settings:reset")
+async def callback_reset_settings(call: CallbackQuery) -> None:
+    _, _, _, user_id = await build_context(call)
+    prefs = await reset_user_preferences(user_id)
+    await call.message.edit_text("<b>⚙️ Настройки</b>\n\nНастройки сброшены.", reply_markup=user_settings_menu(prefs))
+    await call.answer("Сброшено")
 
 
 @router.callback_query(F.data == "bonus:referral")

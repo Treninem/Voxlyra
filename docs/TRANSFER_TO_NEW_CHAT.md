@@ -4,7 +4,7 @@
 
 Формат: Telegram-бот + Mini App + SQLite + GitHub → Bothost.
 
-Актуальная сборка: v1.4.0-stage14.
+Актуальная сборка: v1.6.0-premium-polish.
 
 ## Главная логика
 
@@ -28,7 +28,7 @@ WEBAPP_URL=https://публичный_адрес_Bothost
 CHANNEL_ID=@username_канала
 PROJECT_NAME=Вокслира
 PUBLIC_VERSION_VISIBLE=false
-PROJECT_VERSION=v1.4.0-stage14
+PROJECT_VERSION=v1.6.0-premium-polish
 ```
 
 ## Последние добавленные файлы

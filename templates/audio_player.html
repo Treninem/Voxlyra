@@ -16,11 +16,11 @@
   <div class="audio-controls">
     <button onclick="seekAudio(-15)">⏪ 15</button>
     <button onclick="seekAudio(15)">15 ⏩</button>
-    <button onclick="setRate(1)">1x</button>
-    <button onclick="setRate(1.25)">1.25x</button>
-    <button onclick="setRate(1.5)">1.5x</button>
-    <button onclick="setRate(2)">2x</button>
-    <button id="saveAudioProgress">💾 Место</button>
+    <button data-rate="1" onclick="setRate(1)">1x</button>
+    <button data-rate="1.25" onclick="setRate(1.25)">1.25x</button>
+    <button data-rate="1.5" onclick="setRate(1.5)">1.5x</button>
+    <button data-rate="2" onclick="setRate(2)">2x</button>
+    <button id="saveAudioProgress">💾 Место</button><span id="audioProgressLabel" class="muted"></span>
   </div>
 
   <section id="audioPaywall" class="empty-card paywall-card" style="display:none">

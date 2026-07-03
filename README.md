@@ -340,3 +340,8 @@ static/img/channel_avatar.png
 ```
 
 Отдельная инструкция: `docs/AVATAR_SETUP.md`.
+
+
+## v1.6.0-premium-polish
+
+Премиальная доводка Mini App, рабочие настройки, аудио, пропуск необязательных шагов и новые безопасные аватары для Telegram.

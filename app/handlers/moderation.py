@@ -375,7 +375,7 @@ async def moderation_stubs(call: CallbackQuery) -> None:
     }
     await call.message.edit_text(
         f"<b>{titles.get(call.data, 'Раздел')}</b>\n\n"
-        "Раздел доступен по выданному праву. Полную логику добавим в следующих этапах.",
+        "Для этого раздела нет доступных действий в текущих правах или кнопка устарела. Вернитесь в меню модерации и выберите рабочий раздел.",
         reply_markup=back_to_main(),
     )
     await call.answer()

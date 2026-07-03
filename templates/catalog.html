@@ -15,7 +15,7 @@
 
 <section class="section-title">
   <h2>Витрина</h2>
-  <p>На этом этапе показываются черновики и опубликованные книги для проверки интерфейса.</p>
+  <p>Подборка книг с главами, аудиоверсиями, закладками и покупками внутри Telegram.</p>
 </section>
 
 <section class="book-list">
@@ -25,7 +25,7 @@
         <div class="cover-mini">{{ book.title[:1] }}</div>
         <div class="book-info">
           <h3>{{ book.title }}</h3>
-          <p>{{ book.pen_name or 'Автор не указан' }} · {{ book.age_limit }} · {{ book.publication_status }}</p>
+          <p>{{ book.pen_name or 'Автор не указан' }} · {{ book.age_limit }}</p>
           <p class="desc">{{ (book.description or '')[:120] }}{% if book.description and book.description|length > 120 %}...{% endif %}</p>
           <div class="chips">
             <span>{{ book.price_stars }} Stars</span>

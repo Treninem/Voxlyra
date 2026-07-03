@@ -1,18 +1,30 @@
-if (window.Telegram && window.Telegram.WebApp) {
-  window.Telegram.WebApp.ready();
-  window.Telegram.WebApp.expand();
-}
+(function initTelegram() {
+  const tg = window.Telegram?.WebApp;
+  if (!tg) return;
+  try {
+    tg.ready();
+    tg.expand();
+  } catch (_) {}
+})();
 
 const root = document.documentElement;
+function applyTheme(theme = localStorage.getItem('voxTheme') || 'system') {
+  document.body.classList.remove('light-theme');
+  const tg = window.Telegram?.WebApp;
+  if (theme === 'light' || (theme === 'system' && tg?.colorScheme === 'light')) document.body.classList.add('light-theme');
+  localStorage.setItem('voxTheme', theme);
+  document.querySelectorAll('[data-theme]').forEach(btn => btn.classList.toggle('active', btn.dataset.theme === theme));
+}
 let fontSize = Number(localStorage.getItem('readerFontSize') || 18);
 function applyFontSize() {
   root.style.setProperty('--reader-font-size', `${fontSize}px`);
   localStorage.setItem('readerFontSize', String(fontSize));
 }
+applyTheme();
 applyFontSize();
 
 document.getElementById('fontPlus')?.addEventListener('click', () => {
-  fontSize = Math.min(26, fontSize + 1);
+  fontSize = Math.min(28, fontSize + 1);
   applyFontSize();
 });
 document.getElementById('fontMinus')?.addEventListener('click', () => {
@@ -20,20 +32,35 @@ document.getElementById('fontMinus')?.addEventListener('click', () => {
   applyFontSize();
 });
 document.getElementById('themeToggle')?.addEventListener('click', () => {
-  document.body.classList.toggle('light-theme');
+  const current = localStorage.getItem('voxTheme') || 'system';
+  applyTheme(current === 'light' ? 'dark' : 'light');
+});
+document.querySelectorAll('[data-theme]').forEach(btn => btn.addEventListener('click', () => applyTheme(btn.dataset.theme)));
+document.getElementById('fontReset')?.addEventListener('click', () => { fontSize = 18; applyFontSize(); });
+document.getElementById('resetLocalSettings')?.addEventListener('click', () => {
+  localStorage.removeItem('voxTheme');
+  localStorage.removeItem('readerFontSize');
+  fontSize = 18;
+  applyTheme('system');
+  applyFontSize();
+  alert('Настройки сброшены');
 });
 
 function seekAudio(seconds) {
   const player = document.getElementById('voxPlayer');
-  if (!player) return;
-  player.currentTime = Math.max(0, player.currentTime + seconds);
+  if (!player || !Number.isFinite(player.duration)) return;
+  player.currentTime = Math.max(0, Math.min(player.duration, player.currentTime + seconds));
 }
+window.seekAudio = seekAudio;
 
 function setRate(rate) {
+  localStorage.setItem('voxAudioRate', String(rate));
   const player = document.getElementById('voxPlayer');
   if (!player) return;
   player.playbackRate = rate;
+  document.querySelectorAll('[data-rate]').forEach(btn => btn.classList.toggle('active-rate', Number(btn.dataset.rate) === rate));
 }
+window.setRate = setRate;
 
 function tgInitData() {
   return window.Telegram?.WebApp?.initData || '';
@@ -46,8 +73,9 @@ async function apiFetch(url, options = {}) {
   if (options.body && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
   const response = await fetch(url, Object.assign({}, options, { headers }));
   if (!response.ok) {
-    const text = await response.text();
-    throw new Error(text || `Ошибка ${response.status}`);
+    let message = `Ошибка ${response.status}`;
+    try { message = (await response.json()).detail || message; } catch (_) { try { message = await response.text(); } catch (_) {} }
+    throw new Error(message);
   }
   const ct = response.headers.get('content-type') || '';
   return ct.includes('application/json') ? response.json() : response;
@@ -84,7 +112,8 @@ function renderReviews(reviews) {
   }
   box.innerHTML = reviews.map(item => {
     const name = item.username ? '@' + item.username : (item.full_name || 'Читатель');
-    return `<article class="comment-card"><b>${'★'.repeat(item.rating)} ${escapeHtml(name)}</b><p>${escapeHtml(item.text || 'Без текста')}</p></article>`;
+    const stars = '★'.repeat(Math.max(1, Math.min(5, Number(item.rating || 5))));
+    return `<article class="comment-card"><b>${stars} ${escapeHtml(name)}</b><p>${escapeHtml(item.text || 'Без текста')}</p></article>`;
   }).join('');
 }
 
@@ -103,13 +132,13 @@ async function initReader() {
   try {
     const data = await apiFetch(`/api/reader/${chapterId}`);
     if (!data.allowed) {
-      status.textContent = 'Глава закрыта. Купите доступ в боте или откройте страницу после покупки.';
+      if (status) status.textContent = 'Глава закрыта. Купите доступ в боте или откройте страницу после покупки.';
       if (paragraphs && data.purchase_url) {
         paragraphs.innerHTML = `<section class="empty-card paywall-card"><p>Эта глава платная.</p><p><b>${data.chapter.price_stars} Stars</b></p><a class="button-link" href="${data.purchase_url}">💫 Купить в боте</a></section>`;
       }
       return;
     }
-    status.textContent = data.progress_percent ? `Продолжить с места: ${data.progress_percent}%` : 'Доступ открыт.';
+    if (status) status.textContent = data.progress_percent ? `Продолжить с места: ${data.progress_percent}%` : 'Доступ открыт.';
     if (paragraphs && data.chapter.text) {
       paragraphs.innerHTML = data.chapter.text.split('\n').filter(p => p.trim()).map(p => `<p>${escapeHtml(p)}</p>`).join('');
       if (data.progress_percent > 0) {
@@ -118,7 +147,7 @@ async function initReader() {
     }
     renderComments(data.comments);
   } catch (error) {
-    if (status) status.textContent = 'Откройте эту страницу внутри Telegram, чтобы проверить доступ и сохранить прогресс.';
+    if (status) status.textContent = tgInitData() ? `Не удалось проверить доступ: ${error.message}` : 'Откройте эту страницу внутри Telegram, чтобы проверить доступ и сохранить прогресс.';
   }
 }
 
@@ -157,7 +186,7 @@ document.getElementById('sendComment')?.addEventListener('click', async () => {
     field.value = '';
     renderComments(data.comments);
   } catch (error) {
-    alert('Комментарий не отправлен. Проверьте доступ к главе.');
+    alert('Комментарий не отправлен: ' + error.message);
   }
 });
 
@@ -176,25 +205,31 @@ async function initAudioPage() {
       if (player) player.style.display = 'none';
       return;
     }
-    if (status) status.textContent = meta.progress_seconds ? `Продолжить с ${Math.floor(meta.progress_seconds / 60)} мин.` : 'Доступ открыт.';
+    if (status) status.textContent = meta.progress_seconds ? `Продолжить с ${Math.floor(meta.progress_seconds / 60)} мин.` : 'Доступ открыт. Нажмите Play.';
     const response = await apiFetch(`/api/audio/${audioId}/file`);
     const blob = await response.blob();
     if (player) {
       player.src = URL.createObjectURL(blob);
       player.style.display = 'block';
       player.addEventListener('loadedmetadata', () => {
+        const savedRate = Number(localStorage.getItem('voxAudioRate') || 1);
+        if (savedRate) setRate(savedRate);
         if (meta.progress_seconds > 0 && meta.progress_seconds < player.duration) player.currentTime = meta.progress_seconds;
+      });
+      player.addEventListener('timeupdate', () => {
+        const label = document.getElementById('audioProgressLabel');
+        if (label) label.textContent = `${Math.floor(player.currentTime || 0)} сек.`;
       });
     }
   } catch (error) {
-    if (status) status.textContent = 'Откройте аудио внутри Telegram, чтобы проверить доступ.';
+    if (status) status.textContent = tgInitData() ? `Не удалось загрузить аудио: ${error.message}` : 'Откройте аудио внутри Telegram, чтобы проверить доступ.';
   }
 }
 
 async function saveAudioProgress() {
   const page = document.getElementById('audioPage');
   const player = document.getElementById('voxPlayer');
-  if (!page || !player) return;
+  if (!page || !player || !player.src) return;
   await apiFetch(`/api/audio/${page.dataset.audioId}/progress`, {
     method: 'POST',
     body: JSON.stringify({ position_seconds: Math.floor(player.currentTime || 0) }),
@@ -213,7 +248,7 @@ async function initBookPage() {
   try {
     const state = await apiFetch(`/api/book/${bookId}/state`);
     renderReviews(state.reviews);
-  } catch (error) {}
+  } catch (_) {}
 
   document.getElementById('bookmarkReading')?.addEventListener('click', async () => {
     try {
@@ -238,10 +273,13 @@ async function initBookPage() {
   });
 }
 
+document.addEventListener('DOMContentLoaded', () => {
+  applyTheme(localStorage.getItem('voxTheme') || 'system');
+});
+
 initReader();
 initAudioPage();
 initBookPage();
-
 
 document.querySelectorAll('.reader-ad-card').forEach((link) => {
   link.addEventListener('click', () => {

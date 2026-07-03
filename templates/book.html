@@ -20,7 +20,7 @@
     {% if options.warnings %}<p><b>Предупреждения:</b> {{ options.warnings[:8] | join(' · ') }}</p>{% endif %}
   </section>
   {% endif %}
-  <p class="book-description">{{ book.description }}</p>
+  {% if book.description %}<p class="book-description">{{ book.description }}</p>{% else %}<p class="book-description muted">Автор пока не добавил описание.</p>{% endif %}
   <div class="action-grid">
     {% if chapters %}
       <a class="button-link" href="/reader/{{ chapters[0].id }}">📖 Читать</a>
@@ -34,7 +34,6 @@
     {% endif %}
     <button id="bookmarkReading">⭐ В закладки</button>
     <button id="bookmarkFavorite">💛 Любимое</button>
-    <button>🧾 Пожаловаться</button>
   </div>
   <section class="reviews-box" id="reviewsBox" data-book-id="{{ book_id }}">
     <h2>Отзывы</h2>

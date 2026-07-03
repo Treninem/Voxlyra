@@ -27,6 +27,9 @@ from app.db import (
     set_permission,
     set_setting,
     upsert_user,
+    list_authors_for_owner,
+    list_recent_channel_posts,
+    list_blocked_users,
 )
 from app.keyboards import (
     admin_card_menu,
@@ -542,27 +545,64 @@ async def owner_system(call: CallbackQuery) -> None:
     await call.answer()
 
 
-@router.callback_query(F.data.startswith("owner:"))
-async def owner_stubs(call: CallbackQuery) -> None:
+@router.callback_query(F.data == "owner:authors")
+async def owner_authors(call: CallbackQuery) -> None:
     if await deny_if_not_owner(call):
         return
-    names = {
-        "owner:authors": "✍️ Авторы",
-        "owner:channel": "📢 Канал",
-        "owner:settings": "⚙️ Настройки платформы",
-        "owner:security": "🛡 Безопасность",
-        "owner:system": "🧩 Система",
-    }
-    extra = ""
-    if call.data == "owner:system":
-        extra = (
-            f"\n\nСлужебная версия видна только владельцу: <b>{settings.PROJECT_VERSION}</b>\n"
-            "Публично версия нигде не показывается."
-        )
+    rows = await list_authors_for_owner(limit=20)
+    if not rows:
+        text = "<b>✍️ Авторы</b>\n\nАвторов пока нет."
+    else:
+        lines = ["<b>✍️ Авторы</b>\n"]
+        for row in rows:
+            lines.append(
+                f"• <b>{row['pen_name']}</b> · книг: {row['books_count']} · статус: {row['status']} · @{row['username'] or 'без username'}"
+            )
+        text = "\n".join(lines)
+    await call.message.edit_text(text[:4096], reply_markup=back_to_main())
+    await call.answer()
+
+
+@router.callback_query(F.data == "owner:channel")
+async def owner_channel(call: CallbackQuery) -> None:
+    if await deny_if_not_owner(call):
+        return
+    posts = await list_recent_channel_posts(limit=10)
+    lines = [
+        "<b>📢 Канал</b>",
+        f"CHANNEL_ID: <b>{settings.CHANNEL_ID or 'не указан'}</b>",
+        "",
+        "Автопостинг работает после публикации книги модератором/владельцем, если бот добавлен админом канала с правом публиковать.",
+    ]
+    if posts:
+        lines.append("\nПоследние записи автопостинга:")
+        for row in posts:
+            lines.append(f"• книга #{row['book_id']} · {row['status']} · {row['created_at'][:16]}")
+    await call.message.edit_text("\n".join(lines)[:4096], reply_markup=back_to_main())
+    await call.answer()
+
+
+@router.callback_query(F.data == "owner:security")
+async def owner_security(call: CallbackQuery) -> None:
+    if await deny_if_not_owner(call):
+        return
+    rows = await list_blocked_users(limit=15)
+    if not rows:
+        blocked = "Заблокированных пользователей нет."
+    else:
+        blocked = "\n".join(f"• {r['username'] or r['full_name'] or r['telegram_id']}" for r in rows)
     await call.message.edit_text(
-        f"<b>{names.get(call.data, 'Раздел')}</b>\n\n"
-        "Раздел подготовлен. Полную логику добавим в следующих этапах."
-        f"{extra}",
+        "<b>🛡 Безопасность</b>\n\n"
+        "Работает журнал действий, блокировка пользователей/книг, заморозка выплат и разграничение прав модераторов.\n\n"
+        f"<b>Заблокированные:</b>\n{blocked}",
         reply_markup=back_to_main(),
     )
+    await call.answer()
+
+
+@router.callback_query(F.data == "owner:system")
+async def owner_system_panel(call: CallbackQuery) -> None:
+    if await deny_if_not_owner(call):
+        return
+    await call.message.edit_text(format_diagnostics_for_owner(), reply_markup=back_to_main())
     await call.answer()

@@ -159,6 +159,10 @@ def create_app() -> FastAPI:
             },
         )
 
+    @app.get("/settings", response_class=HTMLResponse)
+    async def settings_page(request: Request):
+        return templates.TemplateResponse(request, "settings.html", {"project_name": settings.PROJECT_NAME})
+
     @app.get("/audio", response_class=HTMLResponse)
     async def audio_index(request: Request):
         books = await list_catalog_books(limit=30, include_drafts=True)

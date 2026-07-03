@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     BOT_USERNAME: str = ""
     PROJECT_NAME: str = "Вокслира"
     PUBLIC_VERSION_VISIBLE: bool = False
-    PROJECT_VERSION: str = "v1.4.1-hotfix"
+    PROJECT_VERSION: str = "v1.6.0-premium-polish"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

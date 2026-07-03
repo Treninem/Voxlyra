@@ -1,38 +1,47 @@
 {% extends "base.html" %}
 {% block content %}
-<section class="hero compact purple">
+<section class="hero purple">
   <img src="/static/img/channel_avatar.png" alt="Voxlyra audio" class="logo">
   <div>
     <h1>Аудиокниги</h1>
-    <p>Истории, которые можно слушать.</p>
+    <p>Слушайте реальные аудиоглавы с прогрессом и плеером внутри Telegram.</p>
   </div>
+</section>
+
+<section class="tabs">
+  <a class="tab" href="/catalog">📚 Читать</a>
+  <a class="tab active" href="/audio">🎧 Слушать</a>
 </section>
 
 <section class="section-title">
-  <h2>Слушать</h2>
-  <p>Книги с аудиоверсией, прогрессом прослушивания и плеером внутри Telegram.</p>
-</section>
-
-<section class="player-demo">
-  <div class="play-circle">▶</div>
-  <div>
-    <h3>Аудиоплеер</h3>
-    <p>скорость · назад 15 сек · вперёд 15 сек · продолжить с места</p>
-  </div>
+  <h2>Доступные аудиоверсии</h2>
+  <p>Здесь показываются только книги, в которых автор уже загрузил аудиофайлы.</p>
 </section>
 
 <section class="book-list">
+  {% set shown = namespace(count=0) %}
   {% for book in books %}
     {% if book.audio_count > 0 or book.has_audio %}
-    <a class="book-card" href="/book/{{ book.id }}">
-      <div class="cover-mini audio">{{ book.title[:1] }}</div>
-      <div class="book-info">
-        <h3>{{ book.title }}</h3>
-        <p>{{ book.pen_name or 'Автор не указан' }}</p>
-        <p class="desc">{{ book.audio_count }} аудиоглав · {{ book.chapters_count }} текстовых глав</p>
-      </div>
-    </a>
+      {% set shown.count = shown.count + 1 %}
+      <a class="book-card" href="/book/{{ book.id }}">
+        <div class="cover-mini audio">{{ book.title[:1] }}</div>
+        <div class="book-info">
+          <h3>{{ book.title }}</h3>
+          <p>{{ book.pen_name or 'Автор не указан' }} · {{ book.age_limit }}</p>
+          <div class="chips">
+            <span>🎧 {{ book.audio_count }} аудиоглав</span>
+            <span>📖 {{ book.chapters_count }} глав</span>
+          </div>
+        </div>
+      </a>
     {% endif %}
   {% endfor %}
+  {% if shown.count == 0 %}
+    <article class="empty-card">
+      <h3>Аудиокниг пока нет</h3>
+      <p>Сначала автор должен добавить книгу, затем в кабинете автора загрузить аудиоглавы MP3, M4A, OGG или WAV.</p>
+      <a class="button-link" href="/catalog">📚 Вернуться в каталог</a>
+    </article>
+  {% endif %}
 </section>
 {% endblock %}

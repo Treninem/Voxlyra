@@ -85,6 +85,15 @@ async def init_db() -> None:
                 updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS user_preferences (
+                user_id INTEGER PRIMARY KEY,
+                theme TEXT NOT NULL DEFAULT 'system',
+                font_size TEXT NOT NULL DEFAULT 'normal',
+                notifications INTEGER NOT NULL DEFAULT 1,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+
             CREATE TABLE IF NOT EXISTS book_option_values (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 book_id INTEGER NOT NULL,
@@ -698,6 +707,36 @@ async def update_author_profile(user_id: int, pen_name: str, bio: str, country: 
             (pen_name, bio, country, 1 if is_adult else 0, now, user_id),
         )
         await db.commit()
+
+
+async def update_book_description(book_id: int, author_user_id: int, description: str) -> bool:
+    now = utc_now()
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            UPDATE books
+            SET description=?, updated_at=?
+            WHERE id=? AND author_id=(SELECT id FROM author_profiles WHERE user_id=?)
+            """,
+            (description, now, book_id, author_user_id),
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def update_book_price(book_id: int, author_user_id: int, pricing_type: str, price_stars: int) -> bool:
+    now = utc_now()
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            UPDATE books
+            SET pricing_type=?, price_stars=?, updated_at=?
+            WHERE id=? AND author_id=(SELECT id FROM author_profiles WHERE user_id=?)
+            """,
+            (pricing_type, int(price_stars), now, book_id, author_user_id),
+        )
+        await db.commit()
+        return cur.rowcount > 0
 
 
 async def create_book(author_id: int, title: str, description: str, age_limit: str, writing_status: str,
@@ -3073,5 +3112,90 @@ async def get_legal_acceptances(user_id: int) -> list[aiosqlite.Row]:
             ORDER BY accepted_at DESC, id DESC
             """,
             (int(user_id),),
+        )
+        return await cur.fetchall()
+
+
+async def get_user_preferences(user_id: int) -> dict[str, str]:
+    async with connect() as db:
+        cur = await db.execute("SELECT theme, font_size, notifications FROM user_preferences WHERE user_id=?", (user_id,))
+        row = await cur.fetchone()
+        if not row:
+            return {"theme": "system", "font_size": "normal", "notifications": "1"}
+        return {"theme": row["theme"], "font_size": row["font_size"], "notifications": str(row["notifications"])}
+
+
+async def set_user_preference(user_id: int, key: str, value: str) -> dict[str, str]:
+    if key not in {"theme", "font_size", "notifications"}:
+        raise ValueError("Unknown preference")
+    now = utc_now()
+    async with connect() as db:
+        await db.execute(
+            """
+            INSERT INTO user_preferences(user_id, theme, font_size, notifications, updated_at)
+            VALUES(?, 'system', 'normal', 1, ?)
+            ON CONFLICT(user_id) DO NOTHING
+            """,
+            (user_id, now),
+        )
+        if key == "notifications":
+            await db.execute("UPDATE user_preferences SET notifications=?, updated_at=? WHERE user_id=?", (1 if str(value) != "0" else 0, now, user_id))
+        else:
+            await db.execute(f"UPDATE user_preferences SET {key}=?, updated_at=? WHERE user_id=?", (value, now, user_id))
+        await db.commit()
+    return await get_user_preferences(user_id)
+
+
+async def reset_user_preferences(user_id: int) -> dict[str, str]:
+    async with connect() as db:
+        await db.execute("DELETE FROM user_preferences WHERE user_id=?", (user_id,))
+        await db.commit()
+    return {"theme": "system", "font_size": "normal", "notifications": "1"}
+
+
+async def list_authors_for_owner(limit: int = 20) -> list[aiosqlite.Row]:
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT ap.*, u.telegram_id, u.username, u.full_name, COUNT(b.id) AS books_count
+            FROM author_profiles ap
+            JOIN users u ON u.id = ap.user_id
+            LEFT JOIN books b ON b.author_id = ap.id
+            GROUP BY ap.id
+            ORDER BY ap.id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        return await cur.fetchall()
+
+
+async def list_blocked_users(limit: int = 20) -> list[aiosqlite.Row]:
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT id, telegram_id, username, full_name
+            FROM users
+            WHERE is_blocked = 1
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        return await cur.fetchall()
+
+
+async def list_recent_channel_posts(limit: int = 10) -> list[aiosqlite.Row]:
+    # В текущей схеме канал фиксируется через audit_logs, чтобы не плодить отдельные таблицы.
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT target_id AS book_id, after_value AS status, created_at
+            FROM audit_logs
+            WHERE action IN ('book_published_channel_posted','book_published_channel_failed','channel_post_sent')
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (limit,),
         )
         return await cur.fetchall()

@@ -31,16 +31,10 @@ PERMISSIONS = [
 PERMISSION_BY_CODE = {p.code: p for p in PERMISSIONS}
 
 MODERATION_BUTTONS = {
+    # Показываем только те разделы, где уже есть рабочая логика.
     "mod_books": ("📚 Книги на проверке", "mod:books"),
-    "mod_comments": ("💬 Комментарии", "mod:comments"),
+    "mod_comments": ("💬 Комментарии и отзывы", "mod:comments"),
     "complaints": ("🧾 Жалобы", "mod:complaints"),
-    "authors": ("✍️ Авторы", "mod:authors"),
-    "block_users": ("👤 Пользователи", "mod:users"),
-    "block_books": ("📕 Заблокировать книгу", "mod:block_books"),
-    "view_finance": ("💰 Финансы", "mod:finance"),
     "refunds": ("↩️ Возвраты", "mod:refunds"),
     "ads": ("📢 Реклама", "mod:ads"),
-    "channel": ("📣 Канал", "mod:channel"),
-    "stats": ("📊 Статистика", "mod:stats"),
-    "support": ("🛟 Поддержка", "mod:support"),
 }

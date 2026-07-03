@@ -150,7 +150,6 @@ def pricing_menu() -> InlineKeyboardMarkup:
     kb.button(text="Бесплатно", callback_data="book:pricing:free")
     kb.button(text="Платные главы", callback_data="book:pricing:chapters")
     kb.button(text="Вся книга", callback_data="book:pricing:whole_book")
-    kb.button(text="Подписка позже", callback_data="book:pricing:subscription")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -196,6 +195,8 @@ def author_book_card_menu(book_id: int, publication_status: str) -> InlineKeyboa
         kb.button(text="📤 Отправить на проверку", callback_data=f"author:submit_book:{book_id}")
     kb.button(text="➕ Главы", callback_data=f"author:chapters:{book_id}")
     kb.button(text="🎧 Аудио", callback_data=f"author:audio:{book_id}")
+    kb.button(text="✏️ Описание", callback_data=f"book:edit_description:{book_id}")
+    kb.button(text="💰 Цена", callback_data=f"book:edit_price:{book_id}")
     kb.button(text="📚 Мои книги", callback_data="author:books")
     kb.adjust(1)
     return kb.as_markup()
@@ -244,6 +245,17 @@ def reader_ads_owner_menu(settings_dict) -> InlineKeyboardMarkup:
     kb.adjust(1)
     return kb.as_markup()
 
+
+
+def author_profile_menu() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✏️ Псевдоним", callback_data="profile:edit:pen_name")
+    kb.button(text="📝 Описание", callback_data="profile:edit:bio")
+    kb.button(text="🌍 Страна", callback_data="profile:edit:country")
+    kb.button(text="🔞 Возраст", callback_data="profile:edit:adult")
+    kb.button(text="⬅️ Кабинет автора", callback_data="author:menu")
+    kb.adjust(1)
+    return kb.as_markup()
 
 def back_to_main() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
@@ -690,5 +702,60 @@ def payout_settings_menu() -> InlineKeyboardMarkup:
     kb.button(text="Срок удержания", callback_data="owner:set_payout:hold_days_default")
     kb.button(text="Резерв на споры", callback_data="owner:set_payout:reserve_percent")
     kb.button(text="⬅️ Финансы", callback_data="owner:finance")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def skip_back_menu(skip_callback: str, back_callback: str | None = None, skip_text: str = "⏭ Пропустить") -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text=skip_text, callback_data=skip_callback)
+    if back_callback:
+        kb.button(text="⬅️ Назад", callback_data=back_callback)
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def skip_use_menu(skip_callback: str, use_callback: str | None = None, use_text: str = "✅ Использовать рекомендованное") -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    if use_callback:
+        kb.button(text=use_text, callback_data=use_callback)
+    kb.button(text="⏭ Пропустить", callback_data=skip_callback)
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def user_settings_menu(preferences: dict | None = None) -> InlineKeyboardMarkup:
+    preferences = preferences or {}
+    theme = preferences.get("theme", "system")
+    font = preferences.get("font_size", "normal")
+    notify = str(preferences.get("notifications", "1")) != "0"
+    theme_label = {"system": "как в Telegram", "dark": "тёмная", "light": "светлая"}.get(theme, theme)
+    font_label = {"small": "мелкий", "normal": "обычный", "large": "крупный"}.get(font, font)
+    kb = InlineKeyboardBuilder()
+    kb.button(text=f"🎨 Тема: {theme_label}", callback_data="settings:theme")
+    kb.button(text=f"🔠 Шрифт: {font_label}", callback_data="settings:font")
+    kb.button(text=f"{'✅' if notify else '▫️'} Уведомления", callback_data="settings:toggle_notifications")
+    kb.button(text="🧹 Очистить настройки", callback_data="settings:reset")
+    kb.button(text="⬅️ Назад", callback_data="main:more")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def user_theme_menu() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Как в Telegram", callback_data="settings:set_theme:system")
+    kb.button(text="Тёмная", callback_data="settings:set_theme:dark")
+    kb.button(text="Светлая", callback_data="settings:set_theme:light")
+    kb.button(text="⬅️ Назад", callback_data="main:settings")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def user_font_menu() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Мелкий", callback_data="settings:set_font:small")
+    kb.button(text="Обычный", callback_data="settings:set_font:normal")
+    kb.button(text="Крупный", callback_data="settings:set_font:large")
+    kb.button(text="⬅️ Назад", callback_data="main:settings")
     kb.adjust(1)
     return kb.as_markup()

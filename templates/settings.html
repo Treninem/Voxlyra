@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero compact">
+  <img src="/static/img/bot_avatar.png" alt="Voxlyra" class="logo">
+  <div>
+    <h1>Настройки</h1>
+    <p>Оформление чтения и прослушивания внутри Mini App.</p>
+  </div>
+</section>
+
+<section class="settings-panel">
+  <article class="setting-card">
+    <div>
+      <h3>Тема</h3>
+      <p>Выберите тёмное, светлое или автоматическое оформление.</p>
+    </div>
+    <div class="segmented" id="themeSettings">
+      <button data-theme="system">Авто</button>
+      <button data-theme="dark">Тёмная</button>
+      <button data-theme="light">Светлая</button>
+    </div>
+  </article>
+  <article class="setting-card">
+    <div>
+      <h3>Размер текста</h3>
+      <p>Настройка применяется в читалке и сохраняется на устройстве.</p>
+    </div>
+    <div class="segmented">
+      <button id="fontMinus">A−</button>
+      <button id="fontReset">Обычный</button>
+      <button id="fontPlus">A+</button>
+    </div>
+  </article>
+  <article class="setting-card">
+    <div>
+      <h3>Аудио</h3>
+      <p>Плеер сохраняет место прослушивания и поддерживает скорости 1x–2x.</p>
+    </div>
+    <a class="button-link secondary" href="/audio">Открыть аудиокниги</a>
+  </article>
+  <article class="setting-card">
+    <div>
+      <h3>Сброс</h3>
+      <p>Вернуть оформление и размер текста по умолчанию.</p>
+    </div>
+    <button id="resetLocalSettings">Сбросить</button>
+  </article>
+</section>
+{% endblock %}

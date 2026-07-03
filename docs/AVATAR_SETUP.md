@@ -11,7 +11,7 @@ static/img/bot_avatar.png
 Отдельный файл в архиве сборки:
 
 ```text
-voxlyra_bot_avatar_premium_v1.4.0.png
+voxlyra_bot_avatar_premium_v1.6.0.png
 ```
 
 Порядок:
@@ -22,7 +22,7 @@ voxlyra_bot_avatar_premium_v1.4.0.png
 4. Выбери бота Вокслира.
 5. Нажми `Edit Bot`.
 6. Нажми `Edit Botpic`.
-7. Отправь файл `voxlyra_bot_avatar_premium_v1.4.0.png`.
+7. Отправь файл `voxlyra_bot_avatar_premium_v1.6.0.png`.
 
 ## Аватар канала
 
@@ -35,7 +35,7 @@ static/img/channel_avatar.png
 Отдельный файл в архиве сборки:
 
 ```text
-voxlyra_channel_avatar_premium_v1.4.0.png
+voxlyra_channel_avatar_premium_v1.6.0.png
 ```
 
 Порядок:
@@ -44,7 +44,7 @@ voxlyra_channel_avatar_premium_v1.4.0.png
 2. Нажми на название канала.
 3. Нажми карандаш / изменить.
 4. Нажми на аватар.
-5. Выбери файл `voxlyra_channel_avatar_premium_v1.4.0.png`.
+5. Выбери файл `voxlyra_channel_avatar_premium_v1.6.0.png`.
 6. Сохрани.
 
 ## Почему аватары без мелкого текста
