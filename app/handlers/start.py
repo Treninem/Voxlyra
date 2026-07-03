@@ -105,11 +105,11 @@ async def callback_read_fallback(call: CallbackQuery) -> None:
     url = settings.WEBAPP_URL.rstrip("/")
     if url:
         await call.message.edit_text(
-            "<b>📚 Читать</b>\n\nКаталог открывается во встроенном окне Telegram. Если оно не появилось, проверьте WEBAPP_URL в скрытой диагностике.",
+            "<b>📚 Читать</b>\n\nКаталог открывается во встроенном окне Telegram. Если окно не появилось, закройте Telegram и попробуйте ещё раз. Если ошибка повторится, напишите в поддержку.",
             reply_markup=back_to_main(),
         )
     else:
-        await call.message.edit_text("<b>📚 Читать</b>\n\nWEBAPP_URL не указан. Добавьте адрес Mini App в Bothost.", reply_markup=back_to_main())
+        await call.message.edit_text("<b>📚 Читать</b>\n\nКаталог временно недоступен. Попробуйте открыть его позже или напишите в поддержку.", reply_markup=back_to_main())
     await call.answer()
 
 
@@ -122,7 +122,7 @@ async def callback_listen_fallback(call: CallbackQuery) -> None:
             reply_markup=back_to_main(),
         )
     else:
-        await call.message.edit_text("<b>🎧 Слушать</b>\n\nWEBAPP_URL не указан. Добавьте адрес Mini App в Bothost.", reply_markup=back_to_main())
+        await call.message.edit_text("<b>🎧 Слушать</b>\n\nАудиораздел временно недоступен. Попробуйте открыть его позже или напишите в поддержку.", reply_markup=back_to_main())
     await call.answer()
 
 
@@ -143,7 +143,7 @@ async def callback_user_settings(call: CallbackQuery) -> None:
     prefs = await get_user_preferences(user_id)
     await call.message.edit_text(
         "<b>⚙️ Настройки</b>\n\n"
-        "Здесь работают пользовательские настройки. Они сохраняются в базе и используются в интерфейсе чтения: тема, размер текста и уведомления.",
+        "Здесь можно выбрать тему, размер текста и уведомления. Настройки сохраняются и применяются при чтении.",
         reply_markup=user_settings_menu(prefs),
     )
     await call.answer()

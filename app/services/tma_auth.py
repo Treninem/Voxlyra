@@ -26,14 +26,14 @@ class TMAUser:
 
 def _validate_init_data_raw(init_data: str, bot_token: str, max_age_seconds: int = 86400) -> dict[str, str]:
     if not init_data:
-        raise TMAAuthError("Mini App не передал данные Telegram.")
+        raise TMAAuthError("Откройте этот раздел из Telegram, чтобы сохранить доступ и прогресс.")
     if not bot_token:
-        raise TMAAuthError("BOT_TOKEN не указан, проверка Mini App невозможна.")
+        raise TMAAuthError("Сейчас не удалось проверить сессию. Откройте раздел заново из Telegram.")
 
     pairs = dict(parse_qsl(init_data, keep_blank_values=True, strict_parsing=False))
     received_hash = pairs.pop("hash", None)
     if not received_hash:
-        raise TMAAuthError("В данных Mini App нет hash.")
+        raise TMAAuthError("Не удалось проверить сессию Telegram. Откройте раздел заново.")
 
     auth_date_raw = pairs.get("auth_date")
     if auth_date_raw and auth_date_raw.isdigit():
@@ -45,7 +45,7 @@ def _validate_init_data_raw(init_data: str, bot_token: str, max_age_seconds: int
     secret_key = hmac.new(b"WebAppData", bot_token.encode("utf-8"), hashlib.sha256).digest()
     calculated_hash = hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(calculated_hash, received_hash):
-        raise TMAAuthError("Данные Mini App не прошли проверку Telegram.")
+        raise TMAAuthError("Сессия не прошла проверку. Откройте раздел заново из Telegram.")
     return pairs
 
 
@@ -54,11 +54,11 @@ async def authenticate_init_data(init_data: str) -> TMAUser:
     pairs = _validate_init_data_raw(init_data, settings.BOT_TOKEN)
     user_raw = pairs.get("user")
     if not user_raw:
-        raise TMAAuthError("В Mini App нет пользователя Telegram.")
+        raise TMAAuthError("Не удалось определить пользователя Telegram. Откройте раздел заново.")
     try:
         tg_user: dict[str, Any] = json.loads(user_raw)
     except json.JSONDecodeError as exc:
-        raise TMAAuthError("Telegram user в Mini App повреждён.") from exc
+        raise TMAAuthError("Не удалось прочитать данные Telegram. Откройте раздел заново.") from exc
 
     telegram_id = int(tg_user["id"])
     username = tg_user.get("username")

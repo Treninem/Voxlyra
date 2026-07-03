@@ -568,16 +568,23 @@ async def owner_channel(call: CallbackQuery) -> None:
     if await deny_if_not_owner(call):
         return
     posts = await list_recent_channel_posts(limit=10)
+    channel_name = settings.CHANNEL_ID or "канал не выбран"
     lines = [
         "<b>📢 Канал</b>",
-        f"CHANNEL_ID: <b>{settings.CHANNEL_ID or 'не указан'}</b>",
         "",
-        "Автопостинг работает после публикации книги модератором/владельцем, если бот добавлен админом канала с правом публиковать.",
+        f"Подключённый канал: <b>{channel_name}</b>",
+        "",
+        "Когда книга проходит проверку и публикуется, Вокслира сама готовит красивый пост для канала. "
+        "Публикация сработает, если бот добавлен администратором канала и может размещать сообщения.",
     ]
     if posts:
-        lines.append("\nПоследние записи автопостинга:")
+        lines.append("\n<b>Последние публикации:</b>")
+        status_labels = {"sent": "опубликовано", "failed": "ошибка публикации", "queued": "ожидает"}
         for row in posts:
-            lines.append(f"• книга #{row['book_id']} · {row['status']} · {row['created_at'][:16]}")
+            status = status_labels.get(row["status"], row["status"] or "готовится")
+            lines.append(f"• Книга №{row['book_id']} · {status} · {row['created_at'][:16]}")
+    else:
+        lines.append("\nПубликаций пока нет. Они появятся здесь после выхода первой книги.")
     await call.message.edit_text("\n".join(lines)[:4096], reply_markup=back_to_main())
     await call.answer()
 

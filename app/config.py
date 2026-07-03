@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     BOT_USERNAME: str = ""
     PROJECT_NAME: str = "Вокслира"
     PUBLIC_VERSION_VISIBLE: bool = False
-    PROJECT_VERSION: str = "v1.6.2-settings-repair"
+    PROJECT_VERSION: str = "v1.6.3-clean-text-and-webapp-recovery"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

@@ -86,9 +86,6 @@ def create_app() -> FastAPI:
         return {
             "ok": True,
             "project": settings.PROJECT_NAME,
-            "version": settings.PROJECT_VERSION,
-            "checks_ok": summary["ok_count"],
-            "checks_total": summary["total"],
         }
 
     @app.get("/readiness")
@@ -390,7 +387,7 @@ def create_app() -> FastAPI:
         if not audio or not audio["file_path"]:
             raise HTTPException(status_code=404, detail="Audio not found")
         if not audio["is_free"]:
-            raise HTTPException(status_code=403, detail="Audio requires Mini App access check")
+            raise HTTPException(status_code=403, detail="Аудио открывается после проверки доступа в Telegram.")
         path = Path(audio["file_path"])
         if not path.exists() or not path.is_file():
             raise HTTPException(status_code=404, detail="Audio file not found")
