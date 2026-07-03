@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
   <meta name="color-scheme" content="dark light">
   <title>{{ project_name }}</title>
-  <link rel="stylesheet" href="/static/css/style.css">
+  <link rel="stylesheet" href="/static/css/style.css?v={{ project_version|default('dev') }}">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -17,6 +17,6 @@
     <a href="/audio">🎧<span>Аудио</span></a>
     <a href="/settings">⚙️<span>Настройки</span></a>
   </nav>
-  <script src="/static/js/app.js"></script>
+  <script src="/static/js/app.js?v={{ project_version|default('dev') }}"></script>
 </body>
 </html>

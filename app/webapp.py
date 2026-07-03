@@ -69,6 +69,12 @@ def create_app() -> FastAPI:
     app.mount("/static", StaticFiles(directory="static"), name="static")
     templates = Jinja2Templates(directory="templates")
 
+    def common_context(extra: dict[str, Any] | None = None) -> dict[str, Any]:
+        data = {"project_name": settings.PROJECT_NAME, "project_version": settings.PROJECT_VERSION}
+        if extra:
+            data.update(extra)
+        return data
+
     @app.on_event("startup")
     async def startup() -> None:
         await init_db()
@@ -105,7 +111,7 @@ def create_app() -> FastAPI:
         return templates.TemplateResponse(
             request,
             "catalog.html",
-            {"project_name": settings.PROJECT_NAME, "books": books},
+            common_context({"books": books}),
         )
 
     @app.get("/catalog", response_class=HTMLResponse)
@@ -114,7 +120,7 @@ def create_app() -> FastAPI:
         return templates.TemplateResponse(
             request,
             "catalog.html",
-            {"project_name": settings.PROJECT_NAME, "books": books},
+            common_context({"books": books}),
         )
 
     @app.get("/book/{book_id}", response_class=HTMLResponse)
@@ -133,6 +139,7 @@ def create_app() -> FastAPI:
                 "audios": audios,
                 "options": options,
                 "project_name": settings.PROJECT_NAME,
+                "project_version": settings.PROJECT_VERSION,
                 "bot_username": settings.BOT_USERNAME.strip().lstrip("@"),
             },
         )
@@ -155,18 +162,19 @@ def create_app() -> FastAPI:
                 "reader_ads": ads,
                 "ad_settings": ad_settings,
                 "project_name": settings.PROJECT_NAME,
+                "project_version": settings.PROJECT_VERSION,
                 "bot_username": settings.BOT_USERNAME.strip().lstrip("@"),
             },
         )
 
     @app.get("/settings", response_class=HTMLResponse)
     async def settings_page(request: Request):
-        return templates.TemplateResponse(request, "settings.html", {"project_name": settings.PROJECT_NAME})
+        return templates.TemplateResponse(request, "settings.html", common_context())
 
     @app.get("/audio", response_class=HTMLResponse)
     async def audio_index(request: Request):
         books = await list_catalog_books(limit=30, include_drafts=True)
-        return templates.TemplateResponse(request, "audio.html", {"project_name": settings.PROJECT_NAME, "books": books})
+        return templates.TemplateResponse(request, "audio.html", common_context({"books": books}))
 
     @app.get("/audio/{audio_id}", response_class=HTMLResponse)
     async def audio_player(request: Request, audio_id: int):
@@ -179,6 +187,7 @@ def create_app() -> FastAPI:
                 "audio_id": audio_id,
                 "purchase_url": _bot_purchase_url("audio", audio_id),
                 "project_name": settings.PROJECT_NAME,
+                "project_version": settings.PROJECT_VERSION,
             },
         )
 
