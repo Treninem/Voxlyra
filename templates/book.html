@@ -1,127 +1,95 @@
 {% extends "base.html" %}
+{% from "_macros.html" import cover, book_card %}
+{% block title %}{% if book %}{{ book.title }} — Вокслира{% else %}Книга не найдена{% endif %}{% endblock %}
 {% block content %}
 {% if book %}
-<section class="book-page" id="bookPage" data-book-id="{{ book_id }}">
-  <div class="cover-big">{{ book.title[:1] }}</div>
-  <h1>{{ book.title }}</h1>
-  <p class="muted">{{ book.pen_name or 'Автор не указан' }} · {{ book.age_limit }}</p>
-  <div class="chips center">
-    <span>{{ book.publication_status }}</span>
-    <span>{{ book.chapters_count }} глав</span>
-    <span>{{ book.audio_count }} аудио</span>
-    <span>{{ book.price_stars }} Stars</span>
-    {% if book.allow_download %}<span>скачивание разрешено</span>{% else %}<span>только читалка</span>{% endif %}
-  </div>
-  {% if options %}
-  <section class="option-summary">
-    {% if options.genres %}<p><b>Жанры:</b> {{ options.genres[:10] | join(' · ') }}</p>{% endif %}
-    {% if options.tropes %}<p><b>Сюжет:</b> {{ options.tropes[:10] | join(' · ') }}</p>{% endif %}
-    {% if options.audience %}<p><b>Для кого:</b> {{ options.audience[:8] | join(' · ') }}</p>{% endif %}
-    {% if options.warnings %}<p><b>Предупреждения:</b> {{ options.warnings[:8] | join(' · ') }}</p>{% endif %}
-  </section>
-  {% endif %}
-  {% if book.description %}<p class="book-description">{{ book.description }}</p>{% else %}<p class="book-description muted">Автор пока не добавил описание.</p>{% endif %}
-  <div class="action-grid">
-    {% if chapters %}
-      <a class="button-link" href="/reader/{{ chapters[0].id }}">📖 Читать</a>
-    {% else %}
-      <button disabled>📖 Глав пока нет</button>
-    {% endif %}
-    {% if audios %}
-      <a class="button-link purple-btn" href="/audio/{{ audios[0].id }}">🎧 Слушать</a>
-    {% else %}
-      <button disabled>🎧 Аудио пока нет</button>
-    {% endif %}
-    <button id="bookmarkReading">⭐ В закладки</button>
-    <button id="bookmarkFavorite">💛 Любимое</button>
-  </div>
-  <section class="reviews-box" id="reviewsBox" data-book-id="{{ book_id }}">
-    <h2>Отзывы</h2>
-    <div class="rating-row">
-      <select id="reviewRating">
-        <option value="5">5 — отлично</option>
-        <option value="4">4 — хорошо</option>
-        <option value="3">3 — нормально</option>
-        <option value="2">2 — слабо</option>
-        <option value="1">1 — плохо</option>
-      </select>
-      <button id="sendReview">Оставить оценку</button>
+<section class="book-page premium-book-page" id="bookPage" data-book-id="{{ book_id }}">
+  <a class="quiet-back" href="/catalog">← Каталог</a>
+  <section class="book-hero-card deluxe-book-hero">
+    {{ cover(book, 'big') }}
+    <div class="book-hero-copy">
+      <span class="eyebrow">{{ book.age_limit }} · {{ book.pen_name or 'Автор не указан' }}</span>
+      <h1>{{ book.title }}</h1>
+      <div class="book-rating-line">
+        {% if book.rating|float > 0 %}<strong>★ {{ '%.1f'|format(book.rating|float) }}</strong><span>{{ book.reviews_count }} отзывов</span>{% else %}<span>Оценка появится после первых отзывов</span>{% endif %}
+      </div>
+      <p class="muted">{{ book.chapters_count }} глав · {{ book.audio_count }} аудио{% if book.free_chapters_count|int > 0 %} · {{ book.free_chapters_count }} бесплатно{% endif %}</p>
+      <div class="chips">
+        {% if book.audio_count|int > 0 %}<span>Есть аудиоверсия</span>{% endif %}
+        {% if book.allow_download %}<span>Можно скачать</span>{% else %}<span>Чтение в приложении</span>{% endif %}
+        {% if book.writing_status == 'finished' %}<span>Завершена</span>{% else %}<span>В процессе</span>{% endif %}
+      </div>
     </div>
-    <textarea id="reviewText" placeholder="Отзыв о книге"></textarea>
-    <div id="reviewsList" class="comment-list"><p class="muted">Отзывы загрузятся внутри Telegram.</p></div>
-  </section>
-  <section class="chapter-list">
-    <h2>Главы</h2>
-    {% if chapters %}
-      {% for chapter in chapters %}
-        {% if chapter.is_free %}
-          <a class="chapter-row" href="/reader/{{ chapter.id }}">
-            <span>{{ chapter.number }}. {{ chapter.title }}</span>
-            <b>бесплатно</b>
-          </a>
-        {% elif bot_username %}
-          <a class="chapter-row locked-row" href="https://t.me/{{ bot_username }}?start=buy_chapter_{{ chapter.id }}">
-            <span>🔒 {{ chapter.number }}. {{ chapter.title }}</span>
-            <b>{{ chapter.price_stars }} Stars</b>
-          </a>
-          <a class="chapter-row promo-row" href="https://t.me/{{ bot_username }}?start=promo_chapter_{{ chapter.id }}">
-            <span>🎟 Промокод для главы</span>
-            <b>скидка</b>
-          </a>
-        {% else %}
-          <a class="chapter-row locked-row" href="/reader/{{ chapter.id }}">
-            <span>🔒 {{ chapter.number }}. {{ chapter.title }}</span>
-            <b>{{ chapter.price_stars }} Stars</b>
-          </a>
-          <a class="chapter-row promo-row" href="https://t.me/{{ bot_username }}?start=promo_chapter_{{ chapter.id }}">
-            <span>🎟 Промокод для главы</span>
-            <b>скидка</b>
-          </a>
-        {% endif %}
-      {% endfor %}
-    {% else %}
-      <p class="muted">Автор ещё не добавил главы.</p>
-    {% endif %}
-  </section>
-  <section class="chapter-list audio-list">
-    <h2>Аудиоглавы</h2>
-    {% if audios %}
-      {% for audio in audios %}
-        {% if audio.is_free %}
-          <a class="chapter-row" href="/audio/{{ audio.id }}">
-            <span>{{ audio.number }}. {{ audio.title }}</span>
-            <b>бесплатно</b>
-          </a>
-        {% elif bot_username %}
-          <a class="chapter-row locked-row" href="https://t.me/{{ bot_username }}?start=buy_audio_{{ audio.id }}">
-            <span>🔒 {{ audio.number }}. {{ audio.title }}</span>
-            <b>{{ audio.price_stars }} Stars</b>
-          </a>
-          <a class="chapter-row promo-row" href="https://t.me/{{ bot_username }}?start=promo_audio_{{ audio.id }}">
-            <span>🎟 Промокод для аудио</span>
-            <b>скидка</b>
-          </a>
-        {% else %}
-          <a class="chapter-row locked-row" href="/audio/{{ audio.id }}">
-            <span>🔒 {{ audio.number }}. {{ audio.title }}</span>
-            <b>{{ audio.price_stars }} Stars</b>
-          </a>
-          <a class="chapter-row promo-row" href="https://t.me/{{ bot_username }}?start=promo_audio_{{ audio.id }}">
-            <span>🎟 Промокод для аудио</span>
-            <b>скидка</b>
-          </a>
-        {% endif %}
-      {% endfor %}
-    {% else %}
-      <p class="muted">Автор ещё не добавил аудиоглавы.</p>
-    {% endif %}
   </section>
 
+  <div class="action-grid premium-actions book-primary-actions">
+    {% if chapters %}<a class="button-link" href="/reader/{{ chapters[0].id }}">Читать</a>{% endif %}
+    {% if audios %}<a class="button-link purple-btn" href="/audio/{{ audios[0].id }}">Слушать</a>{% endif %}
+    <button id="bookmarkReading" class="secondary">В библиотеку</button>
+    <button id="bookmarkFavorite" class="secondary">В любимое</button>
+    {% if book.price_stars|int > 0 and bot_username %}<a class="button-link gold-button full-span" href="https://t.me/{{ bot_username }}?start=buy_book_{{ book.id }}">Купить книгу · {{ book.price_stars }} Stars</a>{% endif %}
+  </div>
+
+  <section class="description-card">
+    <div class="section-title slim"><h2>О книге</h2></div>
+    <p class="book-description{% if not book.description %} muted{% endif %}">{{ book.description or 'Автор пока не добавил описание. Доступные главы уже можно открыть ниже.' }}</p>
+  </section>
+
+  {% if options %}
+  <section class="option-summary premium-options">
+    {% if options.genres %}<div><b>Жанры</b><div class="tag-cloud">{% for item in options.genres[:12] %}<span>{{ item }}</span>{% endfor %}</div></div>{% endif %}
+    {% if options.tropes %}<div><b>Сюжет</b><div class="tag-cloud">{% for item in options.tropes[:12] %}<span>{{ item }}</span>{% endfor %}</div></div>{% endif %}
+    {% if options.audience %}<div><b>Для кого</b><div class="tag-cloud">{% for item in options.audience[:10] %}<span>{{ item }}</span>{% endfor %}</div></div>{% endif %}
+    {% if options.warnings %}<div class="warning-tags"><b>Предупреждения</b><div class="tag-cloud">{% for item in options.warnings[:10] %}<span>{{ item }}</span>{% endfor %}</div></div>{% endif %}
+  </section>
+  {% endif %}
+
+  <section class="chapter-list premium-list">
+    <div class="section-title shelf-title"><div><span class="eyebrow">Текстовая версия</span><h2>Главы</h2></div><span class="section-count">{{ chapters|length }}</span></div>
+    {% if chapters %}
+      <div class="episode-list">
+      {% for chapter in chapters %}
+        <a class="chapter-row" href="/reader/{{ chapter.id }}">
+          <span class="episode-number">{{ '%02d'|format(chapter.number) }}</span>
+          <span class="episode-copy"><strong>{{ chapter.title }}</strong><small>{% if chapter.is_free %}Открыта бесплатно{% else %}Доступ после покупки{% endif %}</small></span>
+          <b>{% if chapter.is_free %}Открыть{% else %}{{ chapter.price_stars }} ★{% endif %}</b>
+        </a>
+      {% endfor %}
+      </div>
+    {% else %}<article class="empty-card"><h3>Глав пока нет</h3><p>Они появятся после публикации автором.</p></article>{% endif %}
+  </section>
+
+  {% if audios %}
+  <section class="chapter-list audio-list premium-list">
+    <div class="section-title shelf-title"><div><span class="eyebrow">Аудиоверсия</span><h2>Аудиоглавы</h2></div><span class="section-count">{{ audios|length }}</span></div>
+    <div class="episode-list">
+    {% for audio in audios %}
+      <a class="chapter-row audio-row" href="/audio/{{ audio.id }}"><span class="episode-number">▶</span><span class="episode-copy"><strong>{{ audio.title }}</strong><small>{{ audio.narrator or 'Диктор не указан' }}</small></span><b>{% if audio.is_free %}Слушать{% else %}{{ audio.price_stars }} ★{% endif %}</b></a>
+    {% endfor %}
+    </div>
+  </section>
+  {% endif %}
+
+  <section class="reviews-box" id="reviewsBox" data-book-id="{{ book_id }}">
+    <div class="section-title slim"><span class="eyebrow">Мнение читателей</span><h2>Отзывы</h2></div>
+    <div class="rating-row">
+      <select id="reviewRating" aria-label="Оценка"><option value="5">5 — отлично</option><option value="4">4 — хорошо</option><option value="3">3 — нормально</option><option value="2">2 — слабо</option><option value="1">1 — плохо</option></select>
+      <button id="sendReview">Сохранить</button>
+    </div>
+    <textarea id="reviewText" placeholder="Поделитесь впечатлением без спойлеров"></textarea>
+    <div id="reviewsList" class="comment-list">
+      {% if public_reviews %}{% for item in public_reviews %}<article class="comment-card"><b>{{ '★' * item.rating }} {{ '@' + item.username if item.username else (item.full_name or 'Читатель') }}</b><p>{{ item.text or 'Без текста' }}</p></article>{% endfor %}{% else %}<p class="muted">Отзывов пока нет. Можно стать первым.</p>{% endif %}
+    </div>
+  </section>
+
+  {% if similar_books %}
+  <section class="showcase-section similar-section">
+    <div class="section-title shelf-title"><div><span class="eyebrow">Похожее настроение</span><h2>Вам может понравиться</h2></div></div>
+    <div class="horizontal-shelf">{% for item in similar_books %}{{ book_card(item, 'shelf') }}{% endfor %}</div>
+  </section>
+  {% endif %}
 </section>
 {% else %}
-<section class="empty-card">
-  <h1>Книга не найдена</h1>
-  <p>Вернитесь в каталог и выберите другую книгу.</p>
-</section>
+<section class="empty-card premium-empty"><h1>Книга не найдена</h1><p>Она могла быть скрыта, удалена или ещё не опубликована.</p><a class="button-link" href="/catalog">Вернуться в каталог</a></section>
 {% endif %}
 {% endblock %}

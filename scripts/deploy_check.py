@@ -42,6 +42,10 @@ def main() -> int:
         "app/webapp.py",
         "templates/catalog.html",
         "templates/reader.html",
+        "templates/author.html",
+        "templates/control.html",
+        "static/js/author.js",
+        "static/js/control.js",
         "data/.gitkeep",
     ]:
         ok, text = check_file(path)
@@ -51,7 +55,7 @@ def main() -> int:
     owner_ids = os.getenv("OWNER_IDS", "")
     webapp_url = os.getenv("WEBAPP_URL", "")
     database_path = os.getenv("DATABASE_PATH", "data/voxlyra.sqlite3")
-    port = os.getenv("PORT", "8080")
+    port = os.getenv("PORT", "3000")
 
     checks.extend([
         (bool(bot_token and bot_token != "PASTE_BOT_TOKEN_HERE"), "BOT_TOKEN указан", "Возьмите токен у @BotFather и вставьте в Bothost."),
@@ -59,7 +63,7 @@ def main() -> int:
         (is_https(webapp_url), "WEBAPP_URL похож на HTTPS-адрес", "После первого деплоя скопируйте публичный HTTPS URL из Bothost."),
         (not webapp_url.endswith("/"), "WEBAPP_URL без слеша в конце", "Уберите / в конце адреса."),
         (str(database_path).replace('\\', '/').startswith("data/"), "DATABASE_PATH лежит в data/", "Поставьте DATABASE_PATH=data/voxlyra.sqlite3."),
-        (port.isdigit() and int(port) > 0, "PORT указан числом", "Обычно PORT=8080."),
+        (port.isdigit() and int(port) > 0, "PORT указан числом", "Обычно PORT=3000."),
     ])
 
     print("Проверка проекта Вокслира перед деплоем\n")

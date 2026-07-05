@@ -9,8 +9,11 @@ from app.db import (
     add_audit,
     get_admin_permissions,
     get_platform_stats,
+    get_owner_today_stats,
+    get_platform_finance_summary,
     get_reader_ad_settings,
     get_book,
+    get_complaint,
     list_complaints,
     search_books,
     search_users,
@@ -47,10 +50,34 @@ from app.keyboards import (
     complaints_menu,
     complaint_card_menu,
 )
-from app.permissions import PERMISSION_BY_CODE
+from app.permissions import DELEGABLE_PERMISSION_CODES, PERMISSION_BY_CODE
 from app.services.diagnostics import format_diagnostics_for_owner
+from app.services.notifications import complaint_message, send_user_notification
 
 router = Router()
+
+
+async def _notify_complaint_owner_action(
+    call: CallbackQuery,
+    *,
+    actor_user_id: int,
+    complaint,
+    status: str,
+) -> None:
+    result = await send_user_notification(
+        app_user_id=int(complaint["user_id"]) if complaint["user_id"] is not None else None,
+        telegram_id=int(complaint["telegram_id"]) if complaint["telegram_id"] is not None else None,
+        text=complaint_message(status),
+        bot=call.bot,
+    )
+    await add_audit(
+        actor_user_id,
+        f"notification_{result}",
+        "complaint",
+        str(complaint["id"]),
+        f"complaint_{status}",
+        result,
+    )
 
 
 class AddAdmin(StatesGroup):
@@ -82,9 +109,19 @@ async def owner_menu_handler(call: CallbackQuery) -> None:
     if await deny_if_not_owner(call):
         return
     await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
+    today = await get_owner_today_stats()
+    finance = await get_platform_finance_summary()
     await call.message.edit_text(
-        "<b>👑 Управление</b>\n\n"
-        "Это скрытое меню владельца. Обычные пользователи, авторы и модераторы его не видят.",
+        "<b>👑 Центр управления</b>\n\n"
+        "<b>Сегодня</b>\n"
+        f"👤 Новых читателей: <b>{today['new_users']}</b>\n"
+        f"🛍 Покупок: <b>{today['purchases']}</b> · <b>{today['stars']} Stars</b>\n"
+        f"📚 Новых книг: <b>{today['new_books']}</b>\n"
+        f"💬 Комментариев: <b>{today['comments']}</b> · ⭐ Отзывов: <b>{today['reviews']}</b>\n\n"
+        f"🕊 На проверке: <b>{today['books_review']}</b>\n"
+        f"🧾 Новых жалоб: <b>{today['complaints']}</b>\n"
+        f"💰 Комиссия платформы: <b>{finance['platform_commission']} Stars</b>\n\n"
+        "Выберите раздел управления.",
         reply_markup=owner_menu(),
     )
     await call.answer()
@@ -182,6 +219,9 @@ async def owner_toggle_permission(call: CallbackQuery) -> None:
     target_user_id = int(user_id_raw)
     if code not in PERMISSION_BY_CODE:
         await call.answer("Неизвестное право", show_alert=True)
+        return
+    if code not in DELEGABLE_PERMISSION_CODES:
+        await call.answer("Это действие доступно только владельцу", show_alert=True)
         return
     owner = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
     perms = await get_admin_permissions(target_user_id)
@@ -375,42 +415,6 @@ async def owner_users(call: CallbackQuery, state: FSMContext) -> None:
     await call.answer()
 
 
-@router.message(OwnerSearch.user_query)
-async def owner_search_user_finish(message: Message, state: FSMContext) -> None:
-    if not is_owner_tg(message.from_user.id):
-        await message.answer("Недоступно")
-        await state.clear()
-        return
-    query = (message.text or "").strip()
-    if len(query) < 2:
-        await message.answer("Введите хотя бы 2 символа.")
-        return
-    rows = await search_users(query)
-    await state.clear()
-    if not rows:
-        await message.answer("Ничего не найдено.", reply_markup=owner_search_menu())
-    else:
-        await message.answer("<b>Результаты поиска</b>", reply_markup=owner_users_search_results_menu(rows))
-
-
-@router.message(OwnerSearch.book_query)
-async def owner_search_book_finish(message: Message, state: FSMContext) -> None:
-    if not is_owner_tg(message.from_user.id):
-        await message.answer("Недоступно")
-        await state.clear()
-        return
-    query = (message.text or "").strip()
-    if len(query) < 2:
-        await message.answer("Введите хотя бы 2 символа.")
-        return
-    rows = await search_books(query)
-    await state.clear()
-    if not rows:
-        await message.answer("Книги не найдены.", reply_markup=owner_search_menu())
-    else:
-        await message.answer("<b>Найденные книги</b>", reply_markup=owner_books_search_results_menu(rows))
-
-
 @router.callback_query(F.data.startswith("owner:user_card:"))
 async def owner_user_card(call: CallbackQuery) -> None:
     if await deny_if_not_owner(call):
@@ -518,9 +522,19 @@ async def owner_complaint_close(call: CallbackQuery) -> None:
     if await deny_if_not_owner(call):
         return
     complaint_id = int(call.data.split(":")[-1])
+    complaint = await get_complaint(complaint_id)
+    if not complaint or complaint["status"] not in {"new", "pending"}:
+        await call.answer("Жалоба уже обработана или не найдена", show_alert=True)
+        return
     owner = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
     await set_complaint_status(complaint_id, "closed", owner["id"])
     await add_audit(owner["id"], "complaint_closed", "complaint", str(complaint_id))
+    await _notify_complaint_owner_action(
+        call,
+        actor_user_id=int(owner["id"]),
+        complaint=complaint,
+        status="closed",
+    )
     await call.message.edit_text("Жалоба закрыта.", reply_markup=owner_menu())
     await call.answer("Закрыто")
 
@@ -530,11 +544,90 @@ async def owner_complaint_pending(call: CallbackQuery) -> None:
     if await deny_if_not_owner(call):
         return
     complaint_id = int(call.data.split(":")[-1])
+    complaint = await get_complaint(complaint_id)
+    if not complaint or complaint["status"] != "new":
+        await call.answer("Жалоба уже обработана или не найдена", show_alert=True)
+        return
     owner = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
     await set_complaint_status(complaint_id, "pending", owner["id"])
     await add_audit(owner["id"], "complaint_pending", "complaint", str(complaint_id))
+    await _notify_complaint_owner_action(
+        call,
+        actor_user_id=int(owner["id"]),
+        complaint=complaint,
+        status="pending",
+    )
     await call.message.edit_text("Жалоба оставлена в работе.", reply_markup=owner_menu())
     await call.answer("В работе")
+
+
+@router.callback_query(F.data == "owner:search_user")
+async def owner_search_user_start(call: CallbackQuery, state: FSMContext) -> None:
+    if await deny_if_not_owner(call):
+        return
+    await state.set_state(OwnerSearch.user_query)
+    await call.message.edit_text(
+        "<b>👤 Поиск пользователя или автора</b>\n\n"
+        "Введите Telegram ID, username, имя или псевдоним автора.",
+        reply_markup=owner_search_menu(),
+    )
+    await call.answer()
+
+
+@router.message(OwnerSearch.user_query)
+async def owner_search_user_finish(message: Message, state: FSMContext) -> None:
+    if not is_owner_tg(message.from_user.id):
+        return
+    query = (message.text or "").strip()
+    if len(query) < 2:
+        await message.answer("Введите хотя бы два символа.")
+        return
+    rows = await search_users(query, limit=20)
+    await state.clear()
+    if not rows:
+        await message.answer(
+            "Ничего не найдено. Проверьте написание или попробуйте Telegram ID.",
+            reply_markup=owner_search_menu(),
+        )
+        return
+    await message.answer(
+        f"<b>Результаты поиска</b>\n\nНайдено: <b>{len(rows)}</b>",
+        reply_markup=owner_users_search_results_menu(rows),
+    )
+
+
+@router.callback_query(F.data == "owner:search_book")
+async def owner_search_book_start(call: CallbackQuery, state: FSMContext) -> None:
+    if await deny_if_not_owner(call):
+        return
+    await state.set_state(OwnerSearch.book_query)
+    await call.message.edit_text(
+        "<b>📚 Поиск книги</b>\n\nВведите название книги или псевдоним автора.",
+        reply_markup=owner_search_menu(),
+    )
+    await call.answer()
+
+
+@router.message(OwnerSearch.book_query)
+async def owner_search_book_finish(message: Message, state: FSMContext) -> None:
+    if not is_owner_tg(message.from_user.id):
+        return
+    query = (message.text or "").strip()
+    if len(query) < 2:
+        await message.answer("Введите хотя бы два символа.")
+        return
+    rows = await search_books(query, limit=20)
+    await state.clear()
+    if not rows:
+        await message.answer(
+            "Книг по этому запросу не найдено.",
+            reply_markup=owner_search_menu(),
+        )
+        return
+    await message.answer(
+        f"<b>Найденные книги</b>\n\nРезультатов: <b>{len(rows)}</b>",
+        reply_markup=owner_books_search_results_menu(rows),
+    )
 
 
 @router.callback_query(F.data == "owner:system")
@@ -604,12 +697,4 @@ async def owner_security(call: CallbackQuery) -> None:
         f"<b>Заблокированные:</b>\n{blocked}",
         reply_markup=back_to_main(),
     )
-    await call.answer()
-
-
-@router.callback_query(F.data == "owner:system")
-async def owner_system_panel(call: CallbackQuery) -> None:
-    if await deny_if_not_owner(call):
-        return
-    await call.message.edit_text(format_diagnostics_for_owner(), reply_markup=back_to_main())
     await call.answer()

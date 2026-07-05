@@ -29,6 +29,8 @@ PERMISSIONS = [
 ]
 
 PERMISSION_BY_CODE = {p.code: p for p in PERMISSIONS}
+DELEGABLE_PERMISSIONS = [permission for permission in PERMISSIONS if not permission.owner_only]
+DELEGABLE_PERMISSION_CODES = {permission.code for permission in DELEGABLE_PERMISSIONS}
 
 MODERATION_BUTTONS = {
     # Показываем только те разделы, где уже есть рабочая логика.

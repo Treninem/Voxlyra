@@ -1,150 +1,70 @@
 {% extends "base.html" %}
+{% block title %}Настройки — Вокслира{% endblock %}
 {% block content %}
 <section class="hero compact settings-hero">
-  <img src="/static/img/bot_avatar.png" alt="Voxlyra" class="logo">
+  <img src="/static/img/bot_avatar.png" alt="Вокслира" class="logo">
   <div>
+    <span class="eyebrow">Личный стиль</span>
     <h1>Настройки</h1>
-    <p>Внешний вид, читалка, аудио и удобство работы внутри Mini App.</p>
+    <p>Оформление, читалка, аудио, уведомления и комфорт чтения.</p>
   </div>
 </section>
 
+<section class="settings-group-title"><h2>🎨 Оформление</h2></section>
 <section class="settings-panel">
   <article class="setting-card">
-    <div class="setting-head">
-      <div>
-        <h3>Тема</h3>
-        <p>Выберите оформление: авто, тёмное или светлое. Все подписи остаются читаемыми в любом режиме.</p>
-      </div>
-    </div>
-    <div class="segmented" id="themeSettings">
+    <div class="setting-head"><div><h3>Тема</h3><p>Авто, тёмная, светлая или сепия для мягкого чтения вечером.</p></div></div>
+    <div class="segmented four" id="themeSettings">
       <button type="button" data-theme="system">Авто</button>
       <button type="button" data-theme="dark">Тёмная</button>
       <button type="button" data-theme="light">Светлая</button>
+      <button type="button" data-theme="sepia">Сепия</button>
     </div>
   </article>
-
   <article class="setting-card">
-    <div class="setting-head">
-      <div>
-        <h3>Размер текста</h3>
-        <p>Настройка применяется в читалке и сохраняется на этом устройстве.</p>
-      </div>
-      <b class="setting-value" id="fontValue">18px</b>
-    </div>
-    <div class="segmented">
-      <button type="button" id="fontMinus">A−</button>
-      <button type="button" id="fontReset">Обычный</button>
-      <button type="button" id="fontPlus">A+</button>
-    </div>
-    <p class="reader-preview" id="settingsPreviewText">Так будет выглядеть текст главы в читалке.</p>
-  </article>
-
-  <article class="setting-card">
-    <div class="setting-head">
-      <div>
-        <h3>Межстрочный интервал</h3>
-        <p>Сделайте чтение плотнее или свободнее.</p>
-      </div>
-      <b class="setting-value" id="lineHeightValue">Обычно</b>
-    </div>
-    <div class="segmented">
-      <button type="button" data-line-height="1.58">Компактно</button>
-      <button type="button" data-line-height="1.78">Обычно</button>
-      <button type="button" data-line-height="1.95">Просторно</button>
-    </div>
-  </article>
-
-  <article class="setting-card">
-    <div class="setting-head">
-      <div>
-        <h3>Ширина читалки</h3>
-        <p>Стандартная ширина удобнее для телефона, широкая — для планшета и компьютера.</p>
-      </div>
-    </div>
-    <div class="segmented two">
-      <button type="button" data-reader-width="normal">Стандартная</button>
-      <button type="button" data-reader-width="wide">Широкая</button>
-    </div>
-  </article>
-
-  <article class="setting-card">
-    <div class="setting-head">
-      <div>
-        <h3>Контраст</h3>
-        <p>Усиленный режим делает текст и кнопки заметнее.</p>
-      </div>
-    </div>
-    <div class="segmented two">
-      <button type="button" data-contrast="normal">Обычный</button>
-      <button type="button" data-contrast="high">Усиленный</button>
-    </div>
-  </article>
-
-  <article class="setting-card">
-    <div class="setting-head">
-      <div>
-        <h3>Скорость аудио</h3>
-        <p>Выбранная скорость будет применяться к аудиоплееру.</p>
-      </div>
-    </div>
-    <div class="segmented four">
-      <button type="button" data-rate="1">1x</button>
-      <button type="button" data-rate="1.25">1.25x</button>
-      <button type="button" data-rate="1.5">1.5x</button>
-      <button type="button" data-rate="2">2x</button>
-    </div>
-  </article>
-
-  <article class="setting-card">
-    <div class="setting-head">
-      <div>
-        <h3>Перемотка аудио</h3>
-        <p>Шаг кнопок «назад» и «вперёд» в плеере.</p>
-      </div>
-      <b class="setting-value" id="rewindValue">15 сек.</b>
-    </div>
-    <div class="segmented three">
-      <button type="button" data-rewind="10">10 сек.</button>
-      <button type="button" data-rewind="15">15 сек.</button>
-      <button type="button" data-rewind="30">30 сек.</button>
-    </div>
-  </article>
-
-  <article class="setting-card">
-    <div class="setting-toggle-row">
-      <div>
-        <h3>Сохранять место при паузе</h3>
-        <p>Плеер будет запоминать позицию, когда вы нажимаете паузу.</p>
-      </div>
-      <button type="button" class="toggle-pill" data-toggle="saveOnPause"><span>Пауза</span><span>Включено</span></button>
-    </div>
-  </article>
-
-  <article class="setting-card">
-    <div class="setting-toggle-row">
-      <div>
-        <h3>Уведомления</h3>
-        <p>Подсказки о новых главах, покупках, бонусах и изменениях в библиотеке.</p>
-      </div>
-      <button type="button" class="toggle-pill" data-toggle="notifications"><span>Статус</span><span>Включено</span></button>
-    </div>
-  </article>
-
-  <article class="setting-card">
-    <div>
-      <h3>Аудиокниги</h3>
-      <p>Откройте список книг с аудиоверсией и продолжите прослушивание.</p>
-    </div>
-    <a class="button-link secondary full" href="/audio">Открыть аудиокниги</a>
-  </article>
-
-  <article class="setting-card danger-zone">
-    <div>
-      <h3>Сброс настроек</h3>
-      <p>Вернуть тему, размер текста, интервал и аудио-настройки по умолчанию.</p>
-    </div>
-    <button type="button" id="resetLocalSettings" class="secondary full">Сбросить настройки</button>
+    <div class="setting-head"><div><h3>Контраст</h3><p>Усиленный режим делает текст и кнопки заметнее.</p></div></div>
+    <div class="segmented two"><button type="button" data-contrast="normal">Обычный</button><button type="button" data-contrast="high">Усиленный</button></div>
   </article>
 </section>
-<div id="toast" class="toast" aria-live="polite"></div>
+
+<section class="settings-group-title"><h2>📖 Чтение</h2></section>
+<section class="settings-panel">
+  <article class="setting-card">
+    <div class="setting-head"><div><h3>Размер текста</h3><p>Изменение сразу видно на примере и применяется в читалке.</p></div><b class="setting-value" id="fontValue">18px</b></div>
+    <div class="segmented"><button type="button" id="fontMinus">A−</button><button type="button" id="fontReset">Обычный</button><button type="button" id="fontPlus">A+</button></div>
+    <p class="reader-preview" id="settingsPreviewText">Так будет выглядеть текст главы в читалке.</p>
+  </article>
+  <article class="setting-card">
+    <div class="setting-head"><div><h3>Межстрочный интервал</h3><p>Сделайте чтение плотнее или свободнее.</p></div><b class="setting-value" id="lineHeightValue">Обычно</b></div>
+    <div class="segmented three"><button type="button" data-line-height="1.58">Компактно</button><button type="button" data-line-height="1.78">Обычно</button><button type="button" data-line-height="1.95">Просторно</button></div>
+  </article>
+  <article class="setting-card">
+    <div class="setting-head"><div><h3>Ширина читалки</h3><p>Стандартная для телефона, широкая для планшета и компьютера.</p></div></div>
+    <div class="segmented two"><button type="button" data-reader-width="normal">Стандартная</button><button type="button" data-reader-width="wide">Широкая</button></div>
+  </article>
+  <article class="setting-card"><div class="setting-toggle-row"><div><h3>Фокус-режим</h3><p>Скрывает декоративные элементы и оставляет максимум места для текста.</p></div><button type="button" class="toggle-pill" data-toggle="focusMode"><span>Фокус</span><span>Выключено</span></button></div></article>
+  <article class="setting-card"><div class="setting-toggle-row"><div><h3>Похожие книги в главах</h3><p>Показывать рекомендации по жанру и сюжету во время чтения.</p></div><button type="button" class="toggle-pill" data-toggle="showReaderAds"><span>Рекомендации</span><span>Включено</span></button></div></article>
+  <article class="setting-card"><div class="setting-toggle-row"><div><h3>Авто-переход к следующей главе</h3><p>После завершения главы читалка сможет открыть следующую автоматически.</p></div><button type="button" class="toggle-pill" data-toggle="autoplayNext"><span>Главы</span><span>Выключено</span></button></div></article>
+</section>
+
+<section class="settings-group-title"><h2>🎧 Аудио</h2></section>
+<section class="settings-panel">
+  <article class="setting-card"><div class="setting-head"><div><h3>Скорость аудио</h3><p>Выбранная скорость применяется к аудиоплееру.</p></div></div><div class="segmented four"><button type="button" data-rate="1">1x</button><button type="button" data-rate="1.25">1.25x</button><button type="button" data-rate="1.5">1.5x</button><button type="button" data-rate="2">2x</button></div></article>
+  <article class="setting-card"><div class="setting-head"><div><h3>Перемотка аудио</h3><p>Шаг кнопок «назад» и «вперёд» в плеере.</p></div><b class="setting-value" id="rewindValue">15 сек.</b></div><div class="segmented three"><button type="button" data-rewind="10">10 сек.</button><button type="button" data-rewind="15">15 сек.</button><button type="button" data-rewind="30">30 сек.</button></div></article>
+  <article class="setting-card"><div class="setting-toggle-row"><div><h3>Сохранять место при паузе</h3><p>Плеер будет запоминать позицию, когда вы нажимаете паузу.</p></div><button type="button" class="toggle-pill" data-toggle="saveOnPause"><span>Пауза</span><span>Включено</span></button></div></article>
+  <article class="setting-card"><div><h3>Аудиокниги</h3><p>Откройте список книг с аудиоверсией и продолжите прослушивание.</p></div><a class="button-link secondary full" href="/audio">Открыть аудиокниги</a></article>
+</section>
+
+<section class="settings-group-title"><h2>🔔 Уведомления</h2></section>
+<section class="settings-panel">
+  <article class="setting-card"><div class="setting-toggle-row"><div><h3>Все уведомления</h3><p>Главный переключатель сообщений от Вокслиры.</p></div><button type="button" class="toggle-pill" data-toggle="notifications"><span>Статус</span><span>Включено</span></button></div></article>
+  <article class="setting-card"><div class="setting-toggle-row"><div><h3>Новые главы</h3><p>Сообщать, когда в сохранённой или открытой книге появляется новая глава.</p></div><button type="button" class="toggle-pill" data-toggle="notificationChapters"><span>Главы</span><span>Включено</span></button></div></article>
+  <article class="setting-card"><div class="setting-toggle-row"><div><h3>Новые аудиоглавы</h3><p>Сообщать о новой озвучке книг из вашей библиотеки.</p></div><button type="button" class="toggle-pill" data-toggle="notificationAudio"><span>Аудио</span><span>Включено</span></button></div></article>
+  <article class="setting-card"><div class="setting-toggle-row"><div><h3>Скидки</h3><p>Сообщать о новых промокодах для книг, которыми вы интересовались.</p></div><button type="button" class="toggle-pill" data-toggle="notificationDiscounts"><span>Скидки</span><span>Включено</span></button></div></article>
+</section>
+
+<section class="settings-group-title"><h2>⚙️ Сброс</h2></section>
+<section class="settings-panel">
+  <article class="setting-card danger-zone"><div><h3>Сброс настроек</h3><p>Вернуть оформление, чтение, аудио и уведомления к исходным значениям.</p></div><button type="button" id="resetLocalSettings" class="secondary full">Сбросить настройки</button></article>
+</section>
 {% endblock %}

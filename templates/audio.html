@@ -1,47 +1,9 @@
 {% extends "base.html" %}
+{% from "_macros.html" import book_card %}
+{% block title %}Аудиокниги — Вокслира{% endblock %}
 {% block content %}
-<section class="hero purple">
-  <img src="/static/img/channel_avatar.png" alt="Voxlyra audio" class="logo">
-  <div>
-    <h1>Аудиокниги</h1>
-    <p>Слушайте реальные аудиоглавы с прогрессом и плеером внутри Telegram.</p>
-  </div>
-</section>
-
-<section class="tabs">
-  <a class="tab" href="/catalog">📚 Читать</a>
-  <a class="tab active" href="/audio">🎧 Слушать</a>
-</section>
-
-<section class="section-title">
-  <h2>Доступные аудиоверсии</h2>
-  <p>Здесь показываются только книги, в которых автор уже загрузил аудиофайлы.</p>
-</section>
-
-<section class="book-list">
-  {% set shown = namespace(count=0) %}
-  {% for book in books %}
-    {% if book.audio_count > 0 or book.has_audio %}
-      {% set shown.count = shown.count + 1 %}
-      <a class="book-card" href="/book/{{ book.id }}">
-        <div class="cover-mini audio">{{ book.title[:1] }}</div>
-        <div class="book-info">
-          <h3>{{ book.title }}</h3>
-          <p>{{ book.pen_name or 'Автор не указан' }} · {{ book.age_limit }}</p>
-          <div class="chips">
-            <span>🎧 {{ book.audio_count }} аудиоглав</span>
-            <span>📖 {{ book.chapters_count }} глав</span>
-          </div>
-        </div>
-      </a>
-    {% endif %}
-  {% endfor %}
-  {% if shown.count == 0 %}
-    <article class="empty-card">
-      <h3>Аудиокниг пока нет</h3>
-      <p>Сначала автор должен добавить книгу, затем в кабинете автора загрузить аудиоглавы MP3, M4A, OGG или WAV.</p>
-      <a class="button-link" href="/catalog">📚 Вернуться в каталог</a>
-    </article>
-  {% endif %}
-</section>
+<section class="hero purple hero-home cinematic-hero"><img src="/static/img/channel_avatar.png" alt="Вокслира аудио" class="logo"><div class="hero-copy"><span class="eyebrow">Голосовые истории</span><h1>Аудиокниги</h1><p>Продолжайте с сохранённого места, меняйте скорость и включайте таймер сна.</p><div class="hero-actions"><a class="button-link" href="#audio-grid">Выбрать историю</a><a class="button-link secondary" href="/settings">Настроить</a></div></div></section>
+<section id="continueAudioSection" class="continue-section" hidden><div class="section-title shelf-title"><div><span class="eyebrow">Ваше прослушивание</span><h2>Продолжить слушать</h2></div><a href="/library">Всё моё →</a></div><div id="continueAudioShelf" class="horizontal-shelf"></div></section>
+<section class="section-title" id="audio-grid"><span class="eyebrow">Доступные озвучки</span><h2>Истории с голосом</h2><p>Здесь только книги, в которых уже опубликованы аудиоглавы.</p></section>
+<section class="book-list premium-grid catalog-grid">{% if books %}{% for book in books %}{{ book_card(book) }}{% endfor %}{% else %}<article class="empty-card premium-empty"><div class="empty-icon">◉</div><h3>Аудиоглав пока нет</h3><p>Когда авторы добавят озвучку, она появится здесь.</p><a class="button-link" href="/catalog">Открыть каталог</a></article>{% endif %}</section>
 {% endblock %}

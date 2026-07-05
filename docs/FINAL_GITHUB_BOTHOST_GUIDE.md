@@ -47,7 +47,7 @@ BOT_USERNAME=username_бота_без_@
 OWNER_IDS=ваш_telegram_id
 DATABASE_PATH=data/voxlyra.sqlite3
 RUN_WEBAPP=true
-PORT=8080
+PORT=3000
 WEBAPP_URL=https://адрес_проекта_на_bothost
 CHANNEL_ID=@username_канала
 ```

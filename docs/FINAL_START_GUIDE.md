@@ -47,7 +47,7 @@ CHANNEL_ID=@voxlyra_news
 2. Создайте новый репозиторий.
 3. Название можно поставить `voxlyra_bot`.
 4. Репозиторий можно сделать private.
-5. Распакуйте архив `voxlyra_bot_v1.2.0_stage12.zip`.
+5. Распакуйте архив `voxlyra_bot_v1.8.0_cross_flow_stage8.zip`.
 6. Загрузите содержимое папки `voxlyra_bot` в репозиторий.
 7. Не загружайте `.env`, если создавали его у себя локально.
 8. Файл `.env.example` можно загружать.
@@ -79,13 +79,13 @@ BOT_TOKEN=токен_от_BotFather
 OWNER_IDS=ваш_Telegram_ID
 DATABASE_PATH=data/voxlyra.sqlite3
 RUN_WEBAPP=true
-PORT=8080
+PORT=3000
 WEBAPP_URL=https://адрес_проекта_на_bothost
 CHANNEL_ID=@username_канала
 BOT_USERNAME=username_бота_без_@
 PROJECT_NAME=Вокслира
 PUBLIC_VERSION_VISIBLE=false
-PROJECT_VERSION=v1.2.0-stage12
+PROJECT_VERSION=v1.8.0-cross-flow-stage8
 ```
 
 ## 7. Где взять WEBAPP_URL
@@ -123,10 +123,10 @@ WEBAPP_URL=https://voxlyra.bothost.app/
 
 ```env
 RUN_WEBAPP=true
-PORT=8080
+PORT=3000
 ```
 
-В коде веб-часть слушает `0.0.0.0:8080`, это уже настроено.
+В коде веб-часть слушает `0.0.0.0:3000`, это уже настроено.
 
 ## 8. Запустить деплой
 
@@ -205,7 +205,7 @@ PORT=8080
 - `WEBAPP_URL` со слешем в конце;
 - бот не добавлен в канал;
 - база указана не в `data/`;
-- порт отличается от `PORT=8080`;
+- порт отличается от `PORT=3000`;
 - репозиторий загружен не из папки `voxlyra_bot`, а уровнем выше.
 
 ## 15. Что нельзя загружать в GitHub

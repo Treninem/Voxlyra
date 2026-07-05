@@ -8,6 +8,7 @@ from app.db import (
     get_ad_campaign,
     get_admin_permissions,
     get_book,
+    get_complaint,
     get_comment_for_moderation,
     get_review_for_moderation,
     list_active_ad_campaigns,
@@ -18,14 +19,41 @@ from app.db import (
     set_ad_campaign_status,
     set_complaint_status,
     set_book_publication_status,
+    publish_book_content,
     set_comment_status,
     set_review_status,
     upsert_user,
 )
 from app.keyboards import ad_moderation_card_menu, back_to_main, complaint_card_menu, complaints_menu, moderation_ads_menu, moderation_book_card_menu, moderation_books_menu, moderation_comments_menu, moderation_content_menu, moderation_hide_menu, moderation_menu, moderation_reviews_menu
 from app.services.channel import build_new_book_post
+from app.services.notifications import (
+    book_moderation_message,
+    complaint_message,
+    content_hidden_message,
+    send_user_notification,
+)
 
 router = Router()
+
+
+async def _notify(
+    call: CallbackQuery,
+    *,
+    actor_user_id: int,
+    event: str,
+    target_type: str,
+    target_id: int,
+    app_user_id: int | None,
+    telegram_id: int | None,
+    text: str,
+) -> None:
+    result = await send_user_notification(
+        app_user_id=app_user_id,
+        telegram_id=telegram_id,
+        text=text,
+        bot=call.bot,
+    )
+    await add_audit(actor_user_id, f"notification_{result}", target_type, str(target_id), event, result)
 
 
 @router.callback_query(F.data == "mod:menu")
@@ -92,14 +120,28 @@ async def moderation_book_publish(call: CallbackQuery) -> None:
     if not await _require_perm(call, "mod_books"):
         return
     book_id = int(call.data.split(":")[-1])
+    book = await get_book(book_id)
+    if not book or book["publication_status"] != "review":
+        await call.answer("Книга уже обработана или не найдена", show_alert=True)
+        return
     chapters_count = await count_chapters_for_book(book_id)
     if chapters_count < 1:
         await call.answer("Нельзя публиковать книгу без глав", show_alert=True)
         return
-    book = await get_book(book_id)
     await set_book_publication_status(book_id, "published")
+    await publish_book_content(book_id)
     user = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
     await add_audit(user["id"], "book_published", "book", str(book_id))
+    await _notify(
+        call,
+        actor_user_id=int(user["id"]),
+        event="book_published",
+        target_type="book",
+        target_id=book_id,
+        app_user_id=int(book["author_user_id"]) if book["author_user_id"] is not None else None,
+        telegram_id=int(book["author_telegram_id"]) if book["author_telegram_id"] is not None else None,
+        text=book_moderation_message(book["title"], "published"),
+    )
 
     channel_status = ""
     if settings.CHANNEL_ID and book:
@@ -115,7 +157,7 @@ async def moderation_book_publish(call: CallbackQuery) -> None:
             channel_status = "\n\nПост отправлен в канал."
             await add_audit(user["id"], "channel_post_sent", "book", str(book_id))
         except Exception as exc:
-            channel_status = f"\n\nКнига опубликована, но пост в канал не отправился: {exc}"
+            channel_status = "\n\nКнига опубликована. Публикацию в канале можно повторить позже."
             await add_audit(user["id"], "channel_post_failed", "book", str(book_id), None, str(exc))
 
     await call.message.edit_text(
@@ -130,9 +172,23 @@ async def moderation_book_reject(call: CallbackQuery) -> None:
     if not await _require_perm(call, "mod_books"):
         return
     book_id = int(call.data.split(":")[-1])
+    book = await get_book(book_id)
+    if not book or book["publication_status"] != "review":
+        await call.answer("Книга уже обработана или не найдена", show_alert=True)
+        return
     await set_book_publication_status(book_id, "draft")
     user = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
     await add_audit(user["id"], "book_rejected", "book", str(book_id))
+    await _notify(
+        call,
+        actor_user_id=int(user["id"]),
+        event="book_rejected",
+        target_type="book",
+        target_id=book_id,
+        app_user_id=int(book["author_user_id"]) if book["author_user_id"] is not None else None,
+        telegram_id=int(book["author_telegram_id"]) if book["author_telegram_id"] is not None else None,
+        text=book_moderation_message(book["title"], "rejected"),
+    )
     await call.message.edit_text("Книга возвращена автору в черновик.", reply_markup=back_to_main())
     await call.answer("Готово")
 
@@ -188,9 +244,23 @@ async def moderation_comment_hide(call: CallbackQuery) -> None:
     if not await _require_perm(call, "mod_comments"):
         return
     comment_id = int(call.data.split(":")[-1])
+    row = await get_comment_for_moderation(comment_id)
+    if not row or row["status"] != "published":
+        await call.answer("Комментарий уже обработан или не найден", show_alert=True)
+        return
     await set_comment_status(comment_id, "hidden")
     user = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
     await add_audit(user["id"], "comment_hidden", "comment", str(comment_id))
+    await _notify(
+        call,
+        actor_user_id=int(user["id"]),
+        event="comment_hidden",
+        target_type="comment",
+        target_id=comment_id,
+        app_user_id=int(row["user_id"]),
+        telegram_id=int(row["telegram_id"]),
+        text=content_hidden_message("comment", row["book_title"], row["chapter_title"]),
+    )
     await call.message.edit_text("Комментарий скрыт.", reply_markup=moderation_content_menu())
     await call.answer("Готово")
 
@@ -234,9 +304,23 @@ async def moderation_review_hide(call: CallbackQuery) -> None:
     if not await _require_perm(call, "mod_comments"):
         return
     review_id = int(call.data.split(":")[-1])
+    row = await get_review_for_moderation(review_id)
+    if not row or row["status"] != "published":
+        await call.answer("Отзыв уже обработан или не найден", show_alert=True)
+        return
     await set_review_status(review_id, "hidden")
     user = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
     await add_audit(user["id"], "review_hidden", "review", str(review_id))
+    await _notify(
+        call,
+        actor_user_id=int(user["id"]),
+        event="review_hidden",
+        target_type="review",
+        target_id=review_id,
+        app_user_id=int(row["user_id"]),
+        telegram_id=int(row["telegram_id"]),
+        text=content_hidden_message("review", row["book_title"]),
+    )
     await call.message.edit_text("Отзыв скрыт.", reply_markup=moderation_content_menu())
     await call.answer("Готово")
 
@@ -339,9 +423,23 @@ async def moderation_complaint_close(call: CallbackQuery) -> None:
     if not await _require_perm(call, "complaints"):
         return
     complaint_id = int(call.data.split(":")[-1])
+    complaint = await get_complaint(complaint_id)
+    if not complaint or complaint["status"] not in {"new", "pending"}:
+        await call.answer("Жалоба уже обработана или не найдена", show_alert=True)
+        return
     user = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
     await set_complaint_status(complaint_id, "closed", user["id"])
     await add_audit(user["id"], "complaint_closed", "complaint", str(complaint_id))
+    await _notify(
+        call,
+        actor_user_id=int(user["id"]),
+        event="complaint_closed",
+        target_type="complaint",
+        target_id=complaint_id,
+        app_user_id=int(complaint["user_id"]) if complaint["user_id"] is not None else None,
+        telegram_id=int(complaint["telegram_id"]) if complaint["telegram_id"] is not None else None,
+        text=complaint_message("closed"),
+    )
     await call.message.edit_text("Жалоба закрыта.", reply_markup=moderation_menu({"complaints"}))
     await call.answer("Закрыто")
 
@@ -351,31 +449,27 @@ async def moderation_complaint_pending(call: CallbackQuery) -> None:
     if not await _require_perm(call, "complaints"):
         return
     complaint_id = int(call.data.split(":")[-1])
+    complaint = await get_complaint(complaint_id)
+    if not complaint or complaint["status"] != "new":
+        await call.answer("Жалоба уже обработана или не найдена", show_alert=True)
+        return
     user = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
     await set_complaint_status(complaint_id, "pending", user["id"])
     await add_audit(user["id"], "complaint_pending", "complaint", str(complaint_id))
+    await _notify(
+        call,
+        actor_user_id=int(user["id"]),
+        event="complaint_pending",
+        target_type="complaint",
+        target_id=complaint_id,
+        app_user_id=int(complaint["user_id"]) if complaint["user_id"] is not None else None,
+        telegram_id=int(complaint["telegram_id"]) if complaint["telegram_id"] is not None else None,
+        text=complaint_message("pending"),
+    )
     await call.message.edit_text("Жалоба оставлена в работе.", reply_markup=moderation_menu({"complaints"}))
     await call.answer("В работе")
 
 
 @router.callback_query(F.data.startswith("mod:"))
-async def moderation_stubs(call: CallbackQuery) -> None:
-    titles = {
-        "mod:comments": "💬 Комментарии",
-        "mod:complaints": "🧾 Жалобы",
-        "mod:authors": "✍️ Авторы",
-        "mod:users": "👤 Пользователи",
-        "mod:block_books": "📕 Блокировка книг",
-        "mod:finance": "💰 Финансы",
-        "mod:refunds": "↩️ Возвраты",
-        "mod:ads": "📢 Реклама",
-        "mod:channel": "📣 Канал",
-        "mod:stats": "📊 Статистика",
-        "mod:support": "🛟 Поддержка",
-    }
-    await call.message.edit_text(
-        f"<b>{titles.get(call.data, 'Раздел')}</b>\n\n"
-        "Для этого раздела нет доступных действий в текущих правах или кнопка устарела. Вернитесь в меню модерации и выберите рабочий раздел.",
-        reply_markup=back_to_main(),
-    )
-    await call.answer()
+async def moderation_unavailable(call: CallbackQuery) -> None:
+    await call.answer("Недоступно", show_alert=True)

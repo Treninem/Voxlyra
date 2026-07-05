@@ -4,7 +4,7 @@ from aiogram.types import CallbackQuery, Message
 
 from app.config import settings
 from app.db import claim_daily_bonus, get_admin_permissions, get_author_profile, get_bonus_balance, get_referral_stats, list_bonus_transactions, register_referral, reward_referral_if_needed, upsert_user, get_user_preferences, set_user_preference, reset_user_preferences
-from app.keyboards import back_to_main, bonuses_menu, main_menu, more_menu, user_settings_menu, user_theme_menu, user_font_menu
+from app.keyboards import back_to_main, bonuses_menu, main_menu, more_menu, user_settings_menu, user_notifications_menu, user_theme_menu, user_font_menu
 
 router = Router()
 
@@ -35,9 +35,9 @@ async def cmd_start(message: Message) -> None:
                 await register_referral(int(ref_user["id"]), user_id)
                 await reward_referral_if_needed(user_id)
     text = (
-        "<b>Вокслира</b>\n\n"
-        "Истории, которые звучат.\n\n"
-        "Выберите раздел."
+        "<b>✨ Добро пожаловать в Вокслиру</b>\n\n"
+        "Здесь истории можно читать, слушать и сохранять в свою личную библиотеку.\n\n"
+        "Начните с каталога или продолжите то, что уже открыли."
     )
     await message.answer(text, reply_markup=main_menu(is_owner, has_admin, has_author))
 
@@ -46,7 +46,9 @@ async def cmd_start(message: Message) -> None:
 async def callback_main_menu(call: CallbackQuery) -> None:
     is_owner, has_admin, has_author, _ = await build_context(call)
     await call.message.edit_text(
-        "<b>Вокслира</b>\n\nВыберите раздел.",
+        "<b>✨ Вокслира</b>\n\n"
+        "Ваша библиотека историй, глав и голосов.\n"
+        "Выберите, куда пойдём.",
         reply_markup=main_menu(is_owner, has_admin, has_author),
     )
     await call.answer()
@@ -55,7 +57,10 @@ async def callback_main_menu(call: CallbackQuery) -> None:
 @router.callback_query(F.data == "main:more")
 async def callback_more(call: CallbackQuery) -> None:
     _, _, has_author, _ = await build_context(call)
-    await call.message.edit_text("<b>Ещё</b>\n\nВыберите нужный раздел.", reply_markup=more_menu(has_author))
+    await call.message.edit_text(
+        "<b>⚙️ Ещё</b>\n\nОформление, поддержка и правила — всё необходимое без лишних пунктов.",
+        reply_markup=more_menu(has_author),
+    )
     await call.answer()
 
 
@@ -66,7 +71,7 @@ async def callback_bonuses(call: CallbackQuery) -> None:
     await call.message.edit_text(
         "<b>💎 Бонусы</b>\n\n"
         f"Ваш баланс: <b>{balance}</b> бонусов.\n\n"
-        "Бонусы можно получать за ежедневный вход и приглашения. Они помогают читателю возвращаться к книгам, а автору — быстрее находить аудиторию.",
+        "Получайте бонусы за ежедневный вход и приглашения.",
         reply_markup=bonuses_menu(True),
     )
     await call.answer()
@@ -179,13 +184,45 @@ async def callback_set_font(call: CallbackQuery) -> None:
     await call.answer("Сохранено")
 
 
+@router.callback_query(F.data == "settings:notifications")
+async def callback_user_notifications(call: CallbackQuery) -> None:
+    _, _, _, user_id = await build_context(call)
+    prefs = await get_user_preferences(user_id)
+    await call.message.edit_text(
+        "<b>🔔 Уведомления</b>\n\nВыберите, какие события Вокслира будет присылать вам в Telegram.",
+        reply_markup=user_notifications_menu(prefs),
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("settings:toggle_notification:"))
+async def callback_toggle_notification_category(call: CallbackQuery) -> None:
+    _, _, _, user_id = await build_context(call)
+    key = call.data.rsplit(":", 1)[-1]
+    allowed = {"notifications", "notifications_chapters", "notifications_audio", "notifications_discounts"}
+    if key not in allowed:
+        await call.answer("Настройка не найдена", show_alert=True)
+        return
+    prefs = await get_user_preferences(user_id)
+    new_value = "0" if str(prefs.get(key, "1")) != "0" else "1"
+    prefs = await set_user_preference(user_id, key, new_value)
+    await call.message.edit_text(
+        "<b>🔔 Уведомления</b>\n\nВыбор сохранён.",
+        reply_markup=user_notifications_menu(prefs),
+    )
+    await call.answer("Сохранено")
+
+
 @router.callback_query(F.data == "settings:toggle_notifications")
-async def callback_toggle_notifications(call: CallbackQuery) -> None:
+async def callback_toggle_notifications_legacy(call: CallbackQuery) -> None:
     _, _, _, user_id = await build_context(call)
     prefs = await get_user_preferences(user_id)
     new_value = "0" if str(prefs.get("notifications", "1")) != "0" else "1"
     prefs = await set_user_preference(user_id, "notifications", new_value)
-    await call.message.edit_text("<b>⚙️ Настройки</b>\n\nНастройка уведомлений сохранена.", reply_markup=user_settings_menu(prefs))
+    await call.message.edit_text(
+        "<b>🔔 Уведомления</b>\n\nВыбор сохранён.",
+        reply_markup=user_notifications_menu(prefs),
+    )
     await call.answer("Сохранено")
 
 

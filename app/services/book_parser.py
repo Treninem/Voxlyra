@@ -1,10 +1,12 @@
 import html
+import os
 import re
 import zipfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable
 from xml.etree import ElementTree as ET
+
 
 
 class BookParseError(RuntimeError):
@@ -230,9 +232,11 @@ def _parse_zip(path: Path, temp_dir: str | Path | None = None) -> list[ParsedCha
             members = sorted(_safe_zip_members(zf), key=lambda i: i.filename.lower())
             if not members:
                 raise BookParseError("В ZIP не найдено файлов TXT, DOCX, FB2, EPUB или PDF.")
+            max_unpacked = max(1, int(os.getenv("MAX_BOOK_UNPACKED_MB", "2048") or 2048)) * 1024 * 1024
+            unpacked_total = sum(max(0, int(info.file_size or 0)) for info in members)
+            if unpacked_total > max_unpacked:
+                raise BookParseError("Архив после распаковки слишком большой. Разделите его на несколько файлов.")
             for index, info in enumerate(members, 1):
-                if info.file_size > 30 * 1024 * 1024:
-                    raise BookParseError(f"Файл {info.filename} слишком большой для импорта.")
                 safe_name = f"{index:04d}_{Path(info.filename).name}"
                 out_path = temp_root / safe_name
                 out_path.write_bytes(zf.read(info))

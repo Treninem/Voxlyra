@@ -36,10 +36,14 @@ def _validate_init_data_raw(init_data: str, bot_token: str, max_age_seconds: int
         raise TMAAuthError("Не удалось проверить сессию Telegram. Откройте раздел заново.")
 
     auth_date_raw = pairs.get("auth_date")
-    if auth_date_raw and auth_date_raw.isdigit():
-        auth_date = int(auth_date_raw)
-        if max_age_seconds > 0 and time.time() - auth_date > max_age_seconds:
-            raise TMAAuthError("Сессия Mini App устарела. Откройте раздел заново из Telegram.")
+    if not auth_date_raw or not auth_date_raw.isdigit():
+        raise TMAAuthError("Не удалось проверить время сессии Telegram. Откройте раздел заново.")
+    auth_date = int(auth_date_raw)
+    now = int(time.time())
+    if auth_date > now + 60:
+        raise TMAAuthError("Время сессии Telegram не прошло проверку. Откройте раздел заново.")
+    if max_age_seconds > 0 and now - auth_date > max_age_seconds:
+        raise TMAAuthError("Сессия Mini App устарела. Откройте раздел заново из Telegram.")
 
     data_check_string = "\n".join(f"{key}={value}" for key, value in sorted(pairs.items()))
     secret_key = hmac.new(b"WebAppData", bot_token.encode("utf-8"), hashlib.sha256).digest()
@@ -64,6 +68,8 @@ async def authenticate_init_data(init_data: str) -> TMAUser:
     username = tg_user.get("username")
     full_name = " ".join(filter(None, [tg_user.get("first_name"), tg_user.get("last_name")])) or username
     app_user = await upsert_user(telegram_id=telegram_id, username=username, full_name=full_name)
+    if bool(app_user["is_blocked"]) and telegram_id not in settings.owner_ids:
+        raise TMAAuthError("Доступ к платформе ограничен. Обратитесь в поддержку.")
     return TMAUser(
         app_user_id=int(app_user["id"]),
         telegram_id=telegram_id,

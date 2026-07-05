@@ -1,45 +1,76 @@
 {% extends "base.html" %}
+{% from "_macros.html" import book_card %}
+{% block title %}Вокслира — библиотека историй{% endblock %}
 {% block content %}
-<section class="hero compact">
-  <img src="/static/img/bot_avatar.png" alt="Voxlyra" class="logo">
-  <div>
-    <h1>Вокслира</h1>
-    <p>Истории, которые звучат.</p>
+<section class="hero hero-home cinematic-hero premium-home-hero">
+  <div class="hero-emblem"><img src="/static/img/bot_avatar.png" alt="Вокслира" class="logo"></div>
+  <div class="hero-copy">
+    <span class="eyebrow">Истории, которые звучат</span>
+    <h1>Откройте свою следующую историю</h1>
+    <p>Читайте с нужного места, слушайте в своём темпе и собирайте личную библиотеку внутри Telegram.</p>
+    <div class="hero-points" aria-label="Возможности Вокслиры"><span>Чтение</span><span>Аудио</span><span>Личная библиотека</span></div>
+    <div class="hero-actions">
+      <a class="button-link" href="#all-books">Открыть каталог</a>
+      {% if audio_books %}<a class="button-link secondary" href="/audio">Слушать</a>{% endif %}
+    </div>
+  </div>
+  <div class="hero-glow" aria-hidden="true"></div>
+</section>
+
+<section id="continueSection" class="continue-section" hidden>
+  <div class="section-title shelf-title"><div><span class="eyebrow">Ваша история</span><h2>Продолжить чтение</h2></div><a href="/library">Всё моё →</a></div>
+  <div id="continueShelf" class="horizontal-shelf"></div>
+</section>
+
+{% if newest %}
+<section class="showcase-section">
+  <div class="section-title shelf-title"><div><span class="eyebrow">Свежие публикации</span><h2>Новинки</h2></div><a href="#all-books">Смотреть все →</a></div>
+  <div class="horizontal-shelf">{% for book in newest %}{{ book_card(book, 'shelf') }}{% endfor %}</div>
+</section>
+{% endif %}
+
+{% if popular %}
+<section class="showcase-section">
+  <div class="section-title shelf-title"><div><span class="eyebrow">Выбор читателей</span><h2>Сейчас читают</h2></div></div>
+  <div class="horizontal-shelf">{% for book in popular %}{{ book_card(book, 'shelf') }}{% endfor %}</div>
+</section>
+{% endif %}
+
+{% if audio_books %}
+<section class="showcase-section">
+  <div class="section-title shelf-title"><div><span class="eyebrow">Слушать в дороге</span><h2>С аудиоверсией</h2></div><a href="/audio">Все аудио →</a></div>
+  <div class="horizontal-shelf">{% for book in audio_books %}{{ book_card(book, 'shelf') }}{% endfor %}</div>
+</section>
+{% endif %}
+
+{% if free_books %}
+<section class="showcase-section free-showcase">
+  <div class="section-title shelf-title"><div><span class="eyebrow">Начать без оплаты</span><h2>Бесплатные главы</h2></div><a href="#all-books">Открыть каталог →</a></div>
+  <div class="horizontal-shelf">{% for book in free_books %}{{ book_card(book, 'shelf') }}{% endfor %}</div>
+</section>
+{% endif %}
+
+<section class="catalog-toolbar" id="all-books">
+  <div class="section-title slim"><span class="eyebrow">Полная витрина</span><h2>Каталог</h2><p>Найдите историю по названию или автору и оставьте только подходящие варианты.</p></div>
+  <label class="search-box"><span aria-hidden="true">⌕</span><input id="catalogSearch" type="search" placeholder="Название или автор" autocomplete="off"></label>
+  <div class="filter-pills" role="group" aria-label="Фильтр каталога">
+    <button class="filter-pill active" data-catalog-filter="all">Все</button>
+    {% if audio_books %}<button class="filter-pill" data-catalog-filter="audio">С аудио</button>{% endif %}
+    {% if free_books %}<button class="filter-pill" data-catalog-filter="free">Бесплатное</button>{% endif %}
+    {% if popular %}<button class="filter-pill" data-catalog-filter="popular">Популярное</button>{% endif %}
   </div>
 </section>
 
-<section class="tabs">
-  <a class="tab active" href="/catalog">📚 Читать</a>
-  <a class="tab" href="/audio">🎧 Слушать</a>
-</section>
-
-<section class="section-title">
-  <h2>Витрина</h2>
-  <p>Подборка книг с главами, аудиоверсиями, закладками и покупками внутри Telegram.</p>
-</section>
-
-<section class="book-list">
+<section class="book-list premium-grid catalog-grid" id="catalogGrid">
   {% if books %}
-    {% for book in books %}
-      <a class="book-card" href="/book/{{ book.id }}">
-        <div class="cover-mini">{{ book.title[:1] }}</div>
-        <div class="book-info">
-          <h3>{{ book.title }}</h3>
-          <p>{{ book.pen_name or 'Автор не указан' }} · {{ book.age_limit }}</p>
-          <p class="desc">{{ (book.description or '')[:120] }}{% if book.description and book.description|length > 120 %}...{% endif %}</p>
-          <div class="chips">
-            <span>{{ book.price_stars }} Stars</span>
-            {% if book.has_audio %}<span>🎧 аудио</span>{% endif %}
-            {% if book.allow_download %}<span>скачивание</span>{% endif %}
-          </div>
-        </div>
-      </a>
-    {% endfor %}
+    {% for book in books %}{{ book_card(book) }}{% endfor %}
   {% else %}
-    <article class="empty-card">
-      <h3>Книг пока нет</h3>
-      <p>Создайте профиль автора в боте и добавьте первую книгу.</p>
+    <article class="empty-card premium-empty catalog-empty-state">
+      <div class="empty-icon">✦</div>
+      <h3>Пока здесь тихо</h3>
+      <p>Когда появятся опубликованные книги, они будут ждать вас на этой витрине.</p>
     </article>
   {% endif %}
 </section>
+<article id="catalogEmptySearch" class="empty-card premium-empty" hidden><div class="empty-icon">⌕</div><h3>Ничего не нашлось</h3><p>Попробуйте другое название или снимите фильтр.</p></article>
 {% endblock %}

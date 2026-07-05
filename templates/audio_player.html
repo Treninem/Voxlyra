@@ -1,40 +1,21 @@
 {% extends "base.html" %}
+{% block title %}{% if audio %}{{ audio.title }} — аудио{% else %}Аудио не найдено{% endif %}{% endblock %}
 {% block content %}
 {% if audio %}
-<section class="audio-player-page" id="audioPage" data-audio-id="{{ audio_id }}">
-  <div class="cover-big audio-cover">🎧</div>
+<section class="audio-player-page premium-player" id="audioPage" data-audio-id="{{ audio_id }}" data-next-audio-id="{{ next_audio.id if next_audio else '' }}">
+  <a class="quiet-back" href="/book/{{ audio.book_id }}">← К книге</a>
+  <div class="audio-visual"><div class="audio-disc"><span>▶</span></div><div class="sound-bars" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div></div>
+  <span class="eyebrow">Аудиоглава {{ audio.number }}</span>
   <h1>{{ audio.title }}</h1>
   <p class="muted">{{ audio.book_title }} · {{ audio.pen_name or 'Автор не указан' }}</p>
-  <div class="chips center">
-    <span>Диктор: {{ audio.narrator or 'не указан' }}</span>
-    <span>{% if audio.is_free %}бесплатно{% else %}{{ audio.price_stars }} Stars{% endif %}</span>
-  </div>
-
-  <section id="audioStatus" class="reader-status">Проверяем доступ через Telegram Mini App...</section>
+  <div class="chips center"><span>{{ audio.narrator or 'Диктор не указан' }}</span><span>{% if audio.is_free %}Бесплатно{% else %}{{ audio.price_stars }} Stars{% endif %}</span></div>
+  <section id="audioStatus" class="reader-status">Открываем аудио…</section>
   <audio id="voxPlayer" controls preload="metadata"></audio>
-
-  <div class="audio-controls">
-    <button type="button" id="audioBack">⏪ Назад</button>
-    <button type="button" id="audioForward">Вперёд ⏩</button>
-    <button type="button" data-rate="1">1x</button>
-    <button type="button" data-rate="1.25">1.25x</button>
-    <button type="button" data-rate="1.5">1.5x</button>
-    <button type="button" data-rate="2">2x</button>
-    <button type="button" id="saveAudioProgress">💾 Сохранить место</button><span id="audioProgressLabel" class="muted"></span>
-  </div>
-
-  <section id="audioPaywall" class="empty-card paywall-card" style="display:none">
-    <p>Эта аудиоглава платная. Если вы уже купили её, откройте страницу внутри Telegram — доступ подтянется автоматически.</p>
-    <p><b>{{ audio.price_stars }} Stars</b></p>
-    {% if purchase_url %}<a class="button-link purple-btn" href="{{ purchase_url }}">💫 Купить в боте</a>{% endif %}
-  </section>
-
-  <a class="button-link" href="/book/{{ audio.book_id }}">⬅️ К книге</a>
+  <div class="audio-time-line"><span id="audioProgressLabel">0:00</span><span id="audioDurationLabel">0:00</span></div>
+  <div class="audio-controls premium-audio-controls"><button type="button" id="audioBack" class="secondary">−15</button><button type="button" id="audioForward" class="secondary">+15</button><button type="button" data-rate="1">1x</button><button type="button" data-rate="1.25">1.25x</button><button type="button" data-rate="1.5">1.5x</button><button type="button" data-rate="2">2x</button><button type="button" id="saveAudioProgress" class="secondary full-span">Сохранить место</button></div>
+  <section class="sleep-timer"><span>Таймер сна</span><div><button class="secondary" data-sleep-minutes="15">15 мин</button><button class="secondary" data-sleep-minutes="30">30 мин</button><button class="secondary" data-sleep-minutes="60">60 мин</button><button class="secondary" data-sleep-minutes="0">Выкл.</button></div><small id="sleepTimerStatus" class="muted">Выключен</small></section>
+  <section id="audioPaywall" class="empty-card paywall-card" hidden><div class="empty-icon">◇</div><h3>Аудиоглава закрыта</h3><p>После покупки откройте её внутри Telegram — доступ подтянется автоматически.</p><p><b>{{ audio.price_stars }} Stars</b></p>{% if purchase_url %}<a class="button-link" href="{{ purchase_url }}">Купить аудио</a>{% endif %}</section>
+  <nav class="chapter-navigation audio-navigation">{% if previous_audio %}<a href="/audio/{{ previous_audio.id }}"><small>Предыдущая</small><strong>← {{ previous_audio.title }}</strong></a>{% else %}<span></span>{% endif %}{% if next_audio %}<a id="nextAudioLink" href="/audio/{{ next_audio.id }}"><small>Следующая</small><strong>{{ next_audio.title }} →</strong></a>{% else %}<a href="/book/{{ audio.book_id }}"><small>Конец</small><strong>К книге →</strong></a>{% endif %}</nav>
 </section>
-{% else %}
-<section class="empty-card">
-  <h1>Аудиоглава не найдена</h1>
-  <p>Вернитесь к книге и выберите другое аудио.</p>
-</section>
-{% endif %}
+{% else %}<section class="empty-card premium-empty"><h1>Аудиоглава не найдена</h1><p>Вернитесь к книге и выберите другую запись.</p><a class="button-link" href="/audio">К аудиокнигам</a></section>{% endif %}
 {% endblock %}

@@ -1,11 +1,14 @@
+import logging
 from pathlib import Path
 
 from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, Message, WebAppInfo
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+from app.config import settings
 from app.db import (
     add_audit,
     create_ad_campaign,
@@ -13,6 +16,14 @@ from app.db import (
     update_author_profile,
     update_book_description,
     update_book_price,
+    update_book_title,
+    update_book_age_limit,
+    update_book_writing_status,
+    update_book_download,
+    soft_delete_book,
+    update_chapter_title,
+    update_chapter_text,
+    update_chapter_price,
     create_book,
     create_promo_code,
     add_manual_chapter,
@@ -21,6 +32,8 @@ from app.db import (
     count_chapters_for_book,
     count_audio_chapters_for_book,
     get_author_profile,
+    get_author_dashboard_stats,
+    get_author_finance_summary,
     get_book,
     get_chapter,
     get_audio_chapter,
@@ -31,6 +44,8 @@ from app.db import (
     get_ad_campaign,
     get_ad_campaign_report,
     list_author_promo_codes,
+    get_author_promo_code,
+    set_author_promo_status,
     submit_book_for_review,
     set_book_options,
     set_chapter_status,
@@ -42,6 +57,7 @@ from app.keyboards import (
     age_menu,
     author_book_card_menu,
     author_books_menu,
+    book_delete_confirm_menu,
     author_menu,
     author_profile_menu,
     author_audio_list_menu,
@@ -57,9 +73,11 @@ from app.keyboards import (
     book_created_menu,
     chapter_import_confirm_menu,
     chapter_view_menu,
+    chapter_delete_confirm_menu,
     cover_menu,
     pricing_menu,
     promo_codes_menu,
+    promo_code_card_menu,
     writing_status_menu,
     yes_no_menu,
     single_select_menu,
@@ -69,11 +87,27 @@ from app.keyboards import (
 )
 from app.services.book_parser import BookParseError, build_import_report, parse_book_file, split_plain_text_to_chapters
 from app.services.import_store import delete_import_preview, load_import_preview, save_import_preview
+from app.services.notifications import discount_message, new_audio_message, new_chapter_message, notify_book_followers
 from app.services.audio_tools import AudioImportError, build_audio_import_report, extract_audio_zip, format_duration, inspect_audio_file
 from app.services.pricing import recommend_book_price
 from app.catalog_options import BOOK_TYPES, LANGUAGES, GENRES, TROPES, AUDIENCES, CONTENT_WARNINGS, AD_PLACEMENTS, PROMO_DISCOUNTS, label_for, labels_for
 
+logger = logging.getLogger(__name__)
+
 router = Router()
+
+
+def _large_book_upload_markup(book_id: int):
+    web_url = settings.WEBAPP_URL.strip().rstrip("/")
+    if not web_url:
+        return None
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text="📤 Загрузить крупный файл",
+        web_app=WebAppInfo(url=f"{web_url}/author?book_id={int(book_id)}"),
+    )
+    builder.adjust(1)
+    return builder.as_markup()
 
 
 class AuthorRegister(StatesGroup):
@@ -90,7 +124,14 @@ class EditAuthorProfile(StatesGroup):
 
 
 class EditBookDetails(StatesGroup):
+    title = State()
     description = State()
+    price = State()
+
+
+class EditChapterDetails(StatesGroup):
+    title = State()
+    text = State()
     price = State()
 
 
@@ -171,21 +212,77 @@ PUBLICATION_RU = {
 }
 
 
+
+async def _notify_new_chapters(book_id: int, chapter_ids: list[int], actor_user_id: int, bot: Bot) -> None:
+    if not chapter_ids:
+        return
+    book = await get_book(book_id)
+    if not book or book["publication_status"] != "published":
+        return
+    if len(chapter_ids) == 1:
+        chapter = await get_chapter(chapter_ids[0])
+        if not chapter or chapter["status"] != "published":
+            return
+        text = new_chapter_message(book["title"], chapter["title"], chapter["number"])
+        event_key = f"chapter:{chapter_ids[0]}:published"
+    else:
+        text = new_chapter_message(book["title"], count=len(chapter_ids))
+        event_key = f"chapter-batch:{book_id}:{max(chapter_ids)}:{len(chapter_ids)}"
+    result = await notify_book_followers(
+        book_id=book_id, event_key=event_key, category="chapters", text=text, bot=bot
+    )
+    await add_audit(actor_user_id, "chapter_followers_notified", "book", str(book_id), None, str(result))
+
+
+async def _notify_new_audio(book_id: int, audio_ids: list[int], actor_user_id: int, bot: Bot) -> None:
+    if not audio_ids:
+        return
+    book = await get_book(book_id)
+    if not book or book["publication_status"] != "published":
+        return
+    if len(audio_ids) == 1:
+        audio = await get_audio_chapter(audio_ids[0])
+        if not audio or audio["status"] != "published":
+            return
+        text = new_audio_message(book["title"], audio["title"], audio["number"])
+        event_key = f"audio:{audio_ids[0]}:published"
+    else:
+        text = new_audio_message(book["title"], count=len(audio_ids))
+        event_key = f"audio-batch:{book_id}:{max(audio_ids)}:{len(audio_ids)}"
+    result = await notify_book_followers(
+        book_id=book_id, event_key=event_key, category="audio", text=text, bot=bot
+    )
+    await add_audit(actor_user_id, "audio_followers_notified", "book", str(book_id), None, str(result))
+
 @router.callback_query(F.data == "author:menu")
 async def author_menu_handler(call: CallbackQuery) -> None:
     user = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
     profile = await get_author_profile(user["id"])
     if profile:
+        stats = await get_author_dashboard_stats(user["id"])
+        finance = await get_author_finance_summary(user["id"])
+        status_label = {
+            "draft": "новый автор",
+            "active": "активен",
+            "verified": "проверен",
+            "blocked": "ограничен",
+        }.get(str(profile["status"]), "активен")
         text = (
-            "<b>Кабинет автора</b>\n\n"
-            f"Псевдоним: <b>{profile['pen_name']}</b>\n"
-            f"Статус: <b>{profile['status']}</b>\n\n"
-            "Профиль сохранён. При добавлении книг бот больше не будет каждый раз спрашивать псевдоним."
+            "<b>✍️ Кабинет автора</b>\n\n"
+            f"<b>{profile['pen_name']}</b> · {status_label}\n\n"
+            f"📚 Книг: <b>{stats['books_total']}</b>\n"
+            f"✅ Опубликовано: <b>{stats['books_published']}</b>\n"
+            f"🕊 На проверке: <b>{stats['books_review']}</b>\n"
+            f"📝 Глав: <b>{stats['chapters']}</b> · 🎧 Аудиоглав: <b>{stats['audio']}</b>\n\n"
+            f"💫 Доступно к выводу: <b>{finance['available']} Stars</b>\n"
+            f"⏳ В удержании: <b>{finance['held']} Stars</b>\n\n"
+            "Создавайте книги, добавляйте главы и следите за доходом в одном месте."
         )
     else:
         text = (
-            "<b>Кабинет автора</b>\n\n"
-            "Зарегистрируйтесь один раз. После этого бот будет использовать сохранённый псевдоним и данные автора."
+            "<b>✍️ Стать автором</b>\n\n"
+            "Создайте профиль один раз — псевдоним и основные данные сохранятся. "
+            "После этого можно публиковать книги, аудиоверсии и получать доход от читателей."
         )
     await call.message.edit_text(text, reply_markup=author_menu(bool(profile)))
     await call.answer()
@@ -723,6 +820,155 @@ async def _author_can_edit_book(call_or_message, book_id: int) -> tuple[bool, in
     ok = await book_belongs_to_author(book_id, user["id"])
     return ok, user["id"]
 
+@router.callback_query(F.data.startswith("book:edit_title:"))
+async def book_edit_title_start(call: CallbackQuery, state: FSMContext) -> None:
+    book_id = int(call.data.split(":")[-1])
+    ok, _ = await _author_can_edit_book(call, book_id)
+    if not ok:
+        await call.answer("Книга не найдена или недоступна", show_alert=True)
+        return
+    book = await get_book(book_id)
+    await state.update_data(book_id=book_id)
+    await state.set_state(EditBookDetails.title)
+    await call.message.edit_text(
+        f"<b>Название книги</b>\n\nСейчас: <b>{book['title'] if book else ''}</b>\n\nВведите новое название.",
+        reply_markup=skip_back_menu(f"book:edit_cancel:{book_id}", None, "Оставить как есть"),
+    )
+    await call.answer()
+
+
+@router.message(EditBookDetails.title)
+async def book_edit_title_save(message: Message, state: FSMContext) -> None:
+    title = (message.text or "").strip()
+    if len(title) < 2:
+        await message.answer("Название слишком короткое. Введите от 2 символов.")
+        return
+    data = await state.get_data()
+    book_id = int(data["book_id"])
+    user = await upsert_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
+    ok = await update_book_title(book_id, user["id"], title)
+    await add_audit(user["id"], "book_title_updated", "book", str(book_id), None, title)
+    await state.clear()
+    await message.answer("Название обновлено." if ok else "Книга не найдена или недоступна.", reply_markup=author_book_card_menu(book_id, (await get_book(book_id))["publication_status"] if await get_book(book_id) else "draft"))
+
+
+
+
+@router.callback_query(F.data.startswith("book:edit_cancel:"))
+async def book_edit_cancel(call: CallbackQuery, state: FSMContext) -> None:
+    book_id = int(call.data.split(":")[-1])
+    await state.clear()
+    book = await get_book(book_id)
+    await call.message.edit_text("Изменения не внесены.", reply_markup=author_book_card_menu(book_id, book["publication_status"] if book else "draft"))
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("book:edit_age:"))
+async def book_edit_age_start(call: CallbackQuery, state: FSMContext) -> None:
+    book_id = int(call.data.split(":")[-1])
+    ok, _ = await _author_can_edit_book(call, book_id)
+    if not ok:
+        await call.answer("Книга не найдена или недоступна", show_alert=True)
+        return
+    await state.update_data(book_id=book_id)
+    await call.message.edit_text("Выберите новое возрастное ограничение.", reply_markup=age_menu("book:edit_age_set"))
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("book:edit_age_set:"))
+async def book_edit_age_save(call: CallbackQuery, state: FSMContext) -> None:
+    age = call.data.split(":")[-1]
+    data = await state.get_data()
+    book_id = int(data.get("book_id", 0))
+    user = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
+    ok = await update_book_age_limit(book_id, user["id"], age)
+    await add_audit(user["id"], "book_age_updated", "book", str(book_id), None, age)
+    await state.clear()
+    book = await get_book(book_id)
+    await call.message.edit_text("Возрастное ограничение обновлено." if ok else "Книга не найдена или недоступна.", reply_markup=author_book_card_menu(book_id, book["publication_status"] if book else "draft"))
+    await call.answer("Готово")
+
+
+@router.callback_query(F.data.startswith("book:edit_status:"))
+async def book_edit_status_start(call: CallbackQuery, state: FSMContext) -> None:
+    book_id = int(call.data.split(":")[-1])
+    ok, _ = await _author_can_edit_book(call, book_id)
+    if not ok:
+        await call.answer("Книга не найдена или недоступна", show_alert=True)
+        return
+    await state.update_data(book_id=book_id)
+    await call.message.edit_text("Выберите состояние книги для читателей.", reply_markup=writing_status_menu())
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("book:status:"))
+async def book_status_dispatch(call: CallbackQuery, state: FSMContext) -> None:
+    current = await state.get_state()
+    if current != AddBook.writing_status.state:
+        status = call.data.split(":")[-1]
+        data = await state.get_data()
+        book_id = int(data.get("book_id", 0))
+        user = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
+        ok = await update_book_writing_status(book_id, user["id"], status)
+        await add_audit(user["id"], "book_status_updated", "book", str(book_id), None, status)
+        await state.clear()
+        book = await get_book(book_id)
+        await call.message.edit_text("Статус книги обновлён." if ok else "Книга не найдена или недоступна.", reply_markup=author_book_card_menu(book_id, book["publication_status"] if book else "draft"))
+        await call.answer("Готово")
+        return
+    await add_book_status(call, state)
+
+
+@router.callback_query(F.data.startswith("book:edit_download:"))
+async def book_edit_download_start(call: CallbackQuery, state: FSMContext) -> None:
+    book_id = int(call.data.split(":")[-1])
+    ok, _ = await _author_can_edit_book(call, book_id)
+    if not ok:
+        await call.answer("Книга не найдена или недоступна", show_alert=True)
+        return
+    await state.update_data(book_id=book_id)
+    await call.message.edit_text("Разрешить скачивание этой книги?", reply_markup=yes_no_menu("book:edit_download_set"))
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("book:edit_download_set:"))
+async def book_edit_download_save(call: CallbackQuery, state: FSMContext) -> None:
+    allow = call.data.endswith(":yes")
+    data = await state.get_data()
+    book_id = int(data.get("book_id", 0))
+    user = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
+    ok = await update_book_download(book_id, user["id"], allow)
+    await add_audit(user["id"], "book_download_updated", "book", str(book_id), None, "yes" if allow else "no")
+    await state.clear()
+    book = await get_book(book_id)
+    await call.message.edit_text("Настройка скачивания обновлена." if ok else "Книга не найдена или недоступна.", reply_markup=author_book_card_menu(book_id, book["publication_status"] if book else "draft"))
+    await call.answer("Готово")
+
+
+@router.callback_query(F.data.startswith("book:delete_ask:"))
+async def book_delete_ask(call: CallbackQuery) -> None:
+    book_id = int(call.data.split(":")[-1])
+    ok, _ = await _author_can_edit_book(call, book_id)
+    if not ok:
+        await call.answer("Книга не найдена или недоступна", show_alert=True)
+        return
+    book = await get_book(book_id)
+    await call.message.edit_text(
+        f"<b>Удалить книгу?</b>\n\n{book['title'] if book else ''}\n\nКнига исчезнет из кабинета автора и каталога. История покупок и финансовые записи сохранятся.",
+        reply_markup=book_delete_confirm_menu(book_id),
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("book:delete_confirm:"))
+async def book_delete_confirm(call: CallbackQuery) -> None:
+    book_id = int(call.data.split(":")[-1])
+    user = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
+    ok = await soft_delete_book(book_id, user["id"])
+    await add_audit(user["id"], "book_deleted_by_author", "book", str(book_id))
+    await call.message.edit_text("Книга удалена." if ok else "Книга не найдена или недоступна.", reply_markup=author_menu(True))
+    await call.answer("Удалено" if ok else "Недоступно")
+
 
 @router.callback_query(F.data.startswith("author:chapters:"))
 async def author_chapters_menu_handler(call: CallbackQuery) -> None:
@@ -790,10 +1036,13 @@ async def chapter_add_manual_text(message: Message, state: FSMContext) -> None:
     pricing_type = book["pricing_type"] if book else "free"
     if pricing_type == "free":
         chapter_id = await add_manual_chapter(book_id, data["title"], text, is_free=True, price_stars=0)
+        if book and book["publication_status"] == "published":
+            await set_chapter_status(chapter_id, "published")
         await state.clear()
         user = await upsert_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
         await add_audit(user["id"], "chapter_created_manual", "chapter", str(chapter_id))
-        await message.answer("Глава сохранена.", reply_markup=author_chapters_menu(book_id))
+        await _notify_new_chapters(book_id, [chapter_id], int(user["id"]), message.bot)
+        await message.answer("Глава опубликована." if book and book["publication_status"] == "published" else "Глава сохранена.", reply_markup=author_chapters_menu(book_id))
         return
     recommended = max(1, int(book["price_stars"] or 3)) if book else 3
     await state.update_data(text=text[:300000], recommended_price=recommended)
@@ -818,9 +1067,14 @@ async def _finish_manual_chapter(message_or_call, state: FSMContext, price: int)
     await state.clear()
     tg = message_or_call.from_user
     user = await upsert_user(tg.id, tg.username, tg.full_name)
+    book = await get_book(book_id)
+    if book and book["publication_status"] == "published":
+        await set_chapter_status(chapter_id, "published")
     await add_audit(user["id"], "chapter_created_manual", "chapter", str(chapter_id))
+    bot = message_or_call.bot
+    await _notify_new_chapters(book_id, [chapter_id], int(user["id"]), bot)
     target_message = message_or_call.message if hasattr(message_or_call, "message") else message_or_call
-    await target_message.answer("Глава сохранена.", reply_markup=author_chapters_menu(book_id))
+    await target_message.answer("Глава опубликована." if book and book["publication_status"] == "published" else "Глава сохранена.", reply_markup=author_chapters_menu(book_id))
 
 
 @router.callback_query(AddChapterManual.price, F.data == "chapter:price:recommended")
@@ -861,7 +1115,8 @@ async def chapter_upload_start(call: CallbackQuery, state: FSMContext) -> None:
     await call.message.edit_text(
         "Загрузите файл книги или архив с главами.\n\n"
         "Поддерживаются: TXT, DOCX, FB2, EPUB, PDF, ZIP.\n"
-        "Лучше всего подходят TXT, DOCX, FB2 и EPUB. PDF может распознаться хуже, если это скан."
+        "Крупные файлы удобнее загружать через кабинет автора — там загрузка идёт частями.",
+        reply_markup=_large_book_upload_markup(book_id),
     )
     await call.answer()
 
@@ -882,23 +1137,35 @@ async def chapter_upload_file(message: Message, state: FSMContext, bot: Bot) -> 
     if ext not in {".txt", ".docx", ".fb2", ".epub", ".pdf", ".zip"}:
         await message.answer("Формат не подходит. Загрузите TXT, DOCX, FB2, EPUB, PDF или ZIP.")
         return
-    if doc.file_size and doc.file_size > 50 * 1024 * 1024:
-        await message.answer("Файл слишком большой для первого импорта. Сейчас лимит 50 МБ.")
+    if doc.file_size and doc.file_size > 20 * 1024 * 1024:
+        await message.answer(
+            "Крупную книгу загрузите через кабинет автора. Файл будет передан частями и не упрётся в ограничение загрузки через чат.",
+            reply_markup=_large_book_upload_markup(book_id),
+        )
         return
 
     upload_dir = Path("storage/books") / str(book_id)
     upload_dir.mkdir(parents=True, exist_ok=True)
     safe_path = upload_dir / f"upload_{message.message_id}{ext}"
-    with safe_path.open("wb") as destination:
-        await bot.download(doc.file_id, destination=destination)
+    try:
+        with safe_path.open("wb") as destination:
+            await bot.download(doc.file_id, destination=destination)
+    except TelegramBadRequest:
+        safe_path.unlink(missing_ok=True)
+        await message.answer(
+            "Telegram не передал файл боту. Откройте кабинет автора и загрузите книгу там — крупные файлы поддерживаются частями.",
+            reply_markup=_large_book_upload_markup(book_id),
+        )
+        return
 
     try:
         chapters = parse_book_file(safe_path, original_name, temp_dir=Path("storage/temp") / f"zip_{book_id}_{message.message_id}")
     except BookParseError as exc:
         await message.answer(f"Не удалось разобрать файл.\n\nПричина: {exc}")
         return
-    except Exception as exc:
-        await message.answer(f"Не удалось разобрать файл. Ошибка: {exc}")
+    except Exception:
+        logger.exception("Unexpected book import error")
+        await message.answer("Не удалось обработать файл. Проверьте его целостность или попробуйте другой формат.")
         return
 
     report = build_import_report(chapters)
@@ -952,13 +1219,17 @@ async def chapter_import_confirm(call: CallbackQuery, state: FSMContext) -> None
         await call.answer("Данные импорта не найдены. Загрузите файл заново.", show_alert=True)
         await state.clear()
         return
-    saved = await upsert_imported_chapters(
+    import_result = await upsert_imported_chapters(
         book_id,
         chapters,
         first_free=int(data.get("first_free", 3)),
         default_price_stars=int(data.get("default_price", 0)),
+        return_published_ids=True,
     )
+    saved = int(import_result["saved"])
+    published_ids = [int(item) for item in import_result["published_ids"]]
     await add_audit(user_id, "chapters_imported", "book", str(book_id), None, str(saved))
+    await _notify_new_chapters(book_id, published_ids, int(user_id), call.bot)
     delete_import_preview(data.get("preview_path"))
     await state.clear()
     await call.message.edit_text(
@@ -1016,6 +1287,161 @@ async def chapter_view_handler(call: CallbackQuery) -> None:
         f"Знаков: <b>{len(text)}</b>\n\n"
         f"{text[:1600]}{'...' if len(text) > 1600 else ''}",
         reply_markup=chapter_view_menu(int(chapter["book_id"]), chapter_id),
+    )
+    await call.answer()
+
+
+
+
+@router.callback_query(F.data.startswith("chapter:edit_title:"))
+async def chapter_edit_title_start(call: CallbackQuery, state: FSMContext) -> None:
+    chapter_id = int(call.data.split(":")[-1])
+    chapter = await get_chapter(chapter_id)
+    if not chapter:
+        await call.answer("Глава не найдена", show_alert=True)
+        return
+    ok, _ = await _author_can_edit_book(call, int(chapter["book_id"]))
+    if not ok:
+        await call.answer("Недоступно", show_alert=True)
+        return
+    await state.update_data(chapter_id=chapter_id, book_id=int(chapter["book_id"]))
+    await state.set_state(EditChapterDetails.title)
+    await call.message.edit_text(
+        f"<b>Название главы</b>\n\nСейчас: <b>{chapter['title']}</b>\n\nВведите новое название.",
+        reply_markup=skip_back_menu(f"chapter:edit_cancel:{chapter_id}", None, "Оставить как есть"),
+    )
+    await call.answer()
+
+
+@router.message(EditChapterDetails.title)
+async def chapter_edit_title_save(message: Message, state: FSMContext) -> None:
+    title = (message.text or "").strip()
+    if len(title) < 2:
+        await message.answer("Название слишком короткое. Введите от 2 символов.")
+        return
+    data = await state.get_data()
+    chapter_id = int(data["chapter_id"])
+    book_id = int(data["book_id"])
+    user = await upsert_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
+    ok = await update_chapter_title(chapter_id, user["id"], title)
+    await add_audit(user["id"], "chapter_title_updated", "chapter", str(chapter_id), None, title)
+    await state.clear()
+    await message.answer("Название главы обновлено." if ok else "Глава не найдена или недоступна.", reply_markup=author_chapters_menu(book_id))
+
+
+@router.callback_query(F.data.startswith("chapter:edit_text:"))
+async def chapter_edit_text_start(call: CallbackQuery, state: FSMContext) -> None:
+    chapter_id = int(call.data.split(":")[-1])
+    chapter = await get_chapter(chapter_id)
+    if not chapter:
+        await call.answer("Глава не найдена", show_alert=True)
+        return
+    ok, _ = await _author_can_edit_book(call, int(chapter["book_id"]))
+    if not ok:
+        await call.answer("Недоступно", show_alert=True)
+        return
+    await state.update_data(chapter_id=chapter_id, book_id=int(chapter["book_id"]))
+    await state.set_state(EditChapterDetails.text)
+    await call.message.edit_text(
+        "Вставьте новый полный текст главы одним сообщением. Старый текст заменится после сохранения.",
+        reply_markup=skip_back_menu(f"chapter:edit_cancel:{chapter_id}", None, "Не менять"),
+    )
+    await call.answer()
+
+
+@router.message(EditChapterDetails.text)
+async def chapter_edit_text_save(message: Message, state: FSMContext) -> None:
+    text = (message.text or "").strip()
+    if len(text) < 100:
+        await message.answer("Текст слишком короткий. Вставьте полный текст главы.")
+        return
+    data = await state.get_data()
+    chapter_id = int(data["chapter_id"])
+    book_id = int(data["book_id"])
+    user = await upsert_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
+    ok = await update_chapter_text(chapter_id, user["id"], text[:300000])
+    await add_audit(user["id"], "chapter_text_updated", "chapter", str(chapter_id), None, f"{len(text)} chars")
+    await state.clear()
+    await message.answer("Текст главы обновлён." if ok else "Глава не найдена или недоступна.", reply_markup=author_chapters_menu(book_id))
+
+
+@router.callback_query(F.data.startswith("chapter:edit_price:"))
+async def chapter_edit_price_start(call: CallbackQuery, state: FSMContext) -> None:
+    chapter_id = int(call.data.split(":")[-1])
+    chapter = await get_chapter(chapter_id)
+    if not chapter:
+        await call.answer("Глава не найдена", show_alert=True)
+        return
+    ok, _ = await _author_can_edit_book(call, int(chapter["book_id"]))
+    if not ok:
+        await call.answer("Недоступно", show_alert=True)
+        return
+    await state.update_data(chapter_id=chapter_id, book_id=int(chapter["book_id"]))
+    await state.set_state(EditChapterDetails.price)
+    await call.message.edit_text(
+        "Введите новую цену главы числом в Stars или сделайте главу бесплатной.",
+        reply_markup=skip_back_menu("chapter:edit_price_free", f"chapter:view:{chapter_id}", "Бесплатно"),
+    )
+    await call.answer()
+
+
+@router.message(EditChapterDetails.price)
+async def chapter_edit_price_save(message: Message, state: FSMContext) -> None:
+    raw = (message.text or "").strip()
+    if not raw.isdigit():
+        await message.answer("Введите цену числом. Например: 5")
+        return
+    price = int(raw)
+    if price < 0 or price > 100000:
+        await message.answer("Цена выглядит неверно. Введите разумное число Stars.")
+        return
+    data = await state.get_data()
+    chapter_id = int(data["chapter_id"])
+    book_id = int(data["book_id"])
+    user = await upsert_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
+    ok = await update_chapter_price(chapter_id, user["id"], price == 0, price)
+    await add_audit(user["id"], "chapter_price_updated", "chapter", str(chapter_id), None, str(price))
+    await state.clear()
+    await message.answer("Цена главы обновлена." if ok else "Глава не найдена или недоступна.", reply_markup=author_chapters_menu(book_id))
+
+
+@router.callback_query(EditChapterDetails.price, F.data == "chapter:edit_price_free")
+async def chapter_edit_price_free(call: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    chapter_id = int(data["chapter_id"])
+    book_id = int(data["book_id"])
+    user = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
+    ok = await update_chapter_price(chapter_id, user["id"], True, 0)
+    await add_audit(user["id"], "chapter_price_updated", "chapter", str(chapter_id), None, "free")
+    await state.clear()
+    await call.message.edit_text("Глава теперь бесплатная." if ok else "Глава не найдена или недоступна.", reply_markup=author_chapters_menu(book_id))
+    await call.answer("Готово")
+
+
+@router.callback_query(F.data.startswith("chapter:edit_cancel:"))
+async def chapter_edit_cancel(call: CallbackQuery, state: FSMContext) -> None:
+    chapter_id = int(call.data.split(":")[-1])
+    chapter = await get_chapter(chapter_id)
+    book_id = int(chapter["book_id"]) if chapter else 0
+    await state.clear()
+    await call.message.edit_text("Изменения не внесены.", reply_markup=chapter_view_menu(book_id, chapter_id))
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("chapter:delete_ask:"))
+async def chapter_delete_ask(call: CallbackQuery) -> None:
+    chapter_id = int(call.data.split(":")[-1])
+    chapter = await get_chapter(chapter_id)
+    if not chapter:
+        await call.answer("Глава не найдена", show_alert=True)
+        return
+    ok, _ = await _author_can_edit_book(call, int(chapter["book_id"]))
+    if not ok:
+        await call.answer("Недоступно", show_alert=True)
+        return
+    await call.message.edit_text(
+        f"<b>Удалить главу?</b>\n\n{chapter['number']}. {chapter['title']}\n\nГлава исчезнет из книги. История покупок сохранится.",
+        reply_markup=chapter_delete_confirm_menu(int(chapter["book_id"]), chapter_id),
     )
     await call.answer()
 
@@ -1220,7 +1646,11 @@ async def _save_telegram_audio(message: Message, bot: Bot, state: FSMContext, fi
         price_stars=int(data.get("price_stars", 0)),
         sample_seconds=60,
     )
+    book = await get_book(book_id)
+    if book and book["publication_status"] == "published":
+        await set_audio_chapter_status(audio_id, "published")
     await add_audit(user_id, "audio_chapter_created", "audio_chapter", str(audio_id), None, source_name)
+    await _notify_new_audio(book_id, [audio_id], int(user_id), bot)
     await state.clear()
     await message.answer(
         "<b>Аудиоглава сохранена.</b>\n\n"
@@ -1325,6 +1755,9 @@ async def audio_zip_file(message: Message, state: FSMContext, bot: Bot) -> None:
         await message.answer(f"Не удалось разобрать ZIP.\n\nПричина: {exc}")
         return
     saved = 0
+    published_audio_ids: list[int] = []
+    book = await get_book(book_id)
+    publish_now = bool(book and book["publication_status"] == "published")
     for info in infos:
         audio_id = await add_audio_chapter(
             book_id=book_id,
@@ -1340,8 +1773,12 @@ async def audio_zip_file(message: Message, state: FSMContext, bot: Bot) -> None:
             price_stars=int(data.get("price_stars", 0)),
             sample_seconds=60,
         )
+        if publish_now:
+            await set_audio_chapter_status(audio_id, "published")
+            published_audio_ids.append(audio_id)
         await add_audit(user_id, "audio_chapter_imported_zip", "audio_chapter", str(audio_id), None, info.source_filename)
         saved += 1
+    await _notify_new_audio(book_id, published_audio_ids, int(user_id), bot)
     report = build_audio_import_report(infos)
     await state.clear()
     preview_lines = [f"• {item['title']} · {item['duration']} · {item['size_mb']} МБ" for item in report["preview"]]
@@ -1622,11 +2059,23 @@ async def promo_create_max_uses(message: Message, state: FSMContext) -> None:
     user = await upsert_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
     try:
         promo_id = await create_promo_code(user["id"], int(data["book_id"]), data["code"], int(data["discount"]), max_uses)
-    except Exception as exc:
-        await message.answer(f"Промокод не создан: {exc}", reply_markup=author_ads_menu())
+    except Exception:
+        logger.exception("Promo code creation failed")
+        await message.answer("Не удалось создать промокод. Проверьте код и попробуйте ещё раз.", reply_markup=author_ads_menu())
         await state.clear()
         return
     await add_audit(user["id"], "promo_code_created", "promo_code", str(promo_id), None, data["code"])
+    promo = await get_author_promo_code(user["id"], promo_id)
+    book = await get_book(int(data["book_id"]))
+    if promo and book and book["publication_status"] == "published":
+        result = await notify_book_followers(
+            book_id=int(data["book_id"]),
+            event_key=f"discount:{promo_id}:created",
+            category="discounts",
+            text=discount_message(book["title"], promo["discount_percent"], promo["code"]),
+            bot=message.bot,
+        )
+        await add_audit(user["id"], "discount_followers_notified", "promo_code", str(promo_id), None, str(result))
     await state.clear()
     await message.answer("Промокод создан.", reply_markup=author_ads_menu())
 
@@ -1641,6 +2090,55 @@ async def promo_list_handler(call: CallbackQuery) -> None:
         await call.message.edit_text("<b>🎟 Промокоды</b>", reply_markup=promo_codes_menu(codes))
     await call.answer()
 
+
+
+@router.callback_query(F.data.startswith("promo:card:"))
+async def promo_card_handler(call: CallbackQuery) -> None:
+    promo_id = int(call.data.split(":")[-1])
+    user = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
+    promo = await get_author_promo_code(user["id"], promo_id)
+    if not promo:
+        await call.answer("Промокод не найден", show_alert=True)
+        return
+    status_label = "активен" if promo["status"] == "active" else "приостановлен"
+    left = max(0, int(promo["max_uses"] or 0) - int(promo["used_count"] or 0))
+    await call.message.edit_text(
+        "<b>🎟 Промокод</b>\n\n"
+        f"Код: <code>{promo['code']}</code>\n"
+        f"Книга: <b>{promo['book_title']}</b>\n"
+        f"Скидка: <b>{promo['discount_percent']}%</b>\n"
+        f"Использовано: <b>{promo['used_count']}</b>\n"
+        f"Осталось: <b>{left}</b>\n"
+        f"Статус: <b>{status_label}</b>",
+        reply_markup=promo_code_card_menu(promo_id, promo["status"]),
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("promo:toggle:"))
+async def promo_toggle_handler(call: CallbackQuery) -> None:
+    promo_id = int(call.data.split(":")[-1])
+    user = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
+    promo = await get_author_promo_code(user["id"], promo_id)
+    if not promo:
+        await call.answer("Промокод не найден", show_alert=True)
+        return
+    new_status = "paused" if promo["status"] == "active" else "active"
+    await set_author_promo_status(user["id"], promo_id, new_status)
+    await call.answer("Промокод приостановлен" if new_status == "paused" else "Промокод снова активен")
+    promo = await get_author_promo_code(user["id"], promo_id)
+    status_label = "активен" if promo["status"] == "active" else "приостановлен"
+    left = max(0, int(promo["max_uses"] or 0) - int(promo["used_count"] or 0))
+    await call.message.edit_text(
+        "<b>🎟 Промокод</b>\n\n"
+        f"Код: <code>{promo['code']}</code>\n"
+        f"Книга: <b>{promo['book_title']}</b>\n"
+        f"Скидка: <b>{promo['discount_percent']}%</b>\n"
+        f"Использовано: <b>{promo['used_count']}</b>\n"
+        f"Осталось: <b>{left}</b>\n"
+        f"Статус: <b>{status_label}</b>",
+        reply_markup=promo_code_card_menu(promo_id, promo["status"]),
+    )
 
 
 @router.callback_query(F.data == "author:profile")

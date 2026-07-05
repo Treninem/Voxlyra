@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Управление — Вокслира{% endblock %}
+{% block body_class %}control-page{% endblock %}
+{% block content %}
+<section class="hero compact control-hero">
+  <img src="/static/img/bot_avatar.png" alt="Вокслира" class="logo">
+  <div>
+    <span class="eyebrow" id="controlRole">Защищённый раздел</span>
+    <h1>Центр управления</h1>
+    <p id="controlGreeting">Открываем доступные разделы.</p>
+  </div>
+</section>
+
+<section id="controlLoading" class="empty-card premium-empty loading-card">
+  <div class="loading-orbit"></div>
+  <h3>Собираем сводку</h3>
+  <p>Показываем только те разделы, к которым у вас есть доступ.</p>
+</section>
+
+<section id="controlDashboard" hidden>
+  <div id="controlStats" class="control-stat-grid"></div>
+  <div id="controlSections" class="control-section-grid"></div>
+
+  <section id="controlWorkspace" class="control-workspace" hidden>
+    <div class="section-title split-title">
+      <div>
+        <span class="eyebrow" id="workspaceEyebrow">Очередь</span>
+        <h2 id="workspaceTitle">Раздел</h2>
+        <p id="workspaceSubtitle">Выберите действие.</p>
+      </div>
+      <button type="button" id="closeWorkspace" class="secondary compact-button">Закрыть</button>
+    </div>
+    <div id="workspaceTabs" class="segmented control-tabs"></div>
+    <div id="workspaceList" class="control-list"></div>
+  </section>
+</section>
+
+<article id="controlError" class="empty-card premium-empty" hidden>
+  <div class="empty-icon">✦</div>
+  <h3>Доступ не открыт</h3>
+  <p id="controlErrorText">Откройте панель из меню бота.</p>
+</article>
+{% endblock %}
+{% block scripts %}<script src="/static/js/control.js"></script>{% endblock %}

@@ -10,7 +10,7 @@
 
 ## Шаг 1. Распаковать архив
 
-Распакуйте архив `voxlyra_bot_v1.4.0_stage14.zip`.
+Распакуйте архив `voxlyra_bot_v1.8.0_cross_flow_stage8.zip`.
 
 Внутри будет папка:
 
@@ -58,12 +58,12 @@ BOT_USERNAME=username_бота_без_@
 OWNER_IDS=ваш_Telegram_ID
 DATABASE_PATH=data/voxlyra.sqlite3
 RUN_WEBAPP=true
-PORT=8080
+PORT=3000
 WEBAPP_URL=https://адрес_проекта_на_Bothost
 CHANNEL_ID=@username_канала
 PROJECT_NAME=Вокслира
 PUBLIC_VERSION_VISIBLE=false
-PROJECT_VERSION=v1.4.0-stage14
+PROJECT_VERSION=v1.8.0-cross-flow-stage8
 ```
 
 Если `WEBAPP_URL` ещё неизвестен, сначала можно временно поставить:

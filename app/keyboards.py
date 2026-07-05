@@ -2,41 +2,48 @@ from aiogram.types import InlineKeyboardMarkup, WebAppInfo
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.config import settings
-from app.permissions import MODERATION_BUTTONS, PERMISSIONS
+from app.permissions import DELEGABLE_PERMISSIONS, MODERATION_BUTTONS
 
 
 def main_menu(is_owner: bool, has_admin_access: bool, has_author_profile: bool = False) -> InlineKeyboardMarkup:
+    """Главная навигация: только рабочие разделы, одинаковая сетка и без служебных кнопок."""
     kb = InlineKeyboardBuilder()
     if settings.WEBAPP_URL:
-        kb.button(text="📚 Читать", web_app=WebAppInfo(url=f"{settings.WEBAPP_URL.rstrip('/')}/catalog"))
-        kb.button(text="🎧 Слушать", web_app=WebAppInfo(url=f"{settings.WEBAPP_URL.rstrip('/')}/audio"))
-    else:
-        kb.button(text="📚 Читать", callback_data="main:read")
-        kb.button(text="🎧 Слушать", callback_data="main:listen")
+        base = settings.WEBAPP_URL.rstrip('/')
+        kb.button(text="📚 Читать", web_app=WebAppInfo(url=f"{base}/catalog"))
+        kb.button(text="🎧 Слушать", web_app=WebAppInfo(url=f"{base}/audio"))
     kb.button(text="⭐ Моё", callback_data="main:my")
-    kb.button(text="➕ Ещё", callback_data="main:more")
+    kb.button(text="✍️ Автору", callback_data="author:menu")
+    kb.button(text="💎 Бонусы", callback_data="main:bonuses")
+    kb.button(text="⚙️ Ещё", callback_data="main:more")
     if has_admin_access:
         kb.button(text="🛡 Модерация", callback_data="mod:menu")
     if is_owner:
         kb.button(text="👑 Управление", callback_data="owner:menu")
-    kb.adjust(2, 2, 1, 1)
+    if settings.WEBAPP_URL:
+        kb.adjust(2, 2, 2, 1, 1)
+    else:
+        kb.adjust(2, 2, 1, 1)
     return kb.as_markup()
 
 
 def more_menu(has_author_profile: bool) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.button(text="✍️ Автору", callback_data="author:menu")
-    kb.button(text="💎 Бонусы", callback_data="main:bonuses")
+    if settings.WEBAPP_URL:
+        kb.button(text="🎨 Оформление", web_app=WebAppInfo(url=f"{settings.WEBAPP_URL.rstrip('/')}/settings"))
+    else:
+        kb.button(text="🎨 Оформление", callback_data="main:settings")
     kb.button(text="🛟 Поддержка", callback_data="main:support")
     kb.button(text="📜 Правила", callback_data="main:legal")
-    kb.button(text="⚙️ Настройки", callback_data="main:settings")
     kb.button(text="⬅️ Назад", callback_data="menu:main")
-    kb.adjust(2, 2, 1, 1)
+    kb.adjust(1, 2, 1)
     return kb.as_markup()
 
 
 def owner_menu() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
+    if settings.WEBAPP_URL:
+        kb.button(text="📱 Панель управления", web_app=WebAppInfo(url=f"{settings.WEBAPP_URL.rstrip('/')}/control"))
     rows = [
         ("👥 Администрация", "owner:admins"),
         ("📚 Книги", "owner:books"),
@@ -53,7 +60,10 @@ def owner_menu() -> InlineKeyboardMarkup:
     ]
     for text, data in rows:
         kb.button(text=text, callback_data=data)
-    kb.adjust(2, 2, 2, 2, 2, 1, 1)
+    if settings.WEBAPP_URL:
+        kb.adjust(1, 2, 2, 2, 2, 2, 1, 1)
+    else:
+        kb.adjust(2, 2, 2, 2, 2, 1, 1)
     return kb.as_markup()
 
 
@@ -69,7 +79,7 @@ def admins_menu() -> InlineKeyboardMarkup:
 
 def admin_card_menu(target_user_id: int, allowed: set[str]) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    for perm in PERMISSIONS:
+    for perm in DELEGABLE_PERMISSIONS:
         mark = "✅" if perm.code in allowed else "▫️"
         label = f"{mark} {perm.label}"
         kb.button(text=label, callback_data=f"owner:perm:{target_user_id}:{perm.code}")
@@ -91,6 +101,8 @@ def admins_list_menu(admins) -> InlineKeyboardMarkup:
 
 def moderation_menu(permissions: set[str]) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
+    if settings.WEBAPP_URL and permissions:
+        kb.button(text="📱 Панель модерации", web_app=WebAppInfo(url=f"{settings.WEBAPP_URL.rstrip('/')}/control"))
     for code, (text, callback) in MODERATION_BUTTONS.items():
         if code in permissions:
             kb.button(text=text, callback_data=callback)
@@ -115,7 +127,7 @@ def author_menu(has_profile: bool) -> InlineKeyboardMarkup:
         rows = [("✍️ Стать автором", "author:register")]
     for text, data in rows:
         kb.button(text=text, callback_data=data)
-    kb.button(text="⬅️ Назад", callback_data="main:more")
+    kb.button(text="⬅️ Назад", callback_data="menu:main")
     kb.adjust(2, 2, 2, 1)
     return kb.as_markup()
 
@@ -195,9 +207,22 @@ def author_book_card_menu(book_id: int, publication_status: str) -> InlineKeyboa
         kb.button(text="📤 Отправить на проверку", callback_data=f"author:submit_book:{book_id}")
     kb.button(text="➕ Главы", callback_data=f"author:chapters:{book_id}")
     kb.button(text="🎧 Аудио", callback_data=f"author:audio:{book_id}")
-    kb.button(text="✏️ Описание", callback_data=f"book:edit_description:{book_id}")
+    kb.button(text="✏️ Название", callback_data=f"book:edit_title:{book_id}")
+    kb.button(text="📝 Описание", callback_data=f"book:edit_description:{book_id}")
+    kb.button(text="🔞 Возраст", callback_data=f"book:edit_age:{book_id}")
+    kb.button(text="📌 Статус", callback_data=f"book:edit_status:{book_id}")
+    kb.button(text="📥 Скачивание", callback_data=f"book:edit_download:{book_id}")
     kb.button(text="💰 Цена", callback_data=f"book:edit_price:{book_id}")
+    kb.button(text="🗑 Удалить книгу", callback_data=f"book:delete_ask:{book_id}")
     kb.button(text="📚 Мои книги", callback_data="author:books")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def book_delete_confirm_menu(book_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🗑 Да, удалить", callback_data=f"book:delete_confirm:{book_id}")
+    kb.button(text="⬅️ Не удалять", callback_data=f"author:book:{book_id}")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -296,8 +321,20 @@ def author_chapter_list_menu(book_id: int, chapters) -> InlineKeyboardMarkup:
 
 def chapter_view_menu(book_id: int, chapter_id: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.button(text="🗑 Удалить главу", callback_data=f"chapter:delete:{chapter_id}")
+    kb.button(text="✏️ Название", callback_data=f"chapter:edit_title:{chapter_id}")
+    kb.button(text="📝 Текст", callback_data=f"chapter:edit_text:{chapter_id}")
+    kb.button(text="💰 Цена", callback_data=f"chapter:edit_price:{chapter_id}")
+    kb.button(text="🗑 Удалить главу", callback_data=f"chapter:delete_ask:{chapter_id}")
     kb.button(text="⬅️ К главам", callback_data=f"chapter:list:{book_id}")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def chapter_delete_confirm_menu(book_id: int, chapter_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🗑 Да, удалить", callback_data=f"chapter:delete:{chapter_id}")
+    kb.button(text="⬅️ Не удалять", callback_data=f"chapter:view:{chapter_id}")
+    kb.button(text="📚 К главам", callback_data=f"chapter:list:{book_id}")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -486,6 +523,15 @@ def promo_codes_menu(codes) -> InlineKeyboardMarkup:
         kb.button(text=f"🎟 {row['code']} · {row['discount_percent']}% · {row['used_count']}/{row['max_uses']}", callback_data=f"promo:card:{row['id']}")
     kb.button(text="➕ Создать промокод", callback_data="promo:create")
     kb.button(text="⬅️ Назад", callback_data="author:ads")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def promo_code_card_menu(promo_id: int, status: str) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    label = "⏸ Приостановить" if status == "active" else "▶️ Возобновить"
+    kb.button(text=label, callback_data=f"promo:toggle:{promo_id}")
+    kb.button(text="⬅️ К промокодам", callback_data="promo:list")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -734,9 +780,29 @@ def user_settings_menu(preferences: dict | None = None) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text=f"🎨 Тема: {theme_label}", callback_data="settings:theme")
     kb.button(text=f"🔠 Шрифт: {font_label}", callback_data="settings:font")
-    kb.button(text=f"{'✅' if notify else '▫️'} Уведомления", callback_data="settings:toggle_notifications")
+    kb.button(text=f"🔔 Уведомления: {'включены' if notify else 'выключены'}", callback_data="settings:notifications")
     kb.button(text="🧹 Очистить настройки", callback_data="settings:reset")
     kb.button(text="⬅️ Назад", callback_data="main:more")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def user_notifications_menu(preferences: dict | None = None) -> InlineKeyboardMarkup:
+    preferences = preferences or {}
+    items = [
+        ("notifications", "Все уведомления"),
+        ("notifications_chapters", "Новые главы"),
+        ("notifications_audio", "Новые аудиоглавы"),
+        ("notifications_discounts", "Скидки и промокоды"),
+    ]
+    kb = InlineKeyboardBuilder()
+    for key, label in items:
+        enabled = str(preferences.get(key, "1")) != "0"
+        kb.button(
+            text=f"{'✅' if enabled else '▫️'} {label}",
+            callback_data=f"settings:toggle_notification:{key}",
+        )
+    kb.button(text="⬅️ Настройки", callback_data="main:settings")
     kb.adjust(1)
     return kb.as_markup()
 

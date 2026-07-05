@@ -7,6 +7,7 @@ import aiosqlite
 
 from app.config import settings
 from app.catalog_options import label_for
+from app.permissions import DELEGABLE_PERMISSION_CODES
 
 
 def utc_now() -> str:
@@ -388,6 +389,8 @@ async def init_db() -> None:
         await _ensure_stage9_schema(db)
         await _ensure_stage10_schema(db)
         await _ensure_stage11_schema(db)
+        await _ensure_v176_schema(db)
+        await _ensure_v179_schema(db)
         await db.commit()
 
 
@@ -739,6 +742,81 @@ async def update_book_price(book_id: int, author_user_id: int, pricing_type: str
         return cur.rowcount > 0
 
 
+async def update_book_title(book_id: int, author_user_id: int, title: str) -> bool:
+    now = utc_now()
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            UPDATE books
+            SET title=?, publication_status=CASE WHEN publication_status='published' THEN 'review' ELSE publication_status END, updated_at=?
+            WHERE id=? AND author_id=(SELECT id FROM author_profiles WHERE user_id=?)
+            """,
+            (title[:160], now, book_id, author_user_id),
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def update_book_age_limit(book_id: int, author_user_id: int, age_limit: str) -> bool:
+    now = utc_now()
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            UPDATE books
+            SET age_limit=?, publication_status=CASE WHEN publication_status='published' THEN 'review' ELSE publication_status END, updated_at=?
+            WHERE id=? AND author_id=(SELECT id FROM author_profiles WHERE user_id=?)
+            """,
+            (age_limit, now, book_id, author_user_id),
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def update_book_writing_status(book_id: int, author_user_id: int, writing_status: str) -> bool:
+    now = utc_now()
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            UPDATE books
+            SET writing_status=?, updated_at=?
+            WHERE id=? AND author_id=(SELECT id FROM author_profiles WHERE user_id=?)
+            """,
+            (writing_status, now, book_id, author_user_id),
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def update_book_download(book_id: int, author_user_id: int, allow_download: bool) -> bool:
+    now = utc_now()
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            UPDATE books
+            SET allow_download=?, updated_at=?
+            WHERE id=? AND author_id=(SELECT id FROM author_profiles WHERE user_id=?)
+            """,
+            (1 if allow_download else 0, now, book_id, author_user_id),
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def soft_delete_book(book_id: int, author_user_id: int) -> bool:
+    now = utc_now()
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            UPDATE books
+            SET publication_status='deleted', updated_at=?
+            WHERE id=? AND author_id=(SELECT id FROM author_profiles WHERE user_id=?)
+            """,
+            (now, book_id, author_user_id),
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
 async def create_book(author_id: int, title: str, description: str, age_limit: str, writing_status: str,
                       allow_download: bool, pricing_type: str, price_stars: int,
                       cover_file_id: str | None = None) -> int:
@@ -775,7 +853,7 @@ async def list_books_for_author(author_user_id: int) -> list[aiosqlite.Row]:
             SELECT b.*
             FROM books b
             JOIN author_profiles a ON a.id = b.author_id
-            WHERE a.user_id = ?
+            WHERE a.user_id = ? AND b.publication_status != 'deleted'
             ORDER BY b.id DESC
             """,
             (author_user_id,),
@@ -783,13 +861,83 @@ async def list_books_for_author(author_user_id: int) -> list[aiosqlite.Row]:
         return await cur.fetchall()
 
 
+async def list_author_books_with_counts(author_user_id: int) -> list[aiosqlite.Row]:
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT b.*,
+                   (SELECT COUNT(*) FROM chapters c WHERE c.book_id=b.id AND c.status!='deleted') AS chapters_count,
+                   (SELECT COUNT(*) FROM audio_chapters ac WHERE ac.book_id=b.id AND ac.status!='deleted') AS audio_count,
+                   (SELECT COUNT(*) FROM purchases p WHERE p.status='paid' AND (
+                       p.book_id=b.id OR
+                       p.chapter_id IN (SELECT c2.id FROM chapters c2 WHERE c2.book_id=b.id) OR
+                       p.audio_chapter_id IN (SELECT a2.id FROM audio_chapters a2 WHERE a2.book_id=b.id)
+                   )) AS purchase_count
+            FROM books b
+            JOIN author_profiles a ON a.id=b.author_id
+            WHERE a.user_id=? AND b.publication_status!='deleted'
+            ORDER BY b.updated_at DESC, b.id DESC
+            """,
+            (int(author_user_id),),
+        )
+        return await cur.fetchall()
+
+
+async def update_author_book_fields(book_id: int, author_user_id: int, values: dict[str, Any]) -> bool:
+    allowed = {
+        "title", "description", "age_limit", "writing_status",
+        "allow_download", "pricing_type", "price_stars",
+    }
+    clean: dict[str, Any] = {key: value for key, value in values.items() if key in allowed}
+    if not clean:
+        return False
+    if "title" in clean:
+        clean["title"] = str(clean["title"]).strip()[:160]
+        if len(clean["title"]) < 2:
+            return False
+    if "description" in clean:
+        clean["description"] = str(clean["description"]).strip()[:12000]
+    if "age_limit" in clean:
+        clean["age_limit"] = str(clean["age_limit"])
+    if "writing_status" in clean:
+        clean["writing_status"] = str(clean["writing_status"])
+    if "allow_download" in clean:
+        clean["allow_download"] = 1 if bool(clean["allow_download"]) else 0
+    if "pricing_type" in clean:
+        clean["pricing_type"] = str(clean["pricing_type"])
+    if "price_stars" in clean:
+        clean["price_stars"] = max(0, min(100000, int(clean["price_stars"] or 0)))
+
+    now = utc_now()
+    fields = [f"{key}=?" for key in clean]
+    values_list = list(clean.values())
+    sensitive = {"title", "description", "age_limit", "pricing_type", "price_stars"}
+    if sensitive.intersection(clean):
+        fields.append("publication_status=CASE WHEN publication_status='published' THEN 'review' ELSE publication_status END")
+    fields.append("updated_at=?")
+    values_list.extend([now, int(book_id), int(author_user_id)])
+    async with connect() as db:
+        cur = await db.execute(
+            f"""
+            UPDATE books SET {', '.join(fields)}
+            WHERE id=? AND publication_status!='deleted'
+              AND author_id=(SELECT id FROM author_profiles WHERE user_id=?)
+            """,
+            values_list,
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
 async def get_book(book_id: int) -> aiosqlite.Row | None:
     async with connect() as db:
         cur = await db.execute(
             """
-            SELECT b.*, a.pen_name
+            SELECT b.*, a.pen_name, a.user_id AS author_user_id,
+                   u.telegram_id AS author_telegram_id
             FROM books b
             LEFT JOIN author_profiles a ON a.id = b.author_id
+            LEFT JOIN users u ON u.id = a.user_id
             WHERE b.id = ?
             """,
             (book_id,),
@@ -798,26 +946,37 @@ async def get_book(book_id: int) -> aiosqlite.Row | None:
 
 
 async def list_catalog_books(limit: int = 50, include_drafts: bool = False) -> list[aiosqlite.Row]:
-    status_filter = "" if include_drafts else "WHERE b.publication_status = 'published'"
+    """Возвращает книги для витрины с реальными агрегатами."""
+    status_filter = "b.publication_status != 'deleted'" if include_drafts else "b.publication_status = 'published'"
+    chapter_status = "c.status != 'deleted'" if include_drafts else "c.status = 'published'"
+    audio_status = "ac.status != 'deleted'" if include_drafts else "ac.status = 'published'"
     async with connect() as db:
         cur = await db.execute(
             f"""
             SELECT b.*, a.pen_name,
-                   COALESCE(AVG(r.rating), 0) AS rating,
-                   COUNT(DISTINCT r.id) AS reviews_count,
-                   COUNT(DISTINCT c.id) AS chapters_count,
-                   COUNT(DISTINCT ac.id) AS audio_count
+                   COALESCE((SELECT AVG(r.rating) FROM reviews r WHERE r.book_id=b.id AND r.status='published'), 0) AS rating,
+                   (SELECT COUNT(*) FROM reviews r WHERE r.book_id=b.id AND r.status='published') AS reviews_count,
+                   (SELECT COUNT(*) FROM chapters c WHERE c.book_id=b.id AND {chapter_status}) AS chapters_count,
+                   (SELECT COUNT(*) FROM audio_chapters ac WHERE ac.book_id=b.id AND {audio_status}) AS audio_count,
+                   (SELECT COUNT(*) FROM chapters c WHERE c.book_id=b.id AND {chapter_status} AND c.is_free=1) AS free_chapters_count,
+                   (SELECT c.id FROM chapters c WHERE c.book_id=b.id AND {chapter_status} ORDER BY c.number, c.id LIMIT 1) AS first_chapter_id,
+                   (SELECT ac.id FROM audio_chapters ac WHERE ac.book_id=b.id AND {audio_status} ORDER BY ac.number, ac.id LIMIT 1) AS first_audio_id,
+                   (SELECT GROUP_CONCAT(v.option_label, '||') FROM book_option_values v WHERE v.book_id=b.id AND v.option_group='genres') AS genre_labels,
+                   (
+                     SELECT COUNT(*) FROM purchases p
+                     WHERE p.status='paid' AND (
+                       p.book_id=b.id OR
+                       p.chapter_id IN (SELECT c3.id FROM chapters c3 WHERE c3.book_id=b.id) OR
+                       p.audio_chapter_id IN (SELECT ac3.id FROM audio_chapters ac3 WHERE ac3.book_id=b.id)
+                     )
+                   ) AS purchase_count
             FROM books b
-            LEFT JOIN author_profiles a ON a.id = b.author_id
-            LEFT JOIN reviews r ON r.book_id = b.id AND r.status = 'published'
-            LEFT JOIN chapters c ON c.book_id = b.id AND c.status != 'deleted'
-            LEFT JOIN audio_chapters ac ON ac.book_id = b.id AND ac.status != 'deleted'
-            {status_filter}
-            GROUP BY b.id
+            LEFT JOIN author_profiles a ON a.id=b.author_id
+            WHERE {status_filter}
             ORDER BY b.id DESC
             LIMIT ?
             """,
-            (limit,),
+            (int(limit),),
         )
         return await cur.fetchall()
 
@@ -918,16 +1077,18 @@ async def get_admin_permissions(user_id: int) -> set[str]:
             (user_id,),
         )
         rows = await cur.fetchall()
-        return {row["permission_code"] for row in rows}
+        return {row["permission_code"] for row in rows if row["permission_code"] in DELEGABLE_PERMISSION_CODES}
 
 
 async def set_permission(user_id: int, permission_code: str, allowed: bool) -> None:
+    if permission_code not in DELEGABLE_PERMISSION_CODES:
+        raise ValueError("Это право нельзя передать администратору")
     now = utc_now()
     async with connect() as db:
         cur = await db.execute("SELECT id FROM admin_staff WHERE user_id=? AND is_active=1", (user_id,))
         admin = await cur.fetchone()
         if admin is None:
-            raise ValueError("Administrator not found")
+            raise ValueError("Администратор не найден")
         await db.execute(
             """
             INSERT INTO admin_permissions(admin_id, permission_code, allowed, updated_at)
@@ -1014,6 +1175,76 @@ async def get_platform_stats() -> dict[str, int]:
         return result
 
 
+async def get_author_dashboard_stats(author_user_id: int) -> dict[str, int]:
+    """Короткая сводка для кабинета автора без служебных данных."""
+    async with connect() as db:
+        cur = await db.execute("SELECT id FROM author_profiles WHERE user_id=?", (int(author_user_id),))
+        author = await cur.fetchone()
+        if not author:
+            return {
+                "books_total": 0, "books_draft": 0, "books_review": 0,
+                "books_published": 0, "chapters": 0, "audio": 0,
+            }
+        author_id = int(author["id"])
+        cur = await db.execute(
+            """
+            SELECT
+                COUNT(*) AS books_total,
+                SUM(CASE WHEN publication_status='draft' THEN 1 ELSE 0 END) AS books_draft,
+                SUM(CASE WHEN publication_status='review' THEN 1 ELSE 0 END) AS books_review,
+                SUM(CASE WHEN publication_status='published' THEN 1 ELSE 0 END) AS books_published
+            FROM books
+            WHERE author_id=? AND publication_status!='deleted'
+            """,
+            (author_id,),
+        )
+        books = await cur.fetchone()
+        cur = await db.execute(
+            "SELECT COUNT(*) FROM chapters c JOIN books b ON b.id=c.book_id WHERE b.author_id=? AND b.publication_status!='deleted'",
+            (author_id,),
+        )
+        chapters = await cur.fetchone()
+        cur = await db.execute(
+            "SELECT COUNT(*) FROM audio_chapters a JOIN books b ON b.id=a.book_id WHERE b.author_id=? AND b.publication_status!='deleted'",
+            (author_id,),
+        )
+        audio = await cur.fetchone()
+        return {
+            "books_total": int(books["books_total"] or 0),
+            "books_draft": int(books["books_draft"] or 0),
+            "books_review": int(books["books_review"] or 0),
+            "books_published": int(books["books_published"] or 0),
+            "chapters": int(chapters[0] or 0),
+            "audio": int(audio[0] or 0),
+        }
+
+
+async def get_owner_today_stats() -> dict[str, int]:
+    """Сводка владельца за текущий день в UTC."""
+    today = datetime.now(timezone.utc).date().isoformat()
+    async with connect() as db:
+        queries = {
+            "new_users": ("SELECT COUNT(*) FROM users WHERE substr(created_at, 1, 10)=?", (today,)),
+            "purchases": ("SELECT COUNT(*) FROM purchases WHERE status='paid' AND substr(created_at, 1, 10)=?", (today,)),
+            "stars": ("SELECT COALESCE(SUM(amount_stars),0) FROM purchases WHERE status='paid' AND substr(created_at, 1, 10)=?", (today,)),
+            "new_books": ("SELECT COUNT(*) FROM books WHERE substr(created_at, 1, 10)=? AND publication_status!='deleted'", (today,)),
+            "reviews": ("SELECT COUNT(*) FROM reviews WHERE substr(created_at, 1, 10)=?", (today,)),
+            "comments": ("SELECT COUNT(*) FROM comments WHERE substr(created_at, 1, 10)=?", (today,)),
+        }
+        result: dict[str, int] = {}
+        for key, (sql, params) in queries.items():
+            cur = await db.execute(sql, params)
+            row = await cur.fetchone()
+            result[key] = int(row[0] or 0) if row else 0
+        cur = await db.execute("SELECT COUNT(*) FROM complaints WHERE status='new'")
+        row = await cur.fetchone()
+        result["complaints"] = int(row[0] or 0) if row else 0
+        cur = await db.execute("SELECT COUNT(*) FROM books WHERE publication_status='review'")
+        row = await cur.fetchone()
+        result["books_review"] = int(row[0] or 0) if row else 0
+        return result
+
+
 
 async def set_book_options(book_id: int, option_group: str, option_codes: list[str] | set[str] | tuple[str, ...]) -> None:
     """Сохраняет выбранные кнопками параметры книги: жанры, теги, аудиторию, предупреждения, язык, тип."""
@@ -1055,6 +1286,63 @@ async def get_book_options(book_id: int) -> dict[str, list[str]]:
     for row in rows:
         result.setdefault(row["option_group"], []).append(row["option_label"])
     return result
+
+
+async def list_similar_books(book_id: int, limit: int = 6) -> list[aiosqlite.Row]:
+    """Подбирает похожие опубликованные книги по жанрам, тропам и аудитории."""
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT b.*, a.pen_name,
+                   COUNT(DISTINCT v2.option_group || ':' || v2.option_code) AS match_score,
+                   GROUP_CONCAT(DISTINCT v2.option_label) AS matched_options,
+                   COALESCE(AVG(CASE WHEN r.status='published' THEN r.rating END), 0) AS rating,
+                   COUNT(DISTINCT CASE WHEN r.status='published' THEN r.id END) AS reviews_count,
+                   COUNT(DISTINCT CASE WHEN c.status='published' THEN c.id END) AS chapters_count,
+                   COUNT(DISTINCT CASE WHEN ac.status='published' THEN ac.id END) AS audio_count
+            FROM book_option_values v1
+            JOIN book_option_values v2
+              ON v2.option_group=v1.option_group
+             AND v2.option_code=v1.option_code
+             AND v2.book_id != v1.book_id
+            JOIN books b ON b.id=v2.book_id
+            LEFT JOIN author_profiles a ON a.id=b.author_id
+            LEFT JOIN reviews r ON r.book_id=b.id
+            LEFT JOIN chapters c ON c.book_id=b.id
+            LEFT JOIN audio_chapters ac ON ac.book_id=b.id
+            WHERE v1.book_id=?
+              AND v1.option_group IN ('genres','tropes','audience')
+              AND b.publication_status='published'
+              AND b.id != ?
+            GROUP BY b.id
+            ORDER BY match_score DESC, rating DESC, b.id DESC
+            LIMIT ?
+            """,
+            (book_id, book_id, int(limit)),
+        )
+        rows = await cur.fetchall()
+        if rows:
+            return rows
+        cur = await db.execute(
+            """
+            SELECT b.*, a.pen_name, 0 AS match_score, '' AS matched_options,
+                   COALESCE(AVG(CASE WHEN r.status='published' THEN r.rating END), 0) AS rating,
+                   COUNT(DISTINCT CASE WHEN r.status='published' THEN r.id END) AS reviews_count,
+                   COUNT(DISTINCT CASE WHEN c.status='published' THEN c.id END) AS chapters_count,
+                   COUNT(DISTINCT CASE WHEN ac.status='published' THEN ac.id END) AS audio_count
+            FROM books b
+            LEFT JOIN author_profiles a ON a.id=b.author_id
+            LEFT JOIN reviews r ON r.book_id=b.id
+            LEFT JOIN chapters c ON c.book_id=b.id
+            LEFT JOIN audio_chapters ac ON ac.book_id=b.id
+            WHERE b.publication_status='published' AND b.id != ?
+            GROUP BY b.id
+            ORDER BY b.id DESC
+            LIMIT ?
+            """,
+            (book_id, int(limit)),
+        )
+        return await cur.fetchall()
 
 
 async def get_book_option_codes(book_id: int, option_group: str) -> list[str]:
@@ -1201,8 +1489,15 @@ async def book_belongs_to_author(book_id: int, author_user_id: int) -> bool:
         return await cur.fetchone() is not None
 
 
-async def list_chapters_for_book(book_id: int, include_deleted: bool = False) -> list[aiosqlite.Row]:
-    status_filter = "" if include_deleted else "AND status != 'deleted'"
+async def list_chapters_for_book(
+    book_id: int,
+    include_deleted: bool = False,
+    published_only: bool = False,
+) -> list[aiosqlite.Row]:
+    if published_only:
+        status_filter = "AND status = 'published'"
+    else:
+        status_filter = "" if include_deleted else "AND status != 'deleted'"
     async with connect() as db:
         cur = await db.execute(
             f"""
@@ -1214,6 +1509,41 @@ async def list_chapters_for_book(book_id: int, include_deleted: bool = False) ->
             (book_id,),
         )
         return await cur.fetchall()
+
+
+async def get_adjacent_chapters(chapter_id: int) -> dict[str, aiosqlite.Row | None]:
+    """Возвращает соседние опубликованные главы той же книги."""
+    async with connect() as db:
+        cur = await db.execute(
+            "SELECT book_id, number FROM chapters WHERE id=? AND status='published'",
+            (chapter_id,),
+        )
+        current = await cur.fetchone()
+        if not current:
+            return {"previous": None, "next": None}
+        cur = await db.execute(
+            """
+            SELECT id, book_id, number, title
+            FROM chapters
+            WHERE book_id=? AND status='published' AND number < ?
+            ORDER BY number DESC
+            LIMIT 1
+            """,
+            (int(current["book_id"]), int(current["number"])),
+        )
+        previous = await cur.fetchone()
+        cur = await db.execute(
+            """
+            SELECT id, book_id, number, title
+            FROM chapters
+            WHERE book_id=? AND status='published' AND number > ?
+            ORDER BY number ASC
+            LIMIT 1
+            """,
+            (int(current["book_id"]), int(current["number"])),
+        )
+        next_row = await cur.fetchone()
+        return {"previous": previous, "next": next_row}
 
 
 async def count_chapters_for_book(book_id: int) -> int:
@@ -1259,11 +1589,22 @@ async def add_manual_chapter(book_id: int, title: str, text: str, is_free: bool 
         return int(cur.lastrowid)
 
 
-async def upsert_imported_chapters(book_id: int, chapters: list[Any], first_free: int = 3, default_price_stars: int = 0) -> int:
-    """Сохраняет импортированные главы. Главы с тем же номером обновляются, остальные добавляются."""
+async def upsert_imported_chapters(
+    book_id: int,
+    chapters: list[Any],
+    first_free: int = 3,
+    default_price_stars: int = 0,
+    *,
+    return_published_ids: bool = False,
+) -> int | dict[str, Any]:
+    """Сохраняет импорт и при необходимости возвращает новые опубликованные главы для уведомления."""
     now = utc_now()
     saved = 0
+    published_ids: list[int] = []
     async with connect() as db:
+        cur = await db.execute("SELECT publication_status FROM books WHERE id=?", (book_id,))
+        book = await cur.fetchone()
+        target_status = "published" if book and book["publication_status"] == "published" else "draft"
         for chapter in chapters:
             if isinstance(chapter, dict):
                 number = int(chapter["number"])
@@ -1275,22 +1616,34 @@ async def upsert_imported_chapters(book_id: int, chapters: list[Any], first_free
                 text = str(chapter.text)
             is_free = 1 if number <= int(first_free) else 0
             price = 0 if is_free else int(default_price_stars)
+            cur = await db.execute(
+                "SELECT id FROM chapters WHERE book_id=? AND number=?",
+                (book_id, number),
+            )
+            existing = await cur.fetchone()
             await db.execute(
                 """
                 INSERT INTO chapters(book_id, number, title, text, is_free, price_stars, status, created_at, updated_at)
-                VALUES(?, ?, ?, ?, ?, ?, 'draft', ?, ?)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(book_id, number) DO UPDATE SET
                     title=excluded.title,
                     text=excluded.text,
                     is_free=excluded.is_free,
                     price_stars=excluded.price_stars,
-                    status='draft',
+                    status=CASE WHEN chapters.status='published' THEN 'published' ELSE excluded.status END,
                     updated_at=excluded.updated_at
                 """,
-                (book_id, number, title, text, is_free, price, now, now),
+                (book_id, number, title, text, is_free, price, target_status, now, now),
             )
+            if existing is None and target_status == "published":
+                cur = await db.execute("SELECT id FROM chapters WHERE book_id=? AND number=?", (book_id, number))
+                inserted = await cur.fetchone()
+                if inserted:
+                    published_ids.append(int(inserted["id"]))
             saved += 1
         await db.commit()
+    if return_published_ids:
+        return {"saved": saved, "published_ids": published_ids}
     return saved
 
 
@@ -1302,20 +1655,98 @@ async def set_chapter_status(chapter_id: int, status: str) -> bool:
         return cur.rowcount > 0
 
 
+async def update_chapter_title(chapter_id: int, author_user_id: int, title: str) -> bool:
+    now = utc_now()
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            UPDATE chapters
+            SET title=?, updated_at=?
+            WHERE id=? AND book_id IN (
+                SELECT b.id FROM books b JOIN author_profiles a ON a.id=b.author_id WHERE a.user_id=?
+            )
+            """,
+            (title[:160], now, chapter_id, author_user_id),
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def update_chapter_text(chapter_id: int, author_user_id: int, text: str) -> bool:
+    now = utc_now()
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            UPDATE chapters
+            SET text=?, updated_at=?
+            WHERE id=? AND book_id IN (
+                SELECT b.id FROM books b JOIN author_profiles a ON a.id=b.author_id WHERE a.user_id=?
+            )
+            """,
+            (text, now, chapter_id, author_user_id),
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def update_chapter_price(chapter_id: int, author_user_id: int, is_free: bool, price_stars: int) -> bool:
+    now = utc_now()
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            UPDATE chapters
+            SET is_free=?, price_stars=?, updated_at=?
+            WHERE id=? AND book_id IN (
+                SELECT b.id FROM books b JOIN author_profiles a ON a.id=b.author_id WHERE a.user_id=?
+            )
+            """,
+            (1 if is_free else 0, int(price_stars), now, chapter_id, author_user_id),
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def soft_delete_chapter_for_author(chapter_id: int, author_user_id: int) -> bool:
+    now = utc_now()
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            UPDATE chapters
+            SET status='deleted', updated_at=?
+            WHERE id=? AND status!='deleted' AND book_id IN (
+                SELECT b.id FROM books b
+                JOIN author_profiles a ON a.id=b.author_id
+                WHERE a.user_id=? AND b.publication_status!='deleted'
+            )
+            """,
+            (now, int(chapter_id), int(author_user_id)),
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
 async def get_book_with_counts(book_id: int) -> aiosqlite.Row | None:
     async with connect() as db:
         cur = await db.execute(
             """
             SELECT b.*, a.pen_name,
-                   COUNT(DISTINCT c.id) AS chapters_count,
-                   COUNT(DISTINCT ac.id) AS audio_count,
-                   COALESCE(SUM(LENGTH(c.text)), 0) AS text_chars
+                   (SELECT COUNT(*) FROM chapters c WHERE c.book_id=b.id AND c.status='published') AS chapters_count,
+                   (SELECT COUNT(*) FROM audio_chapters ac WHERE ac.book_id=b.id AND ac.status='published') AS audio_count,
+                   (SELECT COUNT(*) FROM chapters c WHERE c.book_id=b.id AND c.status='published' AND c.is_free=1) AS free_chapters_count,
+                   COALESCE((SELECT SUM(LENGTH(c.text)) FROM chapters c WHERE c.book_id=b.id AND c.status='published'), 0) AS text_chars,
+                   COALESCE((SELECT AVG(r.rating) FROM reviews r WHERE r.book_id=b.id AND r.status='published'), 0) AS rating,
+                   (SELECT COUNT(*) FROM reviews r WHERE r.book_id=b.id AND r.status='published') AS reviews_count,
+                   (
+                     SELECT COUNT(*) FROM purchases p
+                     WHERE p.status='paid' AND (
+                       p.book_id=b.id OR
+                       p.chapter_id IN (SELECT c3.id FROM chapters c3 WHERE c3.book_id=b.id) OR
+                       p.audio_chapter_id IN (SELECT ac3.id FROM audio_chapters ac3 WHERE ac3.book_id=b.id)
+                     )
+                   ) AS purchase_count
             FROM books b
-            LEFT JOIN author_profiles a ON a.id = b.author_id
-            LEFT JOIN chapters c ON c.book_id = b.id AND c.status != 'deleted'
-            LEFT JOIN audio_chapters ac ON ac.book_id = b.id AND ac.status != 'deleted'
-            WHERE b.id = ?
-            GROUP BY b.id
+            LEFT JOIN author_profiles a ON a.id=b.author_id
+            WHERE b.id=?
             """,
             (book_id,),
         )
@@ -1352,21 +1783,9 @@ async def add_audio_chapter(
             VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?)
             """,
             (
-                book_id,
-                number,
-                title,
-                file_id,
-                file_path,
-                int(duration_seconds or 0),
-                narrator,
-                source_filename,
-                mime_type,
-                int(file_size or 0),
-                int(sample_seconds or 60),
-                1 if is_free else 0,
-                int(price_stars or 0),
-                now,
-                now,
+                book_id, number, title, file_id, file_path, int(duration_seconds or 0), narrator,
+                source_filename, mime_type, int(file_size or 0), int(sample_seconds or 60),
+                1 if is_free else 0, int(price_stars or 0), now, now,
             ),
         )
         await db.execute("UPDATE books SET has_audio=1, updated_at=? WHERE id=?", (now, book_id))
@@ -1374,8 +1793,15 @@ async def add_audio_chapter(
         return int(cur.lastrowid)
 
 
-async def list_audio_chapters_for_book(book_id: int, include_deleted: bool = False) -> list[aiosqlite.Row]:
-    status_filter = "" if include_deleted else "AND status != 'deleted'"
+async def list_audio_chapters_for_book(
+    book_id: int,
+    include_deleted: bool = False,
+    published_only: bool = False,
+) -> list[aiosqlite.Row]:
+    if published_only:
+        status_filter = "AND status = 'published'"
+    else:
+        status_filter = "" if include_deleted else "AND status != 'deleted'"
     async with connect() as db:
         cur = await db.execute(
             f"""
@@ -1387,6 +1813,41 @@ async def list_audio_chapters_for_book(book_id: int, include_deleted: bool = Fal
             (book_id,),
         )
         return await cur.fetchall()
+
+
+async def get_adjacent_audio_chapters(audio_id: int) -> dict[str, aiosqlite.Row | None]:
+    """Возвращает соседние опубликованные аудиоглавы той же книги."""
+    async with connect() as db:
+        cur = await db.execute(
+            "SELECT book_id, number FROM audio_chapters WHERE id=? AND status='published'",
+            (audio_id,),
+        )
+        current = await cur.fetchone()
+        if not current:
+            return {"previous": None, "next": None}
+        cur = await db.execute(
+            """
+            SELECT id, book_id, number, title
+            FROM audio_chapters
+            WHERE book_id=? AND status='published' AND number < ?
+            ORDER BY number DESC
+            LIMIT 1
+            """,
+            (int(current["book_id"]), int(current["number"])),
+        )
+        previous = await cur.fetchone()
+        cur = await db.execute(
+            """
+            SELECT id, book_id, number, title
+            FROM audio_chapters
+            WHERE book_id=? AND status='published' AND number > ?
+            ORDER BY number ASC
+            LIMIT 1
+            """,
+            (int(current["book_id"]), int(current["number"])),
+        )
+        next_row = await cur.fetchone()
+        return {"previous": previous, "next": next_row}
 
 
 async def count_audio_chapters_for_book(book_id: int) -> int:
@@ -1542,6 +2003,119 @@ async def get_purchase_target(payload: str) -> dict[str, Any] | None:
             "author_id": int(book["author_id"]) if book["author_id"] is not None else None,
         }
     return None
+
+
+async def _ensure_v179_schema(db: aiosqlite.Connection) -> None:
+    """Миграция категорий уведомлений и защита от повторной рассылки."""
+    cur = await db.execute("PRAGMA table_info(user_preferences)")
+    existing = {row[1] for row in await cur.fetchall()}
+    for column in ("notifications_chapters", "notifications_audio", "notifications_discounts"):
+        if column not in existing:
+            await db.execute(f"ALTER TABLE user_preferences ADD COLUMN {column} INTEGER NOT NULL DEFAULT 1")
+    await db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS notification_deliveries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_key TEXT NOT NULL,
+            user_id INTEGER NOT NULL,
+            category TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(event_key, user_id),
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_notification_deliveries_event ON notification_deliveries(event_key);
+        """
+    )
+    # Ранние версии публиковали книгу, но могли оставить её главы черновиками.
+    await db.execute(
+        "UPDATE chapters SET status='published' WHERE status='draft' AND book_id IN "
+        "(SELECT id FROM books WHERE publication_status='published')"
+    )
+    await db.execute(
+        "UPDATE audio_chapters SET status='published' WHERE status='draft' AND book_id IN "
+        "(SELECT id FROM books WHERE publication_status='published')"
+    )
+
+
+async def publish_book_content(book_id: int) -> dict[str, int]:
+    """Публикует подготовленные главы вместе с первой публикацией книги без массовой рассылки."""
+    now = utc_now()
+    async with connect() as db:
+        chapters = await db.execute(
+            "UPDATE chapters SET status='published', updated_at=? WHERE book_id=? AND status='draft'",
+            (now, int(book_id)),
+        )
+        audio = await db.execute(
+            "UPDATE audio_chapters SET status='published', updated_at=? WHERE book_id=? AND status='draft'",
+            (now, int(book_id)),
+        )
+        await db.commit()
+        return {"chapters": int(chapters.rowcount), "audio": int(audio.rowcount)}
+
+
+async def list_book_notification_recipients(book_id: int, limit: int = 5000) -> list[aiosqlite.Row]:
+    """Читатели, которые сохранили, открывали, оценивали или покупали книгу."""
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT DISTINCT u.id, u.telegram_id, u.username, u.full_name
+            FROM users u
+            WHERE u.is_blocked=0
+              AND u.id != COALESCE((
+                  SELECT ap.user_id FROM books b
+                  LEFT JOIN author_profiles ap ON ap.id=b.author_id
+                  WHERE b.id=?
+              ), -1)
+              AND (
+                  EXISTS(SELECT 1 FROM bookmarks bm WHERE bm.user_id=u.id AND bm.book_id=?)
+                  OR EXISTS(SELECT 1 FROM reading_progress rp WHERE rp.user_id=u.id AND rp.book_id=?)
+                  OR EXISTS(
+                      SELECT 1 FROM listening_progress lp
+                      JOIN audio_chapters ac ON ac.id=lp.audio_chapter_id
+                      WHERE lp.user_id=u.id AND ac.book_id=?
+                  )
+                  OR EXISTS(SELECT 1 FROM reviews r WHERE r.user_id=u.id AND r.book_id=?)
+                  OR EXISTS(
+                      SELECT 1 FROM purchases p
+                      WHERE p.user_id=u.id AND p.status='paid' AND (
+                          p.book_id=?
+                          OR p.chapter_id IN (SELECT id FROM chapters WHERE book_id=?)
+                          OR p.audio_chapter_id IN (SELECT id FROM audio_chapters WHERE book_id=?)
+                      )
+                  )
+              )
+            ORDER BY u.id
+            LIMIT ?
+            """,
+            (book_id, book_id, book_id, book_id, book_id, book_id, book_id, book_id, int(limit)),
+        )
+        return await cur.fetchall()
+
+
+async def claim_notification_delivery(event_key: str, user_id: int, category: str) -> bool:
+    now = utc_now()
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            INSERT OR IGNORE INTO notification_deliveries(event_key, user_id, category, status, created_at, updated_at)
+            VALUES(?, ?, ?, 'pending', ?, ?)
+            """,
+            (str(event_key)[:180], int(user_id), str(category)[:40], now, now),
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def finish_notification_delivery(event_key: str, user_id: int, status: str) -> None:
+    now = utc_now()
+    async with connect() as db:
+        await db.execute(
+            "UPDATE notification_deliveries SET status=?, updated_at=? WHERE event_key=? AND user_id=?",
+            (str(status)[:30], now, str(event_key)[:180], int(user_id)),
+        )
+        await db.commit()
 
 
 async def create_paid_purchase(
@@ -1852,23 +2426,82 @@ async def get_bookmark(user_id: int, book_id: int) -> aiosqlite.Row | None:
         return await cur.fetchone()
 
 
-async def list_user_bookmarks(user_id: int, limit: int = 50) -> list[aiosqlite.Row]:
+async def list_user_bookmarks(user_id: int, limit: int = 50, published_only: bool = False) -> list[aiosqlite.Row]:
+    publication_filter = "AND b.publication_status='published'" if published_only else ""
     async with connect() as db:
         cur = await db.execute(
-            """
-            SELECT bm.*, b.title, b.description, b.age_limit, b.publication_status,
+            f"""
+            SELECT bm.*, b.title, b.description, b.age_limit, b.publication_status, b.cover_path,
                    ap.pen_name,
-                   COALESCE(MAX(rp.updated_at), bm.updated_at) AS last_progress_at
+                   COALESCE(MAX(rp.updated_at), bm.updated_at) AS last_progress_at,
+                   (SELECT COUNT(*) FROM chapters c WHERE c.book_id=b.id AND c.status='published') AS chapters_count,
+                   (SELECT COUNT(*) FROM audio_chapters ac WHERE ac.book_id=b.id AND ac.status='published') AS audio_count
             FROM bookmarks bm
             JOIN books b ON b.id = bm.book_id
             LEFT JOIN author_profiles ap ON ap.id = b.author_id
             LEFT JOIN reading_progress rp ON rp.user_id = bm.user_id AND rp.book_id = bm.book_id
-            WHERE bm.user_id=?
+            WHERE bm.user_id=? {publication_filter}
             GROUP BY bm.id
             ORDER BY bm.updated_at DESC
             LIMIT ?
             """,
             (user_id, limit),
+        )
+        return await cur.fetchall()
+
+
+async def list_user_continue_reading(user_id: int, limit: int = 12) -> list[aiosqlite.Row]:
+    """Последняя открытая опубликованная глава каждой книги."""
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT rp.*, b.title, b.description, b.age_limit, b.cover_path,
+                   ap.pen_name, c.title AS chapter_title, c.number AS chapter_number,
+                   (
+                     SELECT COUNT(*)
+                     FROM chapters c2
+                     WHERE c2.book_id=b.id AND c2.status='published'
+                   ) AS chapters_count
+            FROM reading_progress rp
+            JOIN books b ON b.id=rp.book_id AND b.publication_status='published'
+            JOIN chapters c ON c.id=rp.chapter_id AND c.status='published'
+            LEFT JOIN author_profiles ap ON ap.id=b.author_id
+            WHERE rp.user_id=?
+              AND rp.updated_at=(
+                SELECT MAX(rp2.updated_at)
+                FROM reading_progress rp2
+                WHERE rp2.user_id=rp.user_id AND rp2.book_id=rp.book_id
+              )
+            ORDER BY rp.updated_at DESC
+            LIMIT ?
+            """,
+            (user_id, int(limit)),
+        )
+        return await cur.fetchall()
+
+
+async def list_user_continue_listening(user_id: int, limit: int = 12) -> list[aiosqlite.Row]:
+    """Последняя прослушиваемая опубликованная аудиоглава каждой книги."""
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT lp.*, ac.book_id, ac.title AS audio_title, ac.number AS audio_number,
+                   ac.duration_seconds, b.title, b.cover_path, ap.pen_name
+            FROM listening_progress lp
+            JOIN audio_chapters ac ON ac.id=lp.audio_chapter_id AND ac.status='published'
+            JOIN books b ON b.id=ac.book_id AND b.publication_status='published'
+            LEFT JOIN author_profiles ap ON ap.id=b.author_id
+            WHERE lp.user_id=?
+              AND lp.updated_at=(
+                SELECT MAX(lp2.updated_at)
+                FROM listening_progress lp2
+                JOIN audio_chapters ac2 ON ac2.id=lp2.audio_chapter_id
+                WHERE lp2.user_id=lp.user_id AND ac2.book_id=ac.book_id
+              )
+            ORDER BY lp.updated_at DESC
+            LIMIT ?
+            """,
+            (user_id, int(limit)),
         )
         return await cur.fetchall()
 
@@ -2207,11 +2840,44 @@ async def get_promo_code(code: str) -> aiosqlite.Row | None:
         return await cur.fetchone()
 
 
+async def get_author_promo_code(author_user_id: int, promo_id: int) -> aiosqlite.Row | None:
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT pc.*, b.title AS book_title
+            FROM promo_codes pc
+            JOIN books b ON b.id=pc.book_id
+            JOIN author_profiles ap ON ap.id=pc.author_id
+            WHERE ap.user_id=? AND pc.id=?
+            """,
+            (int(author_user_id), int(promo_id)),
+        )
+        return await cur.fetchone()
+
+
+async def set_author_promo_status(author_user_id: int, promo_id: int, status: str) -> bool:
+    if status not in {"active", "paused"}:
+        return False
+    now = utc_now()
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            UPDATE promo_codes
+            SET status=?, updated_at=?
+            WHERE id=? AND author_id=(SELECT id FROM author_profiles WHERE user_id=?)
+            """,
+            (status, now, int(promo_id), int(author_user_id)),
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
 async def list_moderation_comments(limit: int = 20) -> list[aiosqlite.Row]:
     async with connect() as db:
         cur = await db.execute(
             """
-            SELECT c.*, u.username, u.full_name, b.title AS book_title, ch.title AS chapter_title
+            SELECT c.*, u.telegram_id, u.username, u.full_name,
+                   b.title AS book_title, ch.title AS chapter_title
             FROM comments c
             JOIN users u ON u.id = c.user_id
             JOIN books b ON b.id = c.book_id
@@ -2237,7 +2903,7 @@ async def list_moderation_reviews(limit: int = 20) -> list[aiosqlite.Row]:
     async with connect() as db:
         cur = await db.execute(
             """
-            SELECT r.*, u.username, u.full_name, b.title AS book_title
+            SELECT r.*, u.telegram_id, u.username, u.full_name, b.title AS book_title
             FROM reviews r
             JOIN users u ON u.id = r.user_id
             JOIN books b ON b.id = r.book_id
@@ -2305,7 +2971,8 @@ async def get_comment_for_moderation(comment_id: int) -> aiosqlite.Row | None:
     async with connect() as db:
         cur = await db.execute(
             """
-            SELECT c.*, u.username, u.full_name, b.title AS book_title, ch.title AS chapter_title
+            SELECT c.*, u.telegram_id, u.username, u.full_name,
+                   b.title AS book_title, ch.title AS chapter_title
             FROM comments c
             JOIN users u ON u.id = c.user_id
             JOIN books b ON b.id = c.book_id
@@ -2321,7 +2988,7 @@ async def get_review_for_moderation(review_id: int) -> aiosqlite.Row | None:
     async with connect() as db:
         cur = await db.execute(
             """
-            SELECT r.*, u.username, u.full_name, b.title AS book_title
+            SELECT r.*, u.telegram_id, u.username, u.full_name, b.title AS book_title
             FROM reviews r
             JOIN users u ON u.id = r.user_id
             JOIN books b ON b.id = r.book_id
@@ -2706,6 +3373,20 @@ async def list_complaints(status: str = "new", limit: int = 30) -> list[aiosqlit
             (status, limit),
         )
         return await cur.fetchall()
+
+
+async def get_complaint(complaint_id: int) -> aiosqlite.Row | None:
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT c.*, u.telegram_id, u.username, u.full_name
+            FROM complaints c
+            LEFT JOIN users u ON u.id = c.user_id
+            WHERE c.id=?
+            """,
+            (int(complaint_id),),
+        )
+        return await cur.fetchone()
 
 
 async def set_complaint_status(complaint_id: int, status: str, handled_by_user_id: int | None = None) -> bool:
@@ -3116,30 +3797,52 @@ async def get_legal_acceptances(user_id: int) -> list[aiosqlite.Row]:
         return await cur.fetchall()
 
 
+DEFAULT_USER_PREFERENCES = {
+    "theme": "system",
+    "font_size": "normal",
+    "notifications": "1",
+    "notifications_chapters": "1",
+    "notifications_audio": "1",
+    "notifications_discounts": "1",
+}
+
+
 async def get_user_preferences(user_id: int) -> dict[str, str]:
     async with connect() as db:
-        cur = await db.execute("SELECT theme, font_size, notifications FROM user_preferences WHERE user_id=?", (user_id,))
+        cur = await db.execute(
+            """
+            SELECT theme, font_size, notifications, notifications_chapters,
+                   notifications_audio, notifications_discounts
+            FROM user_preferences WHERE user_id=?
+            """,
+            (user_id,),
+        )
         row = await cur.fetchone()
         if not row:
-            return {"theme": "system", "font_size": "normal", "notifications": "1"}
-        return {"theme": row["theme"], "font_size": row["font_size"], "notifications": str(row["notifications"])}
+            return dict(DEFAULT_USER_PREFERENCES)
+        return {key: str(row[key]) for key in DEFAULT_USER_PREFERENCES}
 
 
 async def set_user_preference(user_id: int, key: str, value: str) -> dict[str, str]:
-    if key not in {"theme", "font_size", "notifications"}:
+    allowed = set(DEFAULT_USER_PREFERENCES)
+    if key not in allowed:
         raise ValueError("Unknown preference")
     now = utc_now()
     async with connect() as db:
         await db.execute(
             """
-            INSERT INTO user_preferences(user_id, theme, font_size, notifications, updated_at)
-            VALUES(?, 'system', 'normal', 1, ?)
+            INSERT INTO user_preferences(
+                user_id, theme, font_size, notifications, notifications_chapters,
+                notifications_audio, notifications_discounts, updated_at
+            )
+            VALUES(?, 'system', 'normal', 1, 1, 1, 1, ?)
             ON CONFLICT(user_id) DO NOTHING
             """,
             (user_id, now),
         )
-        if key == "notifications":
-            await db.execute("UPDATE user_preferences SET notifications=?, updated_at=? WHERE user_id=?", (1 if str(value) != "0" else 0, now, user_id))
+        if key.startswith("notifications"):
+            normalized = 1 if str(value) != "0" else 0
+            await db.execute(f"UPDATE user_preferences SET {key}=?, updated_at=? WHERE user_id=?", (normalized, now, user_id))
         else:
             await db.execute(f"UPDATE user_preferences SET {key}=?, updated_at=? WHERE user_id=?", (value, now, user_id))
         await db.commit()
@@ -3150,7 +3853,7 @@ async def reset_user_preferences(user_id: int) -> dict[str, str]:
     async with connect() as db:
         await db.execute("DELETE FROM user_preferences WHERE user_id=?", (user_id,))
         await db.commit()
-    return {"theme": "system", "font_size": "normal", "notifications": "1"}
+    return dict(DEFAULT_USER_PREFERENCES)
 
 
 async def list_authors_for_owner(limit: int = 20) -> list[aiosqlite.Row]:
@@ -3199,3 +3902,330 @@ async def list_recent_channel_posts(limit: int = 10) -> list[aiosqlite.Row]:
             (limit,),
         )
         return await cur.fetchall()
+
+
+# v1.7.6 — безопасная финансовая цепочка и мобильный центр управления
+async def _ensure_v176_schema(db: aiosqlite.Connection) -> None:
+    """Мягкая миграция: связывает строки дохода с конкретной заявкой на выплату."""
+    cur = await db.execute("PRAGMA table_info(author_ledger)")
+    existing = {row[1] for row in await cur.fetchall()}
+    if "payout_request_id" not in existing:
+        await db.execute("ALTER TABLE author_ledger ADD COLUMN payout_request_id INTEGER")
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_author_ledger_payout_request ON author_ledger(payout_request_id)"
+    )
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_purchases_charge_id ON purchases(telegram_payment_charge_id)"
+    )
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_refund_purchase_status ON refund_requests(purchase_id, status)"
+    )
+
+
+async def create_paid_purchase(
+    *,
+    user_id: int,
+    payload: str,
+    amount_stars: int,
+    telegram_payment_charge_id: str,
+) -> int:
+    """Фиксирует платёж один раз и не допускает подмену суммы или повторную запись update."""
+    target = await get_purchase_target(payload)
+    if target is None:
+        raise ValueError("Покупка не найдена")
+    amount_stars = int(amount_stars)
+    expected = int(target.get("amount_stars") or 0)
+    if amount_stars != expected:
+        raise ValueError("Сумма платежа не совпадает с ценой")
+    charge_id = (telegram_payment_charge_id or "").strip()
+    if not charge_id:
+        raise ValueError("Не указан идентификатор платежа")
+
+    now = utc_now()
+    kind = str(target["kind"])
+    book_id = int(target["book_id"]) if kind == "book" else None
+    chapter_id = int(target["target_id"]) if kind == "chapter" else None
+    audio_chapter_id = int(target["target_id"]) if kind == "audio" else None
+    purchase_kind = "ad_budget" if kind == "ad_budget" else "content"
+
+    async with connect() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        cur = await db.execute(
+            "SELECT id, user_id, amount_stars, payload FROM purchases WHERE telegram_payment_charge_id=? ORDER BY id LIMIT 1",
+            (charge_id,),
+        )
+        existing = await cur.fetchone()
+        if existing:
+            if int(existing["user_id"]) != int(user_id) or int(existing["amount_stars"]) != amount_stars or str(existing["payload"] or "") != payload:
+                raise ValueError("Идентификатор платежа уже использован")
+            await db.commit()
+            return int(existing["id"])
+
+        cur = await db.execute(
+            """
+            INSERT INTO purchases(user_id, book_id, chapter_id, audio_chapter_id, amount_stars, status,
+                                  telegram_payment_charge_id, created_at, payload, purchase_kind)
+            VALUES(?, ?, ?, ?, ?, 'paid', ?, ?, ?, ?)
+            """,
+            (int(user_id), book_id, chapter_id, audio_chapter_id, amount_stars, charge_id, now, payload, purchase_kind),
+        )
+        purchase_id = int(cur.lastrowid)
+
+        if kind == "ad_budget":
+            cur_setting = await db.execute("SELECT value FROM settings WHERE key='ad_budget_units_per_star'")
+            row_setting = await cur_setting.fetchone()
+            units_per_star = int(row_setting["value"] if row_setting else 10)
+            units = amount_stars * units_per_star
+            await db.execute(
+                "UPDATE ad_campaigns SET budget_units=budget_units + ?, status=CASE WHEN status='stopped' THEN 'running' ELSE status END, updated_at=? WHERE id=?",
+                (units, now, int(target["campaign_id"])),
+            )
+            await db.execute(
+                "INSERT INTO ad_budget_payments(campaign_id, user_id, purchase_id, amount_stars, created_at) VALUES(?, ?, ?, ?, ?)",
+                (int(target["campaign_id"]), int(user_id), purchase_id, amount_stars, now),
+            )
+            await db.commit()
+            return purchase_id
+
+        author_id = target.get("author_id")
+        if author_id is not None and amount_stars > 0:
+            setting_key = "commission_audio" if kind == "audio" else "commission_books"
+            cur_setting = await db.execute("SELECT value FROM settings WHERE key=?", (setting_key,))
+            row_setting = await cur_setting.fetchone()
+            commission_percent = max(0, min(100, int(row_setting["value"] if row_setting else 20)))
+            cur_hold = await db.execute("SELECT value FROM settings WHERE key='hold_days_default'")
+            row_hold = await cur_hold.fetchone()
+            hold_days = max(0, int(row_hold["value"] if row_hold else 14))
+            commission_stars = int(round(amount_stars * commission_percent / 100))
+            net_stars = max(0, amount_stars - commission_stars)
+            available_at = (datetime.now(timezone.utc) + timedelta(days=hold_days)).isoformat()
+            await db.execute(
+                """
+                INSERT INTO author_ledger(author_id, purchase_id, source_type, source_id, gross_stars,
+                                          commission_percent, commission_stars, net_stars, hold_days,
+                                          available_at, status, created_at, updated_at)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'held', ?, ?)
+                """,
+                (int(author_id), purchase_id, kind, int(target["target_id"]), amount_stars, commission_percent,
+                 commission_stars, net_stars, hold_days, available_at, now, now),
+            )
+        if target.get("promo_id"):
+            await db.execute("UPDATE promo_codes SET used_count=used_count + 1, updated_at=? WHERE id=?", (now, int(target["promo_id"])))
+            await db.execute(
+                "INSERT OR IGNORE INTO promo_uses(promo_code_id, user_id, purchase_id, created_at) VALUES(?, ?, ?, ?)",
+                (int(target["promo_id"]), int(user_id), purchase_id, now),
+            )
+        await db.commit()
+        return purchase_id
+
+
+async def create_refund_request(purchase_id: int, user_id: int, reason: str) -> int:
+    """Создаёт возврат только владельцу покупки, в разрешённый срок и без дублей."""
+    reason = (reason or "").strip()
+    if len(reason) < 10:
+        raise ValueError("Опишите причину подробнее")
+    now_dt = datetime.now(timezone.utc)
+    now = now_dt.isoformat()
+    async with connect() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        cur = await db.execute("SELECT * FROM purchases WHERE id=?", (int(purchase_id),))
+        purchase = await cur.fetchone()
+        if not purchase or int(purchase["user_id"]) != int(user_id):
+            raise ValueError("Покупка не найдена")
+        if purchase["status"] != "paid":
+            raise ValueError("Эта покупка уже не доступна для возврата")
+        if str(purchase["purchase_kind"] or "content") != "content":
+            raise ValueError("Для этой операции возврат оформляется через поддержку")
+        created_at = datetime.fromisoformat(str(purchase["created_at"]).replace("Z", "+00:00"))
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        cur = await db.execute("SELECT value FROM settings WHERE key='refund_window_days'")
+        row = await cur.fetchone()
+        window_days = max(0, int(row["value"] if row else 14))
+        if window_days and now_dt > created_at + timedelta(days=window_days):
+            raise ValueError("Срок подачи запроса на возврат истёк")
+        cur = await db.execute(
+            "SELECT id FROM refund_requests WHERE purchase_id=? AND status IN ('new','pending','refunded') ORDER BY id DESC LIMIT 1",
+            (int(purchase_id),),
+        )
+        existing = await cur.fetchone()
+        if existing:
+            raise ValueError("Запрос по этой покупке уже создан")
+        cur = await db.execute(
+            "INSERT INTO refund_requests(purchase_id, user_id, reason, status, created_at, updated_at) VALUES(?, ?, ?, 'new', ?, ?)",
+            (int(purchase_id), int(user_id), reason[:1000], now, now),
+        )
+        await db.commit()
+        return int(cur.lastrowid)
+
+
+async def finalize_refund(refund_id: int, handled_by_user_id: int | None, note: str = "Возврат Stars выполнен") -> bool:
+    """После успешного ответа Telegram атомарно закрывает доступ и корректирует доход автора."""
+    now = utc_now()
+    async with connect() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        cur = await db.execute(
+            """
+            SELECT rr.status AS refund_status, rr.purchase_id, p.status AS purchase_status
+            FROM refund_requests rr JOIN purchases p ON p.id=rr.purchase_id WHERE rr.id=?
+            """,
+            (int(refund_id),),
+        )
+        row = await cur.fetchone()
+        if not row:
+            return False
+        if row["refund_status"] == "refunded" and row["purchase_status"] == "refunded":
+            await db.commit()
+            return True
+        if row["refund_status"] not in {"new", "pending"} or row["purchase_status"] != "paid":
+            return False
+        await db.execute("UPDATE purchases SET status='refunded' WHERE id=?", (int(row["purchase_id"]),))
+        await db.execute(
+            "UPDATE author_ledger SET status='refunded', updated_at=? WHERE purchase_id=?",
+            (now, int(row["purchase_id"])),
+        )
+        await db.execute(
+            "UPDATE refund_requests SET status='refunded', handled_by_user_id=?, moderator_note=?, updated_at=? WHERE id=?",
+            (handled_by_user_id, note[:1000], now, int(refund_id)),
+        )
+        await db.commit()
+        return True
+
+
+async def reject_refund_request(refund_id: int, handled_by_user_id: int | None, note: str = "Возврат отклонён") -> bool:
+    now = utc_now()
+    async with connect() as db:
+        cur = await db.execute(
+            "UPDATE refund_requests SET status='rejected', handled_by_user_id=?, moderator_note=?, updated_at=? WHERE id=? AND status IN ('new','pending')",
+            (handled_by_user_id, note[:1000], now, int(refund_id)),
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def create_author_payout_request(author_user_id: int) -> int:
+    author = await _author_by_user_id(author_user_id)
+    if not author:
+        raise ValueError("Сначала зарегистрируйтесь как автор")
+    author_id = int(author["id"])
+    method = await get_author_payout_method(author_user_id)
+    if not method:
+        raise ValueError("Сначала укажите реквизиты для выплаты")
+    if await is_author_payout_frozen(author_id):
+        raise ValueError("Выплаты автора заморожены до проверки")
+    min_stars = int(await get_setting("payout_min_stars", "100") or 100)
+    now = utc_now()
+    async with connect() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        await _release_ready_author_ledger(db, author_id)
+        cur = await db.execute(
+            "SELECT COUNT(*) AS cnt FROM author_payout_requests WHERE author_id=? AND status IN ('new','approved','frozen')",
+            (author_id,),
+        )
+        existing = await cur.fetchone()
+        if int(existing["cnt"] or 0) > 0:
+            raise ValueError("У вас уже есть активная заявка на выплату")
+        cur = await db.execute("SELECT COALESCE(SUM(net_stars), 0) AS amount FROM author_ledger WHERE author_id=? AND status='available'", (author_id,))
+        row = await cur.fetchone()
+        amount = int(row["amount"] or 0)
+        if amount < min_stars:
+            raise ValueError(f"Минимальная сумма вывода: {min_stars} Stars")
+        cur = await db.execute(
+            """
+            INSERT INTO author_payout_requests(author_id, author_user_id, amount_stars, method_type, payout_details,
+                                               status, requested_at, created_at, updated_at)
+            VALUES(?, ?, ?, ?, ?, 'new', ?, ?, ?)
+            """,
+            (author_id, int(author_user_id), amount, method["method_type"], method["details"], now, now, now),
+        )
+        payout_id = int(cur.lastrowid)
+        await db.execute(
+            "UPDATE author_ledger SET status='payout_requested', payout_request_id=?, updated_at=? WHERE author_id=? AND status='available'",
+            (payout_id, now, author_id),
+        )
+        await db.execute(
+            "INSERT INTO author_payout_logs(payout_request_id, actor_user_id, action, note, created_at) VALUES(?, ?, 'created', ?, ?)",
+            (payout_id, int(author_user_id), f"Заявка на {amount} Stars", now),
+        )
+        await db.commit()
+        return payout_id
+
+
+async def set_payout_request_status(payout_id: int, status: str, actor_user_id: int | None = None, note: str = "") -> bool:
+    allowed = {"new", "approved", "paid", "rejected", "frozen"}
+    if status not in allowed:
+        raise ValueError("Неверный статус выплаты")
+    transitions = {
+        "new": {"approved", "rejected", "frozen"},
+        "approved": {"paid", "rejected", "frozen"},
+        "frozen": {"new", "rejected"},
+        "rejected": set(),
+        "paid": set(),
+    }
+    now = utc_now()
+    async with connect() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        cur = await db.execute("SELECT * FROM author_payout_requests WHERE id=?", (int(payout_id),))
+        req = await cur.fetchone()
+        if not req:
+            return False
+        old = str(req["status"])
+        if old == status:
+            await db.commit()
+            return True
+        if status not in transitions.get(old, set()):
+            return False
+        if status == "paid":
+            cur = await db.execute("SELECT 1 FROM author_payout_freezes WHERE author_id=? AND is_active=1", (int(req["author_id"]),))
+            if await cur.fetchone():
+                return False
+        handled_at = now if status in {"approved", "rejected", "frozen"} else req["handled_at"]
+        paid_at = now if status == "paid" else req["paid_at"]
+        await db.execute(
+            "UPDATE author_payout_requests SET status=?, handled_by_user_id=?, handled_at=?, paid_at=?, note=?, updated_at=? WHERE id=?",
+            (status, actor_user_id, handled_at, paid_at, note[:1200], now, int(payout_id)),
+        )
+        target_ledger_status = {
+            "paid": "paid",
+            "rejected": "available",
+            "frozen": "held",
+            "new": "payout_requested",
+        }.get(status)
+        if target_ledger_status:
+            cur = await db.execute(
+                "UPDATE author_ledger SET status=?, updated_at=? WHERE payout_request_id=?",
+                (target_ledger_status, now, int(payout_id)),
+            )
+            if cur.rowcount == 0:
+                legacy_from = "payout_requested" if status in {"paid", "rejected", "frozen"} else "held"
+                await db.execute(
+                    "UPDATE author_ledger SET status=?, payout_request_id=?, updated_at=? WHERE author_id=? AND status=?",
+                    (target_ledger_status, int(payout_id), now, int(req["author_id"]), legacy_from),
+                )
+        await db.execute(
+            "INSERT INTO author_payout_logs(payout_request_id, actor_user_id, action, note, created_at) VALUES(?, ?, ?, ?, ?)",
+            (int(payout_id), actor_user_id, status, note[:1200], now),
+        )
+        await db.commit()
+        return True
+
+
+async def get_control_queue_counts() -> dict[str, int]:
+    """Сводка очередей без персональных и служебных данных."""
+    async with connect() as db:
+        queries = {
+            "books_review": "SELECT COUNT(*) FROM books WHERE publication_status='review'",
+            "complaints_new": "SELECT COUNT(*) FROM complaints WHERE status='new'",
+            "refunds_new": "SELECT COUNT(*) FROM refund_requests WHERE status='new'",
+            "payouts_new": "SELECT COUNT(*) FROM author_payout_requests WHERE status='new'",
+            "payouts_approved": "SELECT COUNT(*) FROM author_payout_requests WHERE status='approved'",
+            "comments": "SELECT COUNT(*) FROM comments WHERE status='published'",
+            "reviews": "SELECT COUNT(*) FROM reviews WHERE status='published'",
+            "ads_running": "SELECT COUNT(*) FROM ad_campaigns WHERE status='running'",
+        }
+        result: dict[str, int] = {}
+        for key, sql in queries.items():
+            cur = await db.execute(sql)
+            row = await cur.fetchone()
+            result[key] = int(row[0] or 0) if row else 0
+        return result

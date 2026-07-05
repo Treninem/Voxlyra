@@ -54,7 +54,7 @@ def collect_diagnostics() -> list[DiagnosticItem]:
             "port",
             "PORT задан",
             int(settings.PORT) > 0,
-            "На Bothost обычно ставим PORT=8080.",
+            "На Bothost обычно ставим PORT=3000.",
         ),
         DiagnosticItem(
             "webapp_url",

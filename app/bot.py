@@ -8,6 +8,7 @@ from aiogram.client.default import DefaultBotProperties
 from app.config import settings
 from app.db import init_db
 from app.handlers import author, legal, moderation, owner, payments, start
+from app.middleware import BlockedUserMiddleware
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,10 @@ async def run_bot() -> None:
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
     dp = Dispatcher(storage=MemoryStorage())
+    blocked_guard = BlockedUserMiddleware()
+    dp.message.outer_middleware(blocked_guard)
+    dp.callback_query.outer_middleware(blocked_guard)
+    dp.pre_checkout_query.outer_middleware(blocked_guard)
 
     dp.include_router(payments.router)
     dp.include_router(legal.router)

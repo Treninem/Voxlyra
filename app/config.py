@@ -9,13 +9,15 @@ class Settings(BaseSettings):
     OWNER_IDS: str = ""
     DATABASE_PATH: str = "data/voxlyra.sqlite3"
     RUN_WEBAPP: bool = True
-    PORT: int = 8080
+    PORT: int = 3000
     WEBAPP_URL: str = ""
     CHANNEL_ID: str = ""
     BOT_USERNAME: str = ""
     PROJECT_NAME: str = "Вокслира"
     PUBLIC_VERSION_VISIBLE: bool = False
-    PROJECT_VERSION: str = "v1.6.3-clean-text-and-webapp-recovery"
+    PROJECT_VERSION: str = "v1.8.0-cross-flow-stage8"
+    MAX_BOOK_UPLOAD_MB: int = 0
+    MAX_BOOK_UNPACKED_MB: int = 2048
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

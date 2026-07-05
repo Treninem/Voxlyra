@@ -1,0 +1,109 @@
+{% extends "base.html" %}
+{% block title %}Кабинет автора — Вокслира{% endblock %}
+{% block body_class %}author-studio-page{% endblock %}
+{% block content %}
+<section class="hero compact author-hero">
+  <img src="/static/img/bot_avatar.png" alt="Вокслира" class="logo">
+  <div>
+    <span class="eyebrow">Творческая студия</span>
+    <h1>Кабинет автора</h1>
+    <p>Книги, главы, импорт и публикация — в одном месте.</p>
+  </div>
+</section>
+
+<section id="authorStudio" class="author-studio">
+  <article class="empty-card premium-empty loading-card" id="authorLoading">
+    <div class="loading-orbit"></div>
+    <h3>Открываем студию</h3>
+    <p>Загружаем ваши книги и главы.</p>
+  </article>
+
+  <div id="authorDashboard" hidden>
+    <section class="author-welcome">
+      <div>
+        <span class="eyebrow">Ваш профиль</span>
+        <h2 id="authorPenName">Автор</h2>
+        <p id="authorSummary" class="muted"></p>
+      </div>
+      <a class="button-link secondary" href="/library">Моя библиотека</a>
+    </section>
+
+    <div class="author-stat-grid" id="authorStats"></div>
+
+    <div class="section-title split-title">
+      <div><span class="eyebrow">Проекты</span><h2>Мои книги</h2><p>Выберите книгу, чтобы изменить её, добавить главы или отправить на проверку.</p></div>
+    </div>
+    <div id="authorBooks" class="author-book-grid"></div>
+
+    <section id="authorBookEditor" class="author-editor" hidden>
+      <div class="section-title split-title">
+        <div><span class="eyebrow">Редактор книги</span><h2 id="editorBookTitle">Книга</h2><p id="editorBookStatus" class="muted"></p></div>
+        <button class="secondary compact-button" id="closeBookEditor" type="button">Закрыть</button>
+      </div>
+
+      <div class="author-editor-grid">
+        <form id="bookEditForm" class="author-form panel-card">
+          <h3>Основные сведения</h3>
+          <label>Название<input id="bookTitleInput" name="title" maxlength="160" required></label>
+          <label>Описание<textarea id="bookDescriptionInput" name="description" rows="7" maxlength="12000"></textarea></label>
+          <div class="form-grid two">
+            <label>Возраст<select id="bookAgeInput"><option>0+</option><option>6+</option><option>12+</option><option>16+</option><option>18+</option></select></label>
+            <label>Состояние<select id="bookWritingInput"><option value="writing">Пишется</option><option value="finished">Завершена</option><option value="frozen">Заморожена</option></select></label>
+          </div>
+          <div class="form-grid two">
+            <label>Продажа<select id="bookPricingInput"><option value="free">Бесплатно</option><option value="chapters">По главам</option><option value="whole_book">Вся книга</option></select></label>
+            <label>Цена, Stars<input id="bookPriceInput" type="number" min="0" max="100000" value="0"></label>
+          </div>
+          <label class="switch-row"><input id="bookDownloadInput" type="checkbox"><span>Разрешить скачивание</span></label>
+          <button class="button-link" type="submit">Сохранить книгу</button>
+          <button class="button-link secondary" id="submitBookReview" type="button">Отправить на проверку</button>
+          <button class="danger-button" id="deleteBookButton" type="button">Удалить книгу</button>
+        </form>
+
+        <div class="panel-card import-panel">
+          <h3>Импорт книги</h3>
+          <p class="muted">Крупные файлы загружаются частями, поэтому ограничение Telegram здесь не мешает.</p>
+          <label class="file-drop" for="bookFileInput">
+            <input id="bookFileInput" type="file" accept=".txt,.docx,.fb2,.epub,.pdf,.zip">
+            <strong>Выбрать TXT, DOCX, FB2, EPUB, PDF или ZIP</strong>
+            <span id="bookFileName">Файл не выбран</span>
+          </label>
+          <div class="form-grid two">
+            <label>Бесплатных глав<input id="importFirstFree" type="number" min="0" max="100000" value="3"></label>
+            <label>Цена остальных<input id="importPrice" type="number" min="0" max="100000" value="3"></label>
+          </div>
+          <button class="button-link" id="startBookUpload" type="button">Загрузить и проверить</button>
+          <div class="upload-progress" id="uploadProgress" hidden><i></i><span>0%</span></div>
+          <div id="importPreview" class="import-preview" hidden></div>
+        </div>
+      </div>
+
+      <section class="chapter-manager panel-card">
+        <div class="section-title split-title slim">
+          <div><h2>Главы</h2><p>Редактирование, цена и безопасное удаление.</p></div>
+          <button class="button-link compact-button" id="newChapterButton" type="button">Добавить главу</button>
+        </div>
+        <form id="chapterForm" class="author-form chapter-form" hidden>
+          <input id="chapterIdInput" type="hidden">
+          <label>Название<input id="chapterTitleInput" maxlength="160" required></label>
+          <label>Текст<textarea id="chapterTextInput" rows="12" required></textarea></label>
+          <label>Цена, Stars<input id="chapterPriceInput" type="number" min="0" max="100000" value="0"></label>
+          <div class="form-actions">
+            <button class="button-link" type="submit">Сохранить главу</button>
+            <button class="button-link secondary" id="cancelChapterEdit" type="button">Отмена</button>
+            <button class="danger-button" id="deleteChapterButton" type="button" hidden>Удалить главу</button>
+          </div>
+        </form>
+        <div id="authorChapters" class="author-chapter-list"></div>
+      </section>
+    </section>
+  </div>
+
+  <article id="authorError" class="empty-card premium-empty" hidden>
+    <div class="empty-icon">✦</div>
+    <h3>Кабинет пока недоступен</h3>
+    <p id="authorErrorText">Откройте этот раздел из Telegram.</p>
+  </article>
+</section>
+{% endblock %}
+{% block scripts %}<script src="/static/js/author.js"></script>{% endblock %}

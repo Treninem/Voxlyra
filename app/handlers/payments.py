@@ -36,6 +36,8 @@ from app.db import (
     list_user_purchases,
     mark_purchase_refunded,
     set_refund_status,
+    finalize_refund,
+    reject_refund_request,
     set_setting,
     upsert_user,
 )
@@ -53,8 +55,29 @@ from app.keyboards import (
     user_purchases_menu,
 )
 from app.services.payments import build_pay_target, describe_purchase_row
+from app.services.notifications import payout_message, refund_message, send_user_notification
 
 router = Router()
+
+
+async def _notify_finance_action(
+    call: CallbackQuery,
+    *,
+    actor_user_id: int,
+    event: str,
+    target_type: str,
+    target_id: int,
+    app_user_id: int | None,
+    telegram_id: int | None,
+    text: str,
+) -> None:
+    result = await send_user_notification(
+        app_user_id=app_user_id,
+        telegram_id=telegram_id,
+        text=text,
+        bot=call.bot,
+    )
+    await add_audit(actor_user_id, f"notification_{result}", target_type, str(target_id), event, result)
 
 
 class RefundRequestState(StatesGroup):
@@ -97,10 +120,7 @@ async def _can_manage_payouts(tg_user_id: int) -> tuple[bool, int | None]:
     user = await get_user_by_telegram_id(tg_user_id)
     if user is None:
         user = await upsert_user(tg_user_id, None, None)
-    if tg_user_id in settings.owner_ids:
-        return True, user["id"]
-    perms = await get_admin_permissions(user["id"])
-    return "payouts" in perms, user["id"]
+    return tg_user_id in settings.owner_ids, user["id"]
 
 
 async def _send_invoice(message_or_call, kind: str, target_id: int, promo_code: str | None = None, amount_stars: int | None = None) -> None:
@@ -356,8 +376,26 @@ async def refund_reject(call: CallbackQuery) -> None:
         await call.answer("Недоступно", show_alert=True)
         return
     refund_id = int(call.data.split(":")[-1])
-    await set_refund_status(refund_id, "rejected", actor_user_id, "Отклонено модерацией")
+    refund = await get_refund_request(refund_id)
+    if not refund or refund["status"] not in {"new", "pending"}:
+        await call.answer("Запрос уже обработан", show_alert=True)
+        return
+    note = "Запрос не прошёл проверку"
+    ok = await reject_refund_request(refund_id, actor_user_id, note)
+    if not ok:
+        await call.answer("Запрос уже обработан", show_alert=True)
+        return
     await add_audit(actor_user_id, "refund_rejected", "refund", str(refund_id))
+    await _notify_finance_action(
+        call,
+        actor_user_id=int(actor_user_id),
+        event="refund_rejected",
+        target_type="refund",
+        target_id=refund_id,
+        app_user_id=int(refund["user_id"]),
+        telegram_id=int(refund["telegram_id"]),
+        text=refund_message("rejected", refund["amount_stars"], note),
+    )
     await call.message.edit_text("Возврат отклонён.", reply_markup=back_to_main())
     await call.answer("Отклонено")
 
@@ -385,9 +423,20 @@ async def refund_approve(call: CallbackQuery) -> None:
         await add_audit(actor_user_id, "refund_failed", "refund", str(refund_id), None, str(exc))
         await call.answer("Telegram не принял возврат. Подробности записаны в журнал.", show_alert=True)
         return
-    await mark_purchase_refunded(int(refund["purchase_id"]))
-    await set_refund_status(refund_id, "refunded", actor_user_id, "Возврат Stars выполнен")
+    if not await finalize_refund(refund_id, actor_user_id, "Возврат Stars выполнен"):
+        await call.answer("Возврат выполнен Telegram, но запись уже была обработана. Проверьте журнал.", show_alert=True)
+        return
     await add_audit(actor_user_id, "refund_approved", "refund", str(refund_id))
+    await _notify_finance_action(
+        call,
+        actor_user_id=int(actor_user_id),
+        event="refund_refunded",
+        target_type="refund",
+        target_id=refund_id,
+        app_user_id=int(refund["user_id"]),
+        telegram_id=int(refund["telegram_id"]),
+        text=refund_message("refunded", refund["amount_stars"]),
+    )
     await call.message.edit_text("Возврат одобрен и отправлен через Telegram Stars.", reply_markup=back_to_main())
     await call.answer("Возвращено")
 
@@ -701,9 +750,24 @@ async def payout_approve(call: CallbackQuery) -> None:
         await call.answer("Недоступно", show_alert=True)
         return
     payout_id = int(call.data.split(":")[-1])
-    ok = await set_payout_request_status(payout_id, "approved", actor_user_id, "Одобрено к ручной выплате")
+    row = await get_payout_request(payout_id)
+    if not row:
+        await call.answer("Заявка не найдена", show_alert=True)
+        return
+    note = "Выплата одобрена"
+    ok = await set_payout_request_status(payout_id, "approved", actor_user_id, note)
     if ok:
         await add_audit(actor_user_id, "payout_approved", "payout", str(payout_id))
+        await _notify_finance_action(
+            call,
+            actor_user_id=int(actor_user_id),
+            event="payout_approved",
+            target_type="payout",
+            target_id=payout_id,
+            app_user_id=int(row["author_user_id"]),
+            telegram_id=int(row["telegram_id"]),
+            text=payout_message("approved", row["amount_stars"], note),
+        )
         await call.message.edit_text("Заявка одобрена. После реального перевода нажмите «Отметить выплачено».", reply_markup=payout_card_menu(payout_id, "approved"))
         await call.answer("Одобрено")
     else:
@@ -717,9 +781,24 @@ async def payout_paid(call: CallbackQuery) -> None:
         await call.answer("Недоступно", show_alert=True)
         return
     payout_id = int(call.data.split(":")[-1])
-    ok = await set_payout_request_status(payout_id, "paid", actor_user_id, "Выплата отмечена как выполненная")
+    row = await get_payout_request(payout_id)
+    if not row:
+        await call.answer("Заявка не найдена", show_alert=True)
+        return
+    note = "Выплата выполнена"
+    ok = await set_payout_request_status(payout_id, "paid", actor_user_id, note)
     if ok:
         await add_audit(actor_user_id, "payout_paid", "payout", str(payout_id))
+        await _notify_finance_action(
+            call,
+            actor_user_id=int(actor_user_id),
+            event="payout_paid",
+            target_type="payout",
+            target_id=payout_id,
+            app_user_id=int(row["author_user_id"]),
+            telegram_id=int(row["telegram_id"]),
+            text=payout_message("paid", row["amount_stars"], note),
+        )
         await call.message.edit_text("Заявка отмечена как выплаченная. Деньги автора перенесены в статус «выплачено».", reply_markup=finance_owner_menu())
         await call.answer("Выплачено")
     else:
@@ -733,9 +812,24 @@ async def payout_reject(call: CallbackQuery) -> None:
         await call.answer("Недоступно", show_alert=True)
         return
     payout_id = int(call.data.split(":")[-1])
-    ok = await set_payout_request_status(payout_id, "rejected", actor_user_id, "Отклонено администрацией")
+    row = await get_payout_request(payout_id)
+    if not row:
+        await call.answer("Заявка не найдена", show_alert=True)
+        return
+    note = "Выплата не прошла проверку"
+    ok = await set_payout_request_status(payout_id, "rejected", actor_user_id, note)
     if ok:
         await add_audit(actor_user_id, "payout_rejected", "payout", str(payout_id))
+        await _notify_finance_action(
+            call,
+            actor_user_id=int(actor_user_id),
+            event="payout_rejected",
+            target_type="payout",
+            target_id=payout_id,
+            app_user_id=int(row["author_user_id"]),
+            telegram_id=int(row["telegram_id"]),
+            text=payout_message("rejected", row["amount_stars"], note),
+        )
         await call.message.edit_text("Заявка отклонена. Сумма возвращена в доступный баланс автора.", reply_markup=finance_owner_menu())
         await call.answer("Отклонено")
     else:
@@ -753,10 +847,21 @@ async def payout_freeze(call: CallbackQuery) -> None:
     if not row:
         await call.answer("Заявка не найдена", show_alert=True)
         return
-    await set_author_payout_frozen(int(row["author_id"]), True, "Заморожено по заявке на выплату", actor_user_id)
-    ok = await set_payout_request_status(payout_id, "frozen", actor_user_id, "Выплаты заморожены до проверки")
+    note = "Выплата приостановлена до дополнительной проверки"
+    ok = await set_payout_request_status(payout_id, "frozen", actor_user_id, note)
     if ok:
+        await set_author_payout_frozen(int(row["author_id"]), True, note, actor_user_id)
         await add_audit(actor_user_id, "payout_frozen", "payout", str(payout_id))
+        await _notify_finance_action(
+            call,
+            actor_user_id=int(actor_user_id),
+            event="payout_frozen",
+            target_type="payout",
+            target_id=payout_id,
+            app_user_id=int(row["author_user_id"]),
+            telegram_id=int(row["telegram_id"]),
+            text=payout_message("frozen", row["amount_stars"], note),
+        )
         await call.message.edit_text("Выплаты автора заморожены до проверки. Заявка переведена в статус заморозки.", reply_markup=finance_owner_menu())
         await call.answer("Заморожено")
     else:
@@ -775,7 +880,7 @@ async def payout_settings(call: CallbackQuery) -> None:
         f"Минимальная сумма вывода: <b>{data['payout_min_stars']} Stars</b>\n"
         f"Основной способ: <b>{data['payout_default_method']}</b>\n"
         f"Ручная проверка: <b>{'да' if data['payout_manual_review'] != '0' else 'нет'}</b>\n\n"
-        "Срок удержания и резерв на споры меняются здесь же. Эти настройки видит только владелец и люди с правом выплат.",
+        "Срок удержания и резерв на споры меняются здесь же. Эти настройки видит только владелец платформы.",
         reply_markup=payout_settings_menu(),
     )
     await call.answer()

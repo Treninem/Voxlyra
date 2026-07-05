@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}Моя библиотека — Вокслира{% endblock %}
+{% block content %}
+<section class="hero compact library-hero"><img src="/static/img/bot_avatar.png" alt="Вокслира" class="logo"><div><span class="eyebrow">Личная полка</span><h1>Моё</h1><p>Продолжение чтения, любимые книги, аудио и покупки.</p></div></section>
+<a class="author-studio-entry" id="authorStudioEntry" href="/author" hidden><span>✦</span><div><b>Кабинет автора</b><small>Книги, главы, импорт и публикация</small></div><i>›</i></a>
+<a class="author-studio-entry control-center-entry" id="controlCenterEntry" href="/control" hidden><span>◆</span><div><b>Центр управления</b><small id="controlCenterHint">Модерация и рабочие очереди</small></div><i>›</i></a>
+<section class="library-panel" id="libraryPage">
+  <div class="library-tabs"><button class="active" data-library-tab="continue">Продолжить</button><button data-library-tab="saved">Сохранённое</button><button data-library-tab="purchases">Покупки</button></div>
+  <div id="libraryContent"><article class="empty-card premium-empty loading-card"><div class="loading-orbit"></div><h3>Собираем вашу полку</h3><p>Это займёт всего мгновение.</p></article></div>
+</section>
+{% endblock %}
