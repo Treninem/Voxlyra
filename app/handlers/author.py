@@ -88,6 +88,7 @@ from app.keyboards import (
 from app.services.book_parser import BookParseError, build_import_report, parse_book_file, split_plain_text_to_chapters
 from app.services.import_store import delete_import_preview, load_import_preview, save_import_preview
 from app.services.notifications import discount_message, new_audio_message, new_chapter_message, notify_book_followers
+from app.services.cover_storage import download_book_cover
 from app.services.audio_tools import AudioImportError, build_audio_import_report, extract_audio_zip, format_duration, inspect_audio_file
 from app.services.pricing import recommend_book_price
 from app.catalog_options import BOOK_TYPES, LANGUAGES, GENRES, TROPES, AUDIENCES, CONTENT_WARNINGS, AD_PLACEMENTS, PROMO_DISCOUNTS, label_for, labels_for
@@ -638,7 +639,7 @@ async def _show_book_confirm(message: Message, state: FSMContext) -> None:
 
 
 @router.callback_query(AddBook.confirm, F.data.startswith("book:confirm:"))
-async def add_book_confirm(call: CallbackQuery, state: FSMContext) -> None:
+async def add_book_confirm(call: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     if call.data.endswith(":no"):
         await state.clear()
         await call.message.edit_text("Добавление книги отменено.", reply_markup=author_menu(True))
@@ -674,6 +675,12 @@ async def add_book_confirm(call: CallbackQuery, state: FSMContext) -> None:
     }
     for group, codes in option_payload.items():
         await set_book_options(book_id, group, codes)
+    cover_file_id = data.get("cover_file_id")
+    if cover_file_id:
+        try:
+            await download_book_cover(bot, book_id, str(cover_file_id))
+        except Exception:
+            logger.exception("Could not save cover for newly created book_id=%s", book_id)
     await add_audit(user["id"], "book_created", "book", str(book_id), None, data["title"])
     await state.clear()
     await call.message.edit_text(

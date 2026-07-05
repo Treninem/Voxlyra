@@ -9,6 +9,7 @@ from app.config import settings
 from app.db import init_db
 from app.handlers import author, legal, moderation, owner, payments, start
 from app.middleware import BlockedUserMiddleware
+from app.services.cover_storage import restore_missing_book_covers
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,9 @@ async def run_bot() -> None:
     dp.include_router(moderation.router)
 
     await bot.delete_webhook(drop_pending_updates=False)
+    restored_covers, failed_covers = await restore_missing_book_covers(bot)
+    if restored_covers or failed_covers:
+        logger.info("Cover recovery completed: restored=%s failed=%s", restored_covers, failed_covers)
     logger.info("Bot started")
     try:
         await dp.start_polling(bot)

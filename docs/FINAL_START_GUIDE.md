@@ -47,7 +47,7 @@ CHANNEL_ID=@voxlyra_news
 2. Создайте новый репозиторий.
 3. Название можно поставить `voxlyra_bot`.
 4. Репозиторий можно сделать private.
-5. Распакуйте архив `voxlyra_bot_v1.8.0_cross_flow_stage8.zip`.
+5. Распакуйте архив `voxlyra_bot_v1.8.2_cover_fix.zip`.
 6. Загрузите содержимое папки `voxlyra_bot` в репозиторий.
 7. Не загружайте `.env`, если создавали его у себя локально.
 8. Файл `.env.example` можно загружать.
@@ -85,7 +85,7 @@ CHANNEL_ID=@username_канала
 BOT_USERNAME=username_бота_без_@
 PROJECT_NAME=Вокслира
 PUBLIC_VERSION_VISIBLE=false
-PROJECT_VERSION=v1.8.0-cross-flow-stage8
+PROJECT_VERSION=v1.8.2-cover-fix
 ```
 
 ## 7. Где взять WEBAPP_URL

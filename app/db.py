@@ -846,6 +846,35 @@ async def create_book(author_id: int, title: str, description: str, age_limit: s
         return int(cur.lastrowid)
 
 
+async def update_book_cover_path(book_id: int, cover_path: str | None) -> bool:
+    now = utc_now()
+    async with connect() as db:
+        cur = await db.execute(
+            "UPDATE books SET cover_path=?, updated_at=? WHERE id=?",
+            (cover_path, now, int(book_id)),
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def list_books_missing_cover_files(limit: int = 500) -> list[aiosqlite.Row]:
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT id, cover_file_id, cover_path
+            FROM books
+            WHERE cover_file_id IS NOT NULL
+              AND TRIM(cover_file_id) <> ''
+              AND (cover_path IS NULL OR TRIM(cover_path) = '')
+              AND publication_status <> 'deleted'
+            ORDER BY id ASC
+            LIMIT ?
+            """,
+            (max(1, int(limit)),),
+        )
+        return await cur.fetchall()
+
+
 async def list_books_for_author(author_user_id: int) -> list[aiosqlite.Row]:
     async with connect() as db:
         cur = await db.execute(
