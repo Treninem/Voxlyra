@@ -51,6 +51,8 @@ from app.db import (
     set_chapter_status,
     set_audio_chapter_status,
     upsert_imported_chapters,
+    update_book_import_fingerprint,
+    set_book_duplicate_override,
     upsert_user,
 )
 from app.keyboards import (
@@ -84,11 +86,14 @@ from app.keyboards import (
     multi_select_menu,
     skip_back_menu,
     skip_use_menu,
+    navigation_menu,
 )
 from app.services.book_parser import BookParseError, build_import_report, parse_book_file, split_plain_text_to_chapters
+from app.services.duplicate_books import duplicate_warning_text, find_book_duplicates, sha256_file
 from app.services.import_store import delete_import_preview, load_import_preview, save_import_preview
 from app.services.notifications import discount_message, new_audio_message, new_chapter_message, notify_book_followers
 from app.services.cover_storage import download_book_cover
+from app.services.publication import finish_book_content_workflow, publish_book_and_channel
 from app.services.audio_tools import AudioImportError, build_audio_import_report, extract_audio_zip, format_duration, inspect_audio_file
 from app.services.pricing import recommend_book_price
 from app.catalog_options import BOOK_TYPES, LANGUAGES, GENRES, TROPES, AUDIENCES, CONTENT_WARNINGS, AD_PLACEMENTS, PROMO_DISCOUNTS, label_for, labels_for
@@ -99,14 +104,15 @@ router = Router()
 
 
 def _large_book_upload_markup(book_id: int):
-    web_url = settings.WEBAPP_URL.strip().rstrip("/")
-    if not web_url:
-        return None
     builder = InlineKeyboardBuilder()
-    builder.button(
-        text="📤 Загрузить крупный файл",
-        web_app=WebAppInfo(url=f"{web_url}/author?book_id={int(book_id)}"),
-    )
+    web_url = settings.WEBAPP_URL.strip().rstrip("/")
+    if web_url:
+        builder.button(
+            text="📤 Загрузить крупный файл",
+            web_app=WebAppInfo(url=f"{web_url}/author?book_id={int(book_id)}&upload=1"),
+        )
+        builder.button(text="🔄 Проверить результат", callback_data=f"chapter:upload_status:{int(book_id)}")
+    builder.button(text="⬅️ К книге", callback_data=f"author:book:{int(book_id)}")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -145,6 +151,7 @@ class AddChapterManual(StatesGroup):
 class ImportChapters(StatesGroup):
     waiting_file = State()
     confirm = State()
+    duplicate_confirm = State()
 
 
 class AddAudioChapter(StatesGroup):
@@ -289,6 +296,29 @@ async def author_menu_handler(call: CallbackQuery) -> None:
     await call.answer()
 
 
+@router.callback_query(F.data == "author:cancel_flow")
+async def author_cancel_flow(call: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    book_id = int(data.get("book_id") or 0)
+    await state.clear()
+    if book_id:
+        book = await get_book(book_id)
+        if book:
+            await call.message.edit_text(
+                "Действие отменено. Данные не изменены.",
+                reply_markup=author_book_card_menu(book_id, book["publication_status"]),
+            )
+            await call.answer("Отменено")
+            return
+    user = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
+    profile = await get_author_profile(user["id"])
+    await call.message.edit_text(
+        "Действие отменено. Вы вернулись в кабинет автора.",
+        reply_markup=author_menu(bool(profile)),
+    )
+    await call.answer("Отменено")
+
+
 @router.callback_query(F.data == "author:register")
 async def author_register_start(call: CallbackQuery, state: FSMContext) -> None:
     user = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
@@ -298,7 +328,7 @@ async def author_register_start(call: CallbackQuery, state: FSMContext) -> None:
         await call.answer()
         return
     await state.set_state(AuthorRegister.pen_name)
-    await call.message.edit_text("Введите ваш основной псевдоним автора. Это обязательное поле.")
+    await call.message.edit_text("Введите ваш основной псевдоним автора. Это обязательное поле.", reply_markup=navigation_menu(cancel_callback="author:cancel_flow"))
     await call.answer()
 
 
@@ -306,11 +336,11 @@ async def author_register_start(call: CallbackQuery, state: FSMContext) -> None:
 async def author_pen_name(message: Message, state: FSMContext) -> None:
     pen_name = message.text.strip() if message.text else ""
     if len(pen_name) < 2:
-        await message.answer("Псевдоним слишком короткий. Введите от 2 символов.")
+        await message.answer("Псевдоним слишком короткий. Введите от 2 символов.", reply_markup=navigation_menu(cancel_callback="author:cancel_flow"))
         return
     await state.update_data(pen_name=pen_name[:80])
     await state.set_state(AuthorRegister.bio)
-    await message.answer("Введите короткое описание автора или нажмите «Пропустить». Его можно добавить позже.", reply_markup=skip_back_menu("author:skip:bio"))
+    await message.answer("Введите короткое описание автора или нажмите «Пропустить». Его можно добавить позже.", reply_markup=skip_back_menu("author:skip:bio", cancel_callback="author:cancel_flow"))
 
 
 @router.message(AuthorRegister.bio)
@@ -318,14 +348,14 @@ async def author_bio(message: Message, state: FSMContext) -> None:
     bio = message.text.strip() if message.text else ""
     await state.update_data(bio=bio[:1000])
     await state.set_state(AuthorRegister.country)
-    await message.answer("Укажите страну или нажмите «Пропустить». Это можно заполнить позже в профиле автора.", reply_markup=skip_back_menu("author:skip:country"))
+    await message.answer("Укажите страну или нажмите «Пропустить». Это можно заполнить позже в профиле автора.", reply_markup=skip_back_menu("author:skip:country", cancel_callback="author:cancel_flow"))
 
 
 @router.callback_query(AuthorRegister.bio, F.data == "author:skip:bio")
 async def author_bio_skip(call: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(bio="")
     await state.set_state(AuthorRegister.country)
-    await call.message.edit_text("Описание пропущено. Укажите страну или нажмите «Пропустить».", reply_markup=skip_back_menu("author:skip:country"))
+    await call.message.edit_text("Описание пропущено. Укажите страну или нажмите «Пропустить».", reply_markup=skip_back_menu("author:skip:country", cancel_callback="author:cancel_flow"))
     await call.answer("Пропущено")
 
 
@@ -337,6 +367,7 @@ async def author_country(message: Message, state: FSMContext) -> None:
     kb = InlineKeyboardBuilder()
     kb.button(text="Да, мне есть 18", callback_data="author:adult:yes")
     kb.button(text="Нет", callback_data="author:adult:no")
+    kb.button(text="❌ Отмена", callback_data="author:cancel_flow")
     kb.adjust(1)
     await message.answer("Подтвердите возраст автора.", reply_markup=kb.as_markup())
 
@@ -348,6 +379,7 @@ async def author_country_skip(call: CallbackQuery, state: FSMContext) -> None:
     kb = InlineKeyboardBuilder()
     kb.button(text="Да, мне есть 18", callback_data="author:adult:yes")
     kb.button(text="Нет", callback_data="author:adult:no")
+    kb.button(text="❌ Отмена", callback_data="author:cancel_flow")
     kb.adjust(1)
     await call.message.edit_text("Страна пропущена. Подтвердите возраст автора.", reply_markup=kb.as_markup())
     await call.answer("Пропущено")
@@ -387,7 +419,7 @@ async def add_book_start(call: CallbackQuery, state: FSMContext) -> None:
         await call.answer()
         return
     await state.set_state(AddBook.title)
-    await call.message.edit_text("Введите название книги.")
+    await call.message.edit_text("Введите название книги.", reply_markup=navigation_menu(cancel_callback="author:cancel_flow"))
     await call.answer()
 
 
@@ -395,11 +427,49 @@ async def add_book_start(call: CallbackQuery, state: FSMContext) -> None:
 async def add_book_title(message: Message, state: FSMContext) -> None:
     title = (message.text or "").strip()
     if len(title) < 2:
-        await message.answer("Название слишком короткое. Введите нормальное название книги.")
+        await message.answer("Название слишком короткое. Введите нормальное название книги.", reply_markup=navigation_menu(cancel_callback="author:cancel_flow"))
         return
-    await state.update_data(title=title[:160])
+    user = await upsert_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
+    profile = await get_author_profile(user["id"])
+    matches = await find_book_duplicates(
+        title=title[:160],
+        author_id=int(profile["id"]) if profile else None,
+    )
+    if matches:
+        await state.update_data(pending_title=title[:160], duplicate_title_ack=False)
+        kb = InlineKeyboardBuilder()
+        kb.button(text="✅ Это другая книга", callback_data="book:duplicate_title:continue")
+        kb.button(text="✏️ Изменить название", callback_data="book:duplicate_title:change")
+        kb.button(text="❌ Отмена", callback_data="author:cancel_flow")
+        kb.adjust(1)
+        await message.answer(duplicate_warning_text(matches), reply_markup=kb.as_markup())
+        return
+    await state.update_data(title=title[:160], duplicate_title_ack=False)
     await state.set_state(AddBook.description)
-    await message.answer("Введите описание книги или нажмите «Пропустить». Описание можно добавить/изменить позже в карточке книги.", reply_markup=skip_back_menu("book:skip:description"))
+    await message.answer("Введите описание книги или нажмите «Пропустить». Описание можно добавить/изменить позже в карточке книги.", reply_markup=skip_back_menu("book:skip:description", cancel_callback="author:cancel_flow"))
+
+
+@router.callback_query(AddBook.title, F.data == "book:duplicate_title:continue")
+async def add_book_duplicate_title_continue(call: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    title = str(data.get("pending_title") or "").strip()
+    if not title:
+        await call.answer("Введите название заново", show_alert=True)
+        return
+    await state.update_data(title=title, duplicate_title_ack=True)
+    await state.set_state(AddBook.description)
+    await call.message.edit_text(
+        "Совпадение отмечено. Введите описание книги или нажмите «Пропустить».",
+        reply_markup=skip_back_menu("book:skip:description"),
+    )
+    await call.answer("Продолжаем")
+
+
+@router.callback_query(AddBook.title, F.data == "book:duplicate_title:change")
+async def add_book_duplicate_title_change(call: CallbackQuery, state: FSMContext) -> None:
+    await state.update_data(pending_title="", duplicate_title_ack=False)
+    await call.message.edit_text("Введите другое название книги.", reply_markup=navigation_menu(cancel_callback="author:cancel_flow"))
+    await call.answer()
 
 
 @router.message(AddBook.description)
@@ -409,7 +479,7 @@ async def add_book_description(message: Message, state: FSMContext) -> None:
     await state.set_state(AddBook.book_type)
     await message.answer(
         "Выберите тип книги.",
-        reply_markup=single_select_menu("type", BOOK_TYPES),
+        reply_markup=single_select_menu("type", BOOK_TYPES, cancel_callback="author:cancel_flow"),
     )
 
 
@@ -419,7 +489,7 @@ async def add_book_description_skip(call: CallbackQuery, state: FSMContext) -> N
     await state.set_state(AddBook.book_type)
     await call.message.edit_text(
         "Описание пропущено. Выберите тип книги.",
-        reply_markup=single_select_menu("type", BOOK_TYPES),
+        reply_markup=single_select_menu("type", BOOK_TYPES, cancel_callback="author:cancel_flow"),
     )
     await call.answer("Пропущено")
 
@@ -429,7 +499,7 @@ async def add_book_type(call: CallbackQuery, state: FSMContext) -> None:
     code = call.data.split(":")[-1]
     await state.update_data(book_type=[code])
     await state.set_state(AddBook.language)
-    await call.message.edit_text("Выберите язык книги.", reply_markup=single_select_menu("lang", LANGUAGES))
+    await call.message.edit_text("Выберите язык книги.", reply_markup=single_select_menu("lang", LANGUAGES, cancel_callback="author:cancel_flow"))
     await call.answer()
 
 
@@ -438,7 +508,7 @@ async def add_book_language(call: CallbackQuery, state: FSMContext) -> None:
     code = call.data.split(":")[-1]
     await state.update_data(language=[code], selected_g=[], selected_t=[], selected_a=[], selected_c=[])
     await state.set_state(AddBook.genres)
-    await call.message.edit_text("Выберите жанры. Можно отметить несколько вариантов.", reply_markup=multi_select_menu("g", GENRES, set(), page=0))
+    await call.message.edit_text("Выберите жанры. Можно отметить несколько вариантов.", reply_markup=multi_select_menu("g", GENRES, set(), page=0, cancel_callback="author:cancel_flow"))
     await call.answer()
 
 
@@ -457,13 +527,13 @@ async def _handle_multiselect(call: CallbackQuery, state: FSMContext, *, prefix:
         else:
             selected.add(code)
         await state.update_data(**{state_key: list(selected)})
-        await call.message.edit_reply_markup(reply_markup=multi_select_menu(prefix, choices, selected, page=page))
+        await call.message.edit_reply_markup(reply_markup=multi_select_menu(prefix, choices, selected, page=page, cancel_callback="author:cancel_flow"))
         await call.answer("Выбор обновлён")
         return
     if action == "p" and len(parts) >= 4:
         page = int(parts[3])
         await state.update_data(**{page_key: page})
-        await call.message.edit_reply_markup(reply_markup=multi_select_menu(prefix, choices, selected, page=page))
+        await call.message.edit_reply_markup(reply_markup=multi_select_menu(prefix, choices, selected, page=page, cancel_callback="author:cancel_flow"))
         await call.answer()
         return
     if action == "d":
@@ -482,7 +552,7 @@ async def add_book_genres(call: CallbackQuery, state: FSMContext) -> None:
     await _handle_multiselect(call, state, prefix="g", choices=GENRES, state_key="selected_g",
                               next_state=AddBook.tropes,
                               next_text="Выберите сюжетные теги и особенности. Это нужно для рекомендаций и рекламы похожих книг.",
-                              next_markup=multi_select_menu("t", TROPES, set(), page=0), min_required=1)
+                              next_markup=multi_select_menu("t", TROPES, set(), page=0, cancel_callback="author:cancel_flow"), min_required=1)
 
 
 @router.callback_query(AddBook.tropes, F.data.startswith("sel:t:"))
@@ -490,7 +560,7 @@ async def add_book_tropes(call: CallbackQuery, state: FSMContext) -> None:
     await _handle_multiselect(call, state, prefix="t", choices=TROPES, state_key="selected_t",
                               next_state=AddBook.audience,
                               next_text="Выберите, кому книга больше подходит. Можно отметить несколько вариантов.",
-                              next_markup=multi_select_menu("a", AUDIENCES, set(), page=0), min_required=0)
+                              next_markup=multi_select_menu("a", AUDIENCES, set(), page=0, cancel_callback="author:cancel_flow"), min_required=0)
 
 
 @router.callback_query(AddBook.audience, F.data.startswith("sel:a:"))
@@ -498,7 +568,7 @@ async def add_book_audience(call: CallbackQuery, state: FSMContext) -> None:
     await _handle_multiselect(call, state, prefix="a", choices=AUDIENCES, state_key="selected_a",
                               next_state=AddBook.content_warnings,
                               next_text="Выберите предупреждения по содержанию. Если ничего особого нет, просто нажмите «Готово».",
-                              next_markup=multi_select_menu("c", CONTENT_WARNINGS, set(), page=0), min_required=0)
+                              next_markup=multi_select_menu("c", CONTENT_WARNINGS, set(), page=0, cancel_callback="author:cancel_flow"), min_required=0)
 
 
 @router.callback_query(AddBook.content_warnings, F.data.startswith("sel:c:"))
@@ -506,7 +576,7 @@ async def add_book_content_warnings(call: CallbackQuery, state: FSMContext) -> N
     await _handle_multiselect(call, state, prefix="c", choices=CONTENT_WARNINGS, state_key="selected_c",
                               next_state=AddBook.age_limit,
                               next_text="Выберите возрастное ограничение.",
-                              next_markup=age_menu("book:age"), min_required=0)
+                              next_markup=age_menu("book:age", cancel_callback="author:cancel_flow"), min_required=0)
 
 
 @router.callback_query(AddBook.age_limit, F.data.startswith("book:age:"))
@@ -514,7 +584,7 @@ async def add_book_age(call: CallbackQuery, state: FSMContext) -> None:
     age = call.data.split(":")[-1]
     await state.update_data(age_limit=age)
     await state.set_state(AddBook.writing_status)
-    await call.message.edit_text("Выберите статус книги.", reply_markup=writing_status_menu())
+    await call.message.edit_text("Выберите статус книги.", reply_markup=writing_status_menu(cancel_callback="author:cancel_flow"))
     await call.answer()
 
 
@@ -526,7 +596,7 @@ async def add_book_status(call: CallbackQuery, state: FSMContext) -> None:
     await call.message.edit_text(
         "Разрешить скачивание книги после покупки или бесплатного доступа?\n\n"
         "Если запретить, читать можно будет только внутри платформы.",
-        reply_markup=yes_no_menu("book:download"),
+        reply_markup=yes_no_menu("book:download", cancel_callback="author:cancel_flow"),
     )
     await call.answer()
 
@@ -536,7 +606,7 @@ async def add_book_download(call: CallbackQuery, state: FSMContext) -> None:
     allow = call.data.endswith(":yes")
     await state.update_data(allow_download=allow)
     await state.set_state(AddBook.pricing_type)
-    await call.message.edit_text("Выберите способ продажи.", reply_markup=pricing_menu())
+    await call.message.edit_text("Выберите способ продажи.", reply_markup=pricing_menu(cancel_callback="author:cancel_flow"))
     await call.answer()
 
 
@@ -552,14 +622,14 @@ async def add_book_pricing(call: CallbackQuery, state: FSMContext) -> None:
         await call.message.edit_text(
             "Книга будет бесплатной.\n\n"
             "Теперь загрузите обложку изображением или нажмите «Пропустить».",
-            reply_markup=cover_menu(),
+            reply_markup=cover_menu(cancel_callback="author:cancel_flow"),
         )
     else:
         await state.set_state(AddBook.price)
         await call.message.edit_text(
             f"Рекомендуемая цена: <b>{recommended} Stars</b>.\n\n"
             "Введите свою цену числом в Stars или используйте рекомендованную цену.",
-            reply_markup=skip_use_menu("book:price:free", "book:price:recommended", "✅ Поставить рекомендованную цену"),
+            reply_markup=skip_use_menu("book:price:free", "book:price:recommended", "✅ Поставить рекомендованную цену", cancel_callback="author:cancel_flow"),
         )
     await call.answer()
 
@@ -569,7 +639,7 @@ async def add_book_price_recommended(call: CallbackQuery, state: FSMContext) -> 
     data = await state.get_data()
     await state.update_data(price_stars=int(data.get("recommended_price", 0)))
     await state.set_state(AddBook.cover)
-    await call.message.edit_text("Цена сохранена. Загрузите обложку изображением или нажмите «Пропустить».", reply_markup=cover_menu())
+    await call.message.edit_text("Цена сохранена. Загрузите обложку изображением или нажмите «Пропустить».", reply_markup=cover_menu(cancel_callback="author:cancel_flow"))
     await call.answer("Сохранено")
 
 
@@ -577,7 +647,7 @@ async def add_book_price_recommended(call: CallbackQuery, state: FSMContext) -> 
 async def add_book_price_free(call: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(price_stars=0)
     await state.set_state(AddBook.cover)
-    await call.message.edit_text("Цена пропущена: книга будет бесплатной. Загрузите обложку или нажмите «Пропустить».", reply_markup=cover_menu())
+    await call.message.edit_text("Цена пропущена: книга будет бесплатной. Загрузите обложку или нажмите «Пропустить».", reply_markup=cover_menu(cancel_callback="author:cancel_flow"))
     await call.answer("Пропущено")
 
 
@@ -585,15 +655,15 @@ async def add_book_price_free(call: CallbackQuery, state: FSMContext) -> None:
 async def add_book_price(message: Message, state: FSMContext) -> None:
     raw = (message.text or "").strip()
     if not raw.isdigit():
-        await message.answer("Введите цену числом. Например: 120")
+        await message.answer("Введите цену числом. Например: 120", reply_markup=navigation_menu(cancel_callback="author:cancel_flow"))
         return
     price = int(raw)
     if price < 0 or price > 100000:
-        await message.answer("Цена выглядит неверно. Введите разумное число Stars.")
+        await message.answer("Цена выглядит неверно. Введите разумное число Stars.", reply_markup=navigation_menu(cancel_callback="author:cancel_flow"))
         return
     await state.update_data(price_stars=price)
     await state.set_state(AddBook.cover)
-    await message.answer("Загрузите обложку изображением или нажмите «Пропустить».", reply_markup=cover_menu())
+    await message.answer("Загрузите обложку изображением или нажмите «Пропустить».", reply_markup=cover_menu(cancel_callback="author:cancel_flow"))
 
 
 @router.message(AddBook.cover, F.photo)
@@ -675,6 +745,8 @@ async def add_book_confirm(call: CallbackQuery, state: FSMContext, bot: Bot) -> 
     }
     for group, codes in option_payload.items():
         await set_book_options(book_id, group, codes)
+    if data.get("duplicate_title_ack"):
+        await set_book_duplicate_override(book_id, True)
     cover_file_id = data.get("cover_file_id")
     if cover_file_id:
         try:
@@ -779,11 +851,11 @@ async def book_edit_price_start(call: CallbackQuery, state: FSMContext) -> None:
 async def book_edit_price_save(message: Message, state: FSMContext) -> None:
     raw = (message.text or "").strip()
     if not raw.isdigit():
-        await message.answer("Введите цену числом. Например: 120")
+        await message.answer("Введите цену числом. Например: 120", reply_markup=navigation_menu(cancel_callback="author:cancel_flow"))
         return
     price = int(raw)
     if price < 0 or price > 100000:
-        await message.answer("Цена выглядит неверно. Введите разумное число Stars.")
+        await message.answer("Цена выглядит неверно. Введите разумное число Stars.", reply_markup=navigation_menu(cancel_callback="author:cancel_flow"))
         return
     data = await state.get_data()
     book_id = int(data["book_id"])
@@ -878,7 +950,7 @@ async def book_edit_age_start(call: CallbackQuery, state: FSMContext) -> None:
         await call.answer("Книга не найдена или недоступна", show_alert=True)
         return
     await state.update_data(book_id=book_id)
-    await call.message.edit_text("Выберите новое возрастное ограничение.", reply_markup=age_menu("book:edit_age_set"))
+    await call.message.edit_text("Выберите новое возрастное ограничение.", reply_markup=age_menu("book:edit_age_set", cancel_callback=f"book:edit_cancel:{book_id}"))
     await call.answer()
 
 
@@ -904,7 +976,7 @@ async def book_edit_status_start(call: CallbackQuery, state: FSMContext) -> None
         await call.answer("Книга не найдена или недоступна", show_alert=True)
         return
     await state.update_data(book_id=book_id)
-    await call.message.edit_text("Выберите состояние книги для читателей.", reply_markup=writing_status_menu())
+    await call.message.edit_text("Выберите состояние книги для читателей.", reply_markup=writing_status_menu(cancel_callback=f"book:edit_cancel:{book_id}"))
     await call.answer()
 
 
@@ -934,7 +1006,7 @@ async def book_edit_download_start(call: CallbackQuery, state: FSMContext) -> No
         await call.answer("Книга не найдена или недоступна", show_alert=True)
         return
     await state.update_data(book_id=book_id)
-    await call.message.edit_text("Разрешить скачивание этой книги?", reply_markup=yes_no_menu("book:edit_download_set"))
+    await call.message.edit_text("Разрешить скачивание этой книги?", reply_markup=yes_no_menu("book:edit_download_set", cancel_callback=f"book:edit_cancel:{book_id}"))
     await call.answer()
 
 
@@ -1005,7 +1077,7 @@ async def chapter_add_manual_start(call: CallbackQuery, state: FSMContext) -> No
         return
     await state.update_data(book_id=book_id)
     await state.set_state(AddChapterManual.title)
-    await call.message.edit_text("Введите название главы или нажмите «Пропустить», чтобы бот поставил номер автоматически.", reply_markup=skip_back_menu("chapter:title:auto"))
+    await call.message.edit_text("Введите название главы или нажмите «Пропустить», чтобы бот поставил номер автоматически.", reply_markup=skip_back_menu("chapter:title:auto", cancel_callback="author:cancel_flow"))
     await call.answer()
 
 
@@ -1016,7 +1088,7 @@ async def chapter_add_manual_title_auto(call: CallbackQuery, state: FSMContext) 
     count = await count_chapters_for_book(book_id)
     await state.update_data(title=f"Глава {count + 1}")
     await state.set_state(AddChapterManual.text)
-    await call.message.edit_text("Название поставлено автоматически. Теперь вставьте текст главы одним сообщением.")
+    await call.message.edit_text("Название поставлено автоматически. Теперь вставьте текст главы одним сообщением.", reply_markup=navigation_menu(cancel_callback="author:cancel_flow"))
     await call.answer("Готово")
 
 
@@ -1028,14 +1100,14 @@ async def chapter_add_manual_title(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(title=title[:160])
     await state.set_state(AddChapterManual.text)
-    await message.answer("Теперь вставьте текст главы одним сообщением.")
+    await message.answer("Теперь вставьте текст главы одним сообщением.", reply_markup=navigation_menu(cancel_callback="author:cancel_flow"))
 
 
 @router.message(AddChapterManual.text)
 async def chapter_add_manual_text(message: Message, state: FSMContext) -> None:
     text = (message.text or "").strip()
     if len(text) < 100:
-        await message.answer("Текст главы слишком короткий. Вставьте полный текст главы.")
+        await message.answer("Текст главы слишком короткий. Вставьте полный текст главы.", reply_markup=navigation_menu(cancel_callback="author:cancel_flow"))
         return
     data = await state.get_data()
     book_id = int(data["book_id"])
@@ -1057,7 +1129,7 @@ async def chapter_add_manual_text(message: Message, state: FSMContext) -> None:
     await message.answer(
         f"Рекомендуемая цена главы: <b>{recommended} Stars</b>.\n\n"
         "Введите цену главы числом, поставьте рекомендованную или сделайте главу бесплатной.",
-        reply_markup=skip_use_menu("chapter:price:free", "chapter:price:recommended", "✅ Поставить рекомендованную цену"),
+        reply_markup=skip_use_menu("chapter:price:free", "chapter:price:recommended", "✅ Поставить рекомендованную цену", cancel_callback="author:cancel_flow"),
     )
 
 
@@ -1101,11 +1173,11 @@ async def chapter_add_manual_price_free(call: CallbackQuery, state: FSMContext) 
 async def chapter_add_manual_price(message: Message, state: FSMContext) -> None:
     raw = (message.text or "").strip()
     if not raw.isdigit():
-        await message.answer("Введите число. Например: 3")
+        await message.answer("Введите число. Например: 3", reply_markup=navigation_menu(cancel_callback="author:cancel_flow"))
         return
     price = int(raw)
     if price > 100000:
-        await message.answer("Цена выглядит слишком большой.")
+        await message.answer("Цена выглядит слишком большой.", reply_markup=navigation_menu(cancel_callback="author:cancel_flow"))
         return
     await _finish_manual_chapter(message, state, price)
 
@@ -1122,10 +1194,56 @@ async def chapter_upload_start(call: CallbackQuery, state: FSMContext) -> None:
     await call.message.edit_text(
         "Загрузите файл книги или архив с главами.\n\n"
         "Поддерживаются: TXT, DOCX, FB2, EPUB, PDF, ZIP.\n"
-        "Крупные файлы удобнее загружать через кабинет автора — там загрузка идёт частями.",
+        "Крупные файлы удобнее загружать через кабинет автора — там загрузка идёт частями.\n\n"
+        "После сохранения вернитесь сюда и нажмите «Проверить результат». Владелец публикует книгу сразу, обычный автор отправляет её на проверку.",
         reply_markup=_large_book_upload_markup(book_id),
     )
     await call.answer()
+
+
+@router.callback_query(F.data.startswith("chapter:upload_status:"))
+async def chapter_upload_status(call: CallbackQuery, state: FSMContext) -> None:
+    book_id = int(call.data.split(":")[-1])
+    ok, user_id = await _author_can_edit_book(call, book_id)
+    if not ok:
+        await call.answer("Книга не найдена или недоступна", show_alert=True)
+        return
+    book = await get_book(book_id)
+    chapters = await count_chapters_for_book(book_id)
+    if chapters < 1:
+        text = (
+            "Файл ещё не сохранён в книгу. В Mini App выберите файл, нажмите «Загрузить и проверить», "
+            "а затем «Сохранить главы»."
+        )
+        await call.message.edit_text(text, reply_markup=_large_book_upload_markup(book_id))
+        await call.answer("Файл ещё не сохранён")
+        return
+
+    # Восстанавливает цепочку, даже если Mini App был закрыт сразу после импорта.
+    workflow = await finish_book_content_workflow(
+        bot=call.bot,
+        book_id=book_id,
+        actor_user_id=int(user_id),
+        actor_telegram_id=int(call.from_user.id),
+        source="telegram_large_upload_status",
+    )
+    book = await get_book(book_id)
+    status = PUBLICATION_RU.get(book["publication_status"], book["publication_status"]) if book else "неизвестно"
+    text = f"В книге сохранено глав: <b>{chapters}</b>. Статус: <b>{status}</b>."
+    if workflow.workflow_status == "published" or (book and book["publication_status"] == "published"):
+        text += "\n\n<b>Книга опубликована и доступна в каталоге.</b>\n" + workflow.channel_message
+    elif workflow.workflow_status == "review" or (book and book["publication_status"] == "review"):
+        text += "\n\nКнига отправлена на проверку. После одобрения она появится в каталоге и канале."
+    elif workflow.workflow_status == "duplicate":
+        text += "\n\nПубликация остановлена: найдена возможная копия книги. Откройте карточку книги и подтвердите, что это другая книга."
+    else:
+        text += "\n\nГлавы сохранены. Откройте карточку книги, чтобы продолжить."
+    await state.clear()
+    await call.message.edit_text(
+        text,
+        reply_markup=author_book_card_menu(book_id, book["publication_status"] if book else "draft"),
+    )
+    await call.answer("Проверено")
 
 
 @router.message(ImportChapters.waiting_file, F.document)
@@ -1175,9 +1293,23 @@ async def chapter_upload_file(message: Message, state: FSMContext, bot: Bot) -> 
         await message.answer("Не удалось обработать файл. Проверьте его целостность или попробуйте другой формат.")
         return
 
+    source_hash = sha256_file(safe_path)
+    book = await get_book(book_id)
+    duplicate_matches = await find_book_duplicates(
+        title=book["title"] if book else original_name,
+        author_id=int(book["author_id"]) if book and book["author_id"] is not None else None,
+        exclude_book_id=book_id,
+        source_file_hash=source_hash,
+    )
     report = build_import_report(chapters)
     preview_path = save_import_preview(chapters)
-    await state.update_data(preview_path=preview_path, original_name=original_name)
+    await state.update_data(
+        preview_path=preview_path,
+        original_name=original_name,
+        source_file_hash=source_hash,
+        duplicate_matches=[item.to_dict() for item in duplicate_matches],
+        duplicate_ack=not bool(duplicate_matches),
+    )
     await state.set_state(ImportChapters.confirm)
 
     preview_lines = []
@@ -1202,14 +1334,20 @@ async def chapter_upload_file(message: Message, state: FSMContext, bot: Bot) -> 
         f"{chr(10).join(preview_lines) if preview_lines else 'нет'}\n\n"
         "<b>Проверка:</b>\n"
         f"{problems}\n\n"
-        "Сохранить эти главы в книгу? Главы с такими же номерами будут обновлены.",
-        reply_markup=chapter_import_confirm_menu(book_id),
+        "Сохранить эти главы в книгу? Главы с такими же номерами будут обновлены."
+        + ("\n\n" + duplicate_warning_text(duplicate_matches) if duplicate_matches else ""),
+        reply_markup=chapter_import_confirm_menu(book_id, duplicate_warning=bool(duplicate_matches)),
     )
 
 
 @router.message(ImportChapters.waiting_file)
-async def chapter_upload_not_file(message: Message) -> None:
-    await message.answer("Нужно отправить файл документом: TXT, DOCX, FB2, EPUB, PDF или ZIP.")
+async def chapter_upload_not_file(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    book_id = int(data.get("book_id") or 0)
+    await message.answer(
+        "Нужно отправить файл документом: TXT, DOCX, FB2, EPUB, PDF или ZIP.",
+        reply_markup=_large_book_upload_markup(book_id) if book_id else navigation_menu(cancel_callback="author:cancel_flow"),
+    )
 
 
 @router.callback_query(ImportChapters.confirm, F.data.startswith("chapter:import_confirm:"))
@@ -1222,6 +1360,23 @@ async def chapter_import_confirm(call: CallbackQuery, state: FSMContext) -> None
         return
     data = await state.get_data()
     chapters = load_import_preview(data.get("preview_path", ""))
+    if data.get("duplicate_matches") and not data.get("duplicate_ack"):
+        await state.set_state(ImportChapters.duplicate_confirm)
+        matches_text = "\n".join(
+            f"• «{item.get('title', 'Книга')}» — {item.get('reason', 'похожа')}"
+            for item in data.get("duplicate_matches", [])[:6]
+        )
+        kb = InlineKeyboardBuilder()
+        kb.button(text="✅ Всё равно сохранить", callback_data=f"chapter:duplicate_continue:{book_id}")
+        kb.button(text="❌ Отменить импорт", callback_data=f"chapter:import_cancel:{book_id}")
+        kb.adjust(1)
+        await call.message.edit_text(
+            "<b>Подтвердите возможную копию</b>\n\n" + matches_text +
+            "\n\nПродолжайте только если это новая редакция или действительно другая книга.",
+            reply_markup=kb.as_markup(),
+        )
+        await call.answer("Нужно подтверждение", show_alert=True)
+        return
     if not chapters:
         await call.answer("Данные импорта не найдены. Загрузите файл заново.", show_alert=True)
         await state.clear()
@@ -1235,16 +1390,53 @@ async def chapter_import_confirm(call: CallbackQuery, state: FSMContext) -> None
     )
     saved = int(import_result["saved"])
     published_ids = [int(item) for item in import_result["published_ids"]]
+    await update_book_import_fingerprint(
+        book_id,
+        filename=str(data.get("original_name") or "book"),
+        source_file_hash=str(data.get("source_file_hash") or ""),
+        duplicate_override=bool(data.get("duplicate_ack")),
+    )
     await add_audit(user_id, "chapters_imported", "book", str(book_id), None, str(saved))
     await _notify_new_chapters(book_id, published_ids, int(user_id), call.bot)
+
+    workflow = await finish_book_content_workflow(
+        bot=call.bot,
+        book_id=book_id,
+        actor_user_id=int(user_id),
+        actor_telegram_id=int(call.from_user.id),
+        source="telegram_file_import",
+    )
+    publication_note = ""
+    reply_markup = author_menu(True) if workflow.workflow_status in {"published", "review"} else author_chapters_menu(book_id)
+    if workflow.workflow_status == "published":
+        publication_note = "\n\n<b>Книга опубликована.</b> Она доступна в каталоге.\n" + workflow.channel_message
+    elif workflow.workflow_status == "review":
+        publication_note = "\n\nКнига автоматически отправлена на проверку. После одобрения она появится в каталоге и канале."
+    elif workflow.workflow_status == "duplicate":
+        publication_note = "\n\nПубликация остановлена из-за возможной копии. Подтвердите совпадение в карточке книги."
+    else:
+        publication_note = "\n\nГлавы сохранены, но автоматическую публикацию выполнить не удалось."
+
     delete_import_preview(data.get("preview_path"))
     await state.clear()
     await call.message.edit_text(
-        f"Главы сохранены: <b>{saved}</b>.\n\n"
-        "Теперь можно отправить книгу на проверку или загрузить ещё главы.",
-        reply_markup=author_chapters_menu(book_id),
+        f"Главы сохранены: <b>{saved}</b>." + publication_note,
+        reply_markup=reply_markup,
     )
     await call.answer("Сохранено")
+
+
+@router.callback_query(ImportChapters.duplicate_confirm, F.data.startswith("chapter:duplicate_continue:"))
+async def chapter_duplicate_continue(call: CallbackQuery, state: FSMContext) -> None:
+    book_id = int(call.data.split(":")[-1])
+    await state.update_data(duplicate_ack=True)
+    await set_book_duplicate_override(book_id, True)
+    await state.set_state(ImportChapters.confirm)
+    await call.message.edit_text(
+        "Совпадение подтверждено. Теперь сохраните главы.",
+        reply_markup=chapter_import_confirm_menu(book_id),
+    )
+    await call.answer("Подтверждено")
 
 
 @router.callback_query(ImportChapters.confirm, F.data.startswith("chapter:import_cancel:"))
@@ -1360,7 +1552,7 @@ async def chapter_edit_text_start(call: CallbackQuery, state: FSMContext) -> Non
 async def chapter_edit_text_save(message: Message, state: FSMContext) -> None:
     text = (message.text or "").strip()
     if len(text) < 100:
-        await message.answer("Текст слишком короткий. Вставьте полный текст главы.")
+        await message.answer("Текст слишком короткий. Вставьте полный текст главы.", reply_markup=navigation_menu(cancel_callback="author:cancel_flow"))
         return
     data = await state.get_data()
     chapter_id = int(data["chapter_id"])
@@ -1400,7 +1592,7 @@ async def chapter_edit_price_save(message: Message, state: FSMContext) -> None:
         return
     price = int(raw)
     if price < 0 or price > 100000:
-        await message.answer("Цена выглядит неверно. Введите разумное число Stars.")
+        await message.answer("Цена выглядит неверно. Введите разумное число Stars.", reply_markup=navigation_menu(cancel_callback="author:cancel_flow"))
         return
     data = await state.get_data()
     chapter_id = int(data["chapter_id"])
@@ -1515,7 +1707,7 @@ async def audio_add_start(call: CallbackQuery, state: FSMContext) -> None:
         return
     await state.update_data(book_id=book_id)
     await state.set_state(AddAudioChapter.title)
-    await call.message.edit_text("Введите название аудиоглавы или нажмите «Пропустить», чтобы бот поставил номер автоматически.", reply_markup=skip_back_menu("audio:title:auto"))
+    await call.message.edit_text("Введите название аудиоглавы или нажмите «Пропустить», чтобы бот поставил номер автоматически.", reply_markup=skip_back_menu("audio:title:auto", cancel_callback="author:cancel_flow"))
     await call.answer()
 
 
@@ -1526,7 +1718,7 @@ async def audio_add_title_auto(call: CallbackQuery, state: FSMContext) -> None:
     count = await count_audio_chapters_for_book(book_id)
     await state.update_data(title=f"Аудиоглава {count + 1}")
     await state.set_state(AddAudioChapter.narrator)
-    await call.message.edit_text("Название поставлено автоматически. Введите имя диктора или нажмите «Пропустить».", reply_markup=skip_back_menu("audio:narrator:skip"))
+    await call.message.edit_text("Название поставлено автоматически. Введите имя диктора или нажмите «Пропустить».", reply_markup=skip_back_menu("audio:narrator:skip", cancel_callback="author:cancel_flow"))
     await call.answer("Готово")
 
 
@@ -1534,11 +1726,11 @@ async def audio_add_title_auto(call: CallbackQuery, state: FSMContext) -> None:
 async def audio_add_title(message: Message, state: FSMContext) -> None:
     title = (message.text or "").strip()
     if len(title) < 2:
-        await message.answer("Название слишком короткое.")
+        await message.answer("Название слишком короткое.", reply_markup=navigation_menu(cancel_callback="author:cancel_flow"))
         return
     await state.update_data(title=title[:160])
     await state.set_state(AddAudioChapter.narrator)
-    await message.answer("Введите имя диктора или нажмите «Пропустить». Его можно добавить позже.", reply_markup=skip_back_menu("audio:narrator:skip"))
+    await message.answer("Введите имя диктора или нажмите «Пропустить». Его можно добавить позже.", reply_markup=skip_back_menu("audio:narrator:skip", cancel_callback="author:cancel_flow"))
 
 
 @router.callback_query(AddAudioChapter.narrator, F.data == "audio:narrator:skip")
@@ -1552,7 +1744,7 @@ async def audio_add_narrator_skip(call: CallbackQuery, state: FSMContext) -> Non
     await call.message.edit_text(
         f"Рекомендуемая цена аудиоглавы: <b>{recommended} Stars</b>.\n\n"
         "Введите цену числом, поставьте рекомендованную или сделайте аудио бесплатным.",
-        reply_markup=skip_use_menu("audio:price:free", "audio:price:recommended", "✅ Поставить рекомендованную цену"),
+        reply_markup=skip_use_menu("audio:price:free", "audio:price:recommended", "✅ Поставить рекомендованную цену", cancel_callback="author:cancel_flow"),
     )
     await call.answer("Пропущено")
 
@@ -1571,7 +1763,7 @@ async def audio_add_narrator(message: Message, state: FSMContext) -> None:
     await message.answer(
         f"Рекомендуемая цена аудиоглавы: <b>{recommended} Stars</b>.\n\n"
         "Введите цену числом, поставьте рекомендованную или сделайте аудио бесплатным.",
-        reply_markup=skip_use_menu("audio:price:free", "audio:price:recommended", "✅ Поставить рекомендованную цену"),
+        reply_markup=skip_use_menu("audio:price:free", "audio:price:recommended", "✅ Поставить рекомендованную цену", cancel_callback="author:cancel_flow"),
     )
 
 
@@ -1582,10 +1774,11 @@ async def _audio_wait_file(target, state: FSMContext, price: int) -> None:
         "Загрузите реальный аудиофайл документом или аудио.\n\n"
         "Поддерживаются MP3, M4A, OGG и WAV. После загрузки аудиоплеер Mini App будет играть именно этот файл."
     )
+    markup = navigation_menu(cancel_callback="author:cancel_flow")
     if hasattr(target, "message"):
-        await target.message.edit_text(text)
+        await target.message.edit_text(text, reply_markup=markup)
     else:
-        await target.answer(text)
+        await target.answer(text, reply_markup=markup)
 
 
 @router.callback_query(AddAudioChapter.price, F.data == "audio:price:recommended")
@@ -1605,11 +1798,11 @@ async def audio_add_price_free(call: CallbackQuery, state: FSMContext) -> None:
 async def audio_add_price(message: Message, state: FSMContext) -> None:
     raw = (message.text or "").strip()
     if not raw.isdigit():
-        await message.answer("Введите цену числом. Например: 7")
+        await message.answer("Введите цену числом. Например: 7", reply_markup=navigation_menu(cancel_callback="author:cancel_flow"))
         return
     price = int(raw)
     if price > 100000:
-        await message.answer("Цена выглядит слишком большой.")
+        await message.answer("Цена выглядит слишком большой.", reply_markup=navigation_menu(cancel_callback="author:cancel_flow"))
         return
     await _audio_wait_file(message, state, price)
 
@@ -1686,7 +1879,7 @@ async def audio_add_document_message(message: Message, state: FSMContext, bot: B
 
 @router.message(AddAudioChapter.waiting_file)
 async def audio_add_wrong_message(message: Message) -> None:
-    await message.answer("Нужно отправить аудиофайл: MP3, M4A, OGG или WAV.")
+    await message.answer("Нужно отправить аудиофайл: MP3, M4A, OGG или WAV.", reply_markup=navigation_menu(cancel_callback="author:cancel_flow"))
 
 
 @router.callback_query(F.data.startswith("audio:zip:"))
@@ -1698,7 +1891,7 @@ async def audio_zip_start(call: CallbackQuery, state: FSMContext) -> None:
         return
     await state.update_data(book_id=book_id)
     await state.set_state(ImportAudioZip.narrator)
-    await call.message.edit_text("Введите имя диктора для аудиофайлов из ZIP. Если не нужно, напишите: нет")
+    await call.message.edit_text("Введите имя диктора для аудиофайлов из ZIP. Если не нужно, нажмите «Пропустить».", reply_markup=skip_back_menu("audiozip:narrator:skip", cancel_callback="author:cancel_flow"))
     await call.answer()
 
 
@@ -1708,7 +1901,7 @@ async def audio_zip_narrator_skip(call: CallbackQuery, state: FSMContext) -> Non
     await state.set_state(ImportAudioZip.price)
     await call.message.edit_text(
         "Введите цену каждой аудиоглавы числом или сделайте аудио бесплатным.",
-        reply_markup=skip_use_menu("audiozip:price:free", None, "✅ Использовать"),
+        reply_markup=skip_use_menu("audiozip:price:free", None, "✅ Бесплатно", cancel_callback="author:cancel_flow"),
     )
     await call.answer("Пропущено")
 
@@ -1720,7 +1913,7 @@ async def audio_zip_narrator(message: Message, state: FSMContext) -> None:
         narrator = ""
     await state.update_data(narrator=narrator[:120])
     await state.set_state(ImportAudioZip.price)
-    await message.answer("Введите цену каждой аудиоглавы из ZIP. Можно 0, если аудио бесплатное.")
+    await message.answer("Введите цену каждой аудиоглавы из ZIP. Можно 0, если аудио бесплатное.", reply_markup=navigation_menu(cancel_callback="author:cancel_flow"))
 
 
 @router.message(ImportAudioZip.price)
@@ -1731,7 +1924,7 @@ async def audio_zip_price(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(price_stars=int(raw))
     await state.set_state(ImportAudioZip.waiting_zip)
-    await message.answer("Загрузите ZIP с аудиофайлами MP3/M4A/OGG/WAV. Бот сохранит их как аудиоглавы по порядку.")
+    await message.answer("Загрузите ZIP с аудиофайлами MP3/M4A/OGG/WAV. Бот сохранит их как аудиоглавы по порядку.", reply_markup=navigation_menu(cancel_callback="author:cancel_flow"))
 
 
 @router.message(ImportAudioZip.waiting_zip, F.document)
@@ -1803,7 +1996,7 @@ async def audio_zip_file(message: Message, state: FSMContext, bot: Bot) -> None:
 
 @router.message(ImportAudioZip.waiting_zip)
 async def audio_zip_wrong_file(message: Message) -> None:
-    await message.answer("Нужно отправить ZIP-архив документом.")
+    await message.answer("Нужно отправить ZIP-архив документом.", reply_markup=navigation_menu(cancel_callback="author:cancel_flow"))
 
 
 @router.callback_query(F.data.startswith("audio:list:"))
@@ -1898,7 +2091,7 @@ async def ad_create_book(call: CallbackQuery, state: FSMContext) -> None:
     await call.message.edit_text(
         "Где показывать рекламу?\n\n"
         "Для рекламы внутри чтения лучше выбрать «Сверху и снизу главы». Подбор всё равно будет идти по жанрам и сюжетным тегам.",
-        reply_markup=single_select_menu("adplace", AD_PLACEMENTS, back_callback="author:ads"),
+        reply_markup=single_select_menu("adplace", AD_PLACEMENTS, back_callback="author:ads", cancel_callback="author:cancel_flow"),
     )
     await call.answer()
 
@@ -1911,7 +2104,8 @@ async def ad_create_placement(call: CallbackQuery, state: FSMContext) -> None:
     await call.message.edit_text(
         "Введите стартовый бюджет рекламы во внутренних показах.\n\n"
         "Позже кампанию можно пополнить через Stars из карточки кампании.\n"
-        "Рекомендация для старта: 100–500."
+        "Рекомендация для старта: 100–500.",
+        reply_markup=navigation_menu(cancel_callback="author:cancel_flow"),
     )
     await call.answer()
 
@@ -1920,11 +2114,11 @@ async def ad_create_placement(call: CallbackQuery, state: FSMContext) -> None:
 async def ad_create_budget(message: Message, state: FSMContext) -> None:
     raw = (message.text or "").strip()
     if not raw.isdigit():
-        await message.answer("Введите число. Например: 200")
+        await message.answer("Введите число. Например: 200", reply_markup=navigation_menu(cancel_callback="author:cancel_flow"))
         return
     budget = int(raw)
     if budget < 10 or budget > 100000:
-        await message.answer("Бюджет должен быть от 10 до 100000 условных показов.")
+        await message.answer("Бюджет должен быть от 10 до 100000 условных показов.", reply_markup=navigation_menu(cancel_callback="author:cancel_flow"))
         return
     data = await state.get_data()
     user = await upsert_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
@@ -2027,7 +2221,8 @@ async def promo_create_book(call: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(CreatePromoCode.code)
     await call.message.edit_text(
         "Введите промокод латиницей или цифрами.\n\n"
-        "Пример: START50 или MYBOOK100."
+        "Пример: START50 или MYBOOK100.",
+        reply_markup=navigation_menu(cancel_callback="author:cancel_flow"),
     )
     await call.answer()
 
@@ -2036,11 +2231,11 @@ async def promo_create_book(call: CallbackQuery, state: FSMContext) -> None:
 async def promo_create_code(message: Message, state: FSMContext) -> None:
     code = (message.text or "").strip()
     if len(code) < 3:
-        await message.answer("Промокод слишком короткий.")
+        await message.answer("Промокод слишком короткий.", reply_markup=navigation_menu(cancel_callback="author:cancel_flow"))
         return
     await state.update_data(code=code)
     await state.set_state(CreatePromoCode.discount)
-    await message.answer("Выберите размер скидки.", reply_markup=single_select_menu("discount", PROMO_DISCOUNTS))
+    await message.answer("Выберите размер скидки.", reply_markup=single_select_menu("discount", PROMO_DISCOUNTS, cancel_callback="author:cancel_flow"))
 
 
 @router.callback_query(CreatePromoCode.discount, F.data.startswith("single:discount:"))
@@ -2048,7 +2243,7 @@ async def promo_create_discount(call: CallbackQuery, state: FSMContext) -> None:
     discount = int(call.data.split(":")[-1])
     await state.update_data(discount=discount)
     await state.set_state(CreatePromoCode.max_uses)
-    await call.message.edit_text("Введите лимит использований промокода. Например: 100")
+    await call.message.edit_text("Введите лимит использований промокода. Например: 100", reply_markup=navigation_menu(cancel_callback="author:cancel_flow"))
     await call.answer()
 
 
@@ -2056,11 +2251,11 @@ async def promo_create_discount(call: CallbackQuery, state: FSMContext) -> None:
 async def promo_create_max_uses(message: Message, state: FSMContext) -> None:
     raw = (message.text or "").strip()
     if not raw.isdigit():
-        await message.answer("Введите число. Например: 100")
+        await message.answer("Введите число. Например: 100", reply_markup=navigation_menu(cancel_callback="author:cancel_flow"))
         return
     max_uses = int(raw)
     if max_uses < 1 or max_uses > 100000:
-        await message.answer("Лимит должен быть от 1 до 100000.")
+        await message.answer("Лимит должен быть от 1 до 100000.", reply_markup=navigation_menu(cancel_callback="author:cancel_flow"))
         return
     data = await state.get_data()
     user = await upsert_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
@@ -2195,7 +2390,7 @@ async def profile_edit_pen_name_start(call: CallbackQuery, state: FSMContext) ->
 async def profile_edit_pen_name_save(message: Message, state: FSMContext) -> None:
     pen_name = (message.text or "").strip()
     if len(pen_name) < 2:
-        await message.answer("Псевдоним слишком короткий. Введите от 2 символов.")
+        await message.answer("Псевдоним слишком короткий. Введите от 2 символов.", reply_markup=navigation_menu(cancel_callback="profile:cancel_edit"))
         return
     ok = await _update_profile_field(message, pen_name=pen_name[:80])
     await state.clear()

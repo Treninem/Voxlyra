@@ -4,6 +4,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
 from app.config import settings
+from app.build_info import owner_build_label
 from app.db import (
     add_admin,
     add_audit,
@@ -32,6 +33,9 @@ from app.db import (
     upsert_user,
     list_authors_for_owner,
     list_recent_channel_posts,
+    list_recent_channel_promotions,
+    get_channel_promotion_price,
+    record_owner_channel_promotion,
     list_blocked_users,
 )
 from app.keyboards import (
@@ -47,12 +51,15 @@ from app.keyboards import (
     owner_user_card_menu,
     owner_books_search_results_menu,
     owner_book_card_menu,
+    owner_channel_menu,
     complaints_menu,
     complaint_card_menu,
+    navigation_menu,
 )
 from app.permissions import DELEGABLE_PERMISSION_CODES, PERMISSION_BY_CODE
 from app.services.diagnostics import format_diagnostics_for_owner
 from app.services.notifications import complaint_message, send_user_notification
+from app.services.publication import post_book_to_channel
 
 router = Router()
 
@@ -93,6 +100,10 @@ class OwnerSearch(StatesGroup):
     book_query = State()
 
 
+class OwnerChannelSettings(StatesGroup):
+    price = State()
+
+
 def is_owner_tg(telegram_id: int) -> bool:
     return telegram_id in settings.owner_ids
 
@@ -121,6 +132,7 @@ async def owner_menu_handler(call: CallbackQuery) -> None:
         f"🕊 На проверке: <b>{today['books_review']}</b>\n"
         f"🧾 Новых жалоб: <b>{today['complaints']}</b>\n"
         f"💰 Комиссия платформы: <b>{finance['platform_commission']} Stars</b>\n\n"
+        f"🔖 Версия сборки: <b>{owner_build_label()}</b>\n\n"
         "Выберите раздел управления.",
         reply_markup=owner_menu(),
     )
@@ -146,7 +158,8 @@ async def owner_add_admin(call: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(AddAdmin.waiting_for_user)
     await call.message.edit_text(
         "Введите Telegram ID или username администратора.\n\n"
-        "Важно: username сработает только если человек уже запускал этого бота."
+        "Важно: username сработает только если человек уже запускал этого бота.",
+        reply_markup=navigation_menu(cancel_callback="owner:cancel_input"),
     )
     await call.answer()
 
@@ -273,7 +286,8 @@ async def owner_set_commission_start(call: CallbackQuery, state: FSMContext) -> 
     current = await get_setting(key, "20")
     await call.message.edit_text(
         f"Текущее значение: <b>{current}%</b>\n\n"
-        "Введите новое значение комиссии числом от 0 до 50."
+        "Введите новое значение комиссии числом от 0 до 50.",
+        reply_markup=navigation_menu(cancel_callback="owner:cancel_input"),
     )
     await call.answer()
 
@@ -381,7 +395,8 @@ async def owner_books(call: CallbackQuery, state: FSMContext) -> None:
     await call.message.edit_text(
         "<b>📚 Книги</b>\n\n"
         f"На проверке: <b>{len(review_books)}</b>\n\n"
-        "Введите название книги, часть описания или псевдоним автора для поиска."
+        "Введите название книги, часть описания или псевдоним автора для поиска.",
+        reply_markup=navigation_menu(cancel_callback="owner:cancel_search"),
     )
     await call.answer()
 
@@ -410,7 +425,8 @@ async def owner_users(call: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(OwnerSearch.user_query)
     await call.message.edit_text(
         "<b>👤 Пользователи и авторы</b>\n\n"
-        "Введите Telegram ID, username, имя или псевдоним автора для поиска."
+        "Введите Telegram ID, username, имя или псевдоним автора для поиска.",
+        reply_markup=navigation_menu(cancel_callback="owner:cancel_search"),
     )
     await call.answer()
 
@@ -569,7 +585,7 @@ async def owner_search_user_start(call: CallbackQuery, state: FSMContext) -> Non
     await call.message.edit_text(
         "<b>👤 Поиск пользователя или автора</b>\n\n"
         "Введите Telegram ID, username, имя или псевдоним автора.",
-        reply_markup=owner_search_menu(),
+        reply_markup=navigation_menu(cancel_callback="owner:cancel_search"),
     )
     await call.answer()
 
@@ -603,7 +619,7 @@ async def owner_search_book_start(call: CallbackQuery, state: FSMContext) -> Non
     await state.set_state(OwnerSearch.book_query)
     await call.message.edit_text(
         "<b>📚 Поиск книги</b>\n\nВведите название книги или псевдоним автора.",
-        reply_markup=owner_search_menu(),
+        reply_markup=navigation_menu(cancel_callback="owner:cancel_search"),
     )
     await call.answer()
 
@@ -628,6 +644,30 @@ async def owner_search_book_finish(message: Message, state: FSMContext) -> None:
         f"<b>Найденные книги</b>\n\nРезультатов: <b>{len(rows)}</b>",
         reply_markup=owner_books_search_results_menu(rows),
     )
+
+
+@router.callback_query(F.data == "owner:cancel_search")
+async def owner_cancel_search(call: CallbackQuery, state: FSMContext) -> None:
+    if await deny_if_not_owner(call):
+        return
+    await state.clear()
+    await call.message.edit_text(
+        "<b>👑 Центр управления</b>\n\nПоиск отменён. Выберите нужный раздел.",
+        reply_markup=owner_menu(),
+    )
+    await call.answer("Отменено")
+
+
+@router.callback_query(F.data == "owner:cancel_input")
+async def owner_cancel_input(call: CallbackQuery, state: FSMContext) -> None:
+    if await deny_if_not_owner(call):
+        return
+    await state.clear()
+    await call.message.edit_text(
+        "Изменение отменено.",
+        reply_markup=owner_menu(),
+    )
+    await call.answer("Отменено")
 
 
 @router.callback_query(F.data == "owner:system")
@@ -660,26 +700,88 @@ async def owner_authors(call: CallbackQuery) -> None:
 async def owner_channel(call: CallbackQuery) -> None:
     if await deny_if_not_owner(call):
         return
-    posts = await list_recent_channel_posts(limit=10)
+    posts = await list_recent_channel_posts(limit=8)
+    promotions = await list_recent_channel_promotions(limit=8)
     channel_name = settings.CHANNEL_ID or "канал не выбран"
+    price = await get_channel_promotion_price()
     lines = [
-        "<b>📢 Канал</b>",
+        "<b>📢 Канал и продвижение</b>",
         "",
         f"Подключённый канал: <b>{channel_name}</b>",
+        f"Платное размещение: <b>{price} Stars</b>",
+        "Ограничение для пользователей: одна публикация одной книги раз в 30 дней.",
         "",
-        "Когда книга проходит проверку и публикуется, Вокслира сама готовит красивый пост для канала. "
-        "Публикация сработает, если бот добавлен администратором канала и может размещать сообщения.",
+        "Владелец может повторно разместить опубликованную книгу бесплатно из её карточки.",
     ]
-    if posts:
-        lines.append("\n<b>Последние публикации:</b>")
-        status_labels = {"sent": "опубликовано", "failed": "ошибка публикации", "queued": "ожидает"}
+    if promotions:
+        lines.append("\n<b>Последние повторные размещения:</b>")
+        labels = {"sent": "опубликовано", "failed": "ошибка", "paid": "оплачено", "invoice": "ожидает оплаты"}
+        for row in promotions:
+            source = "владелец" if row["source"] == "owner" else "платно"
+            status = labels.get(row["status"], row["status"])
+            lines.append(f"• {row['book_title']} · {source} · {status}")
+    elif posts:
+        lines.append("\n<b>Последние автоматические публикации:</b>")
         for row in posts:
-            status = status_labels.get(row["status"], row["status"] or "готовится")
-            lines.append(f"• Книга №{row['book_id']} · {status} · {row['created_at'][:16]}")
+            lines.append(f"• Книга №{row['book_id']} · {row['status']} · {row['created_at'][:16]}")
     else:
-        lines.append("\nПубликаций пока нет. Они появятся здесь после выхода первой книги.")
-    await call.message.edit_text("\n".join(lines)[:4096], reply_markup=back_to_main())
+        lines.append("\nПубликаций пока нет.")
+    await call.message.edit_text("\n".join(lines)[:4096], reply_markup=owner_channel_menu())
     await call.answer()
+
+
+@router.callback_query(F.data.startswith("owner:channel_repost:"))
+async def owner_channel_repost(call: CallbackQuery) -> None:
+    if await deny_if_not_owner(call):
+        return
+    book_id = int(call.data.split(":")[-1])
+    book = await get_book(book_id)
+    if not book or book["publication_status"] != "published":
+        await call.answer("Повторно публиковать можно только опубликованную книгу", show_alert=True)
+        return
+    actor = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
+    result = await post_book_to_channel(
+        call.bot, book_id, actor_user_id=int(actor["id"]), force=True
+    )
+    sent = result.channel_status == "sent"
+    await record_owner_channel_promotion(
+        book_id, int(actor["id"]), sent=sent, error=result.channel_error
+    )
+    await call.message.edit_text(
+        "Книга повторно опубликована в канале." if sent else f"Не удалось отправить пост. {result.channel_message}",
+        reply_markup=owner_book_card_menu(book_id, book["publication_status"]),
+    )
+    await call.answer("Опубликовано" if sent else "Ошибка", show_alert=not sent)
+
+
+@router.callback_query(F.data == "owner:channel_price")
+async def owner_channel_price_start(call: CallbackQuery, state: FSMContext) -> None:
+    if await deny_if_not_owner(call):
+        return
+    current = await get_channel_promotion_price()
+    await state.set_state(OwnerChannelSettings.price)
+    await call.message.edit_text(
+        f"Текущая цена платного размещения: <b>{current} Stars</b>.\n\nВведите новую цену числом от 1 до 100000.",
+        reply_markup=navigation_menu(cancel_callback="owner:cancel_input"),
+    )
+    await call.answer()
+
+
+@router.message(OwnerChannelSettings.price)
+async def owner_channel_price_save(message: Message, state: FSMContext) -> None:
+    if message.from_user.id not in settings.owner_ids:
+        await state.clear()
+        return
+    raw = (message.text or "").strip()
+    if not raw.isdigit() or not 1 <= int(raw) <= 100000:
+        await message.answer("Введите число от 1 до 100000.")
+        return
+    await set_setting("channel_promotion_price_stars", str(int(raw)))
+    await state.clear()
+    await message.answer(
+        f"Цена платного размещения сохранена: <b>{int(raw)} Stars</b>.",
+        reply_markup=owner_channel_menu(),
+    )
 
 
 @router.callback_query(F.data == "owner:security")

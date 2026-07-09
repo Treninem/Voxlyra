@@ -27,6 +27,12 @@ from app.db import (
     get_purchase,
     get_chapter,
     get_audio_chapter,
+    get_book,
+    get_channel_promotion,
+    get_channel_promotion_availability,
+    get_channel_promotion_price,
+    reserve_channel_promotion,
+    finish_channel_promotion,
     list_chapters_for_book,
     get_purchase_target,
     get_user_by_telegram_id,
@@ -53,9 +59,11 @@ from app.keyboards import (
     refund_card_menu,
     refund_requests_menu,
     user_purchases_menu,
+    channel_promotion_confirm_menu,
 )
 from app.services.payments import build_pay_target, describe_purchase_row
 from app.services.notifications import payout_message, refund_message, send_user_notification
+from app.services.publication import post_book_to_channel
 
 router = Router()
 
@@ -123,6 +131,87 @@ async def _can_manage_payouts(tg_user_id: int) -> tuple[bool, int | None]:
     return tg_user_id in settings.owner_ids, user["id"]
 
 
+def _promotion_available_label(value: str | None) -> str:
+    if not value:
+        return "позже"
+    try:
+        from datetime import datetime
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return dt.astimezone().strftime("%d.%m.%Y")
+    except Exception:
+        return "позже"
+
+
+async def _show_channel_promotion(message_or_call, book_id: int) -> None:
+    user = await upsert_user(
+        message_or_call.from_user.id,
+        message_or_call.from_user.username,
+        message_or_call.from_user.full_name,
+    )
+    book = await get_book(book_id)
+    if not book or book["publication_status"] != "published":
+        text = "Продвигать можно только опубликованную книгу."
+        if isinstance(message_or_call, CallbackQuery):
+            await message_or_call.answer(text, show_alert=True)
+        else:
+            await message_or_call.answer(text, reply_markup=back_to_main())
+        return
+    if not settings.CHANNEL_ID.strip():
+        text = "Канал пока не подключён. Платное продвижение временно недоступно."
+        if isinstance(message_or_call, CallbackQuery):
+            await message_or_call.answer(text, show_alert=True)
+        else:
+            await message_or_call.answer(text, reply_markup=back_to_main())
+        return
+
+    availability = await get_channel_promotion_availability(book_id, int(user["id"]))
+    if not availability.get("allowed"):
+        text = (
+            "Эта книга уже публиковалась в канале. Чтобы канал не превращался в спам, "
+            f"повторное платное размещение будет доступно после {_promotion_available_label(availability.get('available_at'))}."
+        )
+        if isinstance(message_or_call, CallbackQuery):
+            await message_or_call.message.edit_text(text, reply_markup=back_to_main())
+            await message_or_call.answer()
+        else:
+            await message_or_call.answer(text, reply_markup=back_to_main())
+        return
+
+    if availability.get("reason") == "retry":
+        promotion_id = int(availability["promotion_id"])
+        result = await post_book_to_channel(
+            message_or_call.bot, book_id, actor_user_id=int(user["id"]), force=True
+        )
+        await finish_channel_promotion(
+            promotion_id, sent=result.channel_status == "sent", error=result.channel_error
+        )
+        text = (
+            "Оплата уже была сохранена. Пост повторно отправлен в канал."
+            if result.channel_status == "sent"
+            else "Оплата уже сохранена, но Telegram снова не принял пост. Повторная оплата не нужна; попробуйте позже или обратитесь в поддержку."
+        )
+        if isinstance(message_or_call, CallbackQuery):
+            await message_or_call.message.edit_text(text, reply_markup=back_to_main())
+            await message_or_call.answer()
+        else:
+            await message_or_call.answer(text, reply_markup=back_to_main())
+        return
+
+    price = await get_channel_promotion_price()
+    text = (
+        f"<b>📢 Публикация книги в канале</b>\n\n"
+        f"Книга: <b>{book['title']}</b>\n"
+        f"Стоимость: <b>{price} Stars</b>\n\n"
+        "После оплаты Вокслира сразу разместит карточку книги в подключённом канале. "
+        "Одну книгу можно продвигать платно не чаще одного раза в 30 дней."
+    )
+    if isinstance(message_or_call, CallbackQuery):
+        await message_or_call.message.edit_text(text, reply_markup=channel_promotion_confirm_menu(book_id, price))
+        await message_or_call.answer()
+    else:
+        await message_or_call.answer(text, reply_markup=channel_promotion_confirm_menu(book_id, price))
+
+
 async def _send_invoice(message_or_call, kind: str, target_id: int, promo_code: str | None = None, amount_stars: int | None = None) -> None:
     tg = message_or_call.from_user
     user = await upsert_user(tg.id, tg.username, tg.full_name)
@@ -162,7 +251,7 @@ async def _send_invoice(message_or_call, kind: str, target_id: int, promo_code: 
         payload=target.payload,
         provider_token="",
         currency="XTR",
-        prices=[LabeledPrice(label="Доступ", amount=target.amount_stars)],
+        prices=[LabeledPrice(label="Публикация" if kind == "channel_promo" else "Доступ", amount=target.amount_stars)],
         protect_content=True,
     )
     if isinstance(message_or_call, CallbackQuery):
@@ -182,6 +271,11 @@ async def start_deeplink(message: Message, state: FSMContext) -> None:
     if payload.startswith("buy_book_"):
         await _send_invoice(message, "book", int(payload.replace("buy_book_", "")))
         return
+    if payload.startswith("promote_book_"):
+        raw = payload.replace("promote_book_", "")
+        if raw.isdigit():
+            await _show_channel_promotion(message, int(raw))
+        return
     if payload.startswith("promo_chapter_"):
         await state.update_data(kind="chapter", target_id=int(payload.replace("promo_chapter_", "")))
         await state.set_state(PromoApplyState.code)
@@ -197,6 +291,39 @@ async def start_deeplink(message: Message, state: FSMContext) -> None:
         await state.set_state(PromoApplyState.code)
         await message.answer("Введите промокод для покупки книги.")
         return
+
+
+@router.callback_query(F.data.startswith("channel:promote:"))
+async def channel_promote_preview(call: CallbackQuery) -> None:
+    book_id = int(call.data.split(":")[-1])
+    await _show_channel_promotion(call, book_id)
+
+
+@router.callback_query(F.data.startswith("channel:promote_pay:"))
+async def channel_promote_pay(call: CallbackQuery) -> None:
+    book_id = int(call.data.split(":")[-1])
+    user = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
+    book = await get_book(book_id)
+    if not book or book["publication_status"] != "published":
+        await call.answer("Книга не опубликована", show_alert=True)
+        return
+    if not settings.CHANNEL_ID.strip():
+        await call.answer("Канал не подключён", show_alert=True)
+        return
+    availability = await get_channel_promotion_availability(book_id, int(user["id"]))
+    if availability.get("reason") == "retry":
+        await _show_channel_promotion(call, book_id)
+        return
+    if not availability.get("allowed"):
+        await call.answer("Повторное размещение этой книги пока недоступно", show_alert=True)
+        return
+    price = await get_channel_promotion_price()
+    try:
+        promotion_id = await reserve_channel_promotion(book_id, int(user["id"]), price)
+    except ValueError as exc:
+        await call.answer(str(exc), show_alert=True)
+        return
+    await _send_invoice(call, "channel_promo", promotion_id)
 
 
 @router.callback_query(F.data.startswith("buy:"))
@@ -250,6 +377,37 @@ async def successful_payment_handler(message: Message) -> None:
                 "<b>Оплата прошла.</b>\n\nРекламный бюджет пополнен. Кампания продолжит показы, если не заблокирована.",
                 reply_markup=back_to_main(),
             )
+        elif target["kind"] == "channel_promo":
+            promotion = await get_channel_promotion(int(target["promotion_id"]))
+            result = await post_book_to_channel(
+                message.bot,
+                int(target["book_id"]),
+                actor_user_id=int(user["id"]),
+                force=True,
+            )
+            await finish_channel_promotion(
+                int(target["promotion_id"]),
+                sent=result.channel_status == "sent",
+                error=result.channel_error,
+            )
+            await add_audit(
+                int(user["id"]),
+                "paid_channel_promotion_sent" if result.channel_status == "sent" else "paid_channel_promotion_failed",
+                "book",
+                str(target["book_id"]),
+                None,
+                str(target["promotion_id"]),
+            )
+            if result.channel_status == "sent":
+                await message.answer(
+                    "<b>Оплата прошла.</b>\n\nКнига опубликована в канале. Следующее платное размещение этой книги будет доступно через 30 дней.",
+                    reply_markup=back_to_main(),
+                )
+            else:
+                await message.answer(
+                    "<b>Оплата сохранена.</b>\n\nTelegram не принял пост в канал. Повторно платить не нужно: откройте продвижение этой книги позже, и бот повторит отправку.",
+                    reply_markup=back_to_main(),
+                )
         else:
             await message.answer(
                 "<b>Оплата прошла.</b>\n\nДоступ открыт. Покупку можно найти в разделе «Моё».",

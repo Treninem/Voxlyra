@@ -25,7 +25,7 @@ from app.db import (
     upsert_user,
 )
 from app.keyboards import ad_moderation_card_menu, back_to_main, complaint_card_menu, complaints_menu, moderation_ads_menu, moderation_book_card_menu, moderation_books_menu, moderation_comments_menu, moderation_content_menu, moderation_hide_menu, moderation_menu, moderation_reviews_menu
-from app.services.channel import build_new_book_post
+from app.services.publication import publish_book_and_channel
 from app.services.notifications import (
     book_moderation_message,
     complaint_message,
@@ -128,10 +128,15 @@ async def moderation_book_publish(call: CallbackQuery) -> None:
     if chapters_count < 1:
         await call.answer("Нельзя публиковать книгу без глав", show_alert=True)
         return
-    await set_book_publication_status(book_id, "published")
-    await publish_book_content(book_id)
     user = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
-    await add_audit(user["id"], "book_published", "book", str(book_id))
+    result = await publish_book_and_channel(
+        call.bot,
+        book_id,
+        actor_user_id=int(user["id"]),
+    )
+    if not result.published:
+        await call.answer("Не удалось опубликовать книгу", show_alert=True)
+        return
     await _notify(
         call,
         actor_user_id=int(user["id"]),
@@ -142,23 +147,7 @@ async def moderation_book_publish(call: CallbackQuery) -> None:
         telegram_id=int(book["author_telegram_id"]) if book["author_telegram_id"] is not None else None,
         text=book_moderation_message(book["title"], "published"),
     )
-
-    channel_status = ""
-    if settings.CHANNEL_ID and book:
-        try:
-            post = build_new_book_post(
-                title=book["title"],
-                genre="не указан",
-                age_limit=book["age_limit"],
-                chapters_count=chapters_count,
-                has_audio=bool(book["has_audio"]),
-            )
-            await call.bot.send_message(settings.CHANNEL_ID, post)
-            channel_status = "\n\nПост отправлен в канал."
-            await add_audit(user["id"], "channel_post_sent", "book", str(book_id))
-        except Exception as exc:
-            channel_status = "\n\nКнига опубликована. Публикацию в канале можно повторить позже."
-            await add_audit(user["id"], "channel_post_failed", "book", str(book_id), None, str(exc))
+    channel_status = f"\n\n{result.channel_message}" if result.channel_message else ""
 
     await call.message.edit_text(
         "Книга опубликована. Теперь она появится в каталоге." + channel_status,

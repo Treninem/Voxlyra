@@ -1,4 +1,4 @@
-let authorState = { dashboard: null, book: null, previewToken: null };
+let authorState = { dashboard: null, book: null, previewToken: null, duplicateMatches: [] };
 
 const statusLabels = { draft: 'Черновик', review: 'На проверке', published: 'Опубликована', rejected: 'Нужны изменения' };
 const writingLabels = { writing: 'Пишется', finished: 'Завершена', frozen: 'Заморожена' };
@@ -149,8 +149,17 @@ async function loadAuthorDashboard() {
   if (!tgInitData()) { showAuthorError('Откройте Mini App через бота, чтобы войти в кабинет автора.'); return; }
   try {
     renderAuthorDashboard(await apiFetch('/api/author/dashboard'));
-    const requestedBook = Number(new URLSearchParams(window.location.search).get('book_id') || 0);
-    if (requestedBook > 0) await openAuthorBook(requestedBook);
+    const params = new URLSearchParams(window.location.search);
+    const requestedBook = Number(params.get('book_id') || 0);
+    if (requestedBook > 0) {
+      await openAuthorBook(requestedBook);
+      if (params.get('upload') === '1') {
+        const input = document.getElementById('bookFileInput');
+        input?.closest('.import-panel')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        setTimeout(() => input?.focus(), 350);
+        notify('Выберите файл, затем нажмите «Загрузить и проверить»');
+      }
+    }
   } catch (error) { showAuthorError(error.message); }
 }
 
@@ -231,7 +240,9 @@ function renderImportPreview(result) {
   const box = document.getElementById('importPreview');
   const problems = (report.problems || []).length ? `<ul>${report.problems.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>` : '<p class="success-text">Явных проблем не найдено.</p>';
   const preview = (report.preview || []).map((item) => `<li><b>${item.number}. ${escapeHtml(item.title)}</b><span>${Number(item.chars || 0).toLocaleString('ru-RU')} знаков</span></li>`).join('');
-  box.innerHTML = `<h3>Предпросмотр импорта</h3><p><b>${escapeHtml(result.filename)}</b></p><div class="import-numbers"><span>${Number(report.chapters_count || 0)} глав</span><span>${Number(report.total_chars || 0).toLocaleString('ru-RU')} знаков</span></div>${problems}<ol>${preview}</ol><button class="button-link" id="confirmBookImport" type="button">Сохранить главы</button>`;
+  authorState.duplicateMatches = Array.isArray(result.duplicates) ? result.duplicates : [];
+  const duplicateBlock = authorState.duplicateMatches.length ? `<div class="import-warning"><h4>Похоже, такая книга уже есть</h4><p>Проверьте совпадения перед сохранением:</p><ul>${authorState.duplicateMatches.slice(0, 6).map((item) => `<li><b>${escapeHtml(item.title || 'Книга')}</b> — ${escapeHtml(item.reason || 'похожее название')}</li>`).join('')}</ul><label class="switch-row"><input id="allowDuplicateImport" type="checkbox"><span>Это другая книга или новая редакция</span></label></div>` : '';
+  box.innerHTML = `<h3>Предпросмотр импорта</h3><p><b>${escapeHtml(result.filename)}</b></p><div class="import-numbers"><span>${Number(report.chapters_count || 0)} глав</span><span>${Number(report.total_chars || 0).toLocaleString('ru-RU')} знаков</span></div>${problems}${duplicateBlock}<ol>${preview}</ol><button class="button-link" id="confirmBookImport" type="button">Сохранить главы</button>`;
   box.hidden = false;
 }
 
@@ -239,13 +250,24 @@ async function confirmBookImport() {
   const bookId = authorState.book?.book?.id;
   if (!bookId || !authorState.previewToken) return;
   try {
+    const allowDuplicate = Boolean(document.getElementById('allowDuplicateImport')?.checked);
+    if (authorState.duplicateMatches.length && !allowDuplicate) {
+      notify('Подтвердите, что это другая книга или новая редакция');
+      document.getElementById('allowDuplicateImport')?.focus();
+      return;
+    }
     const result = await apiFetch(`/api/author/book/${bookId}/import-confirm`, { method: 'POST', body: JSON.stringify({
       preview_token: authorState.previewToken,
       first_free: Number(document.getElementById('importFirstFree').value || 0),
       default_price_stars: Number(document.getElementById('importPrice').value || 0),
+      allow_duplicate: allowDuplicate,
     }) });
-    notify(`Сохранено глав: ${result.saved}`);
+    const workflow = result.workflow || {};
+    if (workflow.status === 'published') notify(`Сохранено глав: ${result.saved}. Книга опубликована в каталоге.`);
+    else if (workflow.status === 'review') notify(`Сохранено глав: ${result.saved}. Книга отправлена на проверку.`);
+    else notify(`Сохранено глав: ${result.saved}`);
     authorState.previewToken = null;
+    authorState.duplicateMatches = [];
     await openAuthorBook(bookId);
   } catch (error) { notify(error.message || 'Не удалось сохранить главы'); }
 }

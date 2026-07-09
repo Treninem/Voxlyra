@@ -28,6 +28,7 @@
     <button id="bookmarkReading" class="secondary">В библиотеку</button>
     <button id="bookmarkFavorite" class="secondary">В любимое</button>
     {% if book.price_stars|int > 0 and bot_username %}<a class="button-link gold-button full-span" href="https://t.me/{{ bot_username }}?start=buy_book_{{ book.id }}">Купить книгу · {{ book.price_stars }} Stars</a>{% endif %}
+    {% if bot_username and channel_promotion_enabled %}<a class="button-link secondary full-span" href="https://t.me/{{ bot_username }}?start=promote_book_{{ book.id }}">📢 Опубликовать книгу в канале</a>{% endif %}
   </div>
 
   <section class="description-card">

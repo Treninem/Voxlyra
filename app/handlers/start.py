@@ -1,9 +1,10 @@
 from aiogram import F, Router
 from aiogram.filters import CommandStart
 from aiogram.types import CallbackQuery, Message
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.config import settings
-from app.db import claim_daily_bonus, get_admin_permissions, get_author_profile, get_bonus_balance, get_referral_stats, list_bonus_transactions, register_referral, reward_referral_if_needed, upsert_user, get_user_preferences, set_user_preference, reset_user_preferences
+from app.db import claim_daily_bonus, get_admin_permissions, get_author_profile, get_bonus_balance, get_referral_stats, list_bonus_transactions, register_referral, reward_referral_if_needed, upsert_user, get_user_preferences, set_user_preference, reset_user_preferences, get_book
 from app.keyboards import back_to_main, bonuses_menu, main_menu, more_menu, user_settings_menu, user_notifications_menu, user_theme_menu, user_font_menu
 
 router = Router()
@@ -26,14 +27,50 @@ async def build_context(message_or_call) -> tuple[bool, bool, bool, int]:
 async def cmd_start(message: Message) -> None:
     is_owner, has_admin, has_author, user_id = await build_context(message)
     parts = (message.text or "").split(maxsplit=1)
-    if len(parts) > 1 and parts[1].startswith("ref_"):
-        raw = parts[1].replace("ref_", "", 1)
+    payload = parts[1].strip() if len(parts) > 1 else ""
+    if payload.startswith("ref_"):
+        raw = payload.replace("ref_", "", 1)
         if raw.isdigit():
             ref_tg_id = int(raw)
             if ref_tg_id != message.from_user.id:
                 ref_user = await upsert_user(ref_tg_id, None, None)
                 await register_referral(int(ref_user["id"]), user_id)
                 await reward_referral_if_needed(user_id)
+    if payload.startswith("promote_book_"):
+        raw_book_id = payload.replace("promote_book_", "", 1)
+        if raw_book_id.isdigit():
+            book = await get_book(int(raw_book_id))
+            if book and book["publication_status"] == "published":
+                kb = InlineKeyboardBuilder()
+                kb.button(text="📢 Опубликовать книгу в канале", callback_data=f"channel:promote:{int(raw_book_id)}")
+                kb.button(text="🏠 Главное меню", callback_data="menu:main")
+                kb.adjust(1)
+                await message.answer(
+                    f"<b>📢 Продвижение книги</b>\n\n"
+                    f"Книга: <b>{book['title']}</b>\n"
+                    f"Автор: <b>{book['pen_name'] or 'не указан'}</b>\n\n"
+                    "После подтверждения бот проверит доступность публикации и покажет стоимость.",
+                    reply_markup=kb.as_markup(),
+                )
+                return
+    if payload.startswith("book_"):
+        raw_book_id = payload.replace("book_", "", 1)
+        if raw_book_id.isdigit():
+            book = await get_book(int(raw_book_id))
+            if book and book["publication_status"] == "published":
+                kb = InlineKeyboardBuilder()
+                web_url = settings.WEBAPP_URL.strip().rstrip("/")
+                if web_url:
+                    kb.button(text="📖 Открыть книгу", url=f"{web_url}/book/{int(raw_book_id)}")
+                kb.button(text="🏠 Главное меню", callback_data="menu:main")
+                kb.adjust(1)
+                await message.answer(
+                    f"<b>📖 {book['title']}</b>\n\n"
+                    f"Автор: <b>{book['pen_name'] or 'не указан'}</b>\n\n"
+                    "Книга доступна в Вокслире.",
+                    reply_markup=kb.as_markup(),
+                )
+                return
     text = (
         "<b>✨ Добро пожаловать в Вокслиру</b>\n\n"
         "Здесь истории можно читать, слушать и сохранять в свою личную библиотеку.\n\n"

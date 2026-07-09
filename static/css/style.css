@@ -994,3 +994,15 @@ body.sepia-theme .hero-points span { background: rgba(55,39,88,.06); border-colo
 @media (min-width: 561px) {
   .horizontal-shelf { grid-auto-columns: clamp(320px, 72%, 430px); }
 }
+
+.import-warning {
+  margin: 14px 0;
+  padding: 14px;
+  border: 1px solid rgba(255, 190, 92, .36);
+  border-radius: 16px;
+  background: rgba(255, 177, 71, .08);
+}
+.import-warning h4 { margin: 0 0 6px; color: #ffd889; }
+.import-warning p { margin: 0 0 8px; color: var(--muted); }
+.import-warning ul { margin: 8px 0 12px; padding-left: 20px; }
+.import-warning li + li { margin-top: 5px; }

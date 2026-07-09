@@ -131,6 +131,10 @@ async def init_db() -> None:
                 publication_status TEXT NOT NULL DEFAULT 'draft',
                 cover_file_id TEXT,
                 cover_path TEXT,
+                normalized_title TEXT,
+                source_file_hash TEXT,
+                source_file_name TEXT,
+                duplicate_override INTEGER NOT NULL DEFAULT 0,
                 allow_download INTEGER NOT NULL DEFAULT 0,
                 has_audio INTEGER NOT NULL DEFAULT 0,
                 pricing_type TEXT NOT NULL DEFAULT 'free',
@@ -391,6 +395,7 @@ async def init_db() -> None:
         await _ensure_stage11_schema(db)
         await _ensure_v176_schema(db)
         await _ensure_v179_schema(db)
+        await _ensure_v184_schema(db)
         await db.commit()
 
 
@@ -439,6 +444,11 @@ async def _ensure_book_columns(db: aiosqlite.Connection) -> None:
         "writing_status": "ALTER TABLE books ADD COLUMN writing_status TEXT NOT NULL DEFAULT 'writing'",
         "publication_status": "ALTER TABLE books ADD COLUMN publication_status TEXT NOT NULL DEFAULT 'draft'",
         "cover_file_id": "ALTER TABLE books ADD COLUMN cover_file_id TEXT",
+        "cover_path": "ALTER TABLE books ADD COLUMN cover_path TEXT",
+        "normalized_title": "ALTER TABLE books ADD COLUMN normalized_title TEXT",
+        "source_file_hash": "ALTER TABLE books ADD COLUMN source_file_hash TEXT",
+        "source_file_name": "ALTER TABLE books ADD COLUMN source_file_name TEXT",
+        "duplicate_override": "ALTER TABLE books ADD COLUMN duplicate_override INTEGER NOT NULL DEFAULT 0",
         "pricing_type": "ALTER TABLE books ADD COLUMN pricing_type TEXT NOT NULL DEFAULT 'free'",
         "price_stars": "ALTER TABLE books ADD COLUMN price_stars INTEGER NOT NULL DEFAULT 0",
     }
@@ -481,6 +491,8 @@ async def _ensure_defaults(db: aiosqlite.Connection) -> None:
         "ad_impression_cost": "1",
         "ad_click_cost": "3",
         "promo_default_max_uses": "100",
+        "channel_promotion_price_stars": "50",
+        "channel_promotion_cooldown_days": "30",
     }
     for key, value in defaults.items():
         await db.execute(
@@ -825,8 +837,8 @@ async def create_book(author_id: int, title: str, description: str, age_limit: s
         cur = await db.execute(
             """
             INSERT INTO books(author_id, title, description, age_limit, writing_status, publication_status,
-                              cover_file_id, allow_download, pricing_type, price_stars, created_at, updated_at)
-            VALUES(?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?)
+                              cover_file_id, normalized_title, allow_download, pricing_type, price_stars, created_at, updated_at)
+            VALUES(?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 author_id,
@@ -835,6 +847,7 @@ async def create_book(author_id: int, title: str, description: str, age_limit: s
                 age_limit,
                 writing_status,
                 cover_file_id,
+                " ".join(str(title).casefold().replace("ё", "е").split()),
                 1 if allow_download else 0,
                 pricing_type,
                 int(price_stars),
@@ -916,6 +929,7 @@ async def update_author_book_fields(book_id: int, author_user_id: int, values: d
     allowed = {
         "title", "description", "age_limit", "writing_status",
         "allow_download", "pricing_type", "price_stars",
+        "normalized_title", "duplicate_override",
     }
     clean: dict[str, Any] = {key: value for key, value in values.items() if key in allowed}
     if not clean:
@@ -924,6 +938,8 @@ async def update_author_book_fields(book_id: int, author_user_id: int, values: d
         clean["title"] = str(clean["title"]).strip()[:160]
         if len(clean["title"]) < 2:
             return False
+        clean["normalized_title"] = " ".join(clean["title"].casefold().replace("ё", "е").split())
+        clean["duplicate_override"] = 0
     if "description" in clean:
         clean["description"] = str(clean["description"]).strip()[:12000]
     if "age_limit" in clean:
@@ -1492,6 +1508,8 @@ async def get_reader_ad_settings() -> dict[str, bool | str]:
         "ad_impression_cost": "1",
         "ad_click_cost": "3",
         "promo_default_max_uses": "100",
+        "channel_promotion_price_stars": "50",
+        "channel_promotion_cooldown_days": "30",
     }
     async with connect() as db:
         cur = await db.execute("SELECT key, value FROM settings WHERE key IN ('reader_ads_enabled','reader_ads_top','reader_ads_bottom','reader_ads_label')")
@@ -3089,6 +3107,7 @@ async def get_purchase_target(payload: str) -> dict[str, Any] | None:
     - vox:chapter:123:promo:CODE
     - vox:book:123:promo:CODE
     - vox:ad_budget:45:100
+    - vox:channel_promo:12
     """
     parts = str(payload or "").split(":")
     if len(parts) < 3 or parts[0] != "vox":
@@ -3097,6 +3116,30 @@ async def get_purchase_target(payload: str) -> dict[str, Any] | None:
     promo_code = None
     if len(parts) == 5 and parts[3] == "promo":
         promo_code = clean_promo_code(parts[4])
+    if kind == "channel_promo":
+        if len(parts) != 3:
+            return None
+        try:
+            promotion_id = int(parts[2])
+        except ValueError:
+            return None
+        promotion = await get_channel_promotion(promotion_id)
+        if not promotion or promotion["status"] not in {"invoice", "paid", "failed"}:
+            return None
+        if promotion["publication_status"] != "published":
+            return None
+        return {
+            "kind": "channel_promo",
+            "target_id": promotion_id,
+            "promotion_id": promotion_id,
+            "book_id": int(promotion["book_id"]),
+            "title": f"Канал: {promotion['book_title']}",
+            "book_title": promotion["book_title"],
+            "amount_stars": int(promotion["amount_stars"] or 0),
+            "author_id": None,
+            "promo_code": None,
+            "discount_percent": 0,
+        }
     if kind == "ad_budget":
         if len(parts) != 4:
             return None
@@ -3201,6 +3244,13 @@ async def create_paid_purchase(
             (user_id, book_id, chapter_id, audio_chapter_id, int(amount_stars), telegram_payment_charge_id, now, payload, purchase_kind),
         )
         purchase_id = int(cur.lastrowid)
+        if kind == "channel_promo":
+            await db.execute(
+                "UPDATE book_channel_promotions SET purchase_id=?, status='paid', updated_at=? WHERE id=?",
+                (purchase_id, now, int(target["promotion_id"])),
+            )
+            await db.commit()
+            return purchase_id
         if kind == "ad_budget":
             units_per_star = int(await get_setting("ad_budget_units_per_star", "10") or 10)
             units = int(amount_stars) * units_per_star
@@ -3917,18 +3967,287 @@ async def list_blocked_users(limit: int = 20) -> list[aiosqlite.Row]:
         return await cur.fetchall()
 
 
-async def list_recent_channel_posts(limit: int = 10) -> list[aiosqlite.Row]:
-    # В текущей схеме канал фиксируется через audit_logs, чтобы не плодить отдельные таблицы.
+async def was_channel_post_sent(book_id: int) -> bool:
     async with connect() as db:
         cur = await db.execute(
             """
-            SELECT target_id AS book_id, after_value AS status, created_at
+            SELECT 1
             FROM audit_logs
-            WHERE action IN ('book_published_channel_posted','book_published_channel_failed','channel_post_sent')
+            WHERE target_type='book' AND target_id=?
+              AND action IN ('channel_post_sent','channel_post_sent_web','book_published_channel_posted')
+            LIMIT 1
+            """,
+            (str(int(book_id)),),
+        )
+        return await cur.fetchone() is not None
+
+
+async def list_recent_channel_posts(limit: int = 10) -> list[aiosqlite.Row]:
+    # Канал фиксируется через audit_logs; статус выводится по самому действию,
+    # чтобы старые записи без after_value тоже отображались правильно.
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT target_id AS book_id,
+                   CASE
+                     WHEN action IN ('channel_post_failed','channel_post_failed_web','book_published_channel_failed') THEN 'failed'
+                     WHEN action='channel_post_skipped' THEN 'not_configured'
+                     ELSE 'sent'
+                   END AS status,
+                   before_value AS details,
+                   created_at
+            FROM audit_logs
+            WHERE action IN (
+                'book_published_channel_posted','book_published_channel_failed',
+                'channel_post_sent','channel_post_failed',
+                'channel_post_sent_web','channel_post_failed_web',
+                'channel_post_skipped'
+            )
             ORDER BY id DESC
             LIMIT ?
             """,
             (limit,),
+        )
+        return await cur.fetchall()
+
+
+async def _ensure_v184_schema(db: aiosqlite.Connection) -> None:
+    """Мягкая миграция публикаций, платного продвижения и проверки копий книг."""
+    now = utc_now()
+    await db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS book_channel_promotions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            book_id INTEGER NOT NULL,
+            requested_by_user_id INTEGER,
+            purchase_id INTEGER,
+            source TEXT NOT NULL DEFAULT 'paid',
+            amount_stars INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'invoice',
+            expires_at TEXT,
+            posted_at TEXT,
+            error TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE,
+            FOREIGN KEY(requested_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+            FOREIGN KEY(purchase_id) REFERENCES purchases(id) ON DELETE SET NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_book_promotions_book_status
+            ON book_channel_promotions(book_id, source, status, created_at);
+        CREATE INDEX IF NOT EXISTS idx_books_source_hash ON books(source_file_hash);
+        CREATE INDEX IF NOT EXISTS idx_books_normalized_title ON books(normalized_title);
+        """
+    )
+    for key, value in {
+        "channel_promotion_price_stars": "50",
+        "channel_promotion_cooldown_days": "30",
+    }.items():
+        await db.execute(
+            "INSERT INTO settings(key, value, updated_at) VALUES(?, ?, ?) ON CONFLICT(key) DO NOTHING",
+            (key, value, now),
+        )
+    await db.execute(
+        "UPDATE books SET normalized_title=LOWER(TRIM(title)) WHERE normalized_title IS NULL OR TRIM(normalized_title)=''"
+    )
+
+
+async def list_books_for_duplicate_check(exclude_book_id: int | None = None) -> list[aiosqlite.Row]:
+    async with connect() as db:
+        if exclude_book_id is None:
+            cur = await db.execute(
+                """
+                SELECT b.id, b.author_id, b.title, b.normalized_title, b.source_file_hash,
+                       b.publication_status, a.pen_name
+                FROM books b LEFT JOIN author_profiles a ON a.id=b.author_id
+                WHERE b.publication_status!='deleted'
+                ORDER BY b.id DESC
+                """
+            )
+        else:
+            cur = await db.execute(
+                """
+                SELECT b.id, b.author_id, b.title, b.normalized_title, b.source_file_hash,
+                       b.publication_status, a.pen_name
+                FROM books b LEFT JOIN author_profiles a ON a.id=b.author_id
+                WHERE b.publication_status!='deleted' AND b.id!=?
+                ORDER BY b.id DESC
+                """,
+                (int(exclude_book_id),),
+            )
+        return await cur.fetchall()
+
+
+async def update_book_import_fingerprint(
+    book_id: int, *, filename: str, source_file_hash: str, duplicate_override: bool = False
+) -> bool:
+    now = utc_now()
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            UPDATE books
+            SET source_file_name=?, source_file_hash=?, duplicate_override=?, updated_at=?
+            WHERE id=? AND publication_status!='deleted'
+            """,
+            (str(filename)[:180], str(source_file_hash)[:64], 1 if duplicate_override else 0, now, int(book_id)),
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def set_book_duplicate_override(book_id: int, allowed: bool) -> bool:
+    async with connect() as db:
+        cur = await db.execute(
+            "UPDATE books SET duplicate_override=?, updated_at=? WHERE id=?",
+            (1 if allowed else 0, utc_now(), int(book_id)),
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def get_channel_promotion_price() -> int:
+    return max(1, int(await get_setting("channel_promotion_price_stars", "50") or 50))
+
+
+async def get_channel_promotion_cooldown_days() -> int:
+    return max(1, int(await get_setting("channel_promotion_cooldown_days", "30") or 30))
+
+
+async def get_channel_promotion_availability(book_id: int, user_id: int | None = None) -> dict[str, Any]:
+    cooldown_days = await get_channel_promotion_cooldown_days()
+    now_dt = datetime.now(timezone.utc)
+    cutoff = (now_dt - timedelta(days=cooldown_days)).isoformat()
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT * FROM book_channel_promotions
+            WHERE book_id=? AND source='paid' AND status='sent' AND posted_at>=?
+            ORDER BY posted_at DESC, id DESC LIMIT 1
+            """,
+            (int(book_id), cutoff),
+        )
+        sent = await cur.fetchone()
+        if sent:
+            posted_at = datetime.fromisoformat(str(sent["posted_at"]).replace("Z", "+00:00"))
+            if posted_at.tzinfo is None:
+                posted_at = posted_at.replace(tzinfo=timezone.utc)
+            available_at = posted_at + timedelta(days=cooldown_days)
+            return {"allowed": False, "reason": "cooldown", "available_at": available_at.isoformat(), "promotion_id": int(sent["id"])}
+        if user_id is not None:
+            cur = await db.execute(
+                """
+                SELECT * FROM book_channel_promotions
+                WHERE book_id=? AND requested_by_user_id=? AND source='paid'
+                  AND status IN ('paid','failed')
+                ORDER BY id DESC LIMIT 1
+                """,
+                (int(book_id), int(user_id)),
+            )
+            retry = await cur.fetchone()
+            if retry:
+                return {"allowed": True, "reason": "retry", "promotion_id": int(retry["id"]), "paid": True}
+        return {"allowed": True, "reason": "available", "available_at": None}
+
+
+async def reserve_channel_promotion(book_id: int, user_id: int, amount_stars: int) -> int:
+    availability = await get_channel_promotion_availability(book_id, user_id)
+    if not availability.get("allowed"):
+        raise ValueError("Эту книгу уже публиковали в канале. Повтор будет доступен позже.")
+    if availability.get("reason") == "retry":
+        return int(availability["promotion_id"])
+    now_dt = datetime.now(timezone.utc)
+    now = now_dt.isoformat()
+    expires = (now_dt + timedelta(minutes=30)).isoformat()
+    async with connect() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        await db.execute(
+            "UPDATE book_channel_promotions SET status='expired', updated_at=? WHERE status='invoice' AND expires_at<?",
+            (now, now),
+        )
+        cur = await db.execute(
+            "SELECT id FROM book_channel_promotions WHERE book_id=? AND source='paid' AND status='invoice' AND expires_at>? ORDER BY id DESC LIMIT 1",
+            (int(book_id), now),
+        )
+        active = await cur.fetchone()
+        if active:
+            await db.commit()
+            return int(active["id"])
+        cur = await db.execute(
+            """
+            INSERT INTO book_channel_promotions(
+                book_id, requested_by_user_id, source, amount_stars, status, expires_at, created_at, updated_at
+            ) VALUES(?, ?, 'paid', ?, 'invoice', ?, ?, ?)
+            """,
+            (int(book_id), int(user_id), int(amount_stars), expires, now, now),
+        )
+        await db.commit()
+        return int(cur.lastrowid)
+
+
+async def get_channel_promotion(promotion_id: int) -> aiosqlite.Row | None:
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT p.*, b.title AS book_title, b.publication_status, b.cover_path
+            FROM book_channel_promotions p JOIN books b ON b.id=p.book_id
+            WHERE p.id=?
+            """,
+            (int(promotion_id),),
+        )
+        return await cur.fetchone()
+
+
+async def mark_channel_promotion_paid(promotion_id: int, purchase_id: int) -> bool:
+    async with connect() as db:
+        cur = await db.execute(
+            "UPDATE book_channel_promotions SET purchase_id=?, status='paid', updated_at=? WHERE id=? AND status IN ('invoice','paid','failed')",
+            (int(purchase_id), utc_now(), int(promotion_id)),
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def finish_channel_promotion(promotion_id: int, *, sent: bool, error: str = "") -> bool:
+    now = utc_now()
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            UPDATE book_channel_promotions
+            SET status=?, posted_at=CASE WHEN ? THEN ? ELSE posted_at END, error=?, updated_at=?
+            WHERE id=?
+            """,
+            ("sent" if sent else "failed", 1 if sent else 0, now, str(error)[:1000], now, int(promotion_id)),
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def record_owner_channel_promotion(book_id: int, user_id: int | None, *, sent: bool, error: str = "") -> int:
+    now = utc_now()
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            INSERT INTO book_channel_promotions(
+                book_id, requested_by_user_id, source, amount_stars, status, posted_at, error, created_at, updated_at
+            ) VALUES(?, ?, 'owner', 0, ?, ?, ?, ?, ?)
+            """,
+            (int(book_id), user_id, "sent" if sent else "failed", now if sent else None, str(error)[:1000], now, now),
+        )
+        await db.commit()
+        return int(cur.lastrowid)
+
+
+async def list_recent_channel_promotions(limit: int = 20) -> list[aiosqlite.Row]:
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT p.*, b.title AS book_title, u.username, u.full_name
+            FROM book_channel_promotions p
+            JOIN books b ON b.id=p.book_id
+            LEFT JOIN users u ON u.id=p.requested_by_user_id
+            ORDER BY p.id DESC LIMIT ?
+            """,
+            (max(1, int(limit)),),
         )
         return await cur.fetchall()
 
@@ -3972,10 +4291,10 @@ async def create_paid_purchase(
 
     now = utc_now()
     kind = str(target["kind"])
-    book_id = int(target["book_id"]) if kind == "book" else None
+    book_id = int(target["book_id"]) if kind in {"book", "channel_promo"} else None
     chapter_id = int(target["target_id"]) if kind == "chapter" else None
     audio_chapter_id = int(target["target_id"]) if kind == "audio" else None
-    purchase_kind = "ad_budget" if kind == "ad_budget" else "content"
+    purchase_kind = "ad_budget" if kind == "ad_budget" else ("channel_promotion" if kind == "channel_promo" else "content")
 
     async with connect() as db:
         await db.execute("BEGIN IMMEDIATE")
@@ -3999,6 +4318,14 @@ async def create_paid_purchase(
             (int(user_id), book_id, chapter_id, audio_chapter_id, amount_stars, charge_id, now, payload, purchase_kind),
         )
         purchase_id = int(cur.lastrowid)
+
+        if kind == "channel_promo":
+            await db.execute(
+                "UPDATE book_channel_promotions SET purchase_id=?, status='paid', updated_at=? WHERE id=?",
+                (purchase_id, now, int(target["promotion_id"])),
+            )
+            await db.commit()
+            return purchase_id
 
         if kind == "ad_budget":
             cur_setting = await db.execute("SELECT value FROM settings WHERE key='ad_budget_units_per_star'")

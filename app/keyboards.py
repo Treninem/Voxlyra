@@ -132,43 +132,82 @@ def author_menu(has_profile: bool) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-def age_menu(prefix: str) -> InlineKeyboardMarkup:
+def _append_navigation(
+    kb: InlineKeyboardBuilder,
+    *,
+    back_callback: str | None = None,
+    cancel_callback: str | None = None,
+    back_text: str = "⬅️ Назад",
+    cancel_text: str = "❌ Отмена",
+) -> None:
+    """Добавляет только уместные действия выхода из текущего сценария."""
+    if back_callback:
+        kb.button(text=back_text, callback_data=back_callback)
+    if cancel_callback and cancel_callback != back_callback:
+        kb.button(text=cancel_text, callback_data=cancel_callback)
+
+
+def navigation_menu(
+    *,
+    back_callback: str | None = None,
+    cancel_callback: str | None = None,
+    back_text: str = "⬅️ Назад",
+    cancel_text: str = "❌ Отмена",
+) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    for value in ["0+", "6+", "12+", "16+", "18+"]:
-        kb.button(text=value, callback_data=f"{prefix}:{value}")
-    kb.adjust(3, 2)
+    _append_navigation(
+        kb,
+        back_callback=back_callback,
+        cancel_callback=cancel_callback,
+        back_text=back_text,
+        cancel_text=cancel_text,
+    )
+    kb.adjust(1)
     return kb.as_markup()
 
 
-def writing_status_menu() -> InlineKeyboardMarkup:
+def age_menu(prefix: str, back_callback: str | None = None, cancel_callback: str | None = None) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for value in ["0+", "6+", "12+", "16+", "18+"]:
+        kb.button(text=value, callback_data=f"{prefix}:{value}")
+    _append_navigation(kb, back_callback=back_callback, cancel_callback=cancel_callback)
+    kb.adjust(3, 2, 1, 1)
+    return kb.as_markup()
+
+
+def writing_status_menu(back_callback: str | None = None, cancel_callback: str | None = None) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="Пишется", callback_data="book:status:writing")
     kb.button(text="Завершена", callback_data="book:status:finished")
     kb.button(text="Заморожена", callback_data="book:status:frozen")
+    _append_navigation(kb, back_callback=back_callback, cancel_callback=cancel_callback)
     kb.adjust(1)
     return kb.as_markup()
 
 
-def yes_no_menu(prefix: str) -> InlineKeyboardMarkup:
+def yes_no_menu(prefix: str, back_callback: str | None = None, cancel_callback: str | None = None) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="Да", callback_data=f"{prefix}:yes")
     kb.button(text="Нет", callback_data=f"{prefix}:no")
-    kb.adjust(2)
+    _append_navigation(kb, back_callback=back_callback, cancel_callback=cancel_callback)
+    kb.adjust(2, 1, 1)
     return kb.as_markup()
 
 
-def pricing_menu() -> InlineKeyboardMarkup:
+def pricing_menu(back_callback: str | None = None, cancel_callback: str | None = None) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="Бесплатно", callback_data="book:pricing:free")
     kb.button(text="Платные главы", callback_data="book:pricing:chapters")
     kb.button(text="Вся книга", callback_data="book:pricing:whole_book")
+    _append_navigation(kb, back_callback=back_callback, cancel_callback=cancel_callback)
     kb.adjust(1)
     return kb.as_markup()
 
 
-def cover_menu() -> InlineKeyboardMarkup:
+def cover_menu(back_callback: str | None = None, cancel_callback: str | None = None) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.button(text="Пропустить", callback_data="book:cover:skip")
+    kb.button(text="⏭ Пропустить", callback_data="book:cover:skip")
+    _append_navigation(kb, back_callback=back_callback, cancel_callback=cancel_callback)
     kb.adjust(1)
     return kb.as_markup()
 
@@ -205,6 +244,8 @@ def author_book_card_menu(book_id: int, publication_status: str) -> InlineKeyboa
     kb = InlineKeyboardBuilder()
     if publication_status == "draft":
         kb.button(text="📤 Отправить на проверку", callback_data=f"author:submit_book:{book_id}")
+    if publication_status == "published":
+        kb.button(text="📢 Опубликовать в канале", callback_data=f"channel:promote:{book_id}")
     kb.button(text="➕ Главы", callback_data=f"author:chapters:{book_id}")
     kb.button(text="🎧 Аудио", callback_data=f"author:audio:{book_id}")
     kb.button(text="✏️ Название", callback_data=f"book:edit_title:{book_id}")
@@ -299,9 +340,10 @@ def author_chapters_menu(book_id: int) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-def chapter_import_confirm_menu(book_id: int) -> InlineKeyboardMarkup:
+def chapter_import_confirm_menu(book_id: int, duplicate_warning: bool = False) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.button(text="✅ Сохранить главы", callback_data=f"chapter:import_confirm:{book_id}")
+    label = "⚠️ Проверить и сохранить" if duplicate_warning else "✅ Сохранить главы"
+    kb.button(text=label, callback_data=f"chapter:import_confirm:{book_id}")
     kb.button(text="❌ Отмена", callback_data=f"chapter:import_cancel:{book_id}")
     kb.adjust(1)
     return kb.as_markup()
@@ -442,18 +484,23 @@ def access_granted_menu(kind: str, target_id: int) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-def single_select_menu(prefix: str, choices, back_callback: str | None = None) -> InlineKeyboardMarkup:
+def single_select_menu(
+    prefix: str,
+    choices,
+    back_callback: str | None = None,
+    cancel_callback: str | None = None,
+) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     for choice in choices:
         kb.button(text=choice.label, callback_data=f"single:{prefix}:{choice.code}")
-    if back_callback:
-        kb.button(text="⬅️ Назад", callback_data=back_callback)
+    _append_navigation(kb, back_callback=back_callback, cancel_callback=cancel_callback)
     kb.adjust(1)
     return kb.as_markup()
 
 
 def multi_select_menu(prefix: str, choices, selected: set[str] | list[str] | tuple[str, ...], page: int = 0,
-                      per_page: int = 12) -> InlineKeyboardMarkup:
+                      per_page: int = 12, back_callback: str | None = None,
+                      cancel_callback: str | None = None) -> InlineKeyboardMarkup:
     selected_set = set(selected or [])
     total_pages = max(1, (len(choices) + per_page - 1) // per_page)
     page = max(0, min(page, total_pages - 1))
@@ -470,6 +517,7 @@ def multi_select_menu(prefix: str, choices, selected: set[str] | list[str] | tup
         if page < total_pages - 1:
             kb.button(text="Вперёд ➡️", callback_data=f"sel:{prefix}:p:{page+1}")
     kb.button(text="✅ Готово", callback_data=f"sel:{prefix}:d")
+    _append_navigation(kb, back_callback=back_callback, cancel_callback=cancel_callback)
     kb.adjust(1)
     return kb.as_markup()
 
@@ -652,11 +700,30 @@ def owner_books_search_results_menu(rows) -> InlineKeyboardMarkup:
 
 def owner_book_card_menu(book_id: int, status: str) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
+    if status == "published":
+        kb.button(text="📢 Опубликовать в канале повторно", callback_data=f"owner:channel_repost:{book_id}")
     if status == "blocked":
         kb.button(text="👁 Скрыть вместо блокировки", callback_data=f"owner:book_block:{book_id}:0")
     else:
         kb.button(text="🚫 Заблокировать книгу", callback_data=f"owner:book_block:{book_id}:1")
     kb.button(text="⬅️ Поиск", callback_data="owner:books")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def owner_channel_menu() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📚 Найти книгу", callback_data="owner:books")
+    kb.button(text="💰 Цена продвижения", callback_data="owner:channel_price")
+    kb.button(text="⬅️ Назад", callback_data="owner:menu")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def channel_promotion_confirm_menu(book_id: int, price: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text=f"⭐ Оплатить {int(price)} Stars", callback_data=f"channel:promote_pay:{int(book_id)}")
+    kb.button(text="⬅️ К книге", callback_data=f"author:book:{int(book_id)}")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -752,20 +819,31 @@ def payout_settings_menu() -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-def skip_back_menu(skip_callback: str, back_callback: str | None = None, skip_text: str = "⏭ Пропустить") -> InlineKeyboardMarkup:
+def skip_back_menu(
+    skip_callback: str,
+    back_callback: str | None = None,
+    skip_text: str = "⏭ Пропустить",
+    cancel_callback: str | None = None,
+) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text=skip_text, callback_data=skip_callback)
-    if back_callback:
-        kb.button(text="⬅️ Назад", callback_data=back_callback)
+    _append_navigation(kb, back_callback=back_callback, cancel_callback=cancel_callback)
     kb.adjust(1)
     return kb.as_markup()
 
 
-def skip_use_menu(skip_callback: str, use_callback: str | None = None, use_text: str = "✅ Использовать рекомендованное") -> InlineKeyboardMarkup:
+def skip_use_menu(
+    skip_callback: str,
+    use_callback: str | None = None,
+    use_text: str = "✅ Использовать рекомендованное",
+    back_callback: str | None = None,
+    cancel_callback: str | None = None,
+) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     if use_callback:
         kb.button(text=use_text, callback_data=use_callback)
     kb.button(text="⏭ Пропустить", callback_data=skip_callback)
+    _append_navigation(kb, back_callback=back_callback, cancel_callback=cancel_callback)
     kb.adjust(1)
     return kb.as_markup()
 

@@ -395,19 +395,117 @@ async function initBookPage() {
   } catch (_) {}
 }
 
+function normalizeCatalogText(value) {
+  return String(value || '')
+    .toLocaleLowerCase('ru-RU')
+    .replaceAll('ё', 'е')
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim()
+    .replace(/\s+/g, ' ');
+}
+
+function catalogEditDistance(left, right) {
+  const a = String(left || '');
+  const b = String(right || '');
+  if (a === b) return 0;
+  if (!a.length) return b.length;
+  if (!b.length) return a.length;
+  let previous = Array.from({ length: b.length + 1 }, (_, index) => index);
+  for (let i = 1; i <= a.length; i += 1) {
+    const current = [i];
+    for (let j = 1; j <= b.length; j += 1) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      current[j] = Math.min(current[j - 1] + 1, previous[j] + 1, previous[j - 1] + cost);
+    }
+    previous = current;
+  }
+  return previous[b.length];
+}
+
+function catalogWordSimilarity(left, right) {
+  if (!left || !right) return 0;
+  if (left === right) return 1;
+  if (left.startsWith(right) || right.startsWith(left)) return 0.94;
+  if (left.includes(right) || right.includes(left)) return 0.86;
+  const longest = Math.max(left.length, right.length);
+  return longest ? 1 - catalogEditDistance(left, right) / longest : 0;
+}
+
+function catalogTextScore(card, normalizedQuery) {
+  if (!normalizedQuery) return 1;
+  const title = normalizeCatalogText(card.dataset.title || '');
+  const author = normalizeCatalogText(card.dataset.author || '');
+  if (title === normalizedQuery) return 100000;
+  if (title.startsWith(normalizedQuery)) return 90000 - title.length;
+  if (title.includes(normalizedQuery)) return 80000 - title.indexOf(normalizedQuery);
+  if (author === normalizedQuery) return 70000;
+  if (author.includes(normalizedQuery)) return 65000;
+
+  const queryWords = normalizedQuery.split(' ').filter(Boolean);
+  const titleWords = title.split(' ').filter(Boolean);
+  const authorWords = author.split(' ').filter(Boolean);
+  if (!queryWords.length) return 1;
+
+  let titleTotal = 0;
+  let titleMatched = 0;
+  queryWords.forEach((queryWord) => {
+    let best = 0;
+    titleWords.forEach((titleWord) => { best = Math.max(best, catalogWordSimilarity(queryWord, titleWord)); });
+    if (best >= (queryWord.length <= 3 ? 0.9 : 0.66)) titleMatched += 1;
+    titleTotal += best;
+  });
+  if (titleMatched === queryWords.length) {
+    const phraseSimilarity = catalogWordSimilarity(normalizedQuery, title);
+    return 60000 + Math.round((titleTotal / queryWords.length) * 1000) + Math.round(phraseSimilarity * 500);
+  }
+
+  let authorMatched = 0;
+  let authorTotal = 0;
+  queryWords.forEach((queryWord) => {
+    let best = 0;
+    authorWords.forEach((authorWord) => { best = Math.max(best, catalogWordSimilarity(queryWord, authorWord)); });
+    if (best >= (queryWord.length <= 3 ? 0.9 : 0.72)) authorMatched += 1;
+    authorTotal += best;
+  });
+  if (authorMatched === queryWords.length) return 50000 + Math.round((authorTotal / queryWords.length) * 1000);
+
+  if (queryWords.length === 1 && titleTotal >= 0.68) return 40000 + Math.round(titleTotal * 1000);
+  return 0;
+}
+
 function applyCatalogFilter() {
   const grid = document.getElementById('catalogGrid');
   if (!grid) return;
-  const query = (document.getElementById('catalogSearch')?.value || '').trim().toLowerCase();
+  const query = normalizeCatalogText(document.getElementById('catalogSearch')?.value || '');
   const active = document.querySelector('[data-catalog-filter].active')?.dataset.catalogFilter || 'all';
+  const cards = Array.from(grid.querySelectorAll('[data-catalog-card]'));
+  cards.forEach((card, index) => {
+    if (!card.dataset.catalogOrder) card.dataset.catalogOrder = String(index);
+  });
+
+  const exactTitleExists = Boolean(query) && cards.some((card) => normalizeCatalogText(card.dataset.title || '') === query);
   let visible = 0;
-  grid.querySelectorAll('[data-catalog-card]').forEach((card) => {
-    const matchesText = !query || `${card.dataset.title || ''} ${card.dataset.author || ''}`.includes(query);
-    const matchesFilter = active === 'all' || (active === 'audio' && card.dataset.audio === '1') || (active === 'free' && card.dataset.free === '1') || (active === 'popular' && Number(card.dataset.popular || 0) > 0);
+  const ranked = cards.map((card) => {
+    const title = normalizeCatalogText(card.dataset.title || '');
+    const score = exactTitleExists ? (title === query ? 100000 : 0) : catalogTextScore(card, query);
+    const matchesText = !query || score > 0;
+    const matchesFilter = active === 'all'
+      || (active === 'audio' && card.dataset.audio === '1')
+      || (active === 'free' && card.dataset.free === '1')
+      || (active === 'popular' && Number(card.dataset.popular || 0) > 0);
     const show = matchesText && matchesFilter;
     card.hidden = !show;
     if (show) visible += 1;
+    return { card, score, original: Number(card.dataset.catalogOrder || 0) };
   });
+
+  ranked.sort((left, right) => {
+    if (!query) return left.original - right.original;
+    return right.score - left.score || left.original - right.original;
+  }).forEach(({ card }) => grid.appendChild(card));
+
   const empty = document.getElementById('catalogEmptySearch');
   if (empty) empty.hidden = visible !== 0;
 }

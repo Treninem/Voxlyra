@@ -5,6 +5,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from app.config import settings
+from app.build_info import owner_build_label
 
 
 @dataclass(frozen=True)
@@ -99,7 +100,7 @@ def format_diagnostics_for_owner() -> str:
     lines = [
         "<b>🧩 Система</b>",
         "",
-        f"Служебная версия: <b>{settings.PROJECT_VERSION}</b>",
+        f"Версия сборки: <b>{owner_build_label()}</b>",
         "Публично версия нигде не показывается.",
         "",
         f"Проверки: <b>{summary['ok_count']}/{summary['total']}</b>",

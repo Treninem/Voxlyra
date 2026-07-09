@@ -84,6 +84,8 @@ from app.db import (
     update_chapter_text,
     update_chapter_title,
     upsert_imported_chapters,
+    update_book_import_fingerprint,
+    set_book_duplicate_override,
     save_reading_progress,
     set_bookmark,
     set_chapter_status,
@@ -96,8 +98,8 @@ from app.db import (
 from app.services.tma_auth import TMAAuthError, TMAUser, authenticate_init_data
 from app.permissions import PERMISSION_BY_CODE
 from app.services.diagnostics import diagnostics_summary
-from app.services.channel import build_new_book_post
 from app.services.book_parser import BookParseError, build_import_report, parse_book_file
+from app.services.duplicate_books import find_book_duplicates, sha256_file
 from app.services.chunked_upload import (
     ChunkedUploadError,
     CHUNK_SIZE_BYTES,
@@ -119,8 +121,10 @@ from app.services.notifications import (
 from app.services.web_import_store import (
     delete_web_import_preview,
     load_web_import_preview,
+    load_web_import_metadata,
     save_web_import_preview,
 )
+from app.services.publication import finish_book_content_workflow, publish_book_and_channel
 
 
 def _bot_purchase_url(kind: str, target_id: int) -> str:
@@ -290,6 +294,7 @@ def create_app() -> FastAPI:
                 "public_reviews": public_reviews,
                 "project_name": settings.PROJECT_NAME,
                 "bot_username": settings.BOT_USERNAME.strip().lstrip("@"),
+                "channel_promotion_enabled": bool(settings.CHANNEL_ID.strip()),
             },
         )
 
@@ -790,7 +795,26 @@ def create_app() -> FastAPI:
                 text=new_chapter_message(chapter["book_title"], chapter["title"], chapter["number"]),
             )
             await add_audit(user.app_user_id, "chapter_followers_notified_web", "chapter", str(chapter_id), None, str(notification))
-        return {"ok": True, "chapter": _row_to_dict(chapter), "notification": notification}
+        workflow = None
+        if settings.BOT_TOKEN:
+            delivery_bot = Bot(token=settings.BOT_TOKEN)
+            try:
+                workflow_result = await finish_book_content_workflow(
+                    bot=delivery_bot,
+                    book_id=book_id,
+                    actor_user_id=user.app_user_id,
+                    actor_telegram_id=user.telegram_id,
+                    source="miniapp_manual_chapter",
+                )
+                workflow = {
+                    "status": workflow_result.workflow_status,
+                    "channel_status": workflow_result.channel_status,
+                    "channel_message": workflow_result.channel_message,
+                    "duplicate_text": workflow_result.duplicate_text,
+                }
+            finally:
+                await delivery_bot.session.close()
+        return {"ok": True, "chapter": _row_to_dict(chapter), "notification": notification, "workflow": workflow}
 
     @app.patch("/api/author/chapter/{chapter_id}")
     async def api_author_update_chapter(
@@ -902,12 +926,22 @@ def create_app() -> FastAPI:
             )
             if not chapters:
                 raise BookParseError("Главы не найдены. Проверьте структуру файла.")
+            source_hash = sha256_file(path)
+            book = await get_book(book_id)
+            duplicate_matches = await find_book_duplicates(
+                title=book["title"] if book else str(meta.get("filename") or path.name),
+                author_id=int(book["author_id"]) if book and book["author_id"] is not None else None,
+                exclude_book_id=book_id,
+                source_file_hash=source_hash,
+            )
             report = build_import_report(chapters)
             preview_token = save_web_import_preview(
                 chapters,
                 user_id=user.app_user_id,
                 book_id=book_id,
                 original_name=str(meta.get("filename") or path.name),
+                source_file_hash=source_hash,
+                duplicate_matches=[item.to_dict() for item in duplicate_matches],
             )
             await add_audit(
                 user.app_user_id,
@@ -922,6 +956,7 @@ def create_app() -> FastAPI:
                 "preview_token": preview_token,
                 "filename": str(meta.get("filename") or path.name),
                 "report": report,
+                "duplicates": [item.to_dict() for item in duplicate_matches],
             }
         except (ChunkedUploadError, BookParseError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -945,8 +980,18 @@ def create_app() -> FastAPI:
             user_id=user.app_user_id,
             book_id=book_id,
         )
+        metadata = load_web_import_metadata(
+            token, user_id=user.app_user_id, book_id=book_id
+        )
         if not chapters:
             raise HTTPException(status_code=400, detail="Предпросмотр устарел. Загрузите файл заново.")
+        duplicate_matches = list(metadata.get("duplicate_matches") or [])
+        allow_duplicate = bool(payload.get("allow_duplicate"))
+        if duplicate_matches and not allow_duplicate:
+            raise HTTPException(
+                status_code=409,
+                detail="Похоже, такая книга уже есть. Подтвердите, что это новая редакция или другая книга.",
+            )
         first_free = max(0, min(100000, int(payload.get("first_free") or 0)))
         default_price = max(0, min(100000, int(payload.get("default_price_stars") or 0)))
         import_result = await upsert_imported_chapters(
@@ -958,6 +1003,14 @@ def create_app() -> FastAPI:
         )
         saved = int(import_result["saved"])
         published_ids = [int(item) for item in import_result["published_ids"]]
+        await update_book_import_fingerprint(
+            book_id,
+            filename=str(metadata.get("original_name") or original_name or "book"),
+            source_file_hash=str(metadata.get("source_file_hash") or ""),
+            duplicate_override=allow_duplicate or not bool(duplicate_matches),
+        )
+        if allow_duplicate:
+            await set_book_duplicate_override(book_id, True)
         delete_web_import_preview(token)
         await add_audit(user.app_user_id, "book_import_confirmed_web", "book", str(book_id), None, f"{original_name}:{saved}")
         notification = None
@@ -970,7 +1023,44 @@ def create_app() -> FastAPI:
                 text=new_chapter_message(book["title"], count=len(published_ids)),
             )
             await add_audit(user.app_user_id, "chapter_followers_notified_web", "book", str(book_id), None, str(notification))
-        return {"ok": True, "saved": saved, "notification": notification}
+        workflow = None
+        if settings.BOT_TOKEN:
+            delivery_bot = Bot(token=settings.BOT_TOKEN)
+            try:
+                workflow_result = await finish_book_content_workflow(
+                    bot=delivery_bot,
+                    book_id=book_id,
+                    actor_user_id=user.app_user_id,
+                    actor_telegram_id=user.telegram_id,
+                    source="miniapp_file_import",
+                )
+                workflow = {
+                    "status": workflow_result.workflow_status,
+                    "channel_status": workflow_result.channel_status,
+                    "channel_message": workflow_result.channel_message,
+                    "duplicate_text": workflow_result.duplicate_text,
+                }
+                message_text = (
+                    f"Книга «{book['title']}» опубликована и добавлена в каталог. {workflow_result.channel_message}"
+                    if workflow_result.workflow_status == "published"
+                    else (
+                        f"Книга «{book['title']}» отправлена на проверку."
+                        if workflow_result.workflow_status == "review"
+                        else "Главы сохранены, но публикация остановлена из-за возможной копии книги."
+                    )
+                )
+                await delivery_bot.send_message(user.telegram_id, message_text)
+            except Exception:
+                workflow = workflow or {"status": "saved", "channel_status": "", "channel_message": ""}
+            finally:
+                await delivery_bot.session.close()
+        return {
+            "ok": True,
+            "saved": saved,
+            "notification": notification,
+            "workflow": workflow,
+            "book_id": book_id,
+        }
 
     @app.get("/api/control/dashboard")
     async def api_control_dashboard(x_telegram_init_data: str | None = Header(default=None)):
@@ -1025,10 +1115,29 @@ def create_app() -> FastAPI:
         chapters_count = await count_chapters_for_book(book_id)
         if action == "publish" and chapters_count < 1:
             raise HTTPException(status_code=409, detail="Нельзя публиковать книгу без глав.")
-        await set_book_publication_status(book_id, status)
+
+        channel_status = ""
         if action == "publish":
-            await publish_book_content(book_id)
-        await add_audit(user.app_user_id, f"book_{status}_web", "book", str(book_id))
+            if not settings.BOT_TOKEN:
+                raise HTTPException(status_code=503, detail="Бот временно недоступен для публикации.")
+            bot = Bot(token=settings.BOT_TOKEN)
+            try:
+                result = await publish_book_and_channel(
+                    bot,
+                    book_id,
+                    actor_user_id=user.app_user_id,
+                )
+            finally:
+                await bot.session.close()
+            if result.workflow_status == "duplicate":
+                raise HTTPException(status_code=409, detail=result.duplicate_text or "Найдена возможная копия книги.")
+            if not result.published:
+                raise HTTPException(status_code=409, detail=result.channel_error or "Книгу не удалось опубликовать.")
+            channel_status = result.channel_status
+        else:
+            await set_book_publication_status(book_id, status)
+            await add_audit(user.app_user_id, f"book_{status}_web", "book", str(book_id))
+
         notification = await notify_after_action(
             actor_user_id=user.app_user_id,
             event=f"book_{status}",
@@ -1038,29 +1147,13 @@ def create_app() -> FastAPI:
             telegram_id=int(book["author_telegram_id"]) if book["author_telegram_id"] is not None else None,
             text=book_moderation_message(book["title"], status),
         )
-        channel_sent = False
-        if action == "publish" and settings.CHANNEL_ID and settings.BOT_TOKEN:
-            options = await get_book_options(book_id)
-            genre = (options.get("genres") or ["Истории"])[0]
-            bot = Bot(token=settings.BOT_TOKEN)
-            try:
-                await bot.send_message(
-                    settings.CHANNEL_ID,
-                    build_new_book_post(
-                        title=str(book["title"]),
-                        genre=str(genre),
-                        age_limit=str(book["age_limit"] or ""),
-                        chapters_count=chapters_count,
-                        has_audio=bool(book["has_audio"]),
-                    ),
-                )
-                channel_sent = True
-                await add_audit(user.app_user_id, "channel_post_sent_web", "book", str(book_id))
-            except Exception:
-                await add_audit(user.app_user_id, "channel_post_failed_web", "book", str(book_id))
-            finally:
-                await bot.session.close()
-        return {"ok": True, "status": status, "channel_sent": channel_sent, "notification": notification}
+        return {
+            "ok": True,
+            "status": status,
+            "channel_sent": channel_status == "sent",
+            "channel_status": channel_status,
+            "notification": notification,
+        }
 
     @app.get("/api/control/comments")
     async def api_control_comments(x_telegram_init_data: str | None = Header(default=None)):
