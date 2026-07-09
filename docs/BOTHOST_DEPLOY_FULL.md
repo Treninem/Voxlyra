@@ -10,7 +10,7 @@
 
 ## Шаг 1. Распаковать архив
 
-Распакуйте архив `voxlyra_bot_v1.8.2_cover_fix.zip`.
+Распакуйте архив `voxlyra_bot_v1.8.3_author_cover_display.zip`.
 
 Внутри будет папка:
 
@@ -63,7 +63,7 @@ WEBAPP_URL=https://адрес_проекта_на_Bothost
 CHANNEL_ID=@username_канала
 PROJECT_NAME=Вокслира
 PUBLIC_VERSION_VISIBLE=false
-PROJECT_VERSION=v1.8.2-cover-fix
+PROJECT_VERSION=v1.8.3-author-cover-display
 ```
 
 Если `WEBAPP_URL` ещё неизвестен, сначала можно временно поставить:

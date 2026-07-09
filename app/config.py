@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     BOT_USERNAME: str = ""
     PROJECT_NAME: str = "Вокслира"
     PUBLIC_VERSION_VISIBLE: bool = False
-    PROJECT_VERSION: str = "v1.8.2-cover-fix"
+    PROJECT_VERSION: str = "v1.8.3-author-cover-display"
     MAX_BOOK_UPLOAD_MB: int = 0
     MAX_BOOK_UNPACKED_MB: int = 2048
 

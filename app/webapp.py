@@ -671,6 +671,30 @@ def create_app() -> FastAPI:
             },
         }
 
+    @app.get("/api/author/book/{book_id}/cover")
+    async def api_author_book_cover(book_id: int, x_telegram_init_data: str | None = Header(default=None)):
+        user, _ = await author_session(x_telegram_init_data)
+        if not await book_belongs_to_author(book_id, user.app_user_id):
+            raise HTTPException(status_code=404, detail="Обложка не найдена.")
+        book_row = await get_book(book_id)
+        if not book_row or book_row["publication_status"] == "deleted" or not book_row["cover_path"]:
+            raise HTTPException(status_code=404, detail="Обложка не найдена.")
+        path = Path(str(book_row["cover_path"])).expanduser().resolve()
+        if not path.exists() or not path.is_file():
+            raise HTTPException(status_code=404, detail="Обложка не найдена.")
+        media_type = {
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".png": "image/png",
+            ".webp": "image/webp",
+        }.get(path.suffix.lower(), "application/octet-stream")
+        return FileResponse(
+            path,
+            media_type=media_type,
+            filename=path.name,
+            headers={"Cache-Control": "private, no-store, max-age=0"},
+        )
+
     @app.get("/api/author/book/{book_id}")
     async def api_author_book(book_id: int, x_telegram_init_data: str | None = Header(default=None)):
         user, _ = await author_session(x_telegram_init_data)
