@@ -36,8 +36,14 @@
     <div id="authorBooks" class="author-book-grid"></div>
 
     <section id="authorBookEditor" class="author-editor" hidden>
-      <div class="section-title split-title">
-        <div><span class="eyebrow">Редактор книги</span><h2 id="editorBookTitle">Книга</h2><p id="editorBookStatus" class="muted"></p></div>
+      <div class="section-title split-title author-editor-heading">
+        <div class="author-editor-identity">
+          <div class="author-editor-cover author-cover-shell" id="editorBookCover">
+            <img class="author-book-cover-image" id="editorBookCoverImage" alt="" hidden>
+            <div class="author-book-letter" id="editorBookCoverLetter">В</div>
+          </div>
+          <div><span class="eyebrow">Редактор книги</span><h2 id="editorBookTitle">Книга</h2><p id="editorBookStatus" class="muted"></p></div>
+        </div>
         <button class="secondary compact-button" id="closeBookEditor" type="button">Закрыть</button>
       </div>
 
