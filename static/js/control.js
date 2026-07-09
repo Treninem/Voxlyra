@@ -180,7 +180,15 @@
     if (!kind || !verb || !id) return;
     let url = '';
     let body = undefined;
-    if (kind === 'book') url = `/api/control/book/${id}/${verb}`;
+    if (kind === 'book') {
+      url = `/api/control/book/${id}/${verb}`;
+      if (verb === 'reject') {
+        const reason = window.prompt('Что автору нужно исправить? Напишите понятную причину возврата на доработку.');
+        if (reason === null) return;
+        if (reason.trim().length < 8) { notify('Причина слишком короткая'); return; }
+        body = JSON.stringify({ reason: reason.trim() });
+      }
+    }
     if (kind === 'comment' || kind === 'review') url = `/api/control/${kind}/${id}/hide`;
     if (kind === 'complaint') url = `/api/control/complaint/${id}/${verb}`;
     if (kind === 'refund') {

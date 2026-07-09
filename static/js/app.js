@@ -202,9 +202,14 @@ function formatTime(seconds) {
 }
 
 function dynamicCover(item, kind = 'book') {
-  if (item.cover_path && item.book_id) return `<img class="cover-image cover-mini" src="/media/cover/${Number(item.book_id)}" alt="" loading="lazy">`;
   const title = item.title || item.book_title || 'В';
-  return `<div class="cover-mini${kind === 'audio' ? ' audio' : ''}">${escapeHtml(title[0] || 'В')}</div>`;
+  const letter = escapeHtml(title[0] || 'В');
+  const extra = kind === 'audio' ? ' audio' : '';
+  if (item.book_id) {
+    const coverVersion = encodeURIComponent(String(item.updated_at || item.book_id));
+    return `<img class="cover-image cover-mini${extra}" src="/media/cover/${Number(item.book_id)}?v=${coverVersion}" alt="Обложка ${escapeHtml(title)}" loading="lazy" onerror="this.hidden=true;this.nextElementSibling.hidden=false"><div class="cover-mini${extra}" hidden>${letter}</div>`;
+  }
+  return `<div class="cover-mini${extra}">${letter}</div>`;
 }
 
 function continueCard(item, kind = 'reading') {
@@ -236,10 +241,45 @@ function renderReviews(reviews) {
   }).join('') : '<p class="muted">Отзывов пока нет. Можно стать первым.</p>';
 }
 
+function readerTextMap() {
+  const content = document.getElementById('readerParagraphs');
+  if (!content) return null;
+  const paragraphs = Array.from(content.querySelectorAll(':scope > p')).filter((p) => (p.textContent || '').trim());
+  if (!paragraphs.length) return null;
+
+  const scrollTop = window.scrollY || document.documentElement.scrollTop || 0;
+  const toolbar = document.querySelector('.reader-toolbar');
+  const toolbarHeight = toolbar ? Math.max(0, toolbar.getBoundingClientRect().height) : 0;
+  const viewportHeight = Math.max(220, window.innerHeight - toolbarHeight);
+  const contentRect = content.getBoundingClientRect();
+  const contentTop = scrollTop + contentRect.top;
+  const contentBottom = scrollTop + contentRect.bottom;
+  const contentHeight = Math.max(1, contentBottom - contentTop);
+
+  // Процент зависит только от пути прокрутки внутри текста главы. Заголовок, реклама,
+  // комментарии и кнопки под главой больше не могут сразу давать 80–99%.
+  const startScroll = Math.max(0, contentTop - toolbarHeight - 20);
+  const naturalEnd = contentBottom - window.innerHeight + Math.max(70, viewportHeight * 0.14);
+  const minimumJourney = Math.max(140, Math.min(viewportHeight * 0.62, contentHeight * 0.45));
+  const endScroll = Math.max(startScroll + minimumJourney, naturalEnd);
+  return { startScroll, endScroll, scrollTop };
+}
+
 function calcReadingPercent() {
-  const top = window.scrollY || document.documentElement.scrollTop || 0;
-  const max = Math.max(1, document.documentElement.scrollHeight - window.innerHeight);
-  return Math.max(0, Math.min(100, Math.round(top / max * 100)));
+  const map = readerTextMap();
+  if (!map) return 0;
+  if (map.scrollTop <= map.startScroll) return 0;
+  if (map.scrollTop >= map.endScroll) return 100;
+  const percent = (map.scrollTop - map.startScroll) / Math.max(1, map.endScroll - map.startScroll) * 100;
+  return Math.max(0, Math.min(100, Math.round(percent)));
+}
+
+function scrollToReadingPercent(percent, behavior = 'auto') {
+  const map = readerTextMap();
+  if (!map) return;
+  const safePercent = Math.max(0, Math.min(100, Number(percent) || 0));
+  const target = map.startScroll + (map.endScroll - map.startScroll) * safePercent / 100;
+  window.scrollTo({ top: Math.max(0, target), behavior });
 }
 
 function updateReaderProgressBar() {
@@ -266,6 +306,7 @@ async function initReader() {
   const paragraphs = document.getElementById('readerParagraphs');
   updateReaderProgressBar();
   window.addEventListener('scroll', updateReaderProgressBar, { passive: true });
+  window.addEventListener('resize', updateReaderProgressBar, { passive: true });
   if (!tgInitData()) {
     if (status) status.textContent = 'Откройте главу внутри Telegram, чтобы сохранять место и видеть покупки.';
     return;
@@ -280,9 +321,9 @@ async function initReader() {
     if (status) status.textContent = data.progress_percent ? `Продолжаем с отметки ${data.progress_percent}%` : 'Глава открыта';
     if (paragraphs && data.chapter.text) {
       paragraphs.innerHTML = data.chapter.text.split('\n').filter((p) => p.trim()).map((p) => `<p>${escapeHtml(p)}</p>`).join('');
-      if (data.progress_percent > 0) setTimeout(() => {
-        const max = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
-        window.scrollTo({ top: max * data.progress_percent / 100, behavior: 'smooth' });
+      setTimeout(() => {
+        if (data.progress_percent > 0) scrollToReadingPercent(data.progress_percent, 'smooth');
+        updateReaderProgressBar();
       }, 250);
     }
     renderComments(data.comments);
@@ -598,8 +639,32 @@ function markActiveNav() {
   });
 }
 
+async function openChapterByNumber(form) {
+  const bookId = Number(form?.dataset.bookId || 0);
+  const input = form?.querySelector('input[name="chapter_number"]');
+  const chapterNumber = Number(input?.value || 0);
+  if (!bookId || !Number.isInteger(chapterNumber) || chapterNumber < 1) {
+    notify('Введите номер главы');
+    input?.focus();
+    return;
+  }
+  try {
+    const data = await apiFetch(`/api/book/${bookId}/chapter-number/${chapterNumber}`);
+    window.location.href = data.reader_url;
+  } catch (error) {
+    notify(error.message || 'Такая глава не найдена');
+    input?.focus();
+    input?.select();
+  }
+}
+
 function bindEvents() {
   document.addEventListener('input', (event) => { if (event.target.id === 'catalogSearch') applyCatalogFilter(); });
+  document.addEventListener('submit', async (event) => {
+    if (event.target.id !== 'chapterJumpForm') return;
+    event.preventDefault();
+    await openChapterByNumber(event.target);
+  });
   document.addEventListener('click', async (event) => {
     const target = event.target.closest('button, a');
     if (!target) return;

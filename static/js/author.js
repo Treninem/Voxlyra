@@ -87,7 +87,7 @@ function renderAuthorBooks(books) {
   }
   box.innerHTML = books.map((book) => `<button class="author-book-card" type="button" data-author-book-id="${book.id}">
     <div class="author-book-cover author-cover-shell">
-      ${book.cover_path ? `<img class="author-book-cover-image" data-author-cover-id="${Number(book.id)}" alt="Обложка книги ${escapeHtml(book.title)}" hidden>` : ''}
+      <img class="author-book-cover-image" data-author-cover-id="${Number(book.id)}" alt="Обложка книги ${escapeHtml(book.title)}" hidden>
       <div class="author-book-letter">${escapeHtml((book.title || 'В').slice(0,1))}</div>
     </div>
     <div><span>${escapeHtml(statusLabels[book.publication_status] || book.publication_status)}</span><h3>${escapeHtml(book.title)}</h3><p>${Number(book.chapters_count || 0)} глав · ${Number(book.audio_count || 0)} аудио</p></div>
@@ -112,13 +112,9 @@ function fillBookEditor(data) {
     delete editorCover.dataset.coverLoading;
     editorLetter.hidden = false;
     editorLetter.textContent = (book.title || 'В').slice(0, 1);
-    if (book.cover_path) {
-      editorCover.dataset.authorCoverId = String(book.id);
-      editorCover.alt = `Обложка книги ${book.title || ''}`;
-      loadAuthorCovers(document.getElementById('editorBookCover'));
-    } else {
-      delete editorCover.dataset.authorCoverId;
-    }
+    editorCover.dataset.authorCoverId = String(book.id);
+    editorCover.alt = `Обложка книги ${book.title || ''}`;
+    loadAuthorCovers(document.getElementById('editorBookCover'));
   }
   document.getElementById('bookTitleInput').value = book.title || '';
   document.getElementById('bookDescriptionInput').value = book.description || '';
