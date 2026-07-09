@@ -46,6 +46,8 @@ def main() -> int:
         "templates/control.html",
         "static/js/author.js",
         "static/js/control.js",
+        "static/img/bot_avatar.png",
+        "static/img/channel_avatar.png",
         "data/.gitkeep",
     ]:
         ok, text = check_file(path)

@@ -42,17 +42,58 @@ function renderAuthorDashboard(data) {
   renderAuthorBooks(data.books || []);
 }
 
+function releaseAuthorCoverUrl(image) {
+  if (image?._authorCoverUrl) {
+    URL.revokeObjectURL(image._authorCoverUrl);
+    image._authorCoverUrl = '';
+  }
+}
+
+async function loadAuthorCover(image) {
+  const bookId = Number(image?.dataset.authorCoverId || 0);
+  if (!bookId || !tgInitData()) return;
+  try {
+    const response = await fetch(`/api/author/book/${bookId}/cover`, {
+      headers: { 'X-Telegram-Init-Data': tgInitData() },
+      cache: 'no-store',
+    });
+    if (!response.ok) return;
+    const blob = await response.blob();
+    if (!blob.size) return;
+    releaseAuthorCoverUrl(image);
+    const objectUrl = URL.createObjectURL(blob);
+    image._authorCoverUrl = objectUrl;
+    image.src = objectUrl;
+    image.hidden = false;
+    image.closest('.author-cover-shell')?.querySelector('.author-book-letter')?.setAttribute('hidden', '');
+  } catch (_) {}
+}
+
+function loadAuthorCovers(scope = document) {
+  scope.querySelectorAll('img[data-author-cover-id]').forEach((image) => {
+    if (!image.dataset.coverLoading) {
+      image.dataset.coverLoading = '1';
+      loadAuthorCover(image);
+    }
+  });
+}
+
 function renderAuthorBooks(books) {
   const box = document.getElementById('authorBooks');
+  box?.querySelectorAll('img[data-author-cover-id]').forEach(releaseAuthorCoverUrl);
   if (!books.length) {
     box.innerHTML = '<article class="empty-card premium-empty"><div class="empty-icon">✦</div><h3>Книг пока нет</h3><p>Создайте первую книгу через раздел «Автору» в боте, затем редактируйте её здесь.</p></article>';
     return;
   }
   box.innerHTML = books.map((book) => `<button class="author-book-card" type="button" data-author-book-id="${book.id}">
-    <div class="author-book-letter">${escapeHtml((book.title || 'В').slice(0,1))}</div>
+    <div class="author-book-cover author-cover-shell">
+      ${book.cover_path ? `<img class="author-book-cover-image" data-author-cover-id="${Number(book.id)}" alt="Обложка книги ${escapeHtml(book.title)}" hidden>` : ''}
+      <div class="author-book-letter">${escapeHtml((book.title || 'В').slice(0,1))}</div>
+    </div>
     <div><span>${escapeHtml(statusLabels[book.publication_status] || book.publication_status)}</span><h3>${escapeHtml(book.title)}</h3><p>${Number(book.chapters_count || 0)} глав · ${Number(book.audio_count || 0)} аудио</p></div>
     <b>›</b>
   </button>`).join('');
+  loadAuthorCovers(box);
 }
 
 function fillBookEditor(data) {
@@ -62,6 +103,23 @@ function fillBookEditor(data) {
   editor.hidden = false;
   document.getElementById('editorBookTitle').textContent = book.title;
   document.getElementById('editorBookStatus').textContent = `${statusLabels[book.publication_status] || book.publication_status} · ${writingLabels[book.writing_status] || book.writing_status}`;
+  const editorCover = document.getElementById('editorBookCoverImage');
+  const editorLetter = document.getElementById('editorBookCoverLetter');
+  if (editorCover && editorLetter) {
+    releaseAuthorCoverUrl(editorCover);
+    editorCover.hidden = true;
+    editorCover.removeAttribute('src');
+    delete editorCover.dataset.coverLoading;
+    editorLetter.hidden = false;
+    editorLetter.textContent = (book.title || 'В').slice(0, 1);
+    if (book.cover_path) {
+      editorCover.dataset.authorCoverId = String(book.id);
+      editorCover.alt = `Обложка книги ${book.title || ''}`;
+      loadAuthorCovers(document.getElementById('editorBookCover'));
+    } else {
+      delete editorCover.dataset.authorCoverId;
+    }
+  }
   document.getElementById('bookTitleInput').value = book.title || '';
   document.getElementById('bookDescriptionInput').value = book.description || '';
   document.getElementById('bookAgeInput').value = book.age_limit || '16+';
