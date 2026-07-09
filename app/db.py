@@ -396,6 +396,7 @@ async def init_db() -> None:
         await _ensure_v176_schema(db)
         await _ensure_v179_schema(db)
         await _ensure_v184_schema(db)
+        await _ensure_v185_schema(db)
         await db.commit()
 
 
@@ -878,7 +879,6 @@ async def list_books_missing_cover_files(limit: int = 500) -> list[aiosqlite.Row
             FROM books
             WHERE cover_file_id IS NOT NULL
               AND TRIM(cover_file_id) <> ''
-              AND (cover_path IS NULL OR TRIM(cover_path) = '')
               AND publication_status <> 'deleted'
             ORDER BY id ASC
             LIMIT ?
@@ -1598,6 +1598,40 @@ async def count_chapters_for_book(book_id: int) -> int:
         cur = await db.execute("SELECT COUNT(*) FROM chapters WHERE book_id=? AND status != 'deleted'", (book_id,))
         row = await cur.fetchone()
         return int(row[0]) if row else 0
+
+
+async def get_published_chapter_by_number(book_id: int, chapter_number: int) -> aiosqlite.Row | None:
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT id, book_id, number, title
+            FROM chapters
+            WHERE book_id=? AND number=? AND status='published'
+            LIMIT 1
+            """,
+            (int(book_id), int(chapter_number)),
+        )
+        return await cur.fetchone()
+
+
+async def get_published_chapter_bounds(book_id: int) -> dict[str, int]:
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT COALESCE(MIN(number), 0) AS min_number,
+                   COALESCE(MAX(number), 0) AS max_number,
+                   COUNT(*) AS chapters_count
+            FROM chapters
+            WHERE book_id=? AND status='published'
+            """,
+            (int(book_id),),
+        )
+        row = await cur.fetchone()
+        return {
+            "min_number": int(row["min_number"] or 0) if row else 0,
+            "max_number": int(row["max_number"] or 0) if row else 0,
+            "chapters_count": int(row["chapters_count"] or 0) if row else 0,
+        }
 
 
 async def get_chapter(chapter_id: int) -> aiosqlite.Row | None:
@@ -2478,7 +2512,7 @@ async def list_user_bookmarks(user_id: int, limit: int = 50, published_only: boo
     async with connect() as db:
         cur = await db.execute(
             f"""
-            SELECT bm.*, b.title, b.description, b.age_limit, b.publication_status, b.cover_path,
+            SELECT bm.*, b.title, b.description, b.age_limit, b.publication_status, b.cover_path, b.cover_file_id,
                    ap.pen_name,
                    COALESCE(MAX(rp.updated_at), bm.updated_at) AS last_progress_at,
                    (SELECT COUNT(*) FROM chapters c WHERE c.book_id=b.id AND c.status='published') AS chapters_count,
@@ -2502,7 +2536,7 @@ async def list_user_continue_reading(user_id: int, limit: int = 12) -> list[aios
     async with connect() as db:
         cur = await db.execute(
             """
-            SELECT rp.*, b.title, b.description, b.age_limit, b.cover_path,
+            SELECT rp.*, b.title, b.description, b.age_limit, b.cover_path, b.cover_file_id,
                    ap.pen_name, c.title AS chapter_title, c.number AS chapter_number,
                    (
                      SELECT COUNT(*)
@@ -2533,7 +2567,7 @@ async def list_user_continue_listening(user_id: int, limit: int = 12) -> list[ai
         cur = await db.execute(
             """
             SELECT lp.*, ac.book_id, ac.title AS audio_title, ac.number AS audio_number,
-                   ac.duration_seconds, b.title, b.cover_path, ap.pen_name
+                   ac.duration_seconds, b.title, b.cover_path, b.cover_file_id, ap.pen_name
             FROM listening_progress lp
             JOIN audio_chapters ac ON ac.id=lp.audio_chapter_id AND ac.status='published'
             JOIN books b ON b.id=ac.book_id AND b.publication_status='published'
@@ -4052,6 +4086,42 @@ async def _ensure_v184_schema(db: aiosqlite.Connection) -> None:
     )
 
 
+async def _ensure_v185_schema(db: aiosqlite.Connection) -> None:
+    """Очередь безопасной автоматической проверки и напоминаний модерации."""
+    now = utc_now()
+    await db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS book_moderation_queue (
+            book_id INTEGER PRIMARY KEY,
+            status TEXT NOT NULL DEFAULT 'pending',
+            risk_level TEXT NOT NULL DEFAULT 'manual',
+            reasons TEXT,
+            submitted_at TEXT NOT NULL,
+            last_notified_at TEXT,
+            next_reminder_at TEXT,
+            reminder_count INTEGER NOT NULL DEFAULT 0,
+            resolved_at TEXT,
+            resolved_by_user_id INTEGER,
+            resolution TEXT,
+            moderator_note TEXT,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE,
+            FOREIGN KEY(resolved_by_user_id) REFERENCES users(id) ON DELETE SET NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_book_moderation_due
+            ON book_moderation_queue(status, next_reminder_at);
+        """
+    )
+    for key, value in {
+        "moderation_first_reminder_hours": "6",
+        "moderation_repeat_reminder_hours": "12",
+    }.items():
+        await db.execute(
+            "INSERT INTO settings(key, value, updated_at) VALUES(?, ?, ?) ON CONFLICT(key) DO NOTHING",
+            (key, value, now),
+        )
+
+
 async def list_books_for_duplicate_check(exclude_book_id: int | None = None) -> list[aiosqlite.Row]:
     async with connect() as db:
         if exclude_book_id is None:
@@ -4585,3 +4655,150 @@ async def get_control_queue_counts() -> dict[str, int]:
             row = await cur.fetchone()
             result[key] = int(row[0] or 0) if row else 0
         return result
+
+
+async def enqueue_book_moderation(book_id: int, reasons: list[str], risk_level: str = "manual") -> None:
+    now_dt = datetime.now(timezone.utc)
+    first_hours = max(1, int(await get_setting("moderation_first_reminder_hours", "6") or 6))
+    next_reminder = (now_dt + timedelta(hours=first_hours)).isoformat()
+    clean_reasons = "\n".join(dict.fromkeys(str(item).strip() for item in reasons if str(item).strip()))[:4000]
+    now = now_dt.isoformat()
+    async with connect() as db:
+        await db.execute(
+            """
+            INSERT INTO book_moderation_queue(
+                book_id, status, risk_level, reasons, submitted_at,
+                last_notified_at, next_reminder_at, reminder_count, updated_at
+            ) VALUES(?, 'pending', ?, ?, ?, NULL, ?, 0, ?)
+            ON CONFLICT(book_id) DO UPDATE SET
+                status='pending',
+                risk_level=excluded.risk_level,
+                reasons=excluded.reasons,
+                submitted_at=excluded.submitted_at,
+                last_notified_at=NULL,
+                next_reminder_at=excluded.next_reminder_at,
+                reminder_count=0,
+                resolved_at=NULL,
+                resolved_by_user_id=NULL,
+                resolution=NULL,
+                moderator_note=NULL,
+                updated_at=excluded.updated_at
+            """,
+            (int(book_id), str(risk_level)[:32], clean_reasons, now, next_reminder, now),
+        )
+        await db.commit()
+
+
+async def get_book_moderation_entry(book_id: int) -> aiosqlite.Row | None:
+    async with connect() as db:
+        cur = await db.execute(
+            "SELECT * FROM book_moderation_queue WHERE book_id=?",
+            (int(book_id),),
+        )
+        return await cur.fetchone()
+
+
+async def mark_book_moderation_notified(book_id: int, *, reminder: bool) -> None:
+    now_dt = datetime.now(timezone.utc)
+    repeat_hours = max(1, int(await get_setting("moderation_repeat_reminder_hours", "12") or 12))
+    next_reminder = (now_dt + timedelta(hours=repeat_hours)).isoformat()
+    async with connect() as db:
+        await db.execute(
+            """
+            UPDATE book_moderation_queue
+            SET last_notified_at=?, next_reminder_at=?,
+                reminder_count=reminder_count + ?, updated_at=?
+            WHERE book_id=? AND status='pending'
+            """,
+            (now_dt.isoformat(), next_reminder, 1 if reminder else 0, now_dt.isoformat(), int(book_id)),
+        )
+        await db.commit()
+
+
+async def list_due_book_moderation_reminders(limit: int = 25) -> list[aiosqlite.Row]:
+    now = utc_now()
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT q.*, b.title, b.author_id, a.pen_name,
+                   a.user_id AS author_user_id, u.telegram_id AS author_telegram_id
+            FROM book_moderation_queue q
+            JOIN books b ON b.id=q.book_id
+            LEFT JOIN author_profiles a ON a.id=b.author_id
+            LEFT JOIN users u ON u.id=a.user_id
+            WHERE q.status='pending'
+              AND b.publication_status='review'
+              AND q.next_reminder_at IS NOT NULL
+              AND q.next_reminder_at<=?
+            ORDER BY q.next_reminder_at ASC
+            LIMIT ?
+            """,
+            (now, max(1, int(limit))),
+        )
+        return await cur.fetchall()
+
+
+async def resolve_book_moderation(
+    book_id: int,
+    *,
+    resolution: str,
+    actor_user_id: int | None,
+    note: str = "",
+) -> None:
+    now = utc_now()
+    async with connect() as db:
+        await db.execute(
+            """
+            UPDATE book_moderation_queue
+            SET status='resolved', resolved_at=?, resolved_by_user_id=?,
+                resolution=?, moderator_note=?, next_reminder_at=NULL, updated_at=?
+            WHERE book_id=?
+            """,
+            (now, actor_user_id, str(resolution)[:64], str(note)[:4000], now, int(book_id)),
+        )
+        await db.commit()
+
+
+async def list_book_moderation_staff() -> list[aiosqlite.Row]:
+    """Администраторы и модераторы с действующим правом проверки книг."""
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT DISTINCT u.id AS user_id, u.telegram_id, u.username, u.full_name
+            FROM admin_staff s
+            JOIN users u ON u.id=s.user_id
+            JOIN admin_permissions p ON p.admin_id=s.id
+            WHERE s.is_active=1 AND p.allowed=1 AND p.permission_code='mod_books'
+              AND u.is_blocked=0
+            ORDER BY u.id
+            """
+        )
+        return await cur.fetchall()
+
+
+async def get_author_auto_moderation_stats(author_id: int | None, current_book_id: int) -> dict[str, int]:
+    if author_id is None:
+        return {"trust_level": 0, "published_books": 0, "open_complaints": 0}
+    async with connect() as db:
+        cur = await db.execute("SELECT trust_level FROM author_profiles WHERE id=?", (int(author_id),))
+        author = await cur.fetchone()
+        cur = await db.execute(
+            "SELECT COUNT(*) FROM books WHERE author_id=? AND id!=? AND publication_status='published'",
+            (int(author_id), int(current_book_id)),
+        )
+        published = await cur.fetchone()
+        cur = await db.execute(
+            """
+            SELECT COUNT(*)
+            FROM complaints c
+            JOIN books b ON b.id=c.target_id
+            WHERE c.target_type='book' AND b.author_id=? AND c.status IN ('new','pending')
+            """,
+            (int(author_id),),
+        )
+        complaints = await cur.fetchone()
+        return {
+            "trust_level": int(author[0] or 0) if author else 0,
+            "published_books": int(published[0] or 0) if published else 0,
+            "open_complaints": int(complaints[0] or 0) if complaints else 0,
+        }

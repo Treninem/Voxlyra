@@ -34,6 +34,8 @@ from app.db import (
     get_book_with_counts,
     get_bookmark,
     get_chapter,
+    get_published_chapter_by_number,
+    get_published_chapter_bounds,
     get_listening_progress,
     get_reader_ad_settings,
     get_reading_progress,
@@ -62,6 +64,7 @@ from app.db import (
     set_review_status,
     set_complaint_status,
     set_book_publication_status,
+    resolve_book_moderation,
     publish_book_content,
     list_catalog_books,
     list_chapters_for_book,
@@ -110,6 +113,7 @@ from app.services.chunked_upload import (
 )
 from app.services.notifications import (
     book_moderation_message,
+    book_revision_markup,
     complaint_message,
     content_hidden_message,
     payout_message,
@@ -125,7 +129,31 @@ from app.services.web_import_store import (
     save_web_import_preview,
 )
 from app.services.publication import finish_book_content_workflow, publish_book_and_channel
+from app.services.cover_storage import ensure_book_cover_file
+from app.services.moderation_alerts import notify_moderation_resolved
 
+
+
+
+def _cover_file_response(path: Path, *, private: bool = False) -> FileResponse:
+    media_type = {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".webp": "image/webp",
+    }.get(path.suffix.lower(), "application/octet-stream")
+    cache_control = "private, no-store, max-age=0" if private else "public, no-cache, max-age=0, must-revalidate"
+    # Не передаём filename в FileResponse: иначе Starlette ставит attachment,
+    # и Telegram WebView может не показать файл внутри <img>.
+    return FileResponse(
+        path,
+        media_type=media_type,
+        headers={
+            "Cache-Control": cache_control,
+            "Content-Disposition": f'inline; filename="{path.name}"',
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 def _bot_purchase_url(kind: str, target_id: int) -> str:
     username = settings.BOT_USERNAME.strip().lstrip("@")
@@ -210,11 +238,13 @@ def create_app() -> FastAPI:
         app_user_id: int | None,
         telegram_id: int | None,
         text: str,
+        reply_markup=None,
     ) -> str:
         result = await send_user_notification(
             app_user_id=app_user_id,
             telegram_id=telegram_id,
             text=text,
+            reply_markup=reply_markup,
         )
         await add_audit(
             actor_user_id,
@@ -306,6 +336,7 @@ def create_app() -> FastAPI:
         purchase_url = _bot_purchase_url("chapter", chapter_id) if chapter else ""
         ads = []
         adjacent = await get_adjacent_chapters(chapter_id) if chapter else {"previous": None, "next": None}
+        chapter_bounds = await get_published_chapter_bounds(int(chapter["book_id"])) if chapter else {"min_number": 0, "max_number": 0, "chapters_count": 0}
         ad_settings = await get_reader_ad_settings()
         if chapter and ad_settings.get("enabled"):
             ads = await list_contextual_book_ads(int(chapter["book_id"]), limit=4)
@@ -320,6 +351,7 @@ def create_app() -> FastAPI:
                 "ad_settings": ad_settings,
                 "previous_chapter": adjacent.get("previous"),
                 "next_chapter": adjacent.get("next"),
+                "chapter_bounds": chapter_bounds,
                 "project_name": settings.PROJECT_NAME,
                 "bot_username": settings.BOT_USERNAME.strip().lstrip("@"),
             },
@@ -373,19 +405,20 @@ def create_app() -> FastAPI:
     @app.get("/media/cover/{book_id}")
     async def book_cover(book_id: int):
         book_row = await get_book(book_id)
-        if not book_row or book_row["publication_status"] != "published" or not book_row["cover_path"]:
+        if not book_row or book_row["publication_status"] != "published":
             raise HTTPException(status_code=404, detail="Обложка не найдена.")
-        path = Path(str(book_row["cover_path"])).expanduser().resolve()
-        if not path.exists() or not path.is_file():
-            raise HTTPException(status_code=404, detail="Обложка не найдена.")
-        suffix = path.suffix.lower()
-        media_type = {
-            ".jpg": "image/jpeg",
-            ".jpeg": "image/jpeg",
-            ".png": "image/png",
-            ".webp": "image/webp",
-        }.get(suffix, "application/octet-stream")
-        return FileResponse(path, media_type=media_type, filename=path.name)
+        path = await ensure_book_cover_file(
+            book_id=book_id,
+            cover_file_id=str(book_row["cover_file_id"] or ""),
+            cover_path=str(book_row["cover_path"] or ""),
+        )
+        if not path:
+            raise HTTPException(
+                status_code=404,
+                detail="Обложка не найдена.",
+                headers={"Cache-Control": "no-store, max-age=0"},
+            )
+        return _cover_file_response(path, private=False)
 
     @app.get("/api/me")
     async def api_me(x_telegram_init_data: str | None = Header(default=None)):
@@ -492,6 +525,28 @@ def create_app() -> FastAPI:
         reviews = await list_reviews_for_book(book_id, limit=20)
         return {"ok": True, "reviews": _rows_to_dicts(reviews)}
 
+    @app.get("/api/book/{book_id}/chapter-number/{chapter_number}")
+    async def api_chapter_by_number(book_id: int, chapter_number: int):
+        if chapter_number < 1 or chapter_number > 1_000_000:
+            raise HTTPException(status_code=400, detail="Введите корректный номер главы.")
+        book_row = await get_book(book_id)
+        if not book_row or book_row["publication_status"] != "published":
+            raise HTTPException(status_code=404, detail="Книга не найдена.")
+        chapter_row = await get_published_chapter_by_number(book_id, chapter_number)
+        bounds = await get_published_chapter_bounds(book_id)
+        if not chapter_row:
+            if bounds["chapters_count"]:
+                detail = f"Главы {chapter_number} нет. Доступны номера от {bounds['min_number']} до {bounds['max_number']}."
+            else:
+                detail = "У книги пока нет опубликованных глав."
+            raise HTTPException(status_code=404, detail=detail)
+        return {
+            "ok": True,
+            "chapter": _row_to_dict(chapter_row),
+            "reader_url": f"/reader/{int(chapter_row['id'])}",
+            "bounds": bounds,
+        }
+
     @app.get("/api/reader/{chapter_id}")
     async def api_reader(chapter_id: int, x_telegram_init_data: str | None = Header(default=None)):
         user = await _tma_user(x_telegram_init_data)
@@ -517,6 +572,7 @@ def create_app() -> FastAPI:
                     campaign_id=int(ad["campaign_id"]) if ad["campaign_id"] else None,
                 )
         adjacent = await get_adjacent_chapters(chapter_id)
+        chapter_bounds = await get_published_chapter_bounds(int(chapter["book_id"]))
         return {
             "ok": True,
             "allowed": allowed,
@@ -535,6 +591,7 @@ def create_app() -> FastAPI:
             "comments": _rows_to_dicts(comments),
             "reader_ads": _rows_to_dicts(reader_ads),
             "ad_settings": ad_settings,
+            "chapter_bounds": chapter_bounds,
             "navigation": {
                 "previous": _row_to_dict(adjacent["previous"]) if adjacent["previous"] else None,
                 "next": _row_to_dict(adjacent["next"]) if adjacent["next"] else None,
@@ -682,23 +739,20 @@ def create_app() -> FastAPI:
         if not await book_belongs_to_author(book_id, user.app_user_id):
             raise HTTPException(status_code=404, detail="Обложка не найдена.")
         book_row = await get_book(book_id)
-        if not book_row or book_row["publication_status"] == "deleted" or not book_row["cover_path"]:
+        if not book_row or book_row["publication_status"] == "deleted":
             raise HTTPException(status_code=404, detail="Обложка не найдена.")
-        path = Path(str(book_row["cover_path"])).expanduser().resolve()
-        if not path.exists() or not path.is_file():
-            raise HTTPException(status_code=404, detail="Обложка не найдена.")
-        media_type = {
-            ".jpg": "image/jpeg",
-            ".jpeg": "image/jpeg",
-            ".png": "image/png",
-            ".webp": "image/webp",
-        }.get(path.suffix.lower(), "application/octet-stream")
-        return FileResponse(
-            path,
-            media_type=media_type,
-            filename=path.name,
-            headers={"Cache-Control": "private, no-store, max-age=0"},
+        path = await ensure_book_cover_file(
+            book_id=book_id,
+            cover_file_id=str(book_row["cover_file_id"] or ""),
+            cover_path=str(book_row["cover_path"] or ""),
         )
+        if not path:
+            raise HTTPException(
+                status_code=404,
+                detail="Обложка не найдена.",
+                headers={"Cache-Control": "private, no-store, max-age=0"},
+            )
+        return _cover_file_response(path, private=True)
 
     @app.get("/api/author/book/{book_id}")
     async def api_author_book(book_id: int, x_telegram_init_data: str | None = Header(default=None)):
@@ -751,10 +805,27 @@ def create_app() -> FastAPI:
         chapters = await list_chapters_for_book(book_id)
         if not chapters:
             raise HTTPException(status_code=400, detail="Перед отправкой добавьте хотя бы одну главу.")
-        if not await submit_book_for_review(book_id, user.app_user_id):
-            raise HTTPException(status_code=400, detail="Не удалось отправить книгу на проверку.")
-        await add_audit(user.app_user_id, "book_submitted_web", "book", str(book_id))
-        return {"ok": True, "status": "review"}
+        if not settings.BOT_TOKEN:
+            raise HTTPException(status_code=503, detail="Бот временно недоступен для проверки книги.")
+        delivery_bot = Bot(token=settings.BOT_TOKEN)
+        try:
+            workflow = await finish_book_content_workflow(
+                bot=delivery_bot,
+                book_id=book_id,
+                actor_user_id=user.app_user_id,
+                actor_telegram_id=user.telegram_id,
+                source="miniapp_submit",
+            )
+        finally:
+            await delivery_bot.session.close()
+        await add_audit(user.app_user_id, "book_submitted_web", "book", str(book_id), None, workflow.workflow_status)
+        return {
+            "ok": True,
+            "status": workflow.workflow_status or "review",
+            "channel_status": workflow.channel_status,
+            "message": workflow.channel_message,
+            "review_reasons": workflow.duplicate_text,
+        }
 
     @app.delete("/api/author/book/{book_id}")
     async def api_author_delete_book(book_id: int, x_telegram_init_data: str | None = Header(default=None)):
@@ -1103,6 +1174,7 @@ def create_app() -> FastAPI:
     async def api_control_book_action(
         book_id: int,
         action: str,
+        payload: dict[str, Any] | None = None,
         x_telegram_init_data: str | None = Header(default=None),
     ):
         user, _, _ = await control_session(x_telegram_init_data, "mod_books")
@@ -1111,12 +1183,12 @@ def create_app() -> FastAPI:
         book = await get_book(book_id)
         if not book or book["publication_status"] != "review":
             raise HTTPException(status_code=409, detail="Книга уже обработана или не найдена.")
-        status = "published" if action == "publish" else "rejected"
         chapters_count = await count_chapters_for_book(book_id)
         if action == "publish" and chapters_count < 1:
             raise HTTPException(status_code=409, detail="Нельзя публиковать книгу без глав.")
 
         channel_status = ""
+        notification = "unavailable"
         if action == "publish":
             if not settings.BOT_TOKEN:
                 raise HTTPException(status_code=503, detail="Бот временно недоступен для публикации.")
@@ -1126,27 +1198,70 @@ def create_app() -> FastAPI:
                     bot,
                     book_id,
                     actor_user_id=user.app_user_id,
+                    bypass_duplicate_guard=True,
+                )
+                if not result.published:
+                    raise HTTPException(status_code=409, detail=result.channel_error or "Книгу не удалось опубликовать.")
+                channel_status = result.channel_status
+                await resolve_book_moderation(
+                    book_id,
+                    resolution="published",
+                    actor_user_id=user.app_user_id,
+                    note="Опубликовано после ручной проверки в Mini App",
+                )
+                notification = await notify_after_action(
+                    actor_user_id=user.app_user_id,
+                    event="book_published",
+                    target_type="book",
+                    target_id=book_id,
+                    app_user_id=int(book["author_user_id"]) if book["author_user_id"] is not None else None,
+                    telegram_id=int(book["author_telegram_id"]) if book["author_telegram_id"] is not None else None,
+                    text=book_moderation_message(book["title"], "published"),
+                )
+                await notify_moderation_resolved(
+                    bot,
+                    book_id=book_id,
+                    resolution="published",
+                    actor_name=user.full_name or user.username or str(user.telegram_id),
                 )
             finally:
                 await bot.session.close()
-            if result.workflow_status == "duplicate":
-                raise HTTPException(status_code=409, detail=result.duplicate_text or "Найдена возможная копия книги.")
-            if not result.published:
-                raise HTTPException(status_code=409, detail=result.channel_error or "Книгу не удалось опубликовать.")
-            channel_status = result.channel_status
+            status = "published"
         else:
-            await set_book_publication_status(book_id, status)
-            await add_audit(user.app_user_id, f"book_{status}_web", "book", str(book_id))
+            reason = str((payload or {}).get("reason") or "").strip()
+            if len(reason) < 8:
+                raise HTTPException(status_code=400, detail="Укажите понятную причину возврата на доработку.")
+            await set_book_publication_status(book_id, "draft")
+            await resolve_book_moderation(
+                book_id,
+                resolution="revision",
+                actor_user_id=user.app_user_id,
+                note=reason,
+            )
+            await add_audit(user.app_user_id, "book_revision_web", "book", str(book_id), None, reason[:1000])
+            notification = await notify_after_action(
+                actor_user_id=user.app_user_id,
+                event="book_revision",
+                target_type="book",
+                target_id=book_id,
+                app_user_id=int(book["author_user_id"]) if book["author_user_id"] is not None else None,
+                telegram_id=int(book["author_telegram_id"]) if book["author_telegram_id"] is not None else None,
+                text=book_moderation_message(book["title"], "rejected", reason=reason, book_id=book_id),
+                reply_markup=book_revision_markup(book_id),
+            )
+            if settings.BOT_TOKEN:
+                bot = Bot(token=settings.BOT_TOKEN)
+                try:
+                    await notify_moderation_resolved(
+                        bot,
+                        book_id=book_id,
+                        resolution="revision",
+                        actor_name=user.full_name or user.username or str(user.telegram_id),
+                    )
+                finally:
+                    await bot.session.close()
+            status = "draft"
 
-        notification = await notify_after_action(
-            actor_user_id=user.app_user_id,
-            event=f"book_{status}",
-            target_type="book",
-            target_id=book_id,
-            app_user_id=int(book["author_user_id"]) if book["author_user_id"] is not None else None,
-            telegram_id=int(book["author_telegram_id"]) if book["author_telegram_id"] is not None else None,
-            text=book_moderation_message(book["title"], status),
-        )
         return {
             "ok": True,
             "status": status,
@@ -1154,6 +1269,7 @@ def create_app() -> FastAPI:
             "channel_status": channel_status,
             "notification": notification,
         }
+
 
     @app.get("/api/control/comments")
     async def api_control_comments(x_telegram_init_data: str | None = Header(default=None)):

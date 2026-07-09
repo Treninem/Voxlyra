@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 from aiogram import Bot, Dispatcher
@@ -10,6 +11,7 @@ from app.db import init_db
 from app.handlers import author, legal, moderation, owner, payments, start
 from app.middleware import BlockedUserMiddleware
 from app.services.cover_storage import restore_missing_book_covers
+from app.services.moderation_alerts import moderation_reminder_loop
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +44,13 @@ async def run_bot() -> None:
     if restored_covers or failed_covers:
         logger.info("Cover recovery completed: restored=%s failed=%s", restored_covers, failed_covers)
     logger.info("Bot started")
+    reminder_task = asyncio.create_task(moderation_reminder_loop(bot))
     try:
         await dp.start_polling(bot)
     finally:
+        reminder_task.cancel()
+        try:
+            await reminder_task
+        except asyncio.CancelledError:
+            pass
         await bot.session.close()

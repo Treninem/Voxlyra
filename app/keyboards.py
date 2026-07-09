@@ -280,7 +280,7 @@ def moderation_books_menu(books) -> InlineKeyboardMarkup:
 def moderation_book_card_menu(book_id: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="✅ Опубликовать", callback_data=f"mod:book_publish:{book_id}")
-    kb.button(text="⛔ Отклонить", callback_data=f"mod:book_reject:{book_id}")
+    kb.button(text="↩️ На доработку", callback_data=f"mod:book_reject:{book_id}")
     kb.button(text="⬅️ К списку", callback_data="mod:books")
     kb.adjust(1)
     return kb.as_markup()
