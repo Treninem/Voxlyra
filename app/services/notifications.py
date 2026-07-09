@@ -4,6 +4,7 @@ import logging
 from typing import Literal
 
 from aiogram import Bot
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 
 from app.config import settings
 from app.db import (
@@ -23,13 +24,36 @@ def _clean(value: object, limit: int = 240) -> str:
     return text[:limit]
 
 
-def book_moderation_message(title: object, status: str) -> str:
+def book_moderation_message(
+    title: object,
+    status: str,
+    *,
+    reason: object = "",
+    book_id: int | None = None,
+) -> str:
     safe_title = _clean(title, 160) or "Книга"
     if status == "published":
         return f"📚 Книга опубликована\n\n«{safe_title}» прошла проверку и появилась в Вокслире."
+    safe_reason = _clean(reason, 1200)
+    reason_block = f"\n\nЧто нужно исправить:\n{safe_reason}" if safe_reason else ""
     return (
         "📚 Книга возвращена на доработку\n\n"
-        f"«{safe_title}» пока не прошла проверку. Откройте кабинет автора, внесите изменения и отправьте её повторно."
+        f"«{safe_title}» пока не прошла проверку.{reason_block}\n\n"
+        "Откройте кабинет автора, внесите изменения и отправьте книгу повторно."
+    )
+
+
+def book_revision_markup(book_id: int) -> InlineKeyboardMarkup | None:
+    web_url = settings.WEBAPP_URL.strip().rstrip("/")
+    if not web_url or int(book_id or 0) <= 0:
+        return None
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(
+                text="✍️ Открыть книгу",
+                web_app=WebAppInfo(url=f"{web_url}/author?book_id={int(book_id)}"),
+            )
+        ]]
     )
 
 
@@ -122,6 +146,7 @@ async def send_user_notification(
     text: str,
     bot: Bot | None = None,
     category: Literal["chapters", "audio", "discounts"] | None = None,
+    reply_markup: InlineKeyboardMarkup | None = None,
 ) -> NotificationStatus:
     if not settings.BOT_TOKEN or not telegram_id:
         return "unavailable"
@@ -135,11 +160,14 @@ async def send_user_notification(
     owns_bot = bot is None
     delivery_bot = bot or Bot(token=settings.BOT_TOKEN)
     try:
-        await delivery_bot.send_message(
-            chat_id=int(telegram_id),
-            text=text,
-            disable_web_page_preview=True,
-        )
+        kwargs = {
+            "chat_id": int(telegram_id),
+            "text": text,
+            "disable_web_page_preview": True,
+        }
+        if reply_markup is not None:
+            kwargs["reply_markup"] = reply_markup
+        await delivery_bot.send_message(**kwargs)
         return "sent"
     except Exception as exc:  # Telegram may reject delivery when the user blocked the bot.
         logger.warning("Notification delivery failed for Telegram user %s: %s", telegram_id, exc)

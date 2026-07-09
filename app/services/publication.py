@@ -13,12 +13,17 @@ from app.db import (
     get_book,
     get_book_options,
     publish_book_content,
+    enqueue_book_moderation,
+    resolve_book_moderation,
     set_book_publication_status,
     submit_book_for_review,
     was_channel_post_sent,
 )
 from app.services.channel import build_new_book_post
 from app.services.duplicate_books import duplicate_warning_text, find_book_duplicates
+from app.services.cover_storage import ensure_book_cover_file
+from app.services.automatic_moderation import evaluate_book_for_auto_publication
+from app.services.moderation_alerts import notify_book_needs_moderation
 
 
 @dataclass(slots=True)
@@ -104,32 +109,70 @@ async def post_book_to_channel(
     )
     markup = _channel_markup(book_id)
 
-    try:
-        cover_path = Path(str(book["cover_path"] or ""))
-        if cover_path.is_file():
+    channel_id = settings.CHANNEL_ID.strip()
+    cover_errors: list[str] = []
+    sent_with_cover = False
+
+    # Сначала используем Telegram file_id. Это самый надёжный путь после Redeploy:
+    # изображение не зависит от локальной папки storage и не требует повторной загрузки.
+    cover_file_id = str(book["cover_file_id"] or "").strip()
+    if cover_file_id:
+        try:
             await bot.send_photo(
-                settings.CHANNEL_ID.strip(),
-                FSInputFile(cover_path),
+                channel_id,
+                cover_file_id,
                 caption=post,
                 reply_markup=markup,
             )
-        else:
-            await bot.send_message(
-                settings.CHANNEL_ID.strip(),
-                post,
-                reply_markup=markup,
+            sent_with_cover = True
+        except Exception as exc:
+            cover_errors.append(f"file_id {type(exc).__name__}: {exc}")
+
+    # Если Telegram file_id устарел или недоступен, восстанавливаем локальный файл
+    # и повторяем отправку уже как загружаемое изображение.
+    if not sent_with_cover:
+        try:
+            cover_path = await ensure_book_cover_file(
+                book_id=book_id,
+                cover_file_id=cover_file_id,
+                cover_path=str(book["cover_path"] or ""),
+                bot=bot,
             )
+            if cover_path and cover_path.is_file():
+                await bot.send_photo(
+                    channel_id,
+                    FSInputFile(cover_path),
+                    caption=post,
+                    reply_markup=markup,
+                )
+                sent_with_cover = True
+        except Exception as exc:
+            cover_errors.append(f"local {type(exc).__name__}: {exc}")
+
+    try:
+        if not sent_with_cover:
+            # Книга всё равно не теряется из канала. Причина отсутствия обложки
+            # сохраняется только в закрытом журнале владельца.
+            await bot.send_message(channel_id, post, reply_markup=markup)
+        detail = "sent_with_cover" if sent_with_cover else "sent_without_cover"
+        error_text = " | ".join(cover_errors)[:1000]
         await add_audit(
             actor_user_id,
             "channel_post_sent",
             "book",
             str(book_id),
-            None,
-            "sent",
+            error_text or None,
+            detail,
         )
-        return PublicationResult(True, "sent", workflow_status="published")
+        return PublicationResult(
+            True,
+            "sent",
+            error_text if not sent_with_cover else "",
+            workflow_status="published",
+        )
     except Exception as exc:  # Telegram returns several exception classes here.
-        error = f"{type(exc).__name__}: {exc}"[:1000]
+        errors = cover_errors + [f"post {type(exc).__name__}: {exc}"]
+        error = " | ".join(errors)[:1000]
         await add_audit(
             actor_user_id,
             "channel_post_failed",
@@ -209,7 +252,7 @@ async def finish_book_content_workflow(
     actor_telegram_id: int,
     source: str,
 ) -> PublicationResult:
-    """Одинаково завершает загрузку из бота, Mini App и ручного редактора."""
+    """Завершает любой путь загрузки одной безопасной логикой публикации."""
     book = await get_book(book_id)
     if not book:
         return PublicationResult(False, "failed", "Книга не найдена", workflow_status="failed")
@@ -218,15 +261,26 @@ async def finish_book_content_workflow(
         await publish_book_content(book_id)
         return PublicationResult(True, "already_sent", workflow_status="published")
 
-    if int(actor_telegram_id) in settings.owner_ids:
+    check = await evaluate_book_for_auto_publication(
+        book_id,
+        actor_telegram_id=actor_telegram_id,
+    )
+    if check.auto_publish:
         result = await publish_book_and_channel(
             bot,
             book_id,
             actor_user_id=actor_user_id,
         )
+        if result.published:
+            await resolve_book_moderation(
+                book_id,
+                resolution="published",
+                actor_user_id=actor_user_id,
+                note="Автоматическая проверка пройдена",
+            )
         await add_audit(
             actor_user_id,
-            "owner_content_workflow_finished",
+            "book_auto_moderation_passed",
             "book",
             str(book_id),
             source,
@@ -234,26 +288,29 @@ async def finish_book_content_workflow(
         )
         return result
 
-    duplicate_text = await _duplicate_guard(book_id)
-    if duplicate_text:
-        return PublicationResult(
-            False,
-            "duplicate",
-            "Найдена возможная копия книги",
-            workflow_status="duplicate",
-            duplicate_text=duplicate_text,
-        )
-
     if book["publication_status"] != "review":
         submitted = await submit_book_for_review(book_id, actor_user_id)
-        if submitted:
-            await add_audit(
-                actor_user_id,
-                "book_submitted_after_content",
-                "book",
-                str(book_id),
-                source,
-                "review",
-            )
-            return PublicationResult(False, "", workflow_status="review")
-    return PublicationResult(False, "", workflow_status="review")
+        if not submitted:
+            await set_book_publication_status(book_id, "review")
+    await enqueue_book_moderation(book_id, check.reasons, risk_level=check.risk_level)
+    await notify_book_needs_moderation(
+        bot,
+        book_id=book_id,
+        reasons=check.reasons,
+        reminder=False,
+    )
+    await add_audit(
+        actor_user_id,
+        "book_auto_moderation_manual_review",
+        "book",
+        str(book_id),
+        source,
+        " | ".join(check.reasons)[:1000],
+    )
+    return PublicationResult(
+        False,
+        "",
+        workflow_status="review",
+        duplicate_text="\n".join(check.reasons),
+    )
+
