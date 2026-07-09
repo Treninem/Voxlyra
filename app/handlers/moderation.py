@@ -1,5 +1,7 @@
 from aiogram import F, Router
-from aiogram.types import CallbackQuery
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import CallbackQuery, Message, InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.config import settings
 from app.db import (
@@ -8,6 +10,7 @@ from app.db import (
     get_ad_campaign,
     get_admin_permissions,
     get_book,
+    get_book_moderation_entry,
     get_complaint,
     get_comment_for_moderation,
     get_review_for_moderation,
@@ -22,12 +25,15 @@ from app.db import (
     publish_book_content,
     set_comment_status,
     set_review_status,
+    resolve_book_moderation,
     upsert_user,
 )
 from app.keyboards import ad_moderation_card_menu, back_to_main, complaint_card_menu, complaints_menu, moderation_ads_menu, moderation_book_card_menu, moderation_books_menu, moderation_comments_menu, moderation_content_menu, moderation_hide_menu, moderation_menu, moderation_reviews_menu
 from app.services.publication import publish_book_and_channel
+from app.services.moderation_alerts import notify_moderation_resolved
 from app.services.notifications import (
     book_moderation_message,
+    book_revision_markup,
     complaint_message,
     content_hidden_message,
     send_user_notification,
@@ -36,8 +42,12 @@ from app.services.notifications import (
 router = Router()
 
 
+class BookRevision(StatesGroup):
+    reason = State()
+
+
 async def _notify(
-    call: CallbackQuery,
+    call: CallbackQuery | Message,
     *,
     actor_user_id: int,
     event: str,
@@ -46,12 +56,14 @@ async def _notify(
     app_user_id: int | None,
     telegram_id: int | None,
     text: str,
+    reply_markup=None,
 ) -> None:
     result = await send_user_notification(
         app_user_id=app_user_id,
         telegram_id=telegram_id,
         text=text,
         bot=call.bot,
+        reply_markup=reply_markup,
     )
     await add_audit(actor_user_id, f"notification_{result}", target_type, str(target_id), event, result)
 
@@ -59,7 +71,7 @@ async def _notify(
 @router.callback_query(F.data == "mod:menu")
 async def moderation_main(call: CallbackQuery) -> None:
     user = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
-    perms = await get_admin_permissions(user["id"])
+    perms = {"mod_books", "mod_comments", "complaints", "refunds", "ads"} if call.from_user.id in settings.owner_ids else await get_admin_permissions(user["id"])
     if not perms:
         await call.answer("Недоступно", show_alert=True)
         return
@@ -73,6 +85,8 @@ async def moderation_main(call: CallbackQuery) -> None:
 
 async def _require_perm(call: CallbackQuery, code: str) -> bool:
     user = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
+    if call.from_user.id in settings.owner_ids:
+        return True
     perms = await get_admin_permissions(user["id"])
     if code not in perms:
         await call.answer("Недоступно", show_alert=True)
@@ -102,6 +116,10 @@ async def moderation_book_card(call: CallbackQuery) -> None:
         await call.answer("Книга не найдена", show_alert=True)
         return
     chapters_count = await count_chapters_for_book(book_id)
+    queue = await get_book_moderation_entry(book_id)
+    reasons = ""
+    if queue and str(queue["reasons"] or "").strip():
+        reasons = "\n\n<b>Почему нужна ручная проверка:</b>\n" + str(queue["reasons"] or "")
     text = (
         f"<b>{book['title']}</b>\n\n"
         f"Автор: <b>{book['pen_name'] or 'не указан'}</b>\n"
@@ -109,7 +127,7 @@ async def moderation_book_card(call: CallbackQuery) -> None:
         f"Глав: <b>{chapters_count}</b>\n"
         f"Цена: <b>{book['price_stars']} Stars</b>\n"
         f"Скачивание: <b>{'разрешено' if book['allow_download'] else 'запрещено'}</b>\n\n"
-        f"{book['description'] or ''}"
+        f"{book['description'] or ''}{reasons}"
     )
     await call.message.edit_text(text[:4096], reply_markup=moderation_book_card_menu(book_id))
     await call.answer()
@@ -133,6 +151,7 @@ async def moderation_book_publish(call: CallbackQuery) -> None:
         call.bot,
         book_id,
         actor_user_id=int(user["id"]),
+        bypass_duplicate_guard=True,
     )
     if not result.published:
         await call.answer("Не удалось опубликовать книгу", show_alert=True)
@@ -147,6 +166,18 @@ async def moderation_book_publish(call: CallbackQuery) -> None:
         telegram_id=int(book["author_telegram_id"]) if book["author_telegram_id"] is not None else None,
         text=book_moderation_message(book["title"], "published"),
     )
+    await resolve_book_moderation(
+        book_id,
+        resolution="published",
+        actor_user_id=int(user["id"]),
+        note="Опубликовано после ручной проверки",
+    )
+    await notify_moderation_resolved(
+        call.bot,
+        book_id=book_id,
+        resolution="published",
+        actor_name=call.from_user.full_name or call.from_user.username or str(call.from_user.id),
+    )
     channel_status = f"\n\n{result.channel_message}" if result.channel_message else ""
 
     await call.message.edit_text(
@@ -157,7 +188,7 @@ async def moderation_book_publish(call: CallbackQuery) -> None:
 
 
 @router.callback_query(F.data.startswith("mod:book_reject:"))
-async def moderation_book_reject(call: CallbackQuery) -> None:
+async def moderation_book_reject(call: CallbackQuery, state: FSMContext) -> None:
     if not await _require_perm(call, "mod_books"):
         return
     book_id = int(call.data.split(":")[-1])
@@ -165,21 +196,75 @@ async def moderation_book_reject(call: CallbackQuery) -> None:
     if not book or book["publication_status"] != "review":
         await call.answer("Книга уже обработана или не найдена", show_alert=True)
         return
+    await state.update_data(moderation_book_id=book_id)
+    await state.set_state(BookRevision.reason)
+    await call.message.edit_text(
+        "<b>Вернуть книгу на доработку</b>\n\n"
+        "Напишите автору конкретную причину и что нужно исправить. "
+        "Автор получит это сообщение вместе с кнопкой открытия книги.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="❌ Отмена", callback_data=f"mod:book_revision_cancel:{book_id}")
+        ]]),
+    )
+    await call.answer()
+
+
+@router.callback_query(BookRevision.reason, F.data.startswith("mod:book_revision_cancel:"))
+async def moderation_book_revision_cancel(call: CallbackQuery, state: FSMContext) -> None:
+    book_id = int(call.data.split(":")[-1])
+    await state.clear()
+    await call.message.edit_text(
+        "Возврат на доработку отменён.",
+        reply_markup=moderation_book_card_menu(book_id),
+    )
+    await call.answer("Отменено")
+
+
+@router.message(BookRevision.reason)
+async def moderation_book_revision_reason(message: Message, state: FSMContext) -> None:
+    user = await upsert_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
+    if message.from_user.id not in settings.owner_ids and "mod_books" not in await get_admin_permissions(user["id"]):
+        await state.clear()
+        await message.answer("У вас нет доступа к модерации книг.")
+        return
+    data = await state.get_data()
+    book_id = int(data.get("moderation_book_id") or 0)
+    reason = (message.text or "").strip()
+    if len(reason) < 8:
+        await message.answer("Напишите причину подробнее — хотя бы одним понятным предложением.")
+        return
+    book = await get_book(book_id)
+    if not book or book["publication_status"] != "review":
+        await state.clear()
+        await message.answer("Книга уже обработана или не найдена.")
+        return
     await set_book_publication_status(book_id, "draft")
-    user = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
-    await add_audit(user["id"], "book_rejected", "book", str(book_id))
-    await _notify(
-        call,
+    await resolve_book_moderation(
+        book_id,
+        resolution="revision",
         actor_user_id=int(user["id"]),
-        event="book_rejected",
+        note=reason,
+    )
+    await add_audit(user["id"], "book_returned_for_revision", "book", str(book_id), None, reason[:1000])
+    await _notify(
+        message,
+        actor_user_id=int(user["id"]),
+        event="book_revision",
         target_type="book",
         target_id=book_id,
         app_user_id=int(book["author_user_id"]) if book["author_user_id"] is not None else None,
         telegram_id=int(book["author_telegram_id"]) if book["author_telegram_id"] is not None else None,
-        text=book_moderation_message(book["title"], "rejected"),
+        text=book_moderation_message(book["title"], "rejected", reason=reason, book_id=book_id),
+        reply_markup=book_revision_markup(book_id),
     )
-    await call.message.edit_text("Книга возвращена автору в черновик.", reply_markup=back_to_main())
-    await call.answer("Готово")
+    await notify_moderation_resolved(
+        message.bot,
+        book_id=book_id,
+        resolution="revision",
+        actor_name=message.from_user.full_name or message.from_user.username or str(message.from_user.id),
+    )
+    await state.clear()
+    await message.answer("Книга возвращена автору на доработку. Автор получил причину и кнопку открытия книги.")
 
 
 @router.callback_query(F.data == "mod:comments")

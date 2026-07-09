@@ -674,6 +674,22 @@ async def add_book_cover_photo(message: Message, state: FSMContext) -> None:
     await _show_book_confirm(message, state)
 
 
+@router.message(AddBook.cover, F.document)
+async def add_book_cover_document(message: Message, state: FSMContext) -> None:
+    document = message.document
+    filename = (document.file_name or "").lower()
+    mime = (document.mime_type or "").lower()
+    if not (mime.startswith("image/") or filename.endswith((".jpg", ".jpeg", ".png", ".webp"))):
+        await message.answer(
+            "Для обложки отправьте изображение JPG, PNG или WEBP.",
+            reply_markup=cover_menu(cancel_callback="author:cancel_flow"),
+        )
+        return
+    await state.update_data(cover_file_id=document.file_id)
+    await state.set_state(AddBook.confirm)
+    await _show_book_confirm(message, state)
+
+
 @router.callback_query(AddBook.cover, F.data == "book:cover:skip")
 async def add_book_cover_skip(call: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(cover_file_id=None)
@@ -880,16 +896,30 @@ async def book_edit_price_free(call: CallbackQuery, state: FSMContext) -> None:
 async def author_submit_book(call: CallbackQuery) -> None:
     book_id = int(call.data.split(":")[-1])
     user = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
-    ok = await submit_book_for_review(book_id, user["id"])
-    if not ok:
+    if not await book_belongs_to_author(book_id, int(user["id"])):
         await call.answer("Книга не найдена или недоступна", show_alert=True)
         return
-    await add_audit(user["id"], "book_submitted", "book", str(book_id))
-    await call.message.edit_text(
-        "Книга отправлена на проверку. После одобрения она появится в каталоге и сможет публиковаться в канал.",
-        reply_markup=author_menu(True),
+    if await count_chapters_for_book(book_id) < 1:
+        await call.answer("Перед отправкой добавьте хотя бы одну главу", show_alert=True)
+        return
+    workflow = await finish_book_content_workflow(
+        bot=call.bot,
+        book_id=book_id,
+        actor_user_id=int(user["id"]),
+        actor_telegram_id=int(call.from_user.id),
+        source="telegram_submit",
     )
-    await call.answer("Отправлено")
+    await add_audit(user["id"], "book_submitted", "book", str(book_id), None, workflow.workflow_status)
+    if workflow.workflow_status == "published":
+        text = "<b>Книга опубликована.</b> Она появилась в каталоге.\n\n" + workflow.channel_message
+    else:
+        text = (
+            "<b>Книга передана на проверку.</b>\n\n"
+            "Владелец, администраторы и модераторы книг получили уведомление. "
+            "Если решение задержится, бот напомнит им повторно."
+        )
+    await call.message.edit_text(text, reply_markup=author_menu(True))
+    await call.answer("Готово")
 
 
 
@@ -1406,21 +1436,24 @@ async def chapter_import_confirm(call: CallbackQuery, state: FSMContext) -> None
         actor_telegram_id=int(call.from_user.id),
         source="telegram_file_import",
     )
-    publication_note = ""
     reply_markup = author_menu(True) if workflow.workflow_status in {"published", "review"} else author_chapters_menu(book_id)
     if workflow.workflow_status == "published":
-        publication_note = "\n\n<b>Книга опубликована.</b> Она доступна в каталоге.\n" + workflow.channel_message
+        publication_note = "<b>Книга опубликована.</b> Она появилась в каталоге."
+        if workflow.channel_message:
+            publication_note += "\n\n" + workflow.channel_message
     elif workflow.workflow_status == "review":
-        publication_note = "\n\nКнига автоматически отправлена на проверку. После одобрения она появится в каталоге и канале."
-    elif workflow.workflow_status == "duplicate":
-        publication_note = "\n\nПубликация остановлена из-за возможной копии. Подтвердите совпадение в карточке книги."
+        publication_note = (
+            "<b>Книга передана на проверку.</b>\n\n"
+            "Владелец, администраторы и модераторы книг получили уведомление. "
+            "Если решение задержится, бот напомнит им повторно."
+        )
     else:
-        publication_note = "\n\nГлавы сохранены, но автоматическую публикацию выполнить не удалось."
+        publication_note = "Главы сохранены. Откройте карточку книги, чтобы продолжить."
 
     delete_import_preview(data.get("preview_path"))
     await state.clear()
     await call.message.edit_text(
-        f"Главы сохранены: <b>{saved}</b>." + publication_note,
+        f"Главы сохранены: <b>{saved}</b>.\n\n{publication_note}",
         reply_markup=reply_markup,
     )
     await call.answer("Сохранено")
