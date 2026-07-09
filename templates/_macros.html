@@ -1,9 +1,6 @@
 {% macro cover(book, size='mini', audio=false) -%}
-  {% if book.cover_path %}
-    <img class="cover-image cover-{{ size }}{% if audio %} audio{% endif %}" src="/media/cover/{{ book.id }}" alt="Обложка книги {{ book.title }}" loading="lazy">
-  {% else %}
-    <div class="cover-mini{% if size == 'big' %} cover-big{% endif %}{% if audio %} audio{% endif %}" aria-hidden="true">{{ (book.title or 'В')[:1] }}</div>
-  {% endif %}
+  <img class="cover-image cover-{{ size }}{% if audio %} audio{% endif %}" src="/media/cover/{{ book.id }}?v={{ book.updated_at|default(book.id, true) }}" alt="Обложка книги {{ book.title }}" loading="lazy" onerror="this.hidden=true;this.nextElementSibling.hidden=false">
+  <div class="cover-mini{% if size == 'big' %} cover-big{% endif %}{% if audio %} audio{% endif %}" aria-hidden="true" hidden>{{ (book.title or 'В')[:1] }}</div>
 {%- endmacro %}
 
 {% macro book_card(book, mode='grid') -%}

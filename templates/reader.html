@@ -6,7 +6,7 @@
   {% if reader_ads and ad_settings.enabled and ((position == 'top' and ad_settings.top) or (position == 'bottom' and ad_settings.bottom)) %}
   <section class="reader-ad reader-ad-{{ position }}">
     <div class="reader-ad-label">{{ ad_settings.label }}</div>
-    <div class="reader-ad-grid">{% for ad_book in reader_ads %}<a class="reader-ad-card" href="/book/{{ ad_book.id }}" data-promoted-book-id="{{ ad_book.id }}" data-campaign-id="{{ ad_book.campaign_id or '' }}" data-source-book-id="{{ chapter.book_id }}" data-source-chapter-id="{{ chapter_id }}"><div class="reader-ad-cover">{{ ad_book.title[:1] }}</div><div><strong>{{ ad_book.title }}</strong><span>{{ ad_book.pen_name or 'Автор не указан' }}</span>{% if ad_book.matched_options %}<em>{{ ad_book.matched_options.split(',')[:3] | join(' · ') }}</em>{% endif %}</div></a>{% endfor %}</div>
+    <div class="reader-ad-grid">{% for ad_book in reader_ads %}<a class="reader-ad-card" href="/book/{{ ad_book.id }}" data-promoted-book-id="{{ ad_book.id }}" data-campaign-id="{{ ad_book.campaign_id or '' }}" data-source-book-id="{{ chapter.book_id }}" data-source-chapter-id="{{ chapter_id }}"><img class="reader-ad-cover reader-ad-cover-image" src="/media/cover/{{ ad_book.id }}?v={{ ad_book.updated_at|default(ad_book.id, true) }}" alt="Обложка {{ ad_book.title }}" loading="lazy" onerror="this.hidden=true;this.nextElementSibling.hidden=false"><div class="reader-ad-cover" hidden>{{ ad_book.title[:1] }}</div><div><strong>{{ ad_book.title }}</strong><span>{{ ad_book.pen_name or 'Автор не указан' }}</span>{% if ad_book.matched_options %}<em>{{ ad_book.matched_options.split(',')[:3] | join(' · ') }}</em>{% endif %}</div></a>{% endfor %}</div>
   </section>
   {% endif %}
 {%- endmacro %}
@@ -22,6 +22,14 @@
   <div><span>Размер</span><button id="fontMinus">A−</button><button id="fontPlus">A+</button></div>
   <div><span>Тема</span><button data-theme="dark">Тёмная</button><button data-theme="light">Светлая</button><button data-theme="sepia">Сепия</button></div>
   <div><span>Режим</span><button data-toggle="focusMode" class="secondary">Без лишнего</button></div>
+  <form id="chapterJumpForm" class="chapter-jump" data-book-id="{{ chapter.book_id }}">
+    <label for="chapterJumpNumber">Перейти к главе</label>
+    <div>
+      <input id="chapterJumpNumber" name="chapter_number" type="number" inputmode="numeric" min="{{ chapter_bounds.min_number or 1 }}" max="{{ chapter_bounds.max_number or chapter.number }}" value="{{ chapter.number }}" aria-label="Номер главы">
+      <button type="submit">Открыть</button>
+    </div>
+    {% if chapter_bounds.max_number %}<small>Доступны главы {{ chapter_bounds.min_number }}–{{ chapter_bounds.max_number }}</small>{% endif %}
+  </form>
 </section>
 <section class="reader-status" id="readerStatus" data-chapter-id="{{ chapter_id }}">Открываем главу…</section>
 {{ reader_ad_block('top') }}
