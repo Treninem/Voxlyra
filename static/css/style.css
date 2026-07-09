@@ -1006,3 +1006,10 @@ body.sepia-theme .hero-points span { background: rgba(55,39,88,.06); border-colo
 .import-warning p { margin: 0 0 8px; color: var(--muted); }
 .import-warning ul { margin: 8px 0 12px; padding-left: 20px; }
 .import-warning li + li { margin-top: 5px; }
+
+/* Быстрый переход к главе */
+.chapter-jump { display: grid; gap: 8px; width: 100%; }
+.chapter-jump > label { font-size: .86rem; color: var(--muted); }
+.chapter-jump > div { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+.chapter-jump input { min-width: 0; width: 100%; }
+.chapter-jump small { color: var(--muted); }
