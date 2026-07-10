@@ -40,6 +40,7 @@ def main() -> int:
         ".env.example",
         "app/bot.py",
         "app/webapp.py",
+        "app/services/reader_tts.py",
         "templates/catalog.html",
         "templates/reader.html",
         "templates/author.html",
@@ -49,6 +50,7 @@ def main() -> int:
         "static/img/bot_avatar.png",
         "static/img/channel_avatar.png",
         "data/.gitkeep",
+        "storage/tts/.gitkeep",
     ]:
         ok, text = check_file(path)
         checks.append((ok, text, "Проверьте, что архив распакован полностью."))
