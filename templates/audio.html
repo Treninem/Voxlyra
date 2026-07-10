@@ -1,8 +1,9 @@
 {% extends "base.html" %}
 {% from "_macros.html" import book_card %}
 {% block title %}Аудиокниги — Вокслира{% endblock %}
+{% block body_class %}audio-page illustrated-miniapp{% endblock %}
 {% block content %}
-<section class="hero purple hero-home cinematic-hero"><img src="/static/img/channel_avatar.png" alt="Вокслира аудио" class="logo"><div class="hero-copy"><span class="eyebrow">Голосовые истории</span><h1>Аудиокниги</h1><p>Продолжайте с сохранённого места, меняйте скорость и включайте таймер сна.</p><div class="hero-actions"><a class="button-link" href="#audio-grid">Выбрать историю</a><a class="button-link secondary" href="/settings">Настроить</a></div></div></section>
+<section class="hero purple hero-home cinematic-hero illustrated-hero audio-illustrated-hero"><div class="illustrated-hero-backdrop" aria-hidden="true"></div><img src="/static/img/miniapp/voxlyra-v.webp" alt="Вокслира аудио" class="logo illustrated-logo"><div class="hero-copy"><span class="eyebrow">Голосовые истории</span><h1>Аудиокниги</h1><p>Продолжайте с сохранённого места, меняйте скорость и включайте таймер сна.</p><div class="hero-actions"><a class="button-link" href="#audio-grid">Выбрать историю</a><a class="button-link secondary" href="/settings">Настроить</a></div></div></section>
 <section id="continueAudioSection" class="continue-section" hidden><div class="section-title shelf-title"><div><span class="eyebrow">Ваше прослушивание</span><h2>Продолжить слушать</h2></div><a href="/library">Всё моё →</a></div><div id="continueAudioShelf" class="horizontal-shelf"></div></section>
 <section class="section-title" id="audio-grid"><span class="eyebrow">Доступные озвучки</span><h2>Истории с голосом</h2><p>Здесь только книги, в которых уже опубликованы аудиоглавы.</p></section>
 <section class="book-list premium-grid catalog-grid">{% if books %}{% for book in books %}{{ book_card(book) }}{% endfor %}{% else %}<article class="empty-card premium-empty"><div class="empty-icon">◉</div><h3>Аудиоглав пока нет</h3><p>Когда авторы добавят озвучку, она появится здесь.</p><a class="button-link" href="/catalog">Открыть каталог</a></article>{% endif %}</section>

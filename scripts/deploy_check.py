@@ -49,6 +49,12 @@ def main() -> int:
         "static/js/control.js",
         "static/img/bot_avatar.png",
         "static/img/channel_avatar.png",
+        "static/img/miniapp/scene-library.webp",
+        "static/img/miniapp/scene-audio.webp",
+        "static/img/miniapp/scene-reading.webp",
+        "static/img/miniapp/scene-stories.webp",
+        "static/img/miniapp/voxlyra-mark.webp",
+        "static/img/miniapp/voxlyra-v.webp",
         "data/.gitkeep",
         "storage/tts/.gitkeep",
     ]:

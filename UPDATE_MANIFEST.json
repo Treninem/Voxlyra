@@ -1,8 +1,8 @@
 {
   "project": "Voxlyra",
-  "from_version": "v1.8.8",
-  "to_version": "v1.8.9",
-  "build_name": "умное озвучивание и кэш устройства",
+  "from_version": "v1.8.9",
+  "to_version": "v1.9.0",
+  "build_name": "иллюстрированный Mini App",
   "project_version_env": "v1.8.3-author-cover-display",
   "requires_redeploy": true,
   "preserve": [
@@ -10,91 +10,117 @@
     "data/voxlyra.sqlite3",
     "storage/"
   ],
-  "optional_env": {
-    "TTS_CACHE_DAYS": "3",
-    "TTS_MAX_CACHE_MB": "512",
-    "TTS_MAX_VARIANTS_PER_CHAPTER": "6"
-  },
+  "new_required_env": {},
   "changed_files": [
     {
-      "path": ".env.example",
-      "sha256": "e3833191cc673e991298ef00e2fb76fe77bdb19e1df182ab7eaa9023a06842e1",
-      "size": 957
-    },
-    {
       "path": "README.md",
-      "sha256": "bafbf252b5b500312cf102325d0b3f93b08c12acbea3427dbe52d4cc5404af11",
-      "size": 42413
+      "sha256": "0a93f7f4d55d0eecc11aeb1d1e67caa1d7fd989b0cacf642c61f01c426a4d5aa",
+      "size": 43257
     },
     {
       "path": "UPDATE_INSTRUCTIONS.md",
-      "sha256": "02d4bb5f2d5468f6ae675a0a4b4f8a0027fb100df1588944881487542cbad982",
-      "size": 2435
+      "sha256": "07eb3a7c718cbea43df2ad816a8f8159975d1c44025ebbc924fc5376206201b8",
+      "size": 1535
     },
     {
       "path": "app/build_info.py",
-      "sha256": "ec47085802fcd3ae3085d5bd13b5af6c9f575832b07046e7ffc5b8d68058aca9",
-      "size": 550
+      "sha256": "b0481c0e88cdefbf58b41a04be2e81526a9f909b4bec64d7902c99e53512273e",
+      "size": 527
     },
     {
-      "path": "app/config.py",
-      "sha256": "c2ce088925827fe48092993377985191987e945dcfb409fbf5edb50ff51bf284",
-      "size": 1300
-    },
-    {
-      "path": "app/services/reader_tts.py",
-      "sha256": "0df628214f2aee3952b2e938c35dc7b8772b36dd0703ec2e977110e03c088f4e",
-      "size": 18384
-    },
-    {
-      "path": "app/webapp.py",
-      "sha256": "928cba96f84e57ea2ccbaa0d3adf3bcc38c8036718a2a295b6eab7196a5c8c2a",
-      "size": 87227
-    },
-    {
-      "path": "docs/SMART_TTS_V1_8_9.md",
-      "sha256": "6c4df366675a07a9cb78716cbe8b98bf311723a81fb629d73e9eed076ac97e2c",
-      "size": 4714
-    },
-    {
-      "path": "docs/COMICS_MANGA_ROADMAP.md",
-      "sha256": "5366ce5db6a810e79dbd7ea0c48680eb31365a660fcce0a011bf4bc837133c71",
-      "size": 6374
-    },
-    {
-      "path": "docs/STATUS_V1_8_9.md",
-      "sha256": "2a76006fabb2d1580a9853c4e5f56c72138cc2b0d6e0ad3516ba3ecc82743efc",
-      "size": 1179
+      "path": "docs/ILLUSTRATED_MINIAPP_V1_9_0.md",
+      "sha256": "f15392dff2beac5ff0627bf100586b904c7e28f5e31ca2dbe133db2f96d9586f",
+      "size": 3455
     },
     {
       "path": "docs/PROJECT_MEMORY_CURRENT.md",
-      "sha256": "b806cef15000d337efe1c151772c78bcf451113d53662af7f779ad8bc73747fb",
-      "size": 9589
+      "sha256": "5452fcf0dfa656d14b3ad55048aece90105878d4beebc76b1190a1a545503390",
+      "size": 11232
+    },
+    {
+      "path": "docs/STATUS_V1_9_0.md",
+      "sha256": "073c8a379de7da8d7e95cd95c9ab365cdada8f4d4179c47a221e368134c62744",
+      "size": 849
     },
     {
       "path": "docs/TRANSFER_TO_NEW_CHAT.md",
-      "sha256": "81ac7558d380f69eb900c563709bca37e57b04fb41276fc366b88b448e156ad2",
-      "size": 3083
+      "sha256": "ac97c309a6f88538055ad4b5a440577aefd99f221540ca84cecad017ef49ac80",
+      "size": 3711
+    },
+    {
+      "path": "scripts/deploy_check.py",
+      "sha256": "10934ed5d4934f74326d6eab449efd887dcfd1e423ea3dd53126d983b37ad15f",
+      "size": 4630
     },
     {
       "path": "static/css/style.css",
-      "sha256": "156ba8be5e17fb25d45c5f44a0b55156e8e1d8a006eeed84afb9100ffc14b622",
-      "size": 62870
+      "sha256": "30282459cc11ff6c63f27551ef8cd4ef5e7b37b4636191dadfb7fdb7c56670ba",
+      "size": 73016
     },
     {
-      "path": "static/js/app.js",
-      "sha256": "7d0a8b8c804fb579ba3f868047eff3e1a9065a9c6c7d361ec3440ca54ae2269b",
-      "size": 74292
+      "path": "static/img/miniapp/scene-audio.webp",
+      "sha256": "c2927f742e3523b6fdbf136f417f670fab3948322d5ebaa9787bf92ad6c13a43",
+      "size": 117888
     },
     {
-      "path": "templates/reader.html",
-      "sha256": "a1403d855053ad2ea3aba01c5433cc0ab47394a90d34d7e0c3d59a7efe39e567",
-      "size": 9390
+      "path": "static/img/miniapp/scene-library.webp",
+      "sha256": "eae1fb854c2e8d22270c5d984f17f94fc94409856f64360711560cac3ff93de7",
+      "size": 106542
     },
     {
-      "path": "tests/test_v189_smart_tts.py",
-      "sha256": "36c908a0071c0e234e845a33697f64d94e916ae182d0e01834aea25b351b356a",
-      "size": 4108
+      "path": "static/img/miniapp/scene-reading.webp",
+      "sha256": "b3958bb2c287e88d494d59b568b208416948ef02e5bb245906a22d83b53ef40a",
+      "size": 112630
+    },
+    {
+      "path": "static/img/miniapp/scene-stories.webp",
+      "sha256": "f51baf9ce873914ec122b5f396e05c1c9513084cbbe9995651bf1347d72a98f1",
+      "size": 79370
+    },
+    {
+      "path": "static/img/miniapp/voxlyra-mark.webp",
+      "sha256": "e2ef3b3a9091f4fd3fcd5ee4013aa98def91807cfb5e6a588c7e280af6dcfd8b",
+      "size": 41322
+    },
+    {
+      "path": "static/img/miniapp/voxlyra-v.webp",
+      "sha256": "528918ee9f5a664a83f7b1b043438ba434a240293c5dae60c750cd441f75c218",
+      "size": 28776
+    },
+    {
+      "path": "templates/audio.html",
+      "sha256": "42da6a1ef4b5456b48d343e51c868023d506e9bf12fea707ed665ca4afaaa40f",
+      "size": 2035
+    },
+    {
+      "path": "templates/author.html",
+      "sha256": "a15eb6e7c95ad29cd0356a239ecdaadfdc7afdff054d195c80ef17f6fe5876dd",
+      "size": 7122
+    },
+    {
+      "path": "templates/base.html",
+      "sha256": "d7c8626a6ee87c462891a97336e95db99ea5c1d1d1aea4f48b66131ec01e9f1e",
+      "size": 3026
+    },
+    {
+      "path": "templates/catalog.html",
+      "sha256": "7530b9c7c23bd865e2035b04e59dcc93dafc7ce7814e3efdcf6c44303678187e",
+      "size": 6282
+    },
+    {
+      "path": "templates/library.html",
+      "sha256": "dec6b5ed18d4f5c65e5eae23630e02b87a3081525c771c5dde597979ace7c058",
+      "size": 1696
+    },
+    {
+      "path": "templates/settings.html",
+      "sha256": "c9b3baac95994af33f3e959de583514c55ce45e8df4b55e48b91284086328eb6",
+      "size": 8528
+    },
+    {
+      "path": "tests/test_v190_illustrated_miniapp.py",
+      "sha256": "37a050478367303d3dcb2cfbeb57c8426b28c9b4085548972910773b1f4f0788",
+      "size": 1747
     }
   ]
 }

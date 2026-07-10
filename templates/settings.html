@@ -1,9 +1,11 @@
 {% extends "base.html" %}
 {% block title %}Настройки — Вокслира{% endblock %}
+{% block body_class %}settings-page illustrated-miniapp{% endblock %}
 {% block content %}
-<section class="hero compact settings-hero">
-  <img src="/static/img/bot_avatar.png" alt="Вокслира" class="logo">
-  <div>
+<section class="hero compact settings-hero illustrated-hero settings-illustrated-hero">
+  <div class="illustrated-hero-backdrop" aria-hidden="true"></div>
+  <img src="/static/img/miniapp/voxlyra-v.webp" alt="Вокслира" class="logo illustrated-logo">
+  <div class="hero-copy">
     <span class="eyebrow">Личный стиль</span>
     <h1>Настройки</h1>
     <p>Оформление, читалка, аудио, уведомления и комфорт чтения.</p>
