@@ -1,6 +1,6 @@
 {
-  "from": "v1.8.5",
-  "to": "v1.8.7",
+  "from": "v1.8.7",
+  "to": "v1.8.8",
   "project_version_env": "v1.8.3-author-cover-display",
   "changed_files": [
     "Dockerfile",
@@ -8,24 +8,21 @@
     "UPDATE_INSTRUCTIONS.md",
     "app/build_info.py",
     "app/config.py",
-    "app/db.py",
     "app/services/diagnostics.py",
     "app/services/reader_tts.py",
     "app/webapp.py",
-    "docs/MODERATION_READER_ACCESS_V1_8_7.md",
+    "docs/NATURAL_TTS_V1_8_8.md",
     "docs/PROJECT_MEMORY_CURRENT.md",
-    "docs/READER_TTS_V1_8_6.md",
-    "docs/STATUS_V1_8_6.md",
-    "docs/STATUS_V1_8_7.md",
+    "docs/STATUS_V1_8_8.md",
     "docs/TRANSFER_TO_NEW_CHAT.md",
+    "requirements.txt",
     "scripts/deploy_check.py",
     "static/css/style.css",
     "static/js/app.js",
-    "static/js/control.js",
-    "storage/tts/.gitkeep",
     "templates/reader.html",
     "tests/test_v186_reader_tts.py",
-    "tests/test_v187_moderation_reader_access.py"
+    "tests/test_v187_moderation_reader_access.py",
+    "tests/test_v188_natural_tts.py"
   ],
   "deleted_files": []
 }
