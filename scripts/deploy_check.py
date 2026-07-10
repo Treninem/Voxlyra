@@ -61,7 +61,13 @@ def main() -> int:
     database_path = os.getenv("DATABASE_PATH", "data/voxlyra.sqlite3")
     port = os.getenv("PORT", "3000")
 
+    requirements_text = (ROOT / "requirements.txt").read_text(encoding="utf-8") if (ROOT / "requirements.txt").exists() else ""
+    docker_text = (ROOT / "Dockerfile").read_text(encoding="utf-8") if (ROOT / "Dockerfile").exists() else ""
+
     checks.extend([
+        ("piper-tts==1.4.2" in requirements_text, "Piper закреплён в requirements.txt", "Добавьте piper-tts==1.4.2."),
+        ("piper.download_voices" in docker_text, "Docker загружает голосовые модели", "Добавьте загрузку моделей Piper при Redeploy."),
+        ("ru_RU-irina-medium" in docker_text and "ru_RU-dmitri-medium" in docker_text, "Русские модели Ирина и Дмитрий указаны", "Проверьте названия голосовых моделей в Dockerfile."),
         (bool(bot_token and bot_token != "PASTE_BOT_TOKEN_HERE"), "BOT_TOKEN указан", "Возьмите токен у @BotFather и вставьте в Bothost."),
         (bool(owner_ids.strip()), "OWNER_IDS указан", "Укажите свой Telegram ID. Можно несколько через запятую."),
         (is_https(webapp_url), "WEBAPP_URL похож на HTTPS-адрес", "После первого деплоя скопируйте публичный HTTPS URL из Bothost."),
