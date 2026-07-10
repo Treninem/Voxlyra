@@ -86,7 +86,7 @@ def collect_diagnostics() -> list[DiagnosticItem]:
             "reader_tts",
             "Локальное озвучивание готово",
             bool(tts_engine_status()["enabled"]),
-            "Проверьте Dockerfile: должны устанавливаться espeak-ng и ffmpeg.",
+            "Проверьте Dockerfile: должны устанавливаться Piper, ffmpeg и две русские модели голосов.",
         ),
     ]
 
