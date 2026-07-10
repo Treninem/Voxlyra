@@ -139,11 +139,16 @@ from app.services.cover_storage import ensure_book_cover_file
 from app.services.moderation_alerts import notify_moderation_resolved
 from app.services.reader_tts import (
     ReaderTTSError,
+    available_rates,
+    available_styles,
     available_voices,
     build_media_url,
     generate_chapter_tts,
     tts_engine_status,
+    tts_profile_key,
     validate_media_token,
+    validate_rate,
+    validate_style,
     validate_voice,
 )
 
@@ -727,13 +732,18 @@ def create_app() -> FastAPI:
             "ok": True,
             "enabled": bool(status["enabled"]),
             "message": status["message"],
+            "engine": status.get("engine", "piper"),
             "voices": available_voices(),
+            "styles": available_styles(),
+            "rates": available_rates(),
         }
 
     @app.get("/api/reader/{chapter_id}/tts")
     async def api_reader_tts(
         chapter_id: int,
-        voice: str = "anna",
+        voice: str = "irina",
+        rate: float = 1.0,
+        style: str = "expressive",
         x_telegram_init_data: str | None = Header(default=None),
     ):
         user = await _tma_user(x_telegram_init_data)
@@ -751,8 +761,17 @@ def create_app() -> FastAPI:
         if not allowed:
             raise HTTPException(status_code=403, detail="Озвучивание доступно после открытия главы.")
         selected_voice = validate_voice(voice)
+        selected_rate = validate_rate(rate)
+        selected_style = validate_style(style)
+        profile_key = tts_profile_key(selected_voice, selected_rate, selected_style)
         try:
-            asset = await generate_chapter_tts(chapter_id, str(chapter["text"] or ""), selected_voice)
+            asset = await generate_chapter_tts(
+                chapter_id,
+                str(chapter["text"] or ""),
+                selected_voice,
+                selected_rate,
+                selected_style,
+            )
         except ReaderTTSError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         adjacent = (
@@ -760,7 +779,7 @@ def create_app() -> FastAPI:
             if moderation_access
             else await get_adjacent_chapters(chapter_id)
         )
-        progress = await get_tts_progress(user.app_user_id, chapter_id, selected_voice)
+        progress = await get_tts_progress(user.app_user_id, chapter_id, profile_key)
         if moderation_access:
             await _audit_moderation_reader_access(
                 user_id=user.app_user_id,
@@ -776,11 +795,17 @@ def create_app() -> FastAPI:
                 user_id=user.app_user_id,
                 chapter_id=chapter_id,
                 voice=selected_voice,
+                rate=selected_rate,
+                style=selected_style,
             ),
             "duration_seconds": int(asset.duration_seconds or 0),
             "progress_seconds": int(progress or 0),
             "voice": selected_voice,
+            "rate": selected_rate,
+            "style": selected_style,
             "voices": available_voices(),
+            "styles": available_styles(),
+            "rates": available_rates(),
             "chapter": {
                 "id": int(chapter["id"]),
                 "book_id": int(chapter["book_id"]),
@@ -817,12 +842,17 @@ def create_app() -> FastAPI:
         if not allowed:
             raise HTTPException(status_code=403, detail="Нет доступа к главе.")
         position = max(0, int(payload.get("position_seconds") or 0))
-        selected_voice = validate_voice(str(payload.get("voice") or "anna"))
-        await save_tts_progress(user.app_user_id, chapter_id, position, selected_voice)
+        selected_voice = validate_voice(str(payload.get("voice") or "irina"))
+        selected_rate = validate_rate(payload.get("rate"))
+        selected_style = validate_style(str(payload.get("style") or "expressive"))
+        profile_key = tts_profile_key(selected_voice, selected_rate, selected_style)
+        await save_tts_progress(user.app_user_id, chapter_id, position, profile_key)
         return {
             "ok": True,
             "position_seconds": position,
             "voice": selected_voice,
+            "rate": selected_rate,
+            "style": selected_style,
             "moderation_access": moderation_access,
         }
 
@@ -831,14 +861,20 @@ def create_app() -> FastAPI:
         chapter_id: int,
         uid: int,
         voice: str,
-        exp: int,
-        sig: str,
+        rate: float = 1.0,
+        style: str = "expressive",
+        exp: int = 0,
+        sig: str = "",
     ):
         selected_voice = validate_voice(voice)
+        selected_rate = validate_rate(rate)
+        selected_style = validate_style(style)
         if not validate_media_token(
             user_id=uid,
             chapter_id=chapter_id,
             voice=selected_voice,
+            rate=selected_rate,
+            style=selected_style,
             expires_at=exp,
             signature=sig,
         ):
@@ -860,7 +896,13 @@ def create_app() -> FastAPI:
         if not allowed:
             raise HTTPException(status_code=403, detail="Нет доступа к главе.")
         try:
-            asset = await generate_chapter_tts(chapter_id, str(chapter["text"] or ""), selected_voice)
+            asset = await generate_chapter_tts(
+                chapter_id,
+                str(chapter["text"] or ""),
+                selected_voice,
+                selected_rate,
+                selected_style,
+            )
         except ReaderTTSError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         return FileResponse(
@@ -869,7 +911,9 @@ def create_app() -> FastAPI:
             headers={
                 "Cache-Control": "private, max-age=14400",
                 "Accept-Ranges": "bytes",
-                "Content-Disposition": f'inline; filename="chapter_{chapter_id}_{selected_voice}.mp3"',
+                "Content-Disposition": (
+                    f'inline; filename="chapter_{chapter_id}_{selected_voice}_{selected_style}_{selected_rate:.2f}.mp3"'
+                ),
                 "X-Content-Type-Options": "nosniff",
             },
         )

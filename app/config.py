@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     MAX_BOOK_UNPACKED_MB: int = 2048
     TTS_ENABLED: bool = True
     TTS_CACHE_DIR: str = "storage/tts"
+    TTS_MODEL_DIR: str = "/opt/voxlyra-voices"
     TTS_CACHE_DAYS: int = 30
     TTS_MAX_CACHE_MB: int = 2048
     TTS_SIGNING_SECRET: str = ""
