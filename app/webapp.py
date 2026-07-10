@@ -20,6 +20,7 @@ from app.db import (
     count_chapters_for_book,
     get_adjacent_audio_chapters,
     get_adjacent_chapters,
+    get_adjacent_chapters_for_moderation,
     get_audio_chapter,
     get_book,
     get_book_options,
@@ -36,11 +37,15 @@ from app.db import (
     get_chapter,
     get_published_chapter_by_number,
     get_published_chapter_bounds,
+    get_chapter_by_number_for_moderation,
+    get_chapter_bounds_for_moderation,
     get_listening_progress,
     get_reader_ad_settings,
     get_reading_progress,
     get_user_review,
     get_user_preferences,
+    get_user_by_id,
+    get_tts_progress,
     has_purchase_access,
     init_db,
     list_audio_chapters_for_book,
@@ -90,6 +95,7 @@ from app.db import (
     update_book_import_fingerprint,
     set_book_duplicate_override,
     save_reading_progress,
+    save_tts_progress,
     set_bookmark,
     set_chapter_status,
     set_user_preference,
@@ -131,6 +137,15 @@ from app.services.web_import_store import (
 from app.services.publication import finish_book_content_workflow, publish_book_and_channel
 from app.services.cover_storage import ensure_book_cover_file
 from app.services.moderation_alerts import notify_moderation_resolved
+from app.services.reader_tts import (
+    ReaderTTSError,
+    available_voices,
+    build_media_url,
+    generate_chapter_tts,
+    tts_engine_status,
+    validate_media_token,
+    validate_voice,
+)
 
 
 
@@ -175,6 +190,50 @@ async def _tma_user(init_data: str | None) -> TMAUser:
         return await authenticate_init_data(init_data or "")
     except TMAAuthError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
+
+
+async def _has_book_moderation_access(*, app_user_id: int, telegram_id: int, chapter: Any) -> bool:
+    """Служебный доступ к тексту главы только владельцу и сотрудникам с mod_books.
+
+    Владелец может проверять любую неудалённую книгу. Делегированный сотрудник —
+    опубликованную книгу либо книгу, реально находящуюся в очереди review.
+    """
+    if int(telegram_id) in settings.owner_ids:
+        return str(chapter["publication_status"] or "") != "deleted" and str(chapter["status"] or "") != "deleted"
+    permissions = await get_admin_permissions(int(app_user_id))
+    if "mod_books" not in permissions:
+        return False
+    return (
+        str(chapter["status"] or "") != "deleted"
+        and str(chapter["publication_status"] or "") in {"published", "review"}
+    )
+
+
+async def _chapter_access(*, app_user_id: int, telegram_id: int, chapter: Any) -> tuple[bool, bool]:
+    """Возвращает (доступ, служебный_режим_проверки)."""
+    is_public = (
+        str(chapter["publication_status"] or "") == "published"
+        and str(chapter["status"] or "") == "published"
+    )
+    if is_public and await user_can_access_chapter(int(app_user_id), int(chapter["id"])):
+        return True, False
+    moderation = await _has_book_moderation_access(
+        app_user_id=int(app_user_id),
+        telegram_id=int(telegram_id),
+        chapter=chapter,
+    )
+    return moderation, moderation
+
+
+async def _audit_moderation_reader_access(*, user_id: int, chapter_id: int, action: str) -> None:
+    await add_audit(
+        int(user_id),
+        action,
+        "chapter",
+        str(int(chapter_id)),
+        None,
+        "Служебный доступ для проверки содержимого",
+    )
 
 
 def _showcase_sections(books: list[Any]) -> dict[str, list[Any]]:
@@ -330,16 +389,30 @@ def create_app() -> FastAPI:
 
     @app.get("/reader/{chapter_id}", response_class=HTMLResponse)
     async def reader(request: Request, chapter_id: int):
+        # HTML-оболочка не содержит закрытый текст. Право на платную или проверяемую
+        # главу определяется только в /api/reader после проверки Telegram initData.
         chapter = await get_chapter(chapter_id)
-        if chapter and (chapter["publication_status"] != "published" or chapter["status"] != "published"):
-            chapter = None
-        purchase_url = _bot_purchase_url("chapter", chapter_id) if chapter else ""
+        is_public = bool(
+            chapter
+            and chapter["publication_status"] == "published"
+            and chapter["status"] == "published"
+        )
+        purchase_url = _bot_purchase_url("chapter", chapter_id) if is_public else ""
         ads = []
-        adjacent = await get_adjacent_chapters(chapter_id) if chapter else {"previous": None, "next": None}
-        chapter_bounds = await get_published_chapter_bounds(int(chapter["book_id"])) if chapter else {"min_number": 0, "max_number": 0, "chapters_count": 0}
+        adjacent = await get_adjacent_chapters(chapter_id) if is_public else {"previous": None, "next": None}
+        chapter_bounds = (
+            await get_published_chapter_bounds(int(chapter["book_id"]))
+            if is_public and chapter
+            else {"min_number": 0, "max_number": 0, "chapters_count": 0}
+        )
         ad_settings = await get_reader_ad_settings()
-        if chapter and ad_settings.get("enabled"):
+        if is_public and chapter and ad_settings.get("enabled"):
             ads = await list_contextual_book_ads(int(chapter["book_id"]), limit=4)
+        server_text_visible = bool(
+            is_public
+            and chapter
+            and (int(chapter["is_free"] or 0) == 1 or int(chapter["price_stars"] or 0) <= 0)
+        )
         return templates.TemplateResponse(
             request,
             "reader.html",
@@ -352,6 +425,7 @@ def create_app() -> FastAPI:
                 "previous_chapter": adjacent.get("previous"),
                 "next_chapter": adjacent.get("next"),
                 "chapter_bounds": chapter_bounds,
+                "server_text_visible": server_text_visible,
                 "project_name": settings.PROJECT_NAME,
                 "bot_username": settings.BOT_USERNAME.strip().lstrip("@"),
             },
@@ -526,14 +600,38 @@ def create_app() -> FastAPI:
         return {"ok": True, "reviews": _rows_to_dicts(reviews)}
 
     @app.get("/api/book/{book_id}/chapter-number/{chapter_number}")
-    async def api_chapter_by_number(book_id: int, chapter_number: int):
+    async def api_chapter_by_number(
+        book_id: int,
+        chapter_number: int,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
         if chapter_number < 1 or chapter_number > 1_000_000:
             raise HTTPException(status_code=400, detail="Введите корректный номер главы.")
         book_row = await get_book(book_id)
-        if not book_row or book_row["publication_status"] != "published":
+        if not book_row or book_row["publication_status"] == "deleted":
             raise HTTPException(status_code=404, detail="Книга не найдена.")
-        chapter_row = await get_published_chapter_by_number(book_id, chapter_number)
-        bounds = await get_published_chapter_bounds(book_id)
+        if book_row["publication_status"] == "published":
+            chapter_row = await get_published_chapter_by_number(book_id, chapter_number)
+            bounds = await get_published_chapter_bounds(book_id)
+        else:
+            user = await _tma_user(x_telegram_init_data)
+            probe = await get_chapter_by_number_for_moderation(book_id, chapter_number)
+            if not probe:
+                bounds = await get_chapter_bounds_for_moderation(book_id)
+                if bounds["chapters_count"]:
+                    detail = f"Главы {chapter_number} нет. Доступны номера от {bounds['min_number']} до {bounds['max_number']}."
+                else:
+                    detail = "У книги пока нет глав."
+                raise HTTPException(status_code=404, detail=detail)
+            chapter = await get_chapter(int(probe["id"]))
+            if not chapter or not await _has_book_moderation_access(
+                app_user_id=user.app_user_id,
+                telegram_id=user.telegram_id,
+                chapter=chapter,
+            ):
+                raise HTTPException(status_code=404, detail="Книга не найдена.")
+            chapter_row = probe
+            bounds = await get_chapter_bounds_for_moderation(book_id)
         if not chapter_row:
             if bounds["chapters_count"]:
                 detail = f"Главы {chapter_number} нет. Доступны номера от {bounds['min_number']} до {bounds['max_number']}."
@@ -551,15 +649,22 @@ def create_app() -> FastAPI:
     async def api_reader(chapter_id: int, x_telegram_init_data: str | None = Header(default=None)):
         user = await _tma_user(x_telegram_init_data)
         chapter = await get_chapter(chapter_id)
-        if not chapter or chapter["publication_status"] != "published" or chapter["status"] != "published":
+        if not chapter:
             raise HTTPException(status_code=404, detail="Глава не найдена.")
-        allowed = await user_can_access_chapter(user.app_user_id, chapter_id)
-        purchase_url = _bot_purchase_url("chapter", chapter_id)
-        comments = await list_comments_for_chapter(chapter_id, limit=50) if allowed else []
-        progress = await get_reading_progress(user.app_user_id, chapter_id) if allowed else 0
+        allowed, moderation_access = await _chapter_access(
+            app_user_id=user.app_user_id,
+            telegram_id=user.telegram_id,
+            chapter=chapter,
+        )
+        is_public = chapter["publication_status"] == "published" and chapter["status"] == "published"
+        if not is_public and not moderation_access:
+            raise HTTPException(status_code=404, detail="Глава не найдена.")
+        purchase_url = "" if moderation_access else _bot_purchase_url("chapter", chapter_id)
+        comments = await list_comments_for_chapter(chapter_id, limit=50) if allowed and is_public and not moderation_access else []
+        progress = await get_reading_progress(user.app_user_id, chapter_id) if allowed and not moderation_access else 0
         reader_ads = []
         ad_settings = await get_reader_ad_settings()
-        if ad_settings.get("enabled"):
+        if is_public and not moderation_access and ad_settings.get("enabled"):
             reader_ads = await list_contextual_book_ads(int(chapter["book_id"]), limit=4)
             for ad in reader_ads:
                 await record_reader_ad_event(
@@ -571,11 +676,27 @@ def create_app() -> FastAPI:
                     event_type="impression",
                     campaign_id=int(ad["campaign_id"]) if ad["campaign_id"] else None,
                 )
-        adjacent = await get_adjacent_chapters(chapter_id)
-        chapter_bounds = await get_published_chapter_bounds(int(chapter["book_id"]))
+        adjacent = (
+            await get_adjacent_chapters_for_moderation(chapter_id)
+            if moderation_access
+            else await get_adjacent_chapters(chapter_id)
+        )
+        chapter_bounds = (
+            await get_chapter_bounds_for_moderation(int(chapter["book_id"]))
+            if moderation_access
+            else await get_published_chapter_bounds(int(chapter["book_id"]))
+        )
+        if moderation_access:
+            await _audit_moderation_reader_access(
+                user_id=user.app_user_id,
+                chapter_id=chapter_id,
+                action="moderation_chapter_read",
+            )
         return {
             "ok": True,
             "allowed": allowed,
+            "moderation_access": moderation_access,
+            "access_mode": "moderation" if moderation_access else ("reader" if allowed else "locked"),
             "purchase_url": purchase_url,
             "progress_percent": progress,
             "chapter": {
@@ -598,18 +719,190 @@ def create_app() -> FastAPI:
             },
         }
 
-    @app.post("/api/reader/{chapter_id}/progress")
-    async def api_reader_progress(chapter_id: int, payload: dict[str, Any], x_telegram_init_data: str | None = Header(default=None)):
+    @app.get("/api/reader/tts/voices")
+    async def api_reader_tts_voices(x_telegram_init_data: str | None = Header(default=None)):
+        await _tma_user(x_telegram_init_data)
+        status = tts_engine_status()
+        return {
+            "ok": True,
+            "enabled": bool(status["enabled"]),
+            "message": status["message"],
+            "voices": available_voices(),
+        }
+
+    @app.get("/api/reader/{chapter_id}/tts")
+    async def api_reader_tts(
+        chapter_id: int,
+        voice: str = "anna",
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
         user = await _tma_user(x_telegram_init_data)
         chapter = await get_chapter(chapter_id)
-        if not chapter or chapter["publication_status"] != "published" or chapter["status"] != "published":
+        if not chapter:
             raise HTTPException(status_code=404, detail="Глава не найдена.")
-        allowed = await user_can_access_chapter(user.app_user_id, chapter_id)
+        allowed, moderation_access = await _chapter_access(
+            app_user_id=user.app_user_id,
+            telegram_id=user.telegram_id,
+            chapter=chapter,
+        )
+        is_public = chapter["publication_status"] == "published" and chapter["status"] == "published"
+        if not is_public and not moderation_access:
+            raise HTTPException(status_code=404, detail="Глава не найдена.")
+        if not allowed:
+            raise HTTPException(status_code=403, detail="Озвучивание доступно после открытия главы.")
+        selected_voice = validate_voice(voice)
+        try:
+            asset = await generate_chapter_tts(chapter_id, str(chapter["text"] or ""), selected_voice)
+        except ReaderTTSError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        adjacent = (
+            await get_adjacent_chapters_for_moderation(chapter_id)
+            if moderation_access
+            else await get_adjacent_chapters(chapter_id)
+        )
+        progress = await get_tts_progress(user.app_user_id, chapter_id, selected_voice)
+        if moderation_access:
+            await _audit_moderation_reader_access(
+                user_id=user.app_user_id,
+                chapter_id=chapter_id,
+                action="moderation_chapter_tts",
+            )
+        return {
+            "ok": True,
+            "enabled": True,
+            "moderation_access": moderation_access,
+            "access_mode": "moderation" if moderation_access else "reader",
+            "audio_url": build_media_url(
+                user_id=user.app_user_id,
+                chapter_id=chapter_id,
+                voice=selected_voice,
+            ),
+            "duration_seconds": int(asset.duration_seconds or 0),
+            "progress_seconds": int(progress or 0),
+            "voice": selected_voice,
+            "voices": available_voices(),
+            "chapter": {
+                "id": int(chapter["id"]),
+                "book_id": int(chapter["book_id"]),
+                "book_title": chapter["book_title"],
+                "pen_name": chapter["pen_name"] or "Автор не указан",
+                "title": chapter["title"],
+                "number": int(chapter["number"]),
+                "text": chapter["text"],
+            },
+            "navigation": {
+                "previous": _row_to_dict(adjacent["previous"]) if adjacent["previous"] else None,
+                "next": _row_to_dict(adjacent["next"]) if adjacent["next"] else None,
+            },
+        }
+
+    @app.post("/api/reader/{chapter_id}/tts/progress")
+    async def api_reader_tts_progress(
+        chapter_id: int,
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        chapter = await get_chapter(chapter_id)
+        if not chapter:
+            raise HTTPException(status_code=404, detail="Глава не найдена.")
+        allowed, moderation_access = await _chapter_access(
+            app_user_id=user.app_user_id,
+            telegram_id=user.telegram_id,
+            chapter=chapter,
+        )
+        is_public = chapter["publication_status"] == "published" and chapter["status"] == "published"
+        if not is_public and not moderation_access:
+            raise HTTPException(status_code=404, detail="Глава не найдена.")
         if not allowed:
             raise HTTPException(status_code=403, detail="Нет доступа к главе.")
-        percent = int(payload.get("position_percent") or 0)
-        await save_reading_progress(user.app_user_id, chapter_id, percent)
-        return {"ok": True, "position_percent": max(0, min(100, percent))}
+        position = max(0, int(payload.get("position_seconds") or 0))
+        selected_voice = validate_voice(str(payload.get("voice") or "anna"))
+        await save_tts_progress(user.app_user_id, chapter_id, position, selected_voice)
+        return {
+            "ok": True,
+            "position_seconds": position,
+            "voice": selected_voice,
+            "moderation_access": moderation_access,
+        }
+
+    @app.get("/media/reader-tts/{chapter_id}.mp3")
+    async def media_reader_tts(
+        chapter_id: int,
+        uid: int,
+        voice: str,
+        exp: int,
+        sig: str,
+    ):
+        selected_voice = validate_voice(voice)
+        if not validate_media_token(
+            user_id=uid,
+            chapter_id=chapter_id,
+            voice=selected_voice,
+            expires_at=exp,
+            signature=sig,
+        ):
+            raise HTTPException(status_code=403, detail="Ссылка на озвучивание устарела.")
+        user_row = await get_user_by_id(uid)
+        if not user_row or int(user_row["is_blocked"] or 0) == 1:
+            raise HTTPException(status_code=403, detail="Доступ закрыт.")
+        chapter = await get_chapter(chapter_id)
+        if not chapter:
+            raise HTTPException(status_code=404, detail="Глава не найдена.")
+        allowed, moderation_access = await _chapter_access(
+            app_user_id=int(uid),
+            telegram_id=int(user_row["telegram_id"]),
+            chapter=chapter,
+        )
+        is_public = chapter["publication_status"] == "published" and chapter["status"] == "published"
+        if not is_public and not moderation_access:
+            raise HTTPException(status_code=404, detail="Глава не найдена.")
+        if not allowed:
+            raise HTTPException(status_code=403, detail="Нет доступа к главе.")
+        try:
+            asset = await generate_chapter_tts(chapter_id, str(chapter["text"] or ""), selected_voice)
+        except ReaderTTSError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        return FileResponse(
+            asset.path,
+            media_type="audio/mpeg",
+            headers={
+                "Cache-Control": "private, max-age=14400",
+                "Accept-Ranges": "bytes",
+                "Content-Disposition": f'inline; filename="chapter_{chapter_id}_{selected_voice}.mp3"',
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
+    @app.post("/api/reader/{chapter_id}/progress")
+    async def api_reader_progress(
+        chapter_id: int,
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        chapter = await get_chapter(chapter_id)
+        if not chapter:
+            raise HTTPException(status_code=404, detail="Глава не найдена.")
+        allowed, moderation_access = await _chapter_access(
+            app_user_id=user.app_user_id,
+            telegram_id=user.telegram_id,
+            chapter=chapter,
+        )
+        is_public = chapter["publication_status"] == "published" and chapter["status"] == "published"
+        if not is_public and not moderation_access:
+            raise HTTPException(status_code=404, detail="Глава не найдена.")
+        if not allowed:
+            raise HTTPException(status_code=403, detail="Нет доступа к главе.")
+        percent = max(0, min(100, int(payload.get("position_percent") or 0)))
+        # Служебное чтение не должно попадать в личную историю и рекомендации модератора.
+        if not moderation_access:
+            await save_reading_progress(user.app_user_id, chapter_id, percent)
+        return {
+            "ok": True,
+            "position_percent": percent,
+            "moderation_access": moderation_access,
+        }
 
     @app.get("/api/reader/{chapter_id}/comments")
     async def api_comments(chapter_id: int, x_telegram_init_data: str | None = Header(default=None)):

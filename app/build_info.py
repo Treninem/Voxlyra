@@ -4,8 +4,8 @@
 PROJECT_VERSION намеренно остаётся совместимым с уже настроенным Bothost.
 """
 
-OWNER_BUILD_VERSION = "v1.8.5"
-OWNER_BUILD_NAME = "модерация, обложки и читалка"
+OWNER_BUILD_VERSION = "v1.8.7"
+OWNER_BUILD_NAME = "служебная проверка платных глав"
 
 
 def owner_build_label() -> str:

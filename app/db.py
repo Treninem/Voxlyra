@@ -206,6 +206,18 @@ async def init_db() -> None:
                 FOREIGN KEY(chapter_id) REFERENCES chapters(id) ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS tts_progress (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                chapter_id INTEGER NOT NULL,
+                voice_code TEXT NOT NULL DEFAULT 'anna',
+                position_seconds INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL,
+                UNIQUE(user_id, chapter_id, voice_code),
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY(chapter_id) REFERENCES chapters(id) ON DELETE CASCADE
+            );
+
             CREATE TABLE IF NOT EXISTS purchases (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
@@ -1056,7 +1068,19 @@ async def list_books_for_moderation() -> list[aiosqlite.Row]:
     async with connect() as db:
         cur = await db.execute(
             """
-            SELECT b.*, a.pen_name
+            SELECT b.*, a.pen_name,
+                   (
+                       SELECT c.id
+                       FROM chapters c
+                       WHERE c.book_id=b.id AND c.status!='deleted'
+                       ORDER BY c.number ASC, c.id ASC
+                       LIMIT 1
+                   ) AS first_chapter_id,
+                   (
+                       SELECT COUNT(*)
+                       FROM chapters c
+                       WHERE c.book_id=b.id AND c.status!='deleted'
+                   ) AS chapters_count
             FROM books b
             LEFT JOIN author_profiles a ON a.id = b.author_id
             WHERE b.publication_status = 'review'
@@ -1591,6 +1615,76 @@ async def get_adjacent_chapters(chapter_id: int) -> dict[str, aiosqlite.Row | No
         )
         next_row = await cur.fetchone()
         return {"previous": previous, "next": next_row}
+
+
+async def get_adjacent_chapters_for_moderation(chapter_id: int) -> dict[str, aiosqlite.Row | None]:
+    """Соседние неудалённые главы для владельца и сотрудников проверки книг."""
+    async with connect() as db:
+        cur = await db.execute(
+            "SELECT book_id, number FROM chapters WHERE id=? AND status!='deleted'",
+            (int(chapter_id),),
+        )
+        current = await cur.fetchone()
+        if not current:
+            return {"previous": None, "next": None}
+        cur = await db.execute(
+            """
+            SELECT id, book_id, number, title
+            FROM chapters
+            WHERE book_id=? AND status!='deleted' AND number < ?
+            ORDER BY number DESC, id DESC
+            LIMIT 1
+            """,
+            (int(current["book_id"]), int(current["number"])),
+        )
+        previous = await cur.fetchone()
+        cur = await db.execute(
+            """
+            SELECT id, book_id, number, title
+            FROM chapters
+            WHERE book_id=? AND status!='deleted' AND number > ?
+            ORDER BY number ASC, id ASC
+            LIMIT 1
+            """,
+            (int(current["book_id"]), int(current["number"])),
+        )
+        next_row = await cur.fetchone()
+        return {"previous": previous, "next": next_row}
+
+
+async def get_chapter_by_number_for_moderation(book_id: int, chapter_number: int) -> aiosqlite.Row | None:
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT id, book_id, number, title
+            FROM chapters
+            WHERE book_id=? AND number=? AND status!='deleted'
+            ORDER BY id ASC
+            LIMIT 1
+            """,
+            (int(book_id), int(chapter_number)),
+        )
+        return await cur.fetchone()
+
+
+async def get_chapter_bounds_for_moderation(book_id: int) -> dict[str, int]:
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT COALESCE(MIN(number), 0) AS min_number,
+                   COALESCE(MAX(number), 0) AS max_number,
+                   COUNT(*) AS chapters_count
+            FROM chapters
+            WHERE book_id=? AND status!='deleted'
+            """,
+            (int(book_id),),
+        )
+        row = await cur.fetchone()
+        return {
+            "min_number": int(row["min_number"] or 0) if row else 0,
+            "max_number": int(row["max_number"] or 0) if row else 0,
+            "chapters_count": int(row["chapters_count"] or 0) if row else 0,
+        }
 
 
 async def count_chapters_for_book(book_id: int) -> int:
@@ -4802,3 +4896,45 @@ async def get_author_auto_moderation_stats(author_id: int | None, current_book_i
             "published_books": int(published[0] or 0) if published else 0,
             "open_complaints": int(complaints[0] or 0) if complaints else 0,
         }
+
+
+async def get_user_by_id(user_id: int) -> aiosqlite.Row | None:
+    async with connect() as db:
+        cur = await db.execute("SELECT * FROM users WHERE id=?", (int(user_id),))
+        return await cur.fetchone()
+
+
+async def get_tts_progress(user_id: int, chapter_id: int, voice_code: str = "anna") -> int:
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT position_seconds
+            FROM tts_progress
+            WHERE user_id=? AND chapter_id=? AND voice_code=?
+            """,
+            (int(user_id), int(chapter_id), str(voice_code or "anna")),
+        )
+        row = await cur.fetchone()
+        return max(0, int(row["position_seconds"] or 0)) if row else 0
+
+
+async def save_tts_progress(
+    user_id: int,
+    chapter_id: int,
+    position_seconds: int,
+    voice_code: str = "anna",
+) -> None:
+    now = utc_now()
+    position = max(0, int(position_seconds or 0))
+    voice = str(voice_code or "anna")[:32]
+    async with connect() as db:
+        await db.execute(
+            """
+            INSERT INTO tts_progress(user_id, chapter_id, voice_code, position_seconds, updated_at)
+            VALUES(?,?,?,?,?)
+            ON CONFLICT(user_id, chapter_id, voice_code)
+            DO UPDATE SET position_seconds=excluded.position_seconds, updated_at=excluded.updated_at
+            """,
+            (int(user_id), int(chapter_id), voice, position, now),
+        )
+        await db.commit()

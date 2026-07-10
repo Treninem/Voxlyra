@@ -18,6 +18,11 @@ class Settings(BaseSettings):
     PROJECT_VERSION: str = "v1.8.3-author-cover-display"
     MAX_BOOK_UPLOAD_MB: int = 0
     MAX_BOOK_UNPACKED_MB: int = 2048
+    TTS_ENABLED: bool = True
+    TTS_CACHE_DIR: str = "storage/tts"
+    TTS_CACHE_DAYS: int = 30
+    TTS_MAX_CACHE_MB: int = 2048
+    TTS_SIGNING_SECRET: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
