@@ -13,6 +13,7 @@ const root = document.documentElement;
 const DEFAULTS = {
   theme: 'system', fontSize: 18, lineHeight: 1.78, readerWidth: 'normal',
   audioRate: 1, rewindStep: 15, autoplayNext: false, saveOnPause: true,
+  ttsVoice: 'anna', ttsRate: 1, ttsAutoNext: true,
   notifications: true, notificationChapters: true, notificationAudio: true, notificationDiscounts: true,
   contrast: 'normal', focusMode: false, showReaderAds: true,
 };
@@ -20,6 +21,10 @@ let meDataPromise = null;
 let autoProgressTimer = null;
 let sleepTimerHandle = null;
 let sleepTimerEndsAt = 0;
+let readerTtsMeta = null;
+let readerTtsLoading = false;
+let readerTtsProgressTimer = null;
+let readerTtsSleepTimer = null;
 
 function getStoredBool(key, fallback) {
   const value = localStorage.getItem(key);
@@ -34,6 +39,9 @@ function getPrefs() {
     lineHeight: Number(localStorage.getItem('readerLineHeight') || DEFAULTS.lineHeight),
     readerWidth: localStorage.getItem('readerWidth') || DEFAULTS.readerWidth,
     audioRate: Number(localStorage.getItem('voxAudioRate') || DEFAULTS.audioRate),
+    ttsVoice: localStorage.getItem('voxTtsVoice') || DEFAULTS.ttsVoice,
+    ttsRate: Number(localStorage.getItem('voxTtsRate') || DEFAULTS.ttsRate),
+    ttsAutoNext: getStoredBool('voxTtsAutoNext', DEFAULTS.ttsAutoNext),
     rewindStep: Number(localStorage.getItem('voxRewindStep') || DEFAULTS.rewindStep),
     autoplayNext: getStoredBool('voxAutoplayNext', DEFAULTS.autoplayNext),
     saveOnPause: getStoredBool('voxSaveOnPause', DEFAULTS.saveOnPause),
@@ -51,6 +59,7 @@ function setPref(key, value) {
   const map = {
     theme: 'voxTheme', fontSize: 'readerFontSize', lineHeight: 'readerLineHeight',
     readerWidth: 'readerWidth', audioRate: 'voxAudioRate', rewindStep: 'voxRewindStep',
+    ttsVoice: 'voxTtsVoice', ttsRate: 'voxTtsRate', ttsAutoNext: 'voxTtsAutoNext',
     autoplayNext: 'voxAutoplayNext', saveOnPause: 'voxSaveOnPause',
     notifications: 'voxNotifications', notificationChapters: 'voxNotificationChapters',
     notificationAudio: 'voxNotificationAudio', notificationDiscounts: 'voxNotificationDiscounts',
@@ -113,6 +122,14 @@ function applySettings() {
   if (preview) { preview.style.fontSize = `${prefs.fontSize}px`; preview.style.lineHeight = String(prefs.lineHeight); }
   const player = document.getElementById('voxPlayer');
   if (player) player.playbackRate = prefs.audioRate;
+  const ttsPlayer = document.getElementById('readerTtsPlayer');
+  if (ttsPlayer) ttsPlayer.playbackRate = Math.max(.5, Math.min(2.5, prefs.ttsRate));
+  const ttsVoice = document.getElementById('readerTtsVoice');
+  if (ttsVoice && Array.from(ttsVoice.options).some((item) => item.value === prefs.ttsVoice)) ttsVoice.value = prefs.ttsVoice;
+  const ttsRate = document.getElementById('readerTtsRate');
+  if (ttsRate) ttsRate.value = String(prefs.ttsRate);
+  const ttsAutoNext = document.getElementById('readerTtsAutoNext');
+  if (ttsAutoNext) ttsAutoNext.checked = Boolean(prefs.ttsAutoNext);
   document.querySelectorAll('#audioBack').forEach((btn) => { btn.textContent = `−${prefs.rewindStep}`; });
   document.querySelectorAll('#audioForward').forEach((btn) => { btn.textContent = `+${prefs.rewindStep}`; });
 }
@@ -122,7 +139,7 @@ function changeFont(delta) {
 }
 
 async function resetSettings() {
-  ['voxTheme','readerFontSize','readerLineHeight','readerWidth','voxAudioRate','voxRewindStep','voxAutoplayNext','voxSaveOnPause','voxNotifications','voxNotificationChapters','voxNotificationAudio','voxNotificationDiscounts','voxContrast','voxFocusMode','voxShowReaderAds'].forEach((key) => localStorage.removeItem(key));
+  ['voxTheme','readerFontSize','readerLineHeight','readerWidth','voxAudioRate','voxRewindStep','voxAutoplayNext','voxSaveOnPause','voxTtsVoice','voxTtsRate','voxTtsAutoNext','voxNotifications','voxNotificationChapters','voxNotificationAudio','voxNotificationDiscounts','voxContrast','voxFocusMode','voxShowReaderAds'].forEach((key) => localStorage.removeItem(key));
   applySettings();
   if (tgInitData()) {
     try { await apiFetch('/api/preferences', { method: 'DELETE' }); }
@@ -318,7 +335,24 @@ async function initReader() {
       if (paragraphs) paragraphs.innerHTML = `<section class="empty-card paywall-card"><div class="empty-icon">◇</div><h3>Глава закрыта</h3><p><b>${Number(data.chapter.price_stars || 0)} Stars</b></p>${data.purchase_url ? `<a class="button-link" href="${escapeHtml(data.purchase_url)}">Купить главу</a>` : ''}</section>`;
       return;
     }
-    if (status) status.textContent = data.progress_percent ? `Продолжаем с отметки ${data.progress_percent}%` : 'Глава открыта';
+    const moderationNotice = document.getElementById('readerModerationNotice');
+    const commentsBox = document.getElementById('commentsBox');
+    const saveProgressButton = document.getElementById('saveReadingProgress');
+    if (data.moderation_access) {
+      if (moderationNotice) moderationNotice.hidden = false;
+      if (commentsBox) commentsBox.hidden = true;
+      if (saveProgressButton) saveProgressButton.hidden = true;
+      if (status) status.textContent = 'Открыто в служебном режиме проверки';
+    } else {
+      if (moderationNotice) moderationNotice.hidden = true;
+      if (status) status.textContent = data.progress_percent ? `Продолжаем с отметки ${data.progress_percent}%` : 'Глава открыта';
+    }
+    updateReaderNavigation(data);
+    const jumpInput = document.getElementById('chapterJumpNumber');
+    if (jumpInput && data.chapter_bounds) {
+      if (Number(data.chapter_bounds.min_number || 0) > 0) jumpInput.min = String(data.chapter_bounds.min_number);
+      if (Number(data.chapter_bounds.max_number || 0) > 0) jumpInput.max = String(data.chapter_bounds.max_number);
+    }
     if (paragraphs && data.chapter.text) {
       paragraphs.innerHTML = data.chapter.text.split('\n').filter((p) => p.trim()).map((p) => `<p>${escapeHtml(p)}</p>`).join('');
       setTimeout(() => {
@@ -330,6 +364,242 @@ async function initReader() {
   } catch (error) {
     if (status) status.textContent = 'Не удалось открыть главу. Попробуйте ещё раз.';
   }
+}
+
+function readerTtsPlayer() { return document.getElementById('readerTtsPlayer'); }
+
+function readerTtsChapterId() {
+  const panel = document.getElementById('readerTtsPanel');
+  return Number(panel?.dataset.chapterId || document.getElementById('readerText')?.dataset.chapterId || 0);
+}
+
+function updateReaderTtsStatus(text) {
+  const status = document.getElementById('readerTtsStatus');
+  if (status) status.textContent = text;
+}
+
+function readerTtsTime(seconds) { return formatTime(Math.max(0, Number(seconds) || 0)); }
+
+async function saveReaderTtsProgress() {
+  const player = readerTtsPlayer();
+  const chapterId = Number(player?.dataset.chapterId || readerTtsChapterId());
+  if (!player?.src || !chapterId || !tgInitData()) return;
+  await apiFetch(`/api/reader/${chapterId}/tts/progress`, {
+    method: 'POST',
+    body: JSON.stringify({
+      position_seconds: Math.max(0, Math.floor(player.currentTime || 0)),
+      voice: player.dataset.voice || getPrefs().ttsVoice,
+    }),
+  });
+}
+
+function seekReaderTts(seconds) {
+  const player = readerTtsPlayer();
+  if (!player || !Number.isFinite(player.duration)) return;
+  player.currentTime = Math.max(0, Math.min(player.duration, player.currentTime + Number(seconds || 0)));
+}
+
+function setReaderTtsSleep(minutes) {
+  clearTimeout(readerTtsSleepTimer);
+  readerTtsSleepTimer = null;
+  if (!minutes) {
+    updateReaderTtsStatus(readerTtsMeta ? `Глава ${readerTtsMeta.chapter.number} · таймер выключен` : 'Таймер сна выключен');
+    notify('Таймер сна выключен');
+    return;
+  }
+  readerTtsSleepTimer = setTimeout(() => {
+    readerTtsPlayer()?.pause();
+    saveReaderTtsProgress().catch(() => {});
+    updateReaderTtsStatus('Таймер сна остановил озвучивание');
+  }, Number(minutes) * 60_000);
+  notify(`Таймер сна: ${minutes} мин`);
+}
+
+function updateReaderNavigation(meta) {
+  const nav = document.querySelector('.chapter-navigation:not(.audio-navigation)');
+  if (!nav || !meta?.chapter) return;
+  const previous = meta.navigation?.previous;
+  const next = meta.navigation?.next;
+  nav.innerHTML = `${previous ? `<a href="/reader/${Number(previous.id)}" data-reader-nav="previous"><small>Предыдущая</small><strong>← ${escapeHtml(previous.title)}</strong></a>` : '<span></span>'}${next ? `<a href="/reader/${Number(next.id)}" data-reader-nav="next"><small>Следующая</small><strong>${escapeHtml(next.title)} →</strong></a>` : `<a href="/book/${Number(meta.chapter.book_id)}"><small>Конец</small><strong>К книге →</strong></a>`}`;
+}
+
+function updateReaderPageForTts(meta) {
+  if (!meta?.chapter) return;
+  const chapter = meta.chapter;
+  const panel = document.getElementById('readerTtsPanel');
+  const reader = document.getElementById('readerText');
+  const status = document.getElementById('readerStatus');
+  const paragraphs = document.getElementById('readerParagraphs');
+  if (panel) { panel.dataset.chapterId = String(chapter.id); panel.dataset.bookId = String(chapter.book_id); }
+  if (reader) reader.dataset.chapterId = String(chapter.id);
+  if (status) { status.dataset.chapterId = String(chapter.id); status.textContent = meta.moderation_access ? 'Открыто в служебном режиме проверки' : 'Глава открыта'; }
+  const moderationNotice = document.getElementById('readerModerationNotice');
+  if (moderationNotice) moderationNotice.hidden = !meta.moderation_access;
+  const commentsBox = document.getElementById('commentsBox');
+  if (commentsBox && meta.moderation_access) commentsBox.hidden = true;
+  const saveProgressButton = document.getElementById('saveReadingProgress');
+  if (saveProgressButton && meta.moderation_access) saveProgressButton.hidden = true;
+  document.querySelector('.reader-toolbar-title small')?.replaceChildren(document.createTextNode(chapter.book_title || 'Книга'));
+  document.querySelector('.reader-toolbar-title strong')?.replaceChildren(document.createTextNode(`Глава ${chapter.number}`));
+  const kicker = document.querySelector('.reader-kicker');
+  if (kicker) kicker.textContent = `${chapter.book_title || 'Книга'} · ${chapter.pen_name || 'Автор не указан'}`;
+  const heading = reader?.querySelector('h1');
+  if (heading) heading.textContent = chapter.title || `Глава ${chapter.number}`;
+  if (paragraphs) paragraphs.innerHTML = String(chapter.text || '').split('\n').filter((item) => item.trim()).map((item) => `<p>${escapeHtml(item)}</p>`).join('');
+  const jumpForm = document.getElementById('chapterJumpForm');
+  if (jumpForm) jumpForm.dataset.bookId = String(chapter.book_id);
+  const jumpInput = document.getElementById('chapterJumpNumber');
+  if (jumpInput) jumpInput.value = String(chapter.number);
+  const comments = document.getElementById('commentsList');
+  if (comments) comments.innerHTML = '<p class="muted">Комментарии обновятся при обычном открытии главы.</p>';
+  updateReaderNavigation(meta);
+  document.title = `${chapter.title || `Глава ${chapter.number}`} — ${chapter.book_title || 'Вокслира'}`;
+  history.pushState({ readerTts: true, chapterId: chapter.id }, '', `/reader/${Number(chapter.id)}?tts=1`);
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+  setTimeout(updateReaderProgressBar, 100);
+}
+
+function updateReaderTtsMediaSession(meta) {
+  if (!('mediaSession' in navigator) || !meta?.chapter) return;
+  const chapter = meta.chapter;
+  try {
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: chapter.title || `Глава ${chapter.number}`,
+      artist: chapter.pen_name || 'Автор не указан',
+      album: chapter.book_title || 'Вокслира',
+      artwork: [{ src: `/media/cover/${Number(chapter.book_id)}`, sizes: '512x512' }],
+    });
+  } catch (_) {}
+}
+
+function updateReaderTtsPositionState() {
+  const player = readerTtsPlayer();
+  if (!player || !('mediaSession' in navigator) || !Number.isFinite(player.duration) || player.duration <= 0) return;
+  try {
+    navigator.mediaSession.setPositionState({
+      duration: player.duration,
+      playbackRate: player.playbackRate || 1,
+      position: Math.max(0, Math.min(player.duration, player.currentTime || 0)),
+    });
+  } catch (_) {}
+}
+
+function bindReaderTtsMediaActions() {
+  if (!('mediaSession' in navigator)) return;
+  const handlers = {
+    play: () => readerTtsPlayer()?.play(),
+    pause: () => readerTtsPlayer()?.pause(),
+    seekbackward: (details) => seekReaderTts(-(details.seekOffset || 15)),
+    seekforward: (details) => seekReaderTts(details.seekOffset || 15),
+    seekto: (details) => { const player = readerTtsPlayer(); if (player && Number.isFinite(details.seekTime)) player.currentTime = details.seekTime; },
+    previoustrack: () => { const id = readerTtsMeta?.navigation?.previous?.id; if (id) loadReaderTtsChapter(Number(id), true); },
+    nexttrack: () => { const id = readerTtsMeta?.navigation?.next?.id; if (id) loadReaderTtsChapter(Number(id), true); },
+  };
+  Object.entries(handlers).forEach(([action, handler]) => {
+    try { navigator.mediaSession.setActionHandler(action, handler); } catch (_) {}
+  });
+}
+
+async function loadReaderTtsChapter(chapterId, autoPlay = false) {
+  if (readerTtsLoading || !chapterId) return;
+  const panel = document.getElementById('readerTtsPanel');
+  const player = readerTtsPlayer();
+  if (!panel || !player) return;
+  readerTtsLoading = true;
+  panel.classList.add('is-generating');
+  updateReaderTtsStatus('Готовим озвучивание главы…');
+  const voice = document.getElementById('readerTtsVoice')?.value || getPrefs().ttsVoice;
+  try {
+    const meta = await apiFetch(`/api/reader/${Number(chapterId)}/tts?voice=${encodeURIComponent(voice)}`);
+    readerTtsMeta = meta;
+    setPref('ttsVoice', meta.voice || voice);
+    updateReaderPageForTts(meta);
+    updateReaderTtsMediaSession(meta);
+    player.pause();
+    player.dataset.chapterId = String(meta.chapter.id);
+    player.dataset.voice = meta.voice || voice;
+    player._voxStartPosition = Math.max(0, Number(meta.progress_seconds || 0));
+    player.src = meta.audio_url;
+    player.hidden = false;
+    document.getElementById('readerTtsControls')?.removeAttribute('hidden');
+    document.getElementById('readerTtsSleep')?.removeAttribute('hidden');
+    player.load();
+    updateReaderTtsStatus(`Глава ${meta.chapter.number} готова · ${document.getElementById('readerTtsVoice')?.selectedOptions?.[0]?.textContent || ''}`);
+    if (autoPlay) {
+      try { await player.play(); }
+      catch (_) { updateReaderTtsStatus('Озвучивание готово. Нажмите Play в плеере.'); }
+    }
+  } catch (error) {
+    updateReaderTtsStatus(error.message || 'Не удалось подготовить озвучивание');
+    notify(error.message || 'Озвучивание недоступно');
+  } finally {
+    readerTtsLoading = false;
+    panel.classList.remove('is-generating');
+  }
+}
+
+async function initReaderTts() {
+  const panel = document.getElementById('readerTtsPanel');
+  const player = readerTtsPlayer();
+  if (!panel || !player) return;
+  applySettings();
+  bindReaderTtsMediaActions();
+  if (!tgInitData()) {
+    updateReaderTtsStatus('Откройте книгу внутри Telegram, чтобы включить озвучивание.');
+    return;
+  }
+  try {
+    const data = await apiFetch('/api/reader/tts/voices');
+    if (!data.enabled) {
+      updateReaderTtsStatus(data.message || 'Локальное озвучивание пока недоступно');
+      document.getElementById('readerTtsStart')?.setAttribute('disabled', 'disabled');
+      return;
+    }
+    const select = document.getElementById('readerTtsVoice');
+    if (select && data.voices?.length) {
+      select.innerHTML = data.voices.map((voice) => `<option value="${escapeHtml(voice.code)}">${escapeHtml(voice.label)}</option>`).join('');
+      select.value = data.voices.some((item) => item.code === getPrefs().ttsVoice) ? getPrefs().ttsVoice : data.voices[0].code;
+    }
+    updateReaderTtsStatus('Готово к озвучиванию');
+  } catch (error) {
+    updateReaderTtsStatus(error.message || 'Не удалось проверить озвучивание');
+  }
+
+  player.addEventListener('loadedmetadata', () => {
+    player.playbackRate = Math.max(.5, Math.min(2.5, getPrefs().ttsRate));
+    const start = Number(player._voxStartPosition || 0);
+    if (start > 0 && Number.isFinite(player.duration) && start < player.duration - 3) player.currentTime = start;
+    player._voxStartPosition = 0;
+    updateReaderTtsPositionState();
+  });
+  player.addEventListener('play', () => {
+    panel.classList.add('is-playing');
+    try { navigator.mediaSession.playbackState = 'playing'; } catch (_) {}
+  });
+  player.addEventListener('pause', () => {
+    panel.classList.remove('is-playing');
+    try { navigator.mediaSession.playbackState = 'paused'; } catch (_) {}
+    saveReaderTtsProgress().catch(() => {});
+  });
+  player.addEventListener('timeupdate', () => {
+    if (readerTtsMeta?.chapter) updateReaderTtsStatus(`Глава ${readerTtsMeta.chapter.number} · ${readerTtsTime(player.currentTime)} из ${readerTtsTime(player.duration)}`);
+    updateReaderTtsPositionState();
+    clearTimeout(readerTtsProgressTimer);
+    readerTtsProgressTimer = setTimeout(() => saveReaderTtsProgress().catch(() => {}), 3000);
+  });
+  player.addEventListener('ended', async () => {
+    panel.classList.remove('is-playing');
+    try { await saveReaderProgress(100); } catch (_) {}
+    try { await saveReaderTtsProgress(); } catch (_) {}
+    const nextId = Number(readerTtsMeta?.navigation?.next?.id || 0);
+    if (getPrefs().ttsAutoNext && nextId) {
+      updateReaderTtsStatus('Открываем следующую главу…');
+      await loadReaderTtsChapter(nextId, true);
+    } else {
+      updateReaderTtsStatus(nextId ? 'Глава закончена' : 'Книга закончена');
+    }
+  });
+  player.addEventListener('ratechange', updateReaderTtsPositionState);
 }
 
 function seekAudio(seconds) {
@@ -660,6 +930,26 @@ async function openChapterByNumber(form) {
 
 function bindEvents() {
   document.addEventListener('input', (event) => { if (event.target.id === 'catalogSearch') applyCatalogFilter(); });
+  document.addEventListener('change', async (event) => {
+    if (event.target.id === 'readerTtsVoice') {
+      setPref('ttsVoice', event.target.value);
+      const player = readerTtsPlayer();
+      if (player?.src) await loadReaderTtsChapter(readerTtsChapterId(), true);
+      return;
+    }
+    if (event.target.id === 'readerTtsRate') {
+      const rate = Math.max(.5, Math.min(2.5, Number(event.target.value) || 1));
+      setPref('ttsRate', rate);
+      const player = readerTtsPlayer();
+      if (player) player.playbackRate = rate;
+      updateReaderTtsPositionState();
+      return;
+    }
+    if (event.target.id === 'readerTtsAutoNext') {
+      setPref('ttsAutoNext', Boolean(event.target.checked));
+      notify(event.target.checked ? 'Автопереход включён' : 'Автопереход выключен');
+    }
+  });
   document.addEventListener('submit', async (event) => {
     if (event.target.id !== 'chapterJumpForm') return;
     event.preventDefault();
@@ -693,6 +983,11 @@ function bindEvents() {
     if (target.id === 'resetLocalSettings') { event.preventDefault(); await resetSettings(); return; }
     if (target.id === 'readerSettingsToggle') { event.preventDefault(); const panel = document.getElementById('readerQuickSettings'); if (panel) panel.hidden = !panel.hidden; return; }
     if (target.id === 'saveReadingProgress') { event.preventDefault(); try { await saveReaderProgress(); notify('Место сохранено'); } catch (_) { notify('Не удалось сохранить место'); } return; }
+    if (target.id === 'readerTtsStart') { event.preventDefault(); await loadReaderTtsChapter(readerTtsChapterId(), true); return; }
+    if (target.id === 'readerTtsBack') { event.preventDefault(); seekReaderTts(-15); return; }
+    if (target.id === 'readerTtsForward') { event.preventDefault(); seekReaderTts(15); return; }
+    if (target.id === 'readerTtsSave') { event.preventDefault(); try { await saveReaderTtsProgress(); notify('Место озвучивания сохранено'); } catch (_) { notify('Не удалось сохранить место'); } return; }
+    if (target.matches('[data-tts-sleep]')) { event.preventDefault(); setReaderTtsSleep(Number(target.dataset.ttsSleep)); return; }
     if (target.matches('[data-reader-nav="next"]')) { event.preventDefault(); const href = target.href; try { await saveReaderProgress(100); } catch (_) {} window.location.href = href; return; }
     if (target.id === 'saveAudioProgress') { event.preventDefault(); try { await saveAudioProgress(); notify('Место сохранено'); } catch (_) { notify('Не удалось сохранить место'); } return; }
     if (target.id === 'audioBack') { event.preventDefault(); seekAudio(-getPrefs().rewindStep); return; }
@@ -762,6 +1057,7 @@ function bindEvents() {
   }, { passive: true });
   window.addEventListener('pagehide', () => {
     if (document.getElementById('readerText')) saveReaderProgress().catch(() => {});
+    if (readerTtsPlayer()?.src) saveReaderTtsProgress().catch(() => {});
     if (document.getElementById('audioPage')) saveAudioProgress().catch(() => {});
   });
 }
@@ -774,6 +1070,7 @@ document.addEventListener('DOMContentLoaded', () => {
   applyCatalogFilter();
   initContinueShelves();
   initReader();
+  initReaderTts();
   initAudioPage();
   initBookPage();
   initLibrary();

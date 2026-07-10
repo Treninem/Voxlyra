@@ -7,6 +7,8 @@
 
   const actionButton = (label, action, kind = '') =>
     `<button class="control-action ${kind}" type="button" data-action="${esc(action)}">${esc(label)}</button>`;
+  const actionLink = (label, href, kind = '') =>
+    `<a class="control-action ${kind}" href="${esc(href)}">${esc(label)}</a>`;
 
   function showError(message) {
     $('controlLoading').hidden = true;
@@ -84,7 +86,7 @@
     if (!items.length) return emptyList('Очередь пуста', 'Новых книг на проверке нет.');
     $('workspaceList').innerHTML = items.map((item) => `<article class="control-item" data-id="${item.id}">
       <div class="control-item-main"><span>Книга #${item.id}</span><h3>${esc(item.title)}</h3><p>${esc(item.pen_name || 'Автор')} · ${esc(item.age_limit || '')}</p><small>${esc((item.description || '').slice(0, 240))}</small></div>
-      <div class="control-actions">${actionButton('Опубликовать', `book:publish:${item.id}`, 'approve')}${actionButton('На доработку', `book:reject:${item.id}`, 'danger')}</div>
+      <div class="control-actions">${item.first_chapter_id ? actionLink('Читать книгу', `/reader/${Number(item.first_chapter_id)}?moderation=1`) : ''}${actionButton('Опубликовать', `book:publish:${item.id}`, 'approve')}${actionButton('На доработку', `book:reject:${item.id}`, 'danger')}</div>
     </article>`).join('');
   }
 
