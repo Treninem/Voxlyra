@@ -13,7 +13,7 @@ const root = document.documentElement;
 const DEFAULTS = {
   theme: 'system', fontSize: 18, lineHeight: 1.78, readerWidth: 'normal',
   audioRate: 1, rewindStep: 15, autoplayNext: false, saveOnPause: true,
-  ttsVoice: 'anna', ttsRate: 1, ttsAutoNext: true,
+  ttsVoice: 'irina', ttsStyle: 'expressive', ttsRate: 1, ttsAutoNext: true,
   notifications: true, notificationChapters: true, notificationAudio: true, notificationDiscounts: true,
   contrast: 'normal', focusMode: false, showReaderAds: true,
 };
@@ -40,6 +40,7 @@ function getPrefs() {
     readerWidth: localStorage.getItem('readerWidth') || DEFAULTS.readerWidth,
     audioRate: Number(localStorage.getItem('voxAudioRate') || DEFAULTS.audioRate),
     ttsVoice: localStorage.getItem('voxTtsVoice') || DEFAULTS.ttsVoice,
+    ttsStyle: localStorage.getItem('voxTtsStyle') || DEFAULTS.ttsStyle,
     ttsRate: Number(localStorage.getItem('voxTtsRate') || DEFAULTS.ttsRate),
     ttsAutoNext: getStoredBool('voxTtsAutoNext', DEFAULTS.ttsAutoNext),
     rewindStep: Number(localStorage.getItem('voxRewindStep') || DEFAULTS.rewindStep),
@@ -59,7 +60,7 @@ function setPref(key, value) {
   const map = {
     theme: 'voxTheme', fontSize: 'readerFontSize', lineHeight: 'readerLineHeight',
     readerWidth: 'readerWidth', audioRate: 'voxAudioRate', rewindStep: 'voxRewindStep',
-    ttsVoice: 'voxTtsVoice', ttsRate: 'voxTtsRate', ttsAutoNext: 'voxTtsAutoNext',
+    ttsVoice: 'voxTtsVoice', ttsStyle: 'voxTtsStyle', ttsRate: 'voxTtsRate', ttsAutoNext: 'voxTtsAutoNext',
     autoplayNext: 'voxAutoplayNext', saveOnPause: 'voxSaveOnPause',
     notifications: 'voxNotifications', notificationChapters: 'voxNotificationChapters',
     notificationAudio: 'voxNotificationAudio', notificationDiscounts: 'voxNotificationDiscounts',
@@ -123,9 +124,11 @@ function applySettings() {
   const player = document.getElementById('voxPlayer');
   if (player) player.playbackRate = prefs.audioRate;
   const ttsPlayer = document.getElementById('readerTtsPlayer');
-  if (ttsPlayer) ttsPlayer.playbackRate = Math.max(.5, Math.min(2.5, prefs.ttsRate));
+  if (ttsPlayer) ttsPlayer.playbackRate = 1;
   const ttsVoice = document.getElementById('readerTtsVoice');
   if (ttsVoice && Array.from(ttsVoice.options).some((item) => item.value === prefs.ttsVoice)) ttsVoice.value = prefs.ttsVoice;
+  const ttsStyle = document.getElementById('readerTtsStyle');
+  if (ttsStyle && Array.from(ttsStyle.options).some((item) => item.value === prefs.ttsStyle)) ttsStyle.value = prefs.ttsStyle;
   const ttsRate = document.getElementById('readerTtsRate');
   if (ttsRate) ttsRate.value = String(prefs.ttsRate);
   const ttsAutoNext = document.getElementById('readerTtsAutoNext');
@@ -139,7 +142,7 @@ function changeFont(delta) {
 }
 
 async function resetSettings() {
-  ['voxTheme','readerFontSize','readerLineHeight','readerWidth','voxAudioRate','voxRewindStep','voxAutoplayNext','voxSaveOnPause','voxTtsVoice','voxTtsRate','voxTtsAutoNext','voxNotifications','voxNotificationChapters','voxNotificationAudio','voxNotificationDiscounts','voxContrast','voxFocusMode','voxShowReaderAds'].forEach((key) => localStorage.removeItem(key));
+  ['voxTheme','readerFontSize','readerLineHeight','readerWidth','voxAudioRate','voxRewindStep','voxAutoplayNext','voxSaveOnPause','voxTtsVoice','voxTtsStyle','voxTtsRate','voxTtsAutoNext','voxNotifications','voxNotificationChapters','voxNotificationAudio','voxNotificationDiscounts','voxContrast','voxFocusMode','voxShowReaderAds'].forEach((key) => localStorage.removeItem(key));
   applySettings();
   if (tgInitData()) {
     try { await apiFetch('/api/preferences', { method: 'DELETE' }); }
@@ -389,6 +392,8 @@ async function saveReaderTtsProgress() {
     body: JSON.stringify({
       position_seconds: Math.max(0, Math.floor(player.currentTime || 0)),
       voice: player.dataset.voice || getPrefs().ttsVoice,
+      rate: Number(player.dataset.rate || getPrefs().ttsRate),
+      style: player.dataset.style || getPrefs().ttsStyle,
     }),
   });
 }
@@ -509,22 +514,28 @@ async function loadReaderTtsChapter(chapterId, autoPlay = false) {
   panel.classList.add('is-generating');
   updateReaderTtsStatus('Готовим озвучивание главы…');
   const voice = document.getElementById('readerTtsVoice')?.value || getPrefs().ttsVoice;
+  const rate = Number(document.getElementById('readerTtsRate')?.value || getPrefs().ttsRate || 1);
+  const style = document.getElementById('readerTtsStyle')?.value || getPrefs().ttsStyle;
   try {
-    const meta = await apiFetch(`/api/reader/${Number(chapterId)}/tts?voice=${encodeURIComponent(voice)}`);
+    const meta = await apiFetch(`/api/reader/${Number(chapterId)}/tts?voice=${encodeURIComponent(voice)}&rate=${encodeURIComponent(rate)}&style=${encodeURIComponent(style)}`);
     readerTtsMeta = meta;
     setPref('ttsVoice', meta.voice || voice);
+    setPref('ttsRate', Number(meta.rate || rate));
+    setPref('ttsStyle', meta.style || style);
     updateReaderPageForTts(meta);
     updateReaderTtsMediaSession(meta);
     player.pause();
     player.dataset.chapterId = String(meta.chapter.id);
     player.dataset.voice = meta.voice || voice;
+    player.dataset.rate = String(meta.rate || rate);
+    player.dataset.style = meta.style || style;
     player._voxStartPosition = Math.max(0, Number(meta.progress_seconds || 0));
     player.src = meta.audio_url;
     player.hidden = false;
     document.getElementById('readerTtsControls')?.removeAttribute('hidden');
     document.getElementById('readerTtsSleep')?.removeAttribute('hidden');
     player.load();
-    updateReaderTtsStatus(`Глава ${meta.chapter.number} готова · ${document.getElementById('readerTtsVoice')?.selectedOptions?.[0]?.textContent || ''}`);
+    updateReaderTtsStatus(`Глава ${meta.chapter.number} готова · ${document.getElementById('readerTtsVoice')?.selectedOptions?.[0]?.textContent || ''} · ${document.getElementById('readerTtsStyle')?.selectedOptions?.[0]?.textContent || ''}`);
     if (autoPlay) {
       try { await player.play(); }
       catch (_) { updateReaderTtsStatus('Озвучивание готово. Нажмите Play в плеере.'); }
@@ -560,13 +571,24 @@ async function initReaderTts() {
       select.innerHTML = data.voices.map((voice) => `<option value="${escapeHtml(voice.code)}">${escapeHtml(voice.label)}</option>`).join('');
       select.value = data.voices.some((item) => item.code === getPrefs().ttsVoice) ? getPrefs().ttsVoice : data.voices[0].code;
     }
-    updateReaderTtsStatus('Готово к озвучиванию');
+    const styleSelect = document.getElementById('readerTtsStyle');
+    if (styleSelect && data.styles?.length) {
+      styleSelect.innerHTML = data.styles.map((style) => `<option value="${escapeHtml(style.code)}">${escapeHtml(style.label)}</option>`).join('');
+      styleSelect.value = data.styles.some((item) => item.code === getPrefs().ttsStyle) ? getPrefs().ttsStyle : data.styles[0].code;
+    }
+    const rateSelect = document.getElementById('readerTtsRate');
+    if (rateSelect && data.rates?.length) {
+      const labels = { '0.75': '0.75× · медленно', '0.9': '0.9× · спокойно', '1': '1× · обычно', '1.15': '1.15× · быстрее', '1.3': '1.3× · быстро', '1.45': '1.45× · очень быстро' };
+      rateSelect.innerHTML = data.rates.map((rate) => `<option value="${rate}">${labels[String(rate)] || `${rate}×`}</option>`).join('');
+      rateSelect.value = data.rates.some((item) => Number(item) === Number(getPrefs().ttsRate)) ? String(getPrefs().ttsRate) : String(data.rates[0]);
+    }
+    updateReaderTtsStatus('Готово к естественному озвучиванию');
   } catch (error) {
     updateReaderTtsStatus(error.message || 'Не удалось проверить озвучивание');
   }
 
   player.addEventListener('loadedmetadata', () => {
-    player.playbackRate = Math.max(.5, Math.min(2.5, getPrefs().ttsRate));
+    player.playbackRate = 1;
     const start = Number(player._voxStartPosition || 0);
     if (start > 0 && Number.isFinite(player.duration) && start < player.duration - 3) player.currentTime = start;
     player._voxStartPosition = 0;
@@ -937,12 +959,17 @@ function bindEvents() {
       if (player?.src) await loadReaderTtsChapter(readerTtsChapterId(), true);
       return;
     }
+    if (event.target.id === 'readerTtsStyle') {
+      setPref('ttsStyle', event.target.value);
+      const player = readerTtsPlayer();
+      if (player?.src) await loadReaderTtsChapter(readerTtsChapterId(), true);
+      return;
+    }
     if (event.target.id === 'readerTtsRate') {
-      const rate = Math.max(.5, Math.min(2.5, Number(event.target.value) || 1));
+      const rate = Number(event.target.value) || 1;
       setPref('ttsRate', rate);
       const player = readerTtsPlayer();
-      if (player) player.playbackRate = rate;
-      updateReaderTtsPositionState();
+      if (player?.src) await loadReaderTtsChapter(readerTtsChapterId(), true);
       return;
     }
     if (event.target.id === 'readerTtsAutoNext') {
