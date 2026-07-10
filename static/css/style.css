@@ -1029,7 +1029,7 @@ body.reader-wide .reader-tts-panel { max-width: 920px; }
 .reader-tts-heading h2 { margin: 3px 0 0; font-size: 1.2rem; }
 .reader-tts-heading button { flex: 0 0 auto; }
 .reader-tts-note { margin: 10px 0 14px; color: var(--muted); font-size: .88rem; }
-.reader-tts-settings { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 10px; }
+.reader-tts-settings { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 10px; }
 .reader-tts-settings label { display: grid; gap: 6px; color: var(--muted); font-size: .82rem; }
 .reader-tts-settings select { width: 100%; min-height: 42px; border-radius: 13px; }
 .reader-tts-switch { grid-column: 1 / -1; display: flex !important; align-items: center; gap: 10px !important; padding: 10px 12px; border-radius: 14px; background: rgba(255,255,255,.05); }
