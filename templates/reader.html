@@ -33,40 +33,45 @@
 </section>
 <section class="reader-status" id="readerStatus" data-chapter-id="{{ chapter_id }}">Открываем главу…</section>
 <section class="reader-moderation-notice" id="readerModerationNotice" hidden><strong>Служебный режим проверки</strong><span>Платный текст и озвучивание открыты только для проверки содержимого. Действие записывается в журнал.</span></section>
-<section class="reader-tts-panel" id="readerTtsPanel" data-chapter-id="{{ chapter_id }}" data-book-id="{{ chapter.book_id }}">
+<section class="reader-tts-panel is-collapsed" id="readerTtsPanel" data-chapter-id="{{ chapter_id }}" data-book-id="{{ chapter.book_id }}">
   <div class="reader-tts-heading">
     <div><span class="eyebrow">Озвучивание текста</span><h2>Слушать главу</h2></div>
-    <button type="button" id="readerTtsStart">▶ Озвучить</button>
+    <div class="reader-tts-heading-actions">
+      <button type="button" id="readerTtsStart">▶ Озвучить</button>
+      <button type="button" class="reader-tts-settings-toggle secondary" id="readerTtsSettingsToggle" aria-expanded="false" aria-controls="readerTtsOptions" aria-label="Настройки озвучивания" title="Настройки озвучивания">⚙</button>
+    </div>
   </div>
-  <p class="reader-tts-note">Естественный локальный голос читает только текст главы — с паузами по пунктуации, без рекламы, кнопок и комментариев.</p>
-  <div class="reader-tts-settings">
-    <label>Голос
-      <select id="readerTtsVoice">
-        <option value="irina">Ирина · женский</option>
-        <option value="dmitri">Дмитрий · мужской</option>
-      </select>
-    </label>
-    <label>Подача
-      <select id="readerTtsStyle">
-        <option value="natural">Естественно</option>
-        <option value="expressive" selected>С выражением</option>
-        <option value="calm">Спокойно</option>
-      </select>
-    </label>
-    <label>Скорость
-      <select id="readerTtsRate">
-        <option value="0.75">0.75× · медленно</option>
-        <option value="0.9">0.9× · спокойно</option>
-        <option value="1" selected>1× · обычно</option>
-        <option value="1.15">1.15× · быстрее</option>
-        <option value="1.3">1.3× · быстро</option>
-        <option value="1.45">1.45× · очень быстро</option>
-      </select>
-    </label>
-    <label class="reader-tts-switch"><input id="readerTtsAutoNext" type="checkbox" checked><span>Следующая глава автоматически</span></label>
+  <div class="reader-tts-options" id="readerTtsOptions" hidden>
+    <p class="reader-tts-note">Естественный локальный голос читает только текст главы — с паузами по пунктуации, без рекламы, кнопок и комментариев.</p>
+    <div class="reader-tts-settings">
+      <label>Голос
+        <select id="readerTtsVoice">
+          <option value="irina">Ирина · женский</option>
+          <option value="dmitri">Дмитрий · мужской</option>
+        </select>
+      </label>
+      <label>Подача
+        <select id="readerTtsStyle">
+          <option value="natural">Естественно</option>
+          <option value="expressive" selected>С выражением</option>
+          <option value="calm">Спокойно</option>
+        </select>
+      </label>
+      <label>Скорость
+        <select id="readerTtsRate">
+          <option value="0.75">0.75× · медленно</option>
+          <option value="0.9">0.9× · спокойно</option>
+          <option value="1" selected>1× · обычно</option>
+          <option value="1.15">1.15× · быстрее</option>
+          <option value="1.3">1.3× · быстро</option>
+          <option value="1.45">1.45× · очень быстро</option>
+        </select>
+      </label>
+      <label class="reader-tts-switch"><input id="readerTtsAutoNext" type="checkbox" checked><span>Следующая глава автоматически</span></label>
+    </div>
   </div>
-  <div id="readerTtsStatus" class="muted">Готово к озвучиванию</div>
-  <audio id="readerTtsPlayer" controls preload="none" playsinline hidden></audio>
+  <div id="readerTtsStatus" class="muted">Нажмите «Озвучить»</div>
+  <audio id="readerTtsPlayer" controls preload="metadata" playsinline hidden></audio>
   <div class="reader-tts-controls" id="readerTtsControls" hidden>
     <button type="button" class="secondary" id="readerTtsBack">−15 сек</button>
     <button type="button" class="secondary" id="readerTtsForward">+15 сек</button>

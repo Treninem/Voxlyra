@@ -138,6 +138,7 @@ from app.services.publication import finish_book_content_workflow, publish_book_
 from app.services.cover_storage import ensure_book_cover_file
 from app.services.moderation_alerts import notify_moderation_resolved
 from app.services.reader_tts import (
+    TTS_CACHE_VERSION,
     ReaderTTSError,
     available_rates,
     available_styles,
@@ -791,6 +792,7 @@ def create_app() -> FastAPI:
             "enabled": True,
             "moderation_access": moderation_access,
             "access_mode": "moderation" if moderation_access else "reader",
+            "device_cache_allowed": not moderation_access,
             "audio_url": build_media_url(
                 user_id=user.app_user_id,
                 chapter_id=chapter_id,
@@ -800,6 +802,8 @@ def create_app() -> FastAPI:
             ),
             "duration_seconds": int(asset.duration_seconds or 0),
             "progress_seconds": int(progress or 0),
+            "cache_key": asset.text_hash,
+            "cache_version": TTS_CACHE_VERSION,
             "voice": selected_voice,
             "rate": selected_rate,
             "style": selected_style,
@@ -909,7 +913,7 @@ def create_app() -> FastAPI:
             asset.path,
             media_type="audio/mpeg",
             headers={
-                "Cache-Control": "private, max-age=14400",
+                "Cache-Control": "private, max-age=86400, immutable",
                 "Accept-Ranges": "bytes",
                 "Content-Disposition": (
                     f'inline; filename="chapter_{chapter_id}_{selected_voice}_{selected_style}_{selected_rate:.2f}.mp3"'

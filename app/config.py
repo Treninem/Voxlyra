@@ -21,8 +21,9 @@ class Settings(BaseSettings):
     TTS_ENABLED: bool = True
     TTS_CACHE_DIR: str = "storage/tts"
     TTS_MODEL_DIR: str = "/opt/voxlyra-voices"
-    TTS_CACHE_DAYS: int = 30
-    TTS_MAX_CACHE_MB: int = 2048
+    TTS_CACHE_DAYS: int = 3
+    TTS_MAX_CACHE_MB: int = 512
+    TTS_MAX_VARIANTS_PER_CHAPTER: int = 6
     TTS_SIGNING_SECRET: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")

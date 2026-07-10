@@ -1,28 +1,100 @@
 {
-  "from": "v1.8.7",
-  "to": "v1.8.8",
+  "project": "Voxlyra",
+  "from_version": "v1.8.8",
+  "to_version": "v1.8.9",
+  "build_name": "умное озвучивание и кэш устройства",
   "project_version_env": "v1.8.3-author-cover-display",
-  "changed_files": [
-    "Dockerfile",
-    "README.md",
-    "UPDATE_INSTRUCTIONS.md",
-    "app/build_info.py",
-    "app/config.py",
-    "app/services/diagnostics.py",
-    "app/services/reader_tts.py",
-    "app/webapp.py",
-    "docs/NATURAL_TTS_V1_8_8.md",
-    "docs/PROJECT_MEMORY_CURRENT.md",
-    "docs/STATUS_V1_8_8.md",
-    "docs/TRANSFER_TO_NEW_CHAT.md",
-    "requirements.txt",
-    "scripts/deploy_check.py",
-    "static/css/style.css",
-    "static/js/app.js",
-    "templates/reader.html",
-    "tests/test_v186_reader_tts.py",
-    "tests/test_v187_moderation_reader_access.py",
-    "tests/test_v188_natural_tts.py"
+  "requires_redeploy": true,
+  "preserve": [
+    ".env",
+    "data/voxlyra.sqlite3",
+    "storage/"
   ],
-  "deleted_files": []
+  "optional_env": {
+    "TTS_CACHE_DAYS": "3",
+    "TTS_MAX_CACHE_MB": "512",
+    "TTS_MAX_VARIANTS_PER_CHAPTER": "6"
+  },
+  "changed_files": [
+    {
+      "path": ".env.example",
+      "sha256": "e3833191cc673e991298ef00e2fb76fe77bdb19e1df182ab7eaa9023a06842e1",
+      "size": 957
+    },
+    {
+      "path": "README.md",
+      "sha256": "bafbf252b5b500312cf102325d0b3f93b08c12acbea3427dbe52d4cc5404af11",
+      "size": 42413
+    },
+    {
+      "path": "UPDATE_INSTRUCTIONS.md",
+      "sha256": "02d4bb5f2d5468f6ae675a0a4b4f8a0027fb100df1588944881487542cbad982",
+      "size": 2435
+    },
+    {
+      "path": "app/build_info.py",
+      "sha256": "ec47085802fcd3ae3085d5bd13b5af6c9f575832b07046e7ffc5b8d68058aca9",
+      "size": 550
+    },
+    {
+      "path": "app/config.py",
+      "sha256": "c2ce088925827fe48092993377985191987e945dcfb409fbf5edb50ff51bf284",
+      "size": 1300
+    },
+    {
+      "path": "app/services/reader_tts.py",
+      "sha256": "0df628214f2aee3952b2e938c35dc7b8772b36dd0703ec2e977110e03c088f4e",
+      "size": 18384
+    },
+    {
+      "path": "app/webapp.py",
+      "sha256": "928cba96f84e57ea2ccbaa0d3adf3bcc38c8036718a2a295b6eab7196a5c8c2a",
+      "size": 87227
+    },
+    {
+      "path": "docs/SMART_TTS_V1_8_9.md",
+      "sha256": "6c4df366675a07a9cb78716cbe8b98bf311723a81fb629d73e9eed076ac97e2c",
+      "size": 4714
+    },
+    {
+      "path": "docs/COMICS_MANGA_ROADMAP.md",
+      "sha256": "5366ce5db6a810e79dbd7ea0c48680eb31365a660fcce0a011bf4bc837133c71",
+      "size": 6374
+    },
+    {
+      "path": "docs/STATUS_V1_8_9.md",
+      "sha256": "2a76006fabb2d1580a9853c4e5f56c72138cc2b0d6e0ad3516ba3ecc82743efc",
+      "size": 1179
+    },
+    {
+      "path": "docs/PROJECT_MEMORY_CURRENT.md",
+      "sha256": "b806cef15000d337efe1c151772c78bcf451113d53662af7f779ad8bc73747fb",
+      "size": 9589
+    },
+    {
+      "path": "docs/TRANSFER_TO_NEW_CHAT.md",
+      "sha256": "81ac7558d380f69eb900c563709bca37e57b04fb41276fc366b88b448e156ad2",
+      "size": 3083
+    },
+    {
+      "path": "static/css/style.css",
+      "sha256": "156ba8be5e17fb25d45c5f44a0b55156e8e1d8a006eeed84afb9100ffc14b622",
+      "size": 62870
+    },
+    {
+      "path": "static/js/app.js",
+      "sha256": "7d0a8b8c804fb579ba3f868047eff3e1a9065a9c6c7d361ec3440ca54ae2269b",
+      "size": 74292
+    },
+    {
+      "path": "templates/reader.html",
+      "sha256": "a1403d855053ad2ea3aba01c5433cc0ab47394a90d34d7e0c3d59a7efe39e567",
+      "size": 9390
+    },
+    {
+      "path": "tests/test_v189_smart_tts.py",
+      "sha256": "36c908a0071c0e234e845a33697f64d94e916ae182d0e01834aea25b351b356a",
+      "size": 4108
+    }
+  ]
 }

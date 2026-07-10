@@ -25,6 +25,12 @@ let readerTtsMeta = null;
 let readerTtsLoading = false;
 let readerTtsProgressTimer = null;
 let readerTtsSleepTimer = null;
+let readerTtsPrefetch = null;
+let readerTtsObjectUrl = '';
+let readerTtsCacheTimer = null;
+let readerTtsCacheListener = null;
+const TTS_DEVICE_CACHE_NAME = 'voxlyra-reader-tts-v1';
+const TTS_DEVICE_CACHE_PREFIX = `${window.location.origin}/__voxlyra_tts_cache__/`;
 
 function getStoredBool(key, fallback) {
   const value = localStorage.getItem(key);
@@ -160,7 +166,9 @@ async function apiFetch(url, options = {}) {
   if (!response.ok) {
     let message = 'Не удалось выполнить действие';
     try { message = (await response.json()).detail || message; } catch (_) {}
-    throw new Error(message);
+    const error = new Error(message);
+    error.status = response.status;
+    throw error;
   }
   const contentType = response.headers.get('content-type') || '';
   return contentType.includes('application/json') ? response.json() : response;
@@ -376,24 +384,69 @@ function readerTtsChapterId() {
   return Number(panel?.dataset.chapterId || document.getElementById('readerText')?.dataset.chapterId || 0);
 }
 
+function readerTtsCurrentProfile() {
+  return {
+    voice: document.getElementById('readerTtsVoice')?.value || getPrefs().ttsVoice,
+    rate: Number(document.getElementById('readerTtsRate')?.value || getPrefs().ttsRate || 1),
+    style: document.getElementById('readerTtsStyle')?.value || getPrefs().ttsStyle,
+  };
+}
+
+function readerTtsProfileKey(profile = readerTtsCurrentProfile()) {
+  return `${profile.voice}:${profile.style}:${Number(profile.rate || 1).toFixed(2)}`;
+}
+
 function updateReaderTtsStatus(text) {
   const status = document.getElementById('readerTtsStatus');
   if (status) status.textContent = text;
 }
 
+function setReaderTtsOptionsExpanded(expanded) {
+  const panel = document.getElementById('readerTtsPanel');
+  const options = document.getElementById('readerTtsOptions');
+  const toggle = document.getElementById('readerTtsSettingsToggle');
+  if (!panel || !options || !toggle) return;
+  const open = Boolean(expanded);
+  options.hidden = !open;
+  toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+  panel.classList.toggle('is-collapsed', !open);
+}
+
 function readerTtsTime(seconds) { return formatTime(Math.max(0, Number(seconds) || 0)); }
+
+function readerTtsProgressStorageKey(chapterId, profile = readerTtsCurrentProfile()) {
+  return `voxTtsProgress:${Number(chapterId)}:${readerTtsProfileKey(profile)}`;
+}
+
+function getLocalReaderTtsProgress(chapterId, profile) {
+  const value = Number(localStorage.getItem(readerTtsProgressStorageKey(chapterId, profile)) || 0);
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function saveLocalReaderTtsProgress(chapterId, position, profile) {
+  if (!chapterId) return;
+  localStorage.setItem(readerTtsProgressStorageKey(chapterId, profile), String(Math.max(0, Math.floor(position || 0))));
+}
 
 async function saveReaderTtsProgress() {
   const player = readerTtsPlayer();
   const chapterId = Number(player?.dataset.chapterId || readerTtsChapterId());
-  if (!player?.src || !chapterId || !tgInitData()) return;
+  if (!player?.src || !chapterId) return;
+  const profile = {
+    voice: player.dataset.voice || getPrefs().ttsVoice,
+    rate: Number(player.dataset.rate || getPrefs().ttsRate),
+    style: player.dataset.style || getPrefs().ttsStyle,
+  };
+  const position = Math.max(0, Math.floor(player.currentTime || 0));
+  saveLocalReaderTtsProgress(chapterId, position, profile);
+  if (!tgInitData()) return;
   await apiFetch(`/api/reader/${chapterId}/tts/progress`, {
     method: 'POST',
     body: JSON.stringify({
-      position_seconds: Math.max(0, Math.floor(player.currentTime || 0)),
-      voice: player.dataset.voice || getPrefs().ttsVoice,
-      rate: Number(player.dataset.rate || getPrefs().ttsRate),
-      style: player.dataset.style || getPrefs().ttsStyle,
+      position_seconds: position,
+      voice: profile.voice,
+      rate: profile.rate,
+      style: profile.style,
     }),
   });
 }
@@ -505,47 +558,302 @@ function bindReaderTtsMediaActions() {
   });
 }
 
-async function loadReaderTtsChapter(chapterId, autoPlay = false) {
+function wait(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
+
+async function apiFetchWithRetry(url, options = {}, attempts = 3, timeoutMs = 600000) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await apiFetch(url, Object.assign({}, options, { signal: controller.signal }));
+    } catch (error) {
+      lastError = error;
+      const status = Number(error?.status || 0);
+      const retryable = !status || status === 408 || status === 429 || status >= 500;
+      if (!retryable || attempt >= attempts) throw error;
+      await wait(700 * attempt);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  throw lastError || new Error('Не удалось связаться с сервером');
+}
+
+function ttsDeviceAudioRequest(meta) {
+  const chapterId = Number(meta?.chapter?.id || 0);
+  const key = encodeURIComponent(String(meta?.cache_key || ''));
+  return new Request(`${TTS_DEVICE_CACHE_PREFIX}audio/${chapterId}/${key}.mp3`);
+}
+
+function ttsDeviceMetaRequest(chapterId, profile = readerTtsCurrentProfile()) {
+  return new Request(`${TTS_DEVICE_CACHE_PREFIX}meta/${Number(chapterId)}/${encodeURIComponent(readerTtsProfileKey(profile))}.json`);
+}
+
+async function openTtsDeviceCache() {
+  if (!('caches' in window)) return null;
+  try { return await caches.open(TTS_DEVICE_CACHE_NAME); }
+  catch (_) { return null; }
+}
+
+async function cacheReaderTtsMetadata(meta) {
+  if (meta?.device_cache_allowed === false) return;
+  const cache = await openTtsDeviceCache();
+  if (!cache || !meta?.chapter?.id) return;
+  const profile = { voice: meta.voice, rate: Number(meta.rate || 1), style: meta.style };
+  const response = new Response(JSON.stringify(meta), {
+    headers: { 'Content-Type': 'application/json; charset=utf-8', 'X-Voxlyra-Cached-At': String(Date.now()) },
+  });
+  try { await cache.put(ttsDeviceMetaRequest(meta.chapter.id, profile), response); }
+  catch (_) {}
+}
+
+async function getCachedReaderTtsMetadata(chapterId, profile) {
+  const cache = await openTtsDeviceCache();
+  if (!cache) return null;
+  try {
+    const response = await cache.match(ttsDeviceMetaRequest(chapterId, profile));
+    if (!response) return null;
+    const meta = await response.json();
+    meta._fromDevice = true;
+    return meta;
+  } catch (_) { return null; }
+}
+
+async function getCachedReaderTtsAudio(meta) {
+  if (!meta?.cache_key) return null;
+  const cache = await openTtsDeviceCache();
+  if (!cache) return null;
+  try { return await cache.match(ttsDeviceAudioRequest(meta)); }
+  catch (_) { return null; }
+}
+
+async function pruneReaderTtsDeviceCache(meta) {
+  const cache = await openTtsDeviceCache();
+  if (!cache || !meta?.chapter?.id) return;
+  const chapterId = Number(meta.chapter.id);
+  const keepAudio = ttsDeviceAudioRequest(meta).url;
+  const profile = { voice: meta.voice, rate: Number(meta.rate || 1), style: meta.style };
+  const keepMeta = ttsDeviceMetaRequest(chapterId, profile).url;
+  let keys = [];
+  try { keys = await cache.keys(); } catch (_) { return; }
+  const chapterAudioPrefix = `${TTS_DEVICE_CACHE_PREFIX}audio/${chapterId}/`;
+  const chapterMetaPrefix = `${TTS_DEVICE_CACHE_PREFIX}meta/${chapterId}/`;
+  await Promise.all(keys.map(async (request) => {
+    if ((request.url.startsWith(chapterAudioPrefix) && request.url !== keepAudio) ||
+        (request.url.startsWith(chapterMetaPrefix) && request.url !== keepMeta)) {
+      try { await cache.delete(request); } catch (_) {}
+    }
+  }));
+
+  // На устройстве храним не более 40 полностью подготовленных глав.
+  try {
+    keys = (await cache.keys()).filter((request) => request.url.startsWith(`${TTS_DEVICE_CACHE_PREFIX}audio/`));
+    if (keys.length <= 40) return;
+    const dated = [];
+    for (const request of keys) {
+      const response = await cache.match(request);
+      dated.push({ request, time: Number(response?.headers.get('X-Voxlyra-Cached-At') || 0) });
+    }
+    dated.sort((a, b) => a.time - b.time);
+    for (const item of dated.slice(0, Math.max(0, dated.length - 40))) await cache.delete(item.request);
+  } catch (_) {}
+}
+
+async function cacheReaderTtsAudio(meta, attempts = 2) {
+  if (meta?.device_cache_allowed === false || !meta?.audio_url || !meta?.cache_key) return false;
+  const already = await getCachedReaderTtsAudio(meta);
+  if (already) return true;
+  const cache = await openTtsDeviceCache();
+  if (!cache) return false;
+  let lastError = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 900000);
+    try {
+      const response = await fetch(meta.audio_url, {
+        credentials: 'same-origin',
+        headers: { 'X-Telegram-Init-Data': tgInitData() },
+        signal: controller.signal,
+      });
+      if (!response.ok) throw new Error('Озвучивание не загрузилось');
+      const blob = await response.blob();
+      const stored = new Response(blob, {
+        headers: {
+          'Content-Type': response.headers.get('content-type') || 'audio/mpeg',
+          'Content-Length': String(blob.size),
+          'X-Voxlyra-Cached-At': String(Date.now()),
+        },
+      });
+      await cache.put(ttsDeviceAudioRequest(meta), stored);
+      const metaProfileKey = readerTtsProfileKey({ voice: meta.voice, rate: meta.rate, style: meta.style });
+      const activeForCurrent = Number(meta.chapter.id) === readerTtsChapterId() && metaProfileKey === readerTtsProfileKey();
+      const activeForPrefetch = readerTtsPrefetch?.chapterId === Number(meta.chapter.id) && readerTtsPrefetch?.profileKey === metaProfileKey;
+      if (activeForCurrent || activeForPrefetch) await pruneReaderTtsDeviceCache(meta);
+      return true;
+    } catch (error) {
+      lastError = error;
+      if (attempt < attempts) await wait(1000 * attempt);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  if (lastError) throw lastError;
+  return false;
+}
+
+function releaseReaderTtsObjectUrl() {
+  if (!readerTtsObjectUrl) return;
+  try { URL.revokeObjectURL(readerTtsObjectUrl); } catch (_) {}
+  readerTtsObjectUrl = '';
+}
+
+async function readerTtsSource(meta) {
+  const cached = await getCachedReaderTtsAudio(meta);
+  if (!cached) return { src: meta.audio_url, cached: false };
+  const blob = await cached.blob();
+  releaseReaderTtsObjectUrl();
+  readerTtsObjectUrl = URL.createObjectURL(blob);
+  return { src: readerTtsObjectUrl, cached: true };
+}
+
+async function requestReaderTtsMeta(chapterId, profile = readerTtsCurrentProfile(), allowDeviceFallback = true) {
+  const { voice, rate, style } = profile;
+  const url = `/api/reader/${Number(chapterId)}/tts?voice=${encodeURIComponent(voice)}&rate=${encodeURIComponent(rate)}&style=${encodeURIComponent(style)}`;
+  try {
+    const meta = await apiFetchWithRetry(url, {}, 3, 900000);
+    await cacheReaderTtsMetadata(meta);
+    return meta;
+  } catch (error) {
+    const status = Number(error?.status || 0);
+    const temporaryFailure = !status || status === 408 || status === 429 || status >= 500;
+    if (allowDeviceFallback && temporaryFailure) {
+      const cachedMeta = await getCachedReaderTtsMetadata(chapterId, profile);
+      if (cachedMeta && await getCachedReaderTtsAudio(cachedMeta)) return cachedMeta;
+    }
+    throw error;
+  }
+}
+
+function scheduleCurrentReaderTtsCache(meta) {
+  const player = readerTtsPlayer();
+  clearTimeout(readerTtsCacheTimer);
+  if (player && readerTtsCacheListener) player.removeEventListener('canplaythrough', readerTtsCacheListener);
+  readerTtsCacheListener = null;
+  const cacheNow = () => {
+    clearTimeout(readerTtsCacheTimer);
+    if (player) player.removeEventListener('canplaythrough', cacheNow);
+    readerTtsCacheListener = null;
+    cacheReaderTtsAudio(meta).catch(() => {});
+  };
+  if (player) {
+    readerTtsCacheListener = cacheNow;
+    player.addEventListener('canplaythrough', cacheNow, { once: true });
+  }
+  const connection = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+  if (connection?.saveData || ['slow-2g', '2g'].includes(connection?.effectiveType)) return;
+  // Запасной запуск только через минуту, чтобы не конкурировать с первым потоковым воспроизведением.
+  readerTtsCacheTimer = setTimeout(cacheNow, 60000);
+}
+
+function startNextReaderTtsPrefetch(meta) {
+  const nextId = Number(meta?.navigation?.next?.id || 0);
+  if (!getPrefs().ttsAutoNext || !nextId) return null;
+  const profile = { voice: meta.voice, rate: Number(meta.rate || 1), style: meta.style };
+  const profileKey = readerTtsProfileKey(profile);
+  if (readerTtsPrefetch?.chapterId === nextId && readerTtsPrefetch?.profileKey === profileKey) return readerTtsPrefetch.promise;
+  const promise = (async () => {
+    const nextMeta = await requestReaderTtsMeta(nextId, profile, true);
+    await cacheReaderTtsAudio(nextMeta, 3);
+    return nextMeta;
+  })().catch(() => null);
+  readerTtsPrefetch = { chapterId: nextId, profileKey, promise };
+  return promise;
+}
+
+async function recoverReaderTtsPlayback() {
+  const player = readerTtsPlayer();
+  const meta = readerTtsMeta;
+  if (!player || !meta || readerTtsLoading) return;
+  const attempts = Number(player.dataset.recoveryAttempts || 0);
+  if (attempts >= 2) {
+    updateReaderTtsStatus('Связь прервалась. Нажмите «Озвучить», чтобы продолжить.');
+    return;
+  }
+  player.dataset.recoveryAttempts = String(attempts + 1);
+  const position = Math.max(0, Number(player.currentTime || 0));
+  updateReaderTtsStatus('Восстанавливаем озвучивание…');
+  try {
+    let freshMeta = meta;
+    const cached = await getCachedReaderTtsAudio(meta);
+    if (!cached) freshMeta = await requestReaderTtsMeta(meta.chapter.id, { voice: meta.voice, rate: meta.rate, style: meta.style }, true);
+    const source = await readerTtsSource(freshMeta);
+    player._voxStartPosition = position;
+    player.src = source.src;
+    player.load();
+    await player.play();
+  } catch (_) {
+    updateReaderTtsStatus('Не удалось восстановить связь. Попробуйте ещё раз.');
+  }
+}
+
+async function applyReaderTtsMeta(meta, autoPlay = false) {
+  const panel = document.getElementById('readerTtsPanel');
+  const player = readerTtsPlayer();
+  if (!panel || !player || !meta?.chapter) return;
+  readerTtsMeta = meta;
+  setPref('ttsVoice', meta.voice || getPrefs().ttsVoice);
+  setPref('ttsRate', Number(meta.rate || getPrefs().ttsRate));
+  setPref('ttsStyle', meta.style || getPrefs().ttsStyle);
+  updateReaderPageForTts(meta);
+  updateReaderTtsMediaSession(meta);
+  player.pause();
+  const profile = { voice: meta.voice, rate: Number(meta.rate || 1), style: meta.style };
+  const localProgress = getLocalReaderTtsProgress(meta.chapter.id, profile);
+  const source = await readerTtsSource(meta);
+  player.dataset.chapterId = String(meta.chapter.id);
+  player.dataset.voice = meta.voice || profile.voice;
+  player.dataset.rate = String(meta.rate || profile.rate);
+  player.dataset.style = meta.style || profile.style;
+  player.dataset.cacheKey = String(meta.cache_key || '');
+  player.dataset.recoveryAttempts = '0';
+  player._voxStartPosition = Math.max(0, Number(meta.progress_seconds || 0), localProgress);
+  player.src = source.src;
+  player.hidden = false;
+  panel.classList.add('has-audio');
+  document.getElementById('readerTtsControls')?.removeAttribute('hidden');
+  document.getElementById('readerTtsSleep')?.removeAttribute('hidden');
+  player.load();
+  const place = source.cached || meta._fromDevice ? ' · сохранено на устройстве' : '';
+  updateReaderTtsStatus(`Глава ${meta.chapter.number} готова${place}`);
+  if (!source.cached) scheduleCurrentReaderTtsCache(meta);
+  if (autoPlay) {
+    try { await player.play(); }
+    catch (_) { updateReaderTtsStatus('Озвучивание готово. Нажмите Play в плеере.'); }
+  }
+}
+
+async function loadReaderTtsChapter(chapterId, autoPlay = false, preparedMeta = null) {
   if (readerTtsLoading || !chapterId) return;
   const panel = document.getElementById('readerTtsPanel');
   const player = readerTtsPlayer();
   if (!panel || !player) return;
   readerTtsLoading = true;
   panel.classList.add('is-generating');
-  updateReaderTtsStatus('Готовим озвучивание главы…');
-  const voice = document.getElementById('readerTtsVoice')?.value || getPrefs().ttsVoice;
-  const rate = Number(document.getElementById('readerTtsRate')?.value || getPrefs().ttsRate || 1);
-  const style = document.getElementById('readerTtsStyle')?.value || getPrefs().ttsStyle;
+  const startButton = document.getElementById('readerTtsStart');
+  if (startButton) startButton.textContent = 'Подготавливаем…';
+  updateReaderTtsStatus(navigator.onLine ? 'Готовим озвучивание главы…' : 'Проверяем сохранённую озвучку…');
+  const profile = readerTtsCurrentProfile();
   try {
-    const meta = await apiFetch(`/api/reader/${Number(chapterId)}/tts?voice=${encodeURIComponent(voice)}&rate=${encodeURIComponent(rate)}&style=${encodeURIComponent(style)}`);
-    readerTtsMeta = meta;
-    setPref('ttsVoice', meta.voice || voice);
-    setPref('ttsRate', Number(meta.rate || rate));
-    setPref('ttsStyle', meta.style || style);
-    updateReaderPageForTts(meta);
-    updateReaderTtsMediaSession(meta);
-    player.pause();
-    player.dataset.chapterId = String(meta.chapter.id);
-    player.dataset.voice = meta.voice || voice;
-    player.dataset.rate = String(meta.rate || rate);
-    player.dataset.style = meta.style || style;
-    player._voxStartPosition = Math.max(0, Number(meta.progress_seconds || 0));
-    player.src = meta.audio_url;
-    player.hidden = false;
-    document.getElementById('readerTtsControls')?.removeAttribute('hidden');
-    document.getElementById('readerTtsSleep')?.removeAttribute('hidden');
-    player.load();
-    updateReaderTtsStatus(`Глава ${meta.chapter.number} готова · ${document.getElementById('readerTtsVoice')?.selectedOptions?.[0]?.textContent || ''} · ${document.getElementById('readerTtsStyle')?.selectedOptions?.[0]?.textContent || ''}`);
-    if (autoPlay) {
-      try { await player.play(); }
-      catch (_) { updateReaderTtsStatus('Озвучивание готово. Нажмите Play в плеере.'); }
-    }
+    const meta = preparedMeta || await requestReaderTtsMeta(chapterId, profile, true);
+    await applyReaderTtsMeta(meta, autoPlay);
   } catch (error) {
     updateReaderTtsStatus(error.message || 'Не удалось подготовить озвучивание');
     notify(error.message || 'Озвучивание недоступно');
   } finally {
     readerTtsLoading = false;
     panel.classList.remove('is-generating');
+    if (startButton) startButton.textContent = '▶ Озвучить';
   }
 }
 
@@ -554,13 +862,14 @@ async function initReaderTts() {
   const player = readerTtsPlayer();
   if (!panel || !player) return;
   applySettings();
+  setReaderTtsOptionsExpanded(false);
   bindReaderTtsMediaActions();
   if (!tgInitData()) {
     updateReaderTtsStatus('Откройте книгу внутри Telegram, чтобы включить озвучивание.');
     return;
   }
   try {
-    const data = await apiFetch('/api/reader/tts/voices');
+    const data = await apiFetchWithRetry('/api/reader/tts/voices', {}, 3, 30000);
     if (!data.enabled) {
       updateReaderTtsStatus(data.message || 'Локальное озвучивание пока недоступно');
       document.getElementById('readerTtsStart')?.setAttribute('disabled', 'disabled');
@@ -582,9 +891,11 @@ async function initReaderTts() {
       rateSelect.innerHTML = data.rates.map((rate) => `<option value="${rate}">${labels[String(rate)] || `${rate}×`}</option>`).join('');
       rateSelect.value = data.rates.some((item) => Number(item) === Number(getPrefs().ttsRate)) ? String(getPrefs().ttsRate) : String(data.rates[0]);
     }
-    updateReaderTtsStatus('Готово к естественному озвучиванию');
+    updateReaderTtsStatus('Нажмите «Озвучить»');
   } catch (error) {
-    updateReaderTtsStatus(error.message || 'Не удалось проверить озвучивание');
+    const cachedMeta = await getCachedReaderTtsMetadata(readerTtsChapterId(), readerTtsCurrentProfile());
+    if (cachedMeta && await getCachedReaderTtsAudio(cachedMeta)) updateReaderTtsStatus('Доступна сохранённая озвучка');
+    else updateReaderTtsStatus(error.message || 'Не удалось проверить озвучивание');
   }
 
   player.addEventListener('loadedmetadata', () => {
@@ -597,6 +908,7 @@ async function initReaderTts() {
   player.addEventListener('play', () => {
     panel.classList.add('is-playing');
     try { navigator.mediaSession.playbackState = 'playing'; } catch (_) {}
+    startNextReaderTtsPrefetch(readerTtsMeta);
   });
   player.addEventListener('pause', () => {
     panel.classList.remove('is-playing');
@@ -609,21 +921,37 @@ async function initReaderTts() {
     clearTimeout(readerTtsProgressTimer);
     readerTtsProgressTimer = setTimeout(() => saveReaderTtsProgress().catch(() => {}), 3000);
   });
+  player.addEventListener('stalled', () => {
+    if (!player.paused) updateReaderTtsStatus('Связь нестабильна, продолжаем загрузку…');
+  });
+  player.addEventListener('error', () => { recoverReaderTtsPlayback().catch(() => {}); });
   player.addEventListener('ended', async () => {
     panel.classList.remove('is-playing');
+    clearTimeout(readerTtsCacheTimer);
+    cacheReaderTtsAudio(readerTtsMeta).catch(() => {});
     try { await saveReaderProgress(100); } catch (_) {}
     try { await saveReaderTtsProgress(); } catch (_) {}
     const nextId = Number(readerTtsMeta?.navigation?.next?.id || 0);
     if (getPrefs().ttsAutoNext && nextId) {
-      updateReaderTtsStatus('Открываем следующую главу…');
-      await loadReaderTtsChapter(nextId, true);
+      let nextMeta = null;
+      const expectedProfile = readerTtsProfileKey({ voice: readerTtsMeta.voice, rate: readerTtsMeta.rate, style: readerTtsMeta.style });
+      if (readerTtsPrefetch?.chapterId === nextId && readerTtsPrefetch?.profileKey === expectedProfile) {
+        updateReaderTtsStatus('Переключаем на подготовленную главу…');
+        nextMeta = await readerTtsPrefetch.promise;
+      }
+      readerTtsPrefetch = null;
+      if (nextMeta) await loadReaderTtsChapter(nextId, true, nextMeta);
+      else await loadReaderTtsChapter(nextId, true);
     } else {
       updateReaderTtsStatus(nextId ? 'Глава закончена' : 'Книга закончена');
     }
   });
   player.addEventListener('ratechange', updateReaderTtsPositionState);
+  window.addEventListener('online', () => {
+    if (player.src) saveReaderTtsProgress().catch(() => {});
+    if (readerTtsMeta && !player.paused) startNextReaderTtsPrefetch(readerTtsMeta);
+  });
 }
-
 function seekAudio(seconds) {
   const player = document.getElementById('voxPlayer');
   if (!player || !Number.isFinite(player.duration)) return;
@@ -954,18 +1282,21 @@ function bindEvents() {
   document.addEventListener('input', (event) => { if (event.target.id === 'catalogSearch') applyCatalogFilter(); });
   document.addEventListener('change', async (event) => {
     if (event.target.id === 'readerTtsVoice') {
+      readerTtsPrefetch = null;
       setPref('ttsVoice', event.target.value);
       const player = readerTtsPlayer();
       if (player?.src) await loadReaderTtsChapter(readerTtsChapterId(), true);
       return;
     }
     if (event.target.id === 'readerTtsStyle') {
+      readerTtsPrefetch = null;
       setPref('ttsStyle', event.target.value);
       const player = readerTtsPlayer();
       if (player?.src) await loadReaderTtsChapter(readerTtsChapterId(), true);
       return;
     }
     if (event.target.id === 'readerTtsRate') {
+      readerTtsPrefetch = null;
       const rate = Number(event.target.value) || 1;
       setPref('ttsRate', rate);
       const player = readerTtsPlayer();
@@ -1009,6 +1340,7 @@ function bindEvents() {
     }
     if (target.id === 'resetLocalSettings') { event.preventDefault(); await resetSettings(); return; }
     if (target.id === 'readerSettingsToggle') { event.preventDefault(); const panel = document.getElementById('readerQuickSettings'); if (panel) panel.hidden = !panel.hidden; return; }
+    if (target.id === 'readerTtsSettingsToggle') { event.preventDefault(); setReaderTtsOptionsExpanded(target.getAttribute('aria-expanded') !== 'true'); return; }
     if (target.id === 'saveReadingProgress') { event.preventDefault(); try { await saveReaderProgress(); notify('Место сохранено'); } catch (_) { notify('Не удалось сохранить место'); } return; }
     if (target.id === 'readerTtsStart') { event.preventDefault(); await loadReaderTtsChapter(readerTtsChapterId(), true); return; }
     if (target.id === 'readerTtsBack') { event.preventDefault(); seekReaderTts(-15); return; }
@@ -1086,6 +1418,7 @@ function bindEvents() {
     if (document.getElementById('readerText')) saveReaderProgress().catch(() => {});
     if (readerTtsPlayer()?.src) saveReaderTtsProgress().catch(() => {});
     if (document.getElementById('audioPage')) saveAudioProgress().catch(() => {});
+    releaseReaderTtsObjectUrl();
   });
 }
 

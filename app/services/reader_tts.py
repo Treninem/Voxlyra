@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import json
 import os
 import re
 import shutil
@@ -20,7 +21,7 @@ from app.config import settings
 from app.services.audio_tools import probe_duration_seconds
 
 # Версия кэша повышена, чтобы старые ускоренные и искажённые MP3 не использовались.
-TTS_CACHE_VERSION = "2-piper-literary"
+TTS_CACHE_VERSION = "3-smooth-device-cache"
 TTS_VOICES: dict[str, dict[str, str]] = {
     "irina": {
         "label": "Ирина · женский",
@@ -40,26 +41,28 @@ VOICE_ALIASES = {
     "mikhail": "dmitri",
 }
 TTS_STYLES: dict[str, dict[str, float | str]] = {
+    # У Piper базовый темп русских medium-моделей воспринимается слишком быстрым.
+    # Поэтому 1× здесь означает спокойное литературное чтение, а не исходную скорость модели.
     "natural": {
         "label": "Естественно",
-        "length_factor": 1.00,
-        "noise_scale": 0.62,
-        "noise_w_scale": 0.78,
-        "sentence_silence": 0.32,
+        "length_factor": 1.10,
+        "noise_scale": 0.56,
+        "noise_w_scale": 0.70,
+        "sentence_silence": 0.48,
     },
     "expressive": {
         "label": "С выражением",
-        "length_factor": 1.06,
-        "noise_scale": 0.70,
-        "noise_w_scale": 0.90,
-        "sentence_silence": 0.42,
+        "length_factor": 1.16,
+        "noise_scale": 0.62,
+        "noise_w_scale": 0.78,
+        "sentence_silence": 0.58,
     },
     "calm": {
         "label": "Спокойно",
-        "length_factor": 1.13,
-        "noise_scale": 0.54,
-        "noise_w_scale": 0.66,
-        "sentence_silence": 0.48,
+        "length_factor": 1.24,
+        "noise_scale": 0.50,
+        "noise_w_scale": 0.60,
+        "sentence_silence": 0.68,
     },
 }
 TTS_RATES = (0.75, 0.90, 1.00, 1.15, 1.30, 1.45)
@@ -189,6 +192,17 @@ def _voice_model_files(voice: str) -> tuple[Path, Path]:
     return model, Path(str(model) + ".json")
 
 
+def _voice_sample_rate(voice: str) -> int:
+    """Берёт родную частоту модели, чтобы не искажать голос лишним ресемплингом."""
+    _, config = _voice_model_files(voice)
+    try:
+        payload = json.loads(config.read_text(encoding="utf-8"))
+        sample_rate = int(payload.get("audio", {}).get("sample_rate") or 22050)
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        sample_rate = 22050
+    return max(16000, min(48000, sample_rate))
+
+
 def tts_engine_status() -> dict[str, Any]:
     piper = shutil.which("piper")
     ffmpeg = shutil.which("ffmpeg")
@@ -282,7 +296,8 @@ def _run_generation(
     profile = TTS_STYLES[selected_style]
     # Скорость формируется самим синтезатором. Поэтому голос не становится писклявым,
     # глухим или смазанным, как при ускорении уже готового MP3 в браузере.
-    length_scale = max(0.72, min(1.60, float(profile["length_factor"]) / selected_rate))
+    length_scale = max(0.72, min(1.75, float(profile["length_factor"]) / selected_rate))
+    sample_rate = _voice_sample_rate(selected_voice)
     target.parent.mkdir(parents=True, exist_ok=True)
 
     temp_root = Path("storage/temp")
@@ -310,9 +325,10 @@ def _run_generation(
                 [
                     ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
                     "-i", str(wav_file),
-                    "-af", "highpass=f=55,lowpass=f=11500,loudnorm=I=-18:LRA=7:TP=-2",
-                    "-ac", "1", "-ar", "24000",
-                    "-codec:a", "libmp3lame", "-b:a", "96k", str(mp3_file),
+                    # Не выравниваем громкость агрессивным фильтром и не меняем
+                    # частоту модели: оба действия давали лёгкую металлическую окраску.
+                    "-ac", "1", "-ar", str(sample_rate),
+                    "-codec:a", "libmp3lame", "-q:a", "2", str(mp3_file),
                 ],
                 check=True,
                 stdout=subprocess.PIPE,
@@ -368,21 +384,42 @@ async def generate_chapter_tts(
 
 def cleanup_tts_cache() -> None:
     root = _cache_root()
-    max_age = max(1, int(settings.TTS_CACHE_DAYS or 30)) * 86400
-    max_bytes = max(128, int(settings.TTS_MAX_CACHE_MB or 2048)) * 1024 * 1024
+    max_age = max(1, int(settings.TTS_CACHE_DAYS or 3)) * 86400
+    max_bytes = max(128, int(settings.TTS_MAX_CACHE_MB or 512)) * 1024 * 1024
+    max_variants = max(1, int(settings.TTS_MAX_VARIANTS_PER_CHAPTER or 6))
     now = time.time()
+
+    # На сервере остаётся только несколько самых свежих вариантов каждой главы.
+    # Долговременное хранение выполняет браузер пользователя через Cache Storage.
+    for folder in root.glob("chapter_*"):
+        if not folder.is_dir():
+            continue
+        variants: list[Path] = []
+        for path in folder.glob("*.mp3"):
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            if now - stat.st_mtime > max_age:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+                continue
+            variants.append(path)
+        variants.sort(key=lambda item: item.stat().st_mtime, reverse=True)
+        for path in variants[max_variants:]:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
     files: list[Path] = []
     total = 0
     for path in root.rglob("*.mp3"):
         try:
             stat = path.stat()
         except OSError:
-            continue
-        if now - stat.st_mtime > max_age:
-            try:
-                path.unlink()
-            except OSError:
-                pass
             continue
         files.append(path)
         total += stat.st_size
