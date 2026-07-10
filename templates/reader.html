@@ -32,11 +32,56 @@
   </form>
 </section>
 <section class="reader-status" id="readerStatus" data-chapter-id="{{ chapter_id }}">Открываем главу…</section>
+<section class="reader-moderation-notice" id="readerModerationNotice" hidden><strong>Служебный режим проверки</strong><span>Платный текст и озвучивание открыты только для проверки содержимого. Действие записывается в журнал.</span></section>
+<section class="reader-tts-panel" id="readerTtsPanel" data-chapter-id="{{ chapter_id }}" data-book-id="{{ chapter.book_id }}">
+  <div class="reader-tts-heading">
+    <div><span class="eyebrow">Озвучивание текста</span><h2>Слушать главу</h2></div>
+    <button type="button" id="readerTtsStart">▶ Озвучить</button>
+  </div>
+  <p class="reader-tts-note">Озвучивается только текст главы — без рекламы, кнопок и комментариев.</p>
+  <div class="reader-tts-settings">
+    <label>Голос
+      <select id="readerTtsVoice">
+        <option value="anna">Анна</option>
+        <option value="elena">Елена</option>
+        <option value="alexey">Алексей</option>
+        <option value="mikhail">Михаил</option>
+      </select>
+    </label>
+    <label>Скорость
+      <select id="readerTtsRate">
+        <option value="0.75">0.75×</option>
+        <option value="0.9">0.9×</option>
+        <option value="1" selected>1×</option>
+        <option value="1.15">1.15×</option>
+        <option value="1.3">1.3×</option>
+        <option value="1.5">1.5×</option>
+        <option value="1.75">1.75×</option>
+        <option value="2">2×</option>
+      </select>
+    </label>
+    <label class="reader-tts-switch"><input id="readerTtsAutoNext" type="checkbox" checked><span>Следующая глава автоматически</span></label>
+  </div>
+  <div id="readerTtsStatus" class="muted">Готово к озвучиванию</div>
+  <audio id="readerTtsPlayer" controls preload="none" playsinline hidden></audio>
+  <div class="reader-tts-controls" id="readerTtsControls" hidden>
+    <button type="button" class="secondary" id="readerTtsBack">−15 сек</button>
+    <button type="button" class="secondary" id="readerTtsForward">+15 сек</button>
+    <button type="button" class="secondary" id="readerTtsSave">Сохранить место</button>
+  </div>
+  <div class="reader-tts-sleep" id="readerTtsSleep" hidden>
+    <span>Таймер сна</span>
+    <button type="button" class="secondary" data-tts-sleep="15">15 мин</button>
+    <button type="button" class="secondary" data-tts-sleep="30">30 мин</button>
+    <button type="button" class="secondary" data-tts-sleep="60">60 мин</button>
+    <button type="button" class="secondary" data-tts-sleep="0">Выкл.</button>
+  </div>
+</section>
 {{ reader_ad_block('top') }}
 <article class="reader premium-reader" id="readerText" data-chapter-id="{{ chapter_id }}">
   <p class="reader-kicker">{{ chapter.book_title }} · {{ chapter.pen_name or 'Автор не указан' }}</p>
   <h1>{{ chapter.title }}</h1>
-  {% if chapter.is_free %}<div id="readerParagraphs">{% for paragraph in chapter.text.split('\n') %}{% if paragraph.strip() %}<p>{{ paragraph }}</p>{% endif %}{% endfor %}</div>
+  {% if server_text_visible %}<div id="readerParagraphs">{% for paragraph in chapter.text.split('\n') %}{% if paragraph.strip() %}<p>{{ paragraph }}</p>{% endif %}{% endfor %}</div>
   {% else %}<div id="readerParagraphs" class="empty-card paywall-card"><div class="empty-icon">◇</div><h3>Глава закрыта</h3><p>Откройте её внутри Telegram. Если доступ уже куплен, текст загрузится автоматически.</p><p><b>{{ chapter.price_stars }} Stars</b></p>{% if purchase_url %}<a class="button-link" href="{{ purchase_url }}">Купить главу</a>{% endif %}</div>{% endif %}
 </article>
 <section class="reader-actions premium-reader-actions"><button id="saveReadingProgress" class="secondary">Сохранить место</button><span id="progressLabel" class="muted"></span></section>
