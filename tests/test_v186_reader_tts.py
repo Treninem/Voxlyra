@@ -25,24 +25,28 @@ def test_tts_voices_and_signed_media_url(monkeypatch):
 
     monkeypatch.setattr(settings, "TTS_SIGNING_SECRET", "test-secret")
     voices = available_voices()
-    assert len(voices) >= 4
+    assert len(voices) >= 2
     assert {item["gender"] for item in voices} == {"female", "male"}
 
-    url = build_media_url(user_id=7, chapter_id=11, voice="anna", lifetime_seconds=600)
+    url = build_media_url(user_id=7, chapter_id=11, voice="irina", rate=0.9, style="expressive", lifetime_seconds=600)
     parsed = urlparse(url)
     query = parse_qs(parsed.query)
     assert parsed.path == "/media/reader-tts/11.mp3"
     assert validate_media_token(
         user_id=7,
         chapter_id=11,
-        voice="anna",
+        voice="irina",
+        rate=0.9,
+        style="expressive",
         expires_at=int(query["exp"][0]),
         signature=query["sig"][0],
     )
     assert not validate_media_token(
         user_id=8,
         chapter_id=11,
-        voice="anna",
+        voice="irina",
+        rate=0.9,
+        style="expressive",
         expires_at=int(query["exp"][0]),
         signature=query["sig"][0],
     )
@@ -92,7 +96,10 @@ def test_reader_has_background_tts_controls():
     assert "navigator.mediaSession" in script
     assert "loadReaderTtsChapter(nextId, true)" in script
     assert "saveReaderTtsProgress" in script
-    assert "espeak-ng" in dockerfile
+    assert "piper-tts" in (root / "requirements.txt").read_text(encoding="utf-8")
+    assert "piper.download_voices" in dockerfile
+    assert "ru_RU-irina-medium" in dockerfile
+    assert "ru_RU-dmitri-medium" in dockerfile
     assert "ffmpeg" in dockerfile
 
 
@@ -136,7 +143,7 @@ def test_tts_api_returns_signed_audio_for_accessible_chapter(tmp_path, monkeypat
     async def fake_auth(_: str):
         return TMAUser(int(reader["id"]), int(reader["telegram_id"]), reader["username"], reader["full_name"])
 
-    async def fake_generate(chapter_id_arg: int, text: str, voice: str):
+    async def fake_generate(chapter_id_arg: int, text: str, voice: str, rate=1.0, style="expressive"):
         assert chapter_id_arg == chapter_id
         assert "Только текст книги" in text
         return TTSAsset(fake_mp3, 25, voice, "hash")
@@ -145,11 +152,13 @@ def test_tts_api_returns_signed_audio_for_accessible_chapter(tmp_path, monkeypat
     monkeypatch.setattr(webapp_module, "generate_chapter_tts", fake_generate)
     client = TestClient(webapp_module.create_app())
     response = client.get(
-        f"/api/reader/{chapter_id}/tts?voice=alexey",
+        f"/api/reader/{chapter_id}/tts?voice=dmitri&rate=0.9&style=expressive",
         headers={"X-Telegram-Init-Data": "test"},
     )
     assert response.status_code == 200
     data = response.json()
-    assert data["voice"] == "alexey"
+    assert data["voice"] == "dmitri"
+    assert data["rate"] == 0.9
+    assert data["style"] == "expressive"
     assert data["chapter"]["id"] == chapter_id
     assert data["audio_url"].startswith(f"/media/reader-tts/{chapter_id}.mp3?")

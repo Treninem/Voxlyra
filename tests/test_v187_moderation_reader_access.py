@@ -86,7 +86,7 @@ def test_owner_and_book_moderator_can_review_paid_text_and_tts(tmp_path, monkeyp
     async def fake_auth(init_data: str):
         return users[init_data]
 
-    async def fake_generate(chapter_id_arg: int, text: str, voice: str):
+    async def fake_generate(chapter_id_arg: int, text: str, voice: str, rate=1.0, style="expressive"):
         assert chapter_id_arg in {data["chapter_id"], data["review_chapter_id"]}
         assert "глав" in text.lower() or "провер" in text.lower()
         return TTSAsset(fake_mp3, 30, voice, "hash")
