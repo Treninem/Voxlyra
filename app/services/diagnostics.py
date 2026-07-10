@@ -6,6 +6,7 @@ from urllib.parse import urlparse
 
 from app.config import settings
 from app.build_info import owner_build_label
+from app.services.reader_tts import tts_engine_status
 
 
 @dataclass(frozen=True)
@@ -80,6 +81,12 @@ def collect_diagnostics() -> list[DiagnosticItem]:
             "CHANNEL_ID указан",
             bool(channel_id),
             "Укажите @username_канала или числовой ID. Бот должен быть администратором канала.",
+        ),
+        DiagnosticItem(
+            "reader_tts",
+            "Локальное озвучивание готово",
+            bool(tts_engine_status()["enabled"]),
+            "Проверьте Dockerfile: должны устанавливаться espeak-ng и ffmpeg.",
         ),
     ]
 
