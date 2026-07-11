@@ -96,6 +96,7 @@ from app.services.cover_storage import download_book_cover
 from app.services.publication import finish_book_content_workflow, publish_book_and_channel
 from app.services.audio_tools import AudioImportError, build_audio_import_report, extract_audio_zip, format_duration, inspect_audio_file
 from app.services.pricing import recommend_book_price
+from app.handlers.legal import send_next_required_document
 from app.catalog_options import BOOK_TYPES, LANGUAGES, GENRES, TROPES, AUDIENCES, CONTENT_WARNINGS, AD_PLACEMENTS, PROMO_DISCOUNTS, label_for, labels_for
 
 logger = logging.getLogger(__name__)
@@ -327,6 +328,9 @@ async def author_register_start(call: CallbackQuery, state: FSMContext) -> None:
         await call.message.edit_text("Вы уже зарегистрированы как автор.", reply_markup=author_menu(True))
         await call.answer()
         return
+    if await send_next_required_document(call.message, int(user["id"]), author=True):
+        await call.answer("Сначала документы автора")
+        return
     await state.set_state(AuthorRegister.pen_name)
     await call.message.edit_text("Введите ваш основной псевдоним автора. Это обязательное поле.", reply_markup=navigation_menu(cancel_callback="author:cancel_flow"))
     await call.answer()
@@ -417,6 +421,9 @@ async def add_book_start(call: CallbackQuery, state: FSMContext) -> None:
             reply_markup=author_menu(False),
         )
         await call.answer()
+        return
+    if await send_next_required_document(call.message, int(user["id"]), author=True):
+        await call.answer("Нужно обновить документы автора")
         return
     await state.set_state(AddBook.title)
     await call.message.edit_text("Введите название книги.", reply_markup=navigation_menu(cancel_callback="author:cancel_flow"))

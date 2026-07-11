@@ -1,32 +1,55 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
+import json
+import shutil
+import time
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from aiogram import Bot
 
 from app.config import settings
+from app.build_info import OWNER_BUILD_VERSION
+from app.legal_texts import LEGAL_DOCS, REQUIRED_ON_START, all_docs, get_doc, operator_is_configured
+from app.services.legal_documents import ensure_legal_pdf
+from app.services.secure_fields import decrypt_text, encrypt_text, mask_phone
+from app.services.yookassa_payouts import create_sbp_payout, list_sbp_banks, normalize_phone, payouts_configured, YooKassaPayoutError
+from app.services.payment_runtime import load_runtime_payment_settings, public_runtime_payment_settings, update_runtime_payment_settings
+from app.services.yookassa_checkout import test_shop_connection, YooKassaCheckoutError
+from app.services.pricing import split_platform_commission, final_price_for_desired_net, two_rate_price
 from app.db import (
     add_comment,
     add_audit,
     add_manual_chapter,
+    add_graphic_pages,
     book_belongs_to_author,
+    create_book,
+    create_graphic_chapter_record,
+    delete_graphic_chapter_for_author,
     count_chapters_for_book,
     get_adjacent_audio_chapters,
     get_adjacent_chapters,
     get_adjacent_chapters_for_moderation,
+    get_adjacent_graphic_chapters,
     get_audio_chapter,
     get_book,
     get_book_options,
     get_author_dashboard_stats,
     get_author_finance_summary,
+    get_author_financial_profile,
+    get_author_rub_finance_summary,
     get_author_profile,
+    create_author_rub_payout_request,
+    get_author_rub_payout_request,
     get_admin_permissions,
     get_platform_stats,
     get_owner_today_stats,
@@ -40,6 +63,11 @@ from app.db import (
     get_chapter_by_number_for_moderation,
     get_chapter_bounds_for_moderation,
     get_listening_progress,
+    get_legal_acceptances,
+    get_missing_legal_documents,
+    get_graphic_chapter,
+    get_graphic_page,
+    get_graphic_reading_progress,
     get_reader_ad_settings,
     get_reading_progress,
     get_user_review,
@@ -47,22 +75,53 @@ from app.db import (
     get_user_by_id,
     get_tts_progress,
     has_purchase_access,
+    mark_purchase_access_used,
     init_db,
     list_audio_chapters_for_book,
     list_author_books_with_counts,
+    list_graphic_chapters_for_book,
+    list_graphic_volumes_for_book,
+    get_graphic_volume,
+    upsert_graphic_volume_for_author,
+    set_graphic_chapter_preview_for_author,
+    list_graphic_page_reports,
+    create_graphic_page_report,
+    moderate_graphic_page,
+    set_graphic_page_report_status,
+    list_graphic_pages,
+    list_graphic_pages_for_author,
+    upsert_graphic_page_text,
+    list_graphic_page_texts,
+    replace_graphic_translation_regions_for_author,
+    list_graphic_translation_regions,
+    replace_graphic_frames_for_author,
+    list_graphic_page_frames,
+    get_graphic_reader_layers,
+    search_graphic_book_text,
+    toggle_graphic_page_bookmark,
+    list_user_graphic_bookmarks,
+    add_graphic_page_comment,
+    list_graphic_page_comments_for_moderation,
+    set_graphic_page_comment_status,
+    record_graphic_reading_event,
+    get_graphic_chapter_statistics,
     list_books_for_moderation,
     list_complaints,
     list_refund_requests,
     get_refund_request,
+    get_rub_control_summary,
     get_complaint,
     get_comment_for_moderation,
     get_review_for_moderation,
     finalize_refund,
     reject_refund_request,
     list_payout_requests,
+    list_author_financial_profiles,
+    list_author_rub_payout_requests,
     get_payout_request,
     set_payout_request_status,
     set_author_payout_frozen,
+    set_author_financial_profile_status,
     list_moderation_comments,
     list_moderation_reviews,
     set_comment_status,
@@ -73,6 +132,13 @@ from app.db import (
     publish_book_content,
     list_catalog_books,
     list_chapters_for_book,
+    list_chapter_packages_for_book,
+    create_chapter_package_for_author,
+    update_chapter_package_for_author,
+    deactivate_chapter_package_for_author,
+    get_user_chapter_credit_summary,
+    list_user_chapter_package_balances,
+    redeem_chapter_package_credit,
     list_comments_for_chapter,
     list_contextual_book_ads,
     list_reviews_for_book,
@@ -84,13 +150,20 @@ from app.db import (
     record_reader_ad_event,
     remove_bookmark,
     save_listening_progress,
+    save_graphic_reading_progress,
     soft_delete_book,
     soft_delete_chapter_for_author,
     submit_book_for_review,
     update_author_book_fields,
+    upsert_author_financial_profile,
+    update_author_rub_payout_status,
     update_chapter_price,
     update_chapter_text,
     update_chapter_title,
+    update_graphic_chapter_for_author,
+    reorder_graphic_pages_for_author,
+    update_graphic_page_file_for_author,
+    delete_graphic_page_for_author,
     upsert_imported_chapters,
     update_book_import_fingerprint,
     set_book_duplicate_override,
@@ -98,23 +171,52 @@ from app.db import (
     save_tts_progress,
     set_bookmark,
     set_chapter_status,
+    set_graphic_chapter_status,
     set_user_preference,
     reset_user_preferences,
     upsert_review,
     user_can_access_audio,
     user_can_access_chapter,
+    user_can_access_graphic,
 )
 from app.services.tma_auth import TMAAuthError, TMAUser, authenticate_init_data
 from app.permissions import PERMISSION_BY_CODE
+from app.keyboards import author_book_card_menu
 from app.services.diagnostics import diagnostics_summary
 from app.services.book_parser import BookParseError, build_import_report, parse_book_file
 from app.services.duplicate_books import find_book_duplicates, sha256_file
+from app.services.graphic_import import (
+    GraphicImportError,
+    PreparedGraphicPage,
+    graphic_report,
+    prepare_graphic_file,
+    prepare_graphic_images,
+    prepare_replacement_page,
+    rotate_graphic_page_file,
+)
+from app.services.graphic_ocr import (
+    GraphicOCRError,
+    ocr_engine_available,
+    recognize_graphic_text,
+    suggest_graphic_frames,
+)
+from app.services.graphic_storage import (
+    delete_page_files,
+    graphic_storage_root,
+    install_prepared_page,
+    public_variant_info,
+    safe_graphic_path,
+    select_page_variant,
+)
 from app.services.chunked_upload import (
     ChunkedUploadError,
     CHUNK_SIZE_BYTES,
     assemble_upload,
     cleanup_upload,
+    create_graphic_upload,
     create_upload,
+    get_upload_status,
+    load_upload,
     save_chunk,
 )
 from app.services.notifications import (
@@ -154,6 +256,182 @@ from app.services.reader_tts import (
 )
 
 
+GRAPHIC_CONTENT_TYPES = {"comic", "manga", "manhwa", "webtoon", "graphic_novel"}
+GRAPHIC_READING_MODES = {"ltr", "rtl", "vertical", "single", "spread", "inherit"}
+GRAPHIC_STORAGE_ROOT = graphic_storage_root()
+GRAPHIC_TEMP_ROOT = Path("storage/temp/graphic_imports")
+
+
+def _reader_watermark_label(user: TMAUser) -> str:
+    name = (user.full_name or (f"@{user.username}" if user.username else "Читатель")).strip()[:48]
+    tail = str(user.telegram_id)[-4:]
+    return f"{name} · {tail}"
+
+
+async def _content_protection_payload(user: TMAUser, *, allow_download: bool, book_id: int) -> dict[str, Any]:
+    cfg = await load_runtime_payment_settings()
+    protected = bool(cfg.content_protection_enabled and not allow_download)
+    return {
+        "protected": protected,
+        "allow_copy": not protected,
+        "allow_download": bool(allow_download),
+        "download_url": f"/api/book/{int(book_id)}/download.txt" if allow_download else "",
+        "watermark": _reader_watermark_label(user) if protected and cfg.watermark_enabled else "",
+        "screenshot_block_guaranteed": False,
+    }
+
+
+def _graphic_signing_secret() -> bytes:
+    value = (
+        settings.COMIC_SIGNING_SECRET.strip()
+        or settings.TTS_SIGNING_SECRET.strip()
+        or settings.BOT_TOKEN.strip()
+        or "voxlyra-local-comic-secret"
+    )
+    return value.encode("utf-8")
+
+
+def _graphic_media_token(*, user_id: int, chapter_id: int, page_number: int, expires_at: int) -> str:
+    payload = f"{int(user_id)}:{int(chapter_id)}:{int(page_number)}:{int(expires_at)}".encode("utf-8")
+    return hmac.new(_graphic_signing_secret(), payload, hashlib.sha256).hexdigest()
+
+
+def _validate_graphic_media_token(
+    *,
+    user_id: int,
+    chapter_id: int,
+    page_number: int,
+    expires_at: int,
+    token: str,
+) -> bool:
+    if int(expires_at) < int(time.time()):
+        return False
+    expected = _graphic_media_token(
+        user_id=user_id, chapter_id=chapter_id, page_number=page_number, expires_at=expires_at
+    )
+    return hmac.compare_digest(expected, str(token or ""))
+
+
+def _safe_graphic_path(value: str) -> Path | None:
+    return safe_graphic_path(value, root=GRAPHIC_STORAGE_ROOT)
+
+
+async def _commit_graphic_chapter(
+    *,
+    book_id: int,
+    title: str,
+    reading_mode: str,
+    price_stars: int,
+    source_filename: str,
+    prepared_pages: list[PreparedGraphicPage],
+    volume_number: int = 1,
+    volume_title: str = "",
+    preview_pages: int = 3,
+) -> dict[str, Any]:
+    chapter_id = await create_graphic_chapter_record(
+        book_id,
+        title,
+        reading_mode=reading_mode,
+        is_free=int(price_stars or 0) <= 0,
+        price_stars=int(price_stars or 0),
+        source_filename=source_filename,
+        volume_number=max(1, int(volume_number or 1)),
+        volume_title=str(volume_title or "").strip()[:120],
+        preview_pages=max(0, min(50, int(preview_pages or 0))),
+    )
+    final_dir = GRAPHIC_STORAGE_ROOT / str(int(book_id)) / str(int(chapter_id))
+    shutil.rmtree(final_dir, ignore_errors=True)
+    final_dir.mkdir(parents=True, exist_ok=True)
+    rows: list[dict[str, Any]] = []
+    try:
+        for page in prepared_pages:
+            target = final_dir / f"page-{int(page.number):05d}.webp"
+            installed = install_prepared_page(page, target)
+            rows.append(
+                {
+                    "number": int(page.number),
+                    "file_path": installed["file_path"],
+                    "source_filename": page.source_filename,
+                    "mime_type": installed["mime_type"],
+                    "width": installed["width"],
+                    "height": installed["height"],
+                    "file_size": installed["file_size"],
+                    "checksum": installed["checksum"],
+                    "variants_json": installed["variants_json"],
+                    "storage_backend": installed["storage_backend"],
+                    "storage_key": installed["storage_key"],
+                }
+            )
+        await add_graphic_pages(chapter_id, rows)
+    except Exception:
+        shutil.rmtree(final_dir, ignore_errors=True)
+        await set_graphic_chapter_status(chapter_id, "deleted")
+        raise
+    chapter = await get_graphic_chapter(chapter_id)
+    return _row_to_dict(chapter) if chapter else {"id": chapter_id, "pages_count": len(rows)}
+
+
+async def _notify_graphic_chapter_if_published(*, book_id: int, chapter: dict[str, Any], actor_user_id: int) -> dict[str, Any] | None:
+    chapter_id = int(chapter.get("id") or 0)
+    if chapter_id <= 0:
+        return None
+    current = await get_graphic_chapter(chapter_id)
+    book = await get_book(book_id)
+    if not current or not book or str(book["publication_status"] or "") != "published" or str(current["status"] or "") != "published":
+        return None
+    notification = await notify_book_followers(
+        book_id=book_id,
+        event_key=f"graphic-chapter:{chapter_id}:published",
+        category="chapters",
+        text=new_chapter_message(str(book["title"] or "Произведение"), str(current["title"] or "Новая глава"), int(current["number"] or 0)),
+    )
+    await add_audit(actor_user_id, "graphic_chapter_followers_notified_web", "graphic_chapter", str(chapter_id), None, str(notification))
+    return notification
+
+
+def _graphic_page_payloads(*, user_id: int, chapter_id: int, pages: list[Any], include_ids: bool = False) -> list[dict[str, Any]]:
+    expires_at = int(time.time()) + 60 * 30
+    result: list[dict[str, Any]] = []
+    for page in pages:
+        page_number = int(page["page_number"])
+        token = _graphic_media_token(
+            user_id=int(user_id),
+            chapter_id=int(chapter_id),
+            page_number=page_number,
+            expires_at=expires_at,
+        )
+        base_url = (
+            f"/media/comic/{int(chapter_id)}/{page_number}"
+            f"?user_id={int(user_id)}&expires={expires_at}&token={token}"
+        )
+        variant_meta = public_variant_info(page, root=GRAPHIC_STORAGE_ROOT)
+        item: dict[str, Any] = {
+            "number": page_number,
+            "width": int(page["width"] or 0),
+            "height": int(page["height"] or 0),
+            "file_size": int(page["file_size"] or 0),
+            "source_filename": str(page["source_filename"] or ""),
+            "cache_key": str(page["checksum"] or f"{chapter_id}:{page_number}"),
+            "url": base_url,
+            "variants": {
+                label: {**meta, "url": f"{base_url}&variant={label}"}
+                for label, meta in variant_meta.items()
+            },
+        }
+        if include_ids:
+            item["id"] = int(page["id"])
+        result.append(item)
+    return result
+
+
+def _graphic_type_label(content_type: str) -> str:
+    return {
+        "comic": "Комикс",
+        "manga": "Манга",
+        "manhwa": "Манхва",
+        "webtoon": "Вебтун",
+        "graphic_novel": "Графический роман",
+    }.get(str(content_type or ""), "Графическое произведение")
 
 
 def _cover_file_response(path: Path, *, private: bool = False) -> FileResponse:
@@ -231,6 +509,26 @@ async def _chapter_access(*, app_user_id: int, telegram_id: int, chapter: Any) -
     return moderation, moderation
 
 
+async def _graphic_access(*, app_user_id: int, telegram_id: int, chapter: Any) -> tuple[bool, bool]:
+    """Доступ к графической главе с теми же правилами проверки, что и для текста."""
+    is_public = (
+        str(chapter["publication_status"] or "") == "published"
+        and str(chapter["status"] or "") == "published"
+    )
+    if is_public and await user_can_access_graphic(int(app_user_id), int(chapter["id"])):
+        return True, False
+    if int(telegram_id) in settings.owner_ids:
+        moderation = str(chapter["publication_status"] or "") != "deleted" and str(chapter["status"] or "") != "deleted"
+        return moderation, moderation
+    permissions = await get_admin_permissions(int(app_user_id))
+    moderation = (
+        "mod_books" in permissions
+        and str(chapter["status"] or "") != "deleted"
+        and str(chapter["publication_status"] or "") in {"published", "review"}
+    )
+    return moderation, moderation
+
+
 async def _audit_moderation_reader_access(*, user_id: int, chapter_id: int, action: str) -> None:
     await add_audit(
         int(user_id),
@@ -265,7 +563,14 @@ def _showcase_sections(books: list[Any]) -> dict[str, list[Any]]:
         row for row in books
         if int(row["price_stars"] or 0) <= 0 or int(row["free_chapters_count"] or 0) > 0
     ][:8]
-    return {"newest": newest, "popular": popular, "audio_books": audio, "free_books": free}
+    graphics = [row for row in books if str(row["content_type"] or "book") != "book"][:8]
+    return {
+        "newest": newest,
+        "popular": popular,
+        "audio_books": audio,
+        "free_books": free,
+        "graphic_books": graphics,
+    }
 
 
 def create_app() -> FastAPI:
@@ -276,13 +581,32 @@ def create_app() -> FastAPI:
 
     app = FastAPI(title="Вокслира", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.mount("/static", StaticFiles(directory="static"), name="static")
+
+    @app.get("/comic-sw.js", include_in_schema=False)
+    async def comic_service_worker() -> FileResponse:
+        response = FileResponse(
+            Path("static/js/comic-sw.js"),
+            media_type="application/javascript; charset=utf-8",
+        )
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Service-Worker-Allowed"] = "/"
+        return response
     templates = Jinja2Templates(directory="templates")
+    templates.env.globals["asset_version"] = OWNER_BUILD_VERSION
 
     def common_context(extra: dict[str, Any] | None = None) -> dict[str, Any]:
         data = {"project_name": settings.PROJECT_NAME}
         if extra:
             data.update(extra)
         return data
+
+    async def price_context() -> dict[str, Any]:
+        cfg = await load_runtime_payment_settings()
+        return {
+            "buyer_star_rate_minor": cfg.buyer_star_rate_minor,
+            "buyer_star_rate_rubles": cfg.buyer_star_rate_minor / 100,
+            "author_star_rate_minor": cfg.author_star_rate_minor,
+        }
 
     async def author_session(init_data: str | None) -> tuple[TMAUser, Any]:
         user = await _tma_user(init_data)
@@ -346,6 +670,67 @@ def create_app() -> FastAPI:
         summary = diagnostics_summary()
         return {"ok": bool(summary["ok"])}
 
+    @app.get("/legal", response_class=HTMLResponse)
+    async def legal_index(request: Request):
+        return templates.TemplateResponse(
+            request,
+            "legal.html",
+            common_context({
+                "documents": all_docs(),
+                "document": None,
+                "operator_configured": operator_is_configured(),
+            }),
+        )
+
+    @app.get("/legal/{code}.pdf")
+    async def legal_pdf(code: str):
+        doc = get_doc(code)
+        if not doc:
+            raise HTTPException(status_code=404, detail="Документ не найден.")
+        path = ensure_legal_pdf(doc.code)
+        return FileResponse(
+            path,
+            media_type="application/pdf",
+            filename=doc.filename,
+            headers={"Cache-Control": "public, max-age=3600", "X-Legal-Document-Hash": doc.digest},
+        )
+
+    @app.get("/legal/{code}", response_class=HTMLResponse)
+    async def legal_document_page(request: Request, code: str):
+        doc = get_doc(code)
+        if not doc:
+            raise HTTPException(status_code=404, detail="Документ не найден.")
+        return templates.TemplateResponse(
+            request,
+            "legal.html",
+            common_context({
+                "documents": all_docs(),
+                "document": doc,
+                "operator_configured": operator_is_configured(),
+            }),
+        )
+
+    @app.get("/api/legal/status")
+    async def api_legal_status(x_telegram_init_data: str | None = Header(default=None)):
+        user = await _tma_user(x_telegram_init_data)
+        required = [(code, LEGAL_DOCS[code].version, LEGAL_DOCS[code].digest) for code in REQUIRED_ON_START]
+        missing = await get_missing_legal_documents(user.app_user_id, required)
+        accepted = await get_legal_acceptances(user.app_user_id)
+        return {
+            "ok": True,
+            "required_version": LEGAL_DOCS["terms"].version,
+            "missing": missing,
+            "accepted": [
+                {
+                    "code": row["doc_code"],
+                    "version": row["doc_version"],
+                    "accepted_at": row["accepted_at"],
+                    "active": not bool(row["withdrawn_at"]),
+                }
+                for row in accepted
+            ],
+        }
+
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request):
         books = await list_catalog_books(limit=80, include_drafts=False)
@@ -353,7 +738,7 @@ def create_app() -> FastAPI:
         return templates.TemplateResponse(
             request,
             "catalog.html",
-            common_context({"books": books, **sections}),
+            common_context({"books": books, **sections, **(await price_context())}),
         )
 
     @app.get("/catalog", response_class=HTMLResponse)
@@ -363,7 +748,7 @@ def create_app() -> FastAPI:
         return templates.TemplateResponse(
             request,
             "catalog.html",
-            common_context({"books": books, **sections}),
+            common_context({"books": books, **sections, **(await price_context())}),
         )
 
     @app.get("/book/{book_id}", response_class=HTMLResponse)
@@ -372,6 +757,9 @@ def create_app() -> FastAPI:
         if book_row and book_row["publication_status"] != "published":
             book_row = None
         chapters = await list_chapters_for_book(book_id, published_only=True) if book_row else []
+        graphic_chapters = await list_graphic_chapters_for_book(book_id, published_only=True) if book_row else []
+        graphic_volumes = await list_graphic_volumes_for_book(book_id, published_only=True) if book_row else []
+        chapter_packages = await list_chapter_packages_for_book(book_id) if book_row else []
         audios = await list_audio_chapters_for_book(book_id, published_only=True) if book_row else []
         options = await get_book_options(book_id) if book_row else {}
         similar_books = await list_similar_books(book_id, limit=6) if book_row else []
@@ -383,6 +771,10 @@ def create_app() -> FastAPI:
                 "book": book_row,
                 "book_id": book_id,
                 "chapters": chapters,
+                "graphic_chapters": graphic_chapters,
+                "graphic_volumes": graphic_volumes,
+                "graphic_volume_map": {int(row["volume_number"]): row for row in graphic_volumes},
+                "chapter_packages": chapter_packages,
                 "audios": audios,
                 "options": options,
                 "similar_books": similar_books,
@@ -390,6 +782,52 @@ def create_app() -> FastAPI:
                 "project_name": settings.PROJECT_NAME,
                 "bot_username": settings.BOT_USERNAME.strip().lstrip("@"),
                 "channel_promotion_enabled": bool(settings.CHANNEL_ID.strip()),
+                **(await price_context()),
+            },
+        )
+
+    @app.get("/api/book/{book_id}/download.txt")
+    async def api_download_book_text(
+        book_id: int,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        book_row = await get_book(book_id)
+        if not book_row or book_row["publication_status"] == "deleted":
+            raise HTTPException(status_code=404, detail="Книга не найдена.")
+        if int(book_row["allow_download"] or 0) != 1:
+            raise HTTPException(status_code=403, detail="Автор разрешил только чтение внутри приложения.")
+        is_author = await book_belongs_to_author(book_id, user.app_user_id)
+        chapters = await list_chapters_for_book(book_id, published_only=not is_author)
+        available = []
+        for chapter_row in chapters:
+            if is_author or await user_can_access_chapter(user.app_user_id, int(chapter_row["id"])):
+                available.append(chapter_row)
+        if not available:
+            raise HTTPException(status_code=403, detail="Нет доступных для скачивания глав.")
+        if not is_author:
+            for chapter_row in available:
+                if int(chapter_row["is_free"] or 0) != 1 and int(chapter_row["price_stars"] or 0) > 0:
+                    await mark_purchase_access_used(
+                        user.app_user_id, chapter_id=int(chapter_row["id"])
+                    )
+        parts = [str(book_row["title"] or "Книга"), f"Автор: {book_row['pen_name'] or 'не указан'}", ""]
+        for chapter_row in available:
+            parts.extend([
+                f"Глава {int(chapter_row['number'])}. {chapter_row['title']}",
+                "",
+                str(chapter_row["text"] or ""),
+                "",
+            ])
+        safe_name = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in str(book_row["title"] or "book"))[:80] or "book"
+        content = "\n".join(parts).encode("utf-8")
+        return Response(
+            content=content,
+            media_type="text/plain; charset=utf-8",
+            headers={
+                "Content-Disposition": f'attachment; filename="{safe_name}.txt"; filename*=UTF-8\'\'{safe_name}.txt',
+                "X-Content-Type-Options": "nosniff",
+                "Cache-Control": "private, no-store",
             },
         )
 
@@ -414,10 +852,12 @@ def create_app() -> FastAPI:
         ad_settings = await get_reader_ad_settings()
         if is_public and chapter and ad_settings.get("enabled"):
             ads = await list_contextual_book_ads(int(chapter["book_id"]), limit=4)
+        runtime_cfg = await load_runtime_payment_settings()
         server_text_visible = bool(
             is_public
             and chapter
             and (int(chapter["is_free"] or 0) == 1 or int(chapter["price_stars"] or 0) <= 0)
+            and (not runtime_cfg.content_protection_enabled or int(chapter["allow_download"] or 0) == 1)
         )
         return templates.TemplateResponse(
             request,
@@ -434,8 +874,33 @@ def create_app() -> FastAPI:
                 "server_text_visible": server_text_visible,
                 "project_name": settings.PROJECT_NAME,
                 "bot_username": settings.BOT_USERNAME.strip().lstrip("@"),
+                **(await price_context()),
             },
         )
+
+    @app.get("/comic/{graphic_chapter_id}", response_class=HTMLResponse)
+    async def comic_reader(request: Request, graphic_chapter_id: int):
+        chapter = await get_graphic_chapter(graphic_chapter_id)
+        is_public = bool(
+            chapter
+            and chapter["publication_status"] == "published"
+            and chapter["status"] == "published"
+        )
+        adjacent = await get_adjacent_graphic_chapters(graphic_chapter_id) if is_public else {"previous": None, "next": None}
+        return templates.TemplateResponse(
+            request,
+            "comic_reader.html",
+            common_context(
+                {
+                    "graphic_chapter": chapter,
+                    "graphic_chapter_id": graphic_chapter_id,
+                    "previous_chapter": adjacent.get("previous"),
+                    "next_chapter": adjacent.get("next"),
+                    "bot_username": settings.BOT_USERNAME.strip().lstrip("@"),
+                }
+            ),
+        )
+
 
     @app.get("/settings", response_class=HTMLResponse)
     async def settings_page(request: Request):
@@ -461,7 +926,7 @@ def create_app() -> FastAPI:
     async def audio_index(request: Request):
         rows = await list_catalog_books(limit=60, include_drafts=False)
         books = [book for book in rows if int(book["audio_count"] or 0) > 0 or int(book["has_audio"] or 0) == 1]
-        return templates.TemplateResponse(request, "audio.html", common_context({"books": books}))
+        return templates.TemplateResponse(request, "audio.html", common_context({"books": books, **(await price_context())}))
 
     @app.get("/audio/{audio_id}", response_class=HTMLResponse)
     async def audio_player(request: Request, audio_id: int):
@@ -479,6 +944,7 @@ def create_app() -> FastAPI:
                 "next_audio": adjacent.get("next"),
                 "purchase_url": _bot_purchase_url("audio", audio_id),
                 "project_name": settings.PROJECT_NAME,
+                **(await price_context()),
             },
         )
 
@@ -507,6 +973,7 @@ def create_app() -> FastAPI:
         continue_reading = await list_user_continue_reading(user.app_user_id, limit=12)
         continue_listening = await list_user_continue_listening(user.app_user_id, limit=12)
         purchases = await list_user_purchases(user.app_user_id, limit=30)
+        chapter_package_balances = await list_user_chapter_package_balances(user.app_user_id)
         author_profile = await get_author_profile(user.app_user_id)
         is_owner = user.telegram_id in settings.owner_ids
         permissions = set(PERMISSION_BY_CODE) if is_owner else await get_admin_permissions(user.app_user_id)
@@ -523,6 +990,7 @@ def create_app() -> FastAPI:
             "continue_reading": _rows_to_dicts(continue_reading),
             "continue_listening": _rows_to_dicts(continue_listening),
             "purchases": _rows_to_dicts(purchases),
+            "chapter_package_balances": _rows_to_dicts(chapter_package_balances),
             "preferences": preferences,
             "author": {
                 "enabled": bool(author_profile and author_profile["status"] in {"active", "approved"}),
@@ -668,6 +1136,13 @@ def create_app() -> FastAPI:
         purchase_url = "" if moderation_access else _bot_purchase_url("chapter", chapter_id)
         comments = await list_comments_for_chapter(chapter_id, limit=50) if allowed and is_public and not moderation_access else []
         progress = await get_reading_progress(user.app_user_id, chapter_id) if allowed and not moderation_access else 0
+        if (
+            allowed
+            and not moderation_access
+            and int(chapter["is_free"] or 0) != 1
+            and int(chapter["price_stars"] or 0) > 0
+        ):
+            await mark_purchase_access_used(user.app_user_id, chapter_id=chapter_id)
         reader_ads = []
         ad_settings = await get_reader_ad_settings()
         if is_public and not moderation_access and ad_settings.get("enabled"):
@@ -698,13 +1173,24 @@ def create_app() -> FastAPI:
                 chapter_id=chapter_id,
                 action="moderation_chapter_read",
             )
+        protection = await _content_protection_payload(
+            user,
+            allow_download=bool(int(chapter["allow_download"] or 0)),
+            book_id=int(chapter["book_id"]),
+        )
+        package_credits = await get_user_chapter_credit_summary(
+            user.app_user_id, int(chapter["book_id"]), "text"
+        )
         return {
             "ok": True,
             "allowed": allowed,
             "moderation_access": moderation_access,
             "access_mode": "moderation" if moderation_access else ("reader" if allowed else "locked"),
             "purchase_url": purchase_url,
+            "package_credits": package_credits,
+            "package_unlock_url": f"/api/reader/{int(chapter_id)}/unlock-package",
             "progress_percent": progress,
+            "protection": protection,
             "chapter": {
                 "id": int(chapter["id"]),
                 "book_id": int(chapter["book_id"]),
@@ -713,6 +1199,7 @@ def create_app() -> FastAPI:
                 "number": int(chapter["number"]),
                 "is_free": int(chapter["is_free"] or 0) == 1,
                 "price_stars": int(chapter["price_stars"] or 0),
+                "buyer_estimate_minor": int(chapter["price_stars"] or 0) * (await load_runtime_payment_settings()).buyer_star_rate_minor,
                 "text": chapter["text"] if allowed else "",
             },
             "comments": _rows_to_dicts(comments),
@@ -724,6 +1211,19 @@ def create_app() -> FastAPI:
                 "next": _row_to_dict(adjacent["next"]) if adjacent["next"] else None,
             },
         }
+
+    @app.post("/api/reader/{chapter_id}/unlock-package")
+    async def api_unlock_text_chapter_from_package(
+        chapter_id: int,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        try:
+            result = await redeem_chapter_package_credit(user.app_user_id, chapter_id=chapter_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        await add_audit(user.app_user_id, "chapter_package_credit_used", "chapter", str(chapter_id), None, str(result.get("remaining")))
+        return result
 
     @app.get("/api/reader/tts/voices")
     async def api_reader_tts_voices(x_telegram_init_data: str | None = Header(default=None)):
@@ -761,6 +1261,12 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="Глава не найдена.")
         if not allowed:
             raise HTTPException(status_code=403, detail="Озвучивание доступно после открытия главы.")
+        if (
+            not moderation_access
+            and int(chapter["is_free"] or 0) != 1
+            and int(chapter["price_stars"] or 0) > 0
+        ):
+            await mark_purchase_access_used(user.app_user_id, chapter_id=chapter_id)
         selected_voice = validate_voice(voice)
         selected_rate = validate_rate(rate)
         selected_style = validate_style(style)
@@ -899,6 +1405,12 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="Глава не найдена.")
         if not allowed:
             raise HTTPException(status_code=403, detail="Нет доступа к главе.")
+        if (
+            not moderation_access
+            and int(chapter["is_free"] or 0) != 1
+            and int(chapter["price_stars"] or 0) > 0
+        ):
+            await mark_purchase_access_used(int(uid), chapter_id=chapter_id)
         try:
             asset = await generate_chapter_tts(
                 chapter_id,
@@ -1000,6 +1512,414 @@ def create_app() -> FastAPI:
         )
         return {"ok": True}
 
+    @app.get("/api/comic/{graphic_chapter_id}")
+    async def api_comic_reader(
+        graphic_chapter_id: int,
+        language: str = "ru",
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        chapter = await get_graphic_chapter(graphic_chapter_id)
+        if not chapter:
+            raise HTTPException(status_code=404, detail="Графическая глава не найдена.")
+        allowed, moderation_access = await _graphic_access(
+            app_user_id=user.app_user_id,
+            telegram_id=user.telegram_id,
+            chapter=chapter,
+        )
+        is_public = chapter["publication_status"] == "published" and chapter["status"] == "published"
+        if not is_public and not moderation_access:
+            raise HTTPException(status_code=404, detail="Графическая глава не найдена.")
+
+        all_pages = await list_graphic_pages(graphic_chapter_id)
+        visible_pages = all_pages if moderation_access else [
+            page for page in all_pages if str(page["moderation_status"] or "approved") != "rejected"
+        ]
+        preview_count = max(0, min(20, int(chapter["preview_pages"] or 0)))
+        preview_only = bool(not allowed and is_public and preview_count > 0)
+        purchase_url = _bot_purchase_url("graphic", int(graphic_chapter_id))
+        package_credits = await get_user_chapter_credit_summary(
+            user.app_user_id, int(chapter["book_id"]), "graphic"
+        )
+        if not allowed and not preview_only:
+            return {
+                "ok": True,
+                "allowed": False,
+                "preview_only": False,
+                "chapter": _row_to_dict(chapter),
+                "purchase_url": purchase_url,
+                "package_credits": package_credits,
+                "package_unlock_url": f"/api/comic/{int(graphic_chapter_id)}/unlock-package",
+                "pages": [],
+            }
+
+        pages = visible_pages[:preview_count] if preview_only else visible_pages
+        page_items = _graphic_page_payloads(
+            user_id=user.app_user_id,
+            chapter_id=graphic_chapter_id,
+            pages=pages,
+            include_ids=True,
+        )
+        layer_map = await get_graphic_reader_layers(
+            [int(item["id"]) for item in page_items if item.get("id")],
+            language_code=language,
+            user_id=user.app_user_id,
+        )
+        for item in page_items:
+            item["layers"] = layer_map.get(int(item.get("id") or 0), {"texts": [], "translations": [], "frames": [], "bookmarked": False, "comments": []})
+        adjacent = await get_adjacent_graphic_chapters(graphic_chapter_id)
+        progress_page = 1 if (moderation_access or preview_only) else await get_graphic_reading_progress(
+            user.app_user_id, graphic_chapter_id
+        )
+        effective_mode = str(chapter["reading_mode"] or "inherit")
+        if effective_mode == "inherit":
+            effective_mode = str(chapter["book_reading_mode"] or "ltr")
+        if effective_mode not in GRAPHIC_READING_MODES:
+            effective_mode = "ltr"
+        if moderation_access:
+            await add_audit(
+                user.app_user_id,
+                "moderation_graphic_reader_opened",
+                "graphic_chapter",
+                str(graphic_chapter_id),
+                None,
+                "Служебный доступ для проверки графических страниц",
+            )
+        protection = await _content_protection_payload(
+            user,
+            allow_download=False if preview_only else bool(int(chapter["allow_download"] or 0)),
+            book_id=int(chapter["book_id"]),
+        )
+        if preview_only:
+            protection["protected"] = True
+            protection["allow_download"] = False
+            protection["download_url"] = ""
+        return {
+            "ok": True,
+            "allowed": True,
+            "preview_only": preview_only,
+            "preview_pages": preview_count,
+            "purchase_url": purchase_url if preview_only else "",
+            "package_credits": package_credits,
+            "package_unlock_url": f"/api/comic/{int(graphic_chapter_id)}/unlock-package",
+            "moderation_access": moderation_access,
+            "access_mode": "moderation" if moderation_access else ("preview" if preview_only else "reader"),
+            "chapter": _row_to_dict(chapter),
+            "content_type_label": _graphic_type_label(str(chapter["content_type"] or "")),
+            "reading_mode": effective_mode,
+            "progress_page": progress_page,
+            "protection": protection,
+            "pages": page_items,
+            "delivery": {
+                "adaptive_variants": True,
+                "device_cache_max_mb": max(64, int(settings.COMIC_DEVICE_CACHE_MAX_MB or 512)),
+                "device_cache_max_items": max(100, int(settings.COMIC_DEVICE_CACHE_MAX_ITEMS or 1200)),
+                "preload_fast": max(1, int(settings.COMIC_PRELOAD_PAGES_FAST or 6)),
+                "preload_slow": max(0, int(settings.COMIC_PRELOAD_PAGES_SLOW or 1)),
+                "storage_backend": "local-volume",
+            },
+            "advanced_reading": {
+                "ocr_available": ocr_engine_available(),
+                "search_url": f"/api/comic/book/{int(chapter['book_id'])}/search",
+                "bookmarks_url": f"/api/comic/book/{int(chapter['book_id'])}/bookmarks",
+                "language": str(language or "ru")[:12],
+                "translation_layers": True,
+                "frame_mode": any(bool(item.get("layers", {}).get("frames")) for item in page_items),
+                "page_comments": True,
+            },
+            "navigation": {
+                "previous": _row_to_dict(adjacent["previous"]) if adjacent["previous"] else None,
+                "next": None if preview_only else (_row_to_dict(adjacent["next"]) if adjacent["next"] else None),
+            },
+        }
+
+    @app.post("/api/comic/{graphic_chapter_id}/unlock-package")
+    async def api_unlock_graphic_chapter_from_package(
+        graphic_chapter_id: int,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        try:
+            result = await redeem_chapter_package_credit(
+                user.app_user_id, graphic_chapter_id=graphic_chapter_id
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        await add_audit(user.app_user_id, "chapter_package_credit_used", "graphic_chapter", str(graphic_chapter_id), None, str(result.get("remaining")))
+        return result
+
+    @app.get("/api/comic/book/{book_id}/search")
+    async def api_comic_text_search(
+        book_id: int,
+        q: str,
+        language: str = "ru",
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        rows = await search_graphic_book_text(book_id, q, language_code=language, limit=80)
+        items = []
+        for row in rows:
+            if await user_can_access_graphic(user.app_user_id, int(row["graphic_chapter_id"])):
+                items.append(_row_to_dict(row))
+        if items:
+            await record_graphic_reading_event(user.app_user_id, int(items[0]["graphic_chapter_id"]), "search")
+        return {"ok": True, "query": q, "items": items}
+
+    @app.post("/api/comic/page/{graphic_page_id}/bookmark")
+    async def api_comic_page_bookmark(
+        graphic_page_id: int,
+        payload: dict[str, Any] | None = None,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        page = await get_graphic_page(graphic_page_id)
+        if not page or not await user_can_access_graphic(user.app_user_id, int(page["graphic_chapter_id"])):
+            raise HTTPException(status_code=403, detail="Нет доступа к этой странице.")
+        active = await toggle_graphic_page_bookmark(user.app_user_id, graphic_page_id, str((payload or {}).get("note") or ""))
+        return {"ok": True, "bookmarked": active}
+
+    @app.get("/api/comic/book/{book_id}/bookmarks")
+    async def api_comic_bookmarks(
+        book_id: int,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        return {"ok": True, "items": _rows_to_dicts(await list_user_graphic_bookmarks(user.app_user_id, book_id))}
+
+    @app.post("/api/comic/page/{graphic_page_id}/comments")
+    async def api_comic_page_comment(
+        graphic_page_id: int,
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        page = await get_graphic_page(graphic_page_id)
+        if not page or not await user_can_access_graphic(user.app_user_id, int(page["graphic_chapter_id"])):
+            raise HTTPException(status_code=403, detail="Нет доступа к этой странице.")
+        try:
+            comment_id = await add_graphic_page_comment(user.app_user_id, graphic_page_id, str(payload.get("text") or ""))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"ok": True, "comment_id": comment_id, "message": "Комментарий отправлен на модерацию."}
+
+    @app.post("/api/comic/{graphic_chapter_id}/event")
+    async def api_comic_reading_event(
+        graphic_chapter_id: int,
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        chapter = await get_graphic_chapter(graphic_chapter_id)
+        if not chapter or not await user_can_access_graphic(user.app_user_id, graphic_chapter_id):
+            raise HTTPException(status_code=403, detail="Нет доступа к главе.")
+        page_id = int(payload.get("graphic_page_id") or 0) or None
+        await record_graphic_reading_event(
+            user.app_user_id,
+            graphic_chapter_id,
+            str(payload.get("event_type") or "page_view"),
+            graphic_page_id=page_id,
+            session_key=str(payload.get("session_key") or ""),
+        )
+        return {"ok": True}
+
+    @app.get("/api/comic/book/{book_id}/offline-manifest")
+    async def api_comic_offline_manifest(
+        book_id: int,
+        volume: int = 0,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        book = await get_book(book_id)
+        if not book or str(book["publication_status"] or "") != "published":
+            raise HTTPException(status_code=404, detail="Произведение не найдено.")
+        if int(book["allow_download"] or 0) != 1:
+            raise HTTPException(status_code=403, detail="Автор не разрешил сохранять это произведение на устройство.")
+        chapters = await list_graphic_chapters_for_book(book_id, published_only=True)
+        selected = [
+            chapter for chapter in chapters
+            if int(volume or 0) <= 0 or int(chapter["volume_number"] or 1) == int(volume)
+        ]
+        items: list[dict[str, Any]] = []
+        protection = await _content_protection_payload(
+            user, allow_download=True, book_id=int(book_id)
+        )
+        for chapter in selected:
+            chapter_id = int(chapter["id"])
+            if not await user_can_access_graphic(user.app_user_id, chapter_id):
+                continue
+            pages = [
+                page for page in await list_graphic_pages(chapter_id)
+                if str(page["moderation_status"] or "approved") != "rejected"
+            ]
+            effective_mode = str(chapter["reading_mode"] or "inherit")
+            if effective_mode == "inherit":
+                effective_mode = str(book["reading_mode"] or "ltr")
+            adjacent = await get_adjacent_graphic_chapters(chapter_id)
+            items.append({
+                "meta": {
+                    "ok": True,
+                    "allowed": True,
+                    "moderation_access": False,
+                    "access_mode": "reader",
+                    "chapter": _row_to_dict(chapter),
+                    "content_type_label": _graphic_type_label(str(book["content_type"] or "")),
+                    "reading_mode": effective_mode,
+                    "progress_page": 1,
+                    "protection": protection,
+                    "pages": _graphic_page_payloads(
+                        user_id=user.app_user_id, chapter_id=chapter_id, pages=pages
+                    ),
+                    "navigation": {
+                        "previous": _row_to_dict(adjacent["previous"]) if adjacent["previous"] else None,
+                        "next": _row_to_dict(adjacent["next"]) if adjacent["next"] else None,
+                    },
+                }
+            })
+        if not items:
+            raise HTTPException(status_code=403, detail="Нет доступных глав для сохранения.")
+        return {
+            "ok": True,
+            "book_id": int(book_id),
+            "volume_number": max(0, int(volume or 0)),
+            "chapters": items,
+            "delivery": {
+                "device_cache_max_mb": max(64, int(settings.COMIC_DEVICE_CACHE_MAX_MB or 512)),
+                "device_cache_max_items": max(100, int(settings.COMIC_DEVICE_CACHE_MAX_ITEMS or 1200)),
+            },
+        }
+
+    @app.post("/api/comic/{graphic_chapter_id}/progress")
+    async def api_comic_progress(
+        graphic_chapter_id: int,
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        chapter = await get_graphic_chapter(graphic_chapter_id)
+        if not chapter:
+            raise HTTPException(status_code=404, detail="Графическая глава не найдена.")
+        allowed, moderation_access = await _graphic_access(
+            app_user_id=user.app_user_id,
+            telegram_id=user.telegram_id,
+            chapter=chapter,
+        )
+        if not allowed:
+            raise HTTPException(status_code=403, detail="Нет доступа к главе.")
+        page_number = max(1, min(int(chapter["pages_count"] or 1), int(payload.get("page_number") or 1)))
+        if not moderation_access:
+            await save_graphic_reading_progress(user.app_user_id, graphic_chapter_id, page_number)
+        return {"ok": True, "page_number": page_number, "moderation_access": moderation_access}
+
+    @app.post("/api/comic/page/{graphic_page_id}/report")
+    async def api_comic_page_report(
+        graphic_page_id: int,
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        page = await get_graphic_page(graphic_page_id)
+        if not page:
+            raise HTTPException(status_code=404, detail="Страница не найдена.")
+        chapter = await get_graphic_chapter(int(page["graphic_chapter_id"]))
+        if not chapter:
+            raise HTTPException(status_code=404, detail="Глава не найдена.")
+        allowed, moderation_access = await _graphic_access(
+            app_user_id=user.app_user_id,
+            telegram_id=user.telegram_id,
+            chapter=chapter,
+        )
+        preview_allowed = (
+            chapter["publication_status"] == "published"
+            and chapter["status"] == "published"
+            and int(page["page_number"] or 0) <= max(0, int(chapter["preview_pages"] or 0))
+        )
+        if not allowed and not preview_allowed and not moderation_access:
+            raise HTTPException(status_code=403, detail="Нет доступа к этой странице.")
+        try:
+            report_id = await create_graphic_page_report(
+                user.app_user_id, graphic_page_id, str(payload.get("reason") or "")
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        await add_audit(user.app_user_id, "graphic_page_reported", "graphic_page", str(graphic_page_id))
+        return {"ok": True, "report_id": report_id, "message": "Сообщение отправлено модератору."}
+
+    @app.get("/media/comic/{graphic_chapter_id}/{page_number}")
+    async def media_comic_page(
+        graphic_chapter_id: int,
+        page_number: int,
+        user_id: int,
+        expires: int,
+        token: str,
+        variant: str = "auto",
+        width: int = 0,
+    ):
+        if not _validate_graphic_media_token(
+            user_id=user_id,
+            chapter_id=graphic_chapter_id,
+            page_number=page_number,
+            expires_at=expires,
+            token=token,
+        ):
+            raise HTTPException(status_code=403, detail="Ссылка на страницу устарела.")
+        media_user = await get_user_by_id(int(user_id))
+        if not media_user or int(media_user["is_blocked"] or 0) == 1:
+            raise HTTPException(status_code=403, detail="Доступ закрыт.")
+        chapter = await get_graphic_chapter(graphic_chapter_id)
+        if not chapter or chapter["status"] == "deleted" or chapter["publication_status"] == "deleted":
+            raise HTTPException(status_code=404, detail="Страница не найдена.")
+        allowed, moderation_access = await _graphic_access(
+            app_user_id=int(user_id),
+            telegram_id=int(media_user["telegram_id"]),
+            chapter=chapter,
+        )
+        preview_allowed = (
+            str(chapter["publication_status"] or "") == "published"
+            and str(chapter["status"] or "") == "published"
+            and int(page_number) <= max(0, int(chapter["preview_pages"] or 0))
+        )
+        if not allowed and not moderation_access and not preview_allowed:
+            raise HTTPException(status_code=403, detail="Страница доступна после покупки.")
+        pages = await list_graphic_pages(graphic_chapter_id)
+        page = next((row for row in pages if int(row["page_number"]) == int(page_number)), None)
+        if not page:
+            raise HTTPException(status_code=404, detail="Страница не найдена.")
+        if str(page["moderation_status"] or "approved") == "rejected":
+            can_review = bool(int(media_user["telegram_id"]) in settings.owner_ids)
+            if media_user and not can_review:
+                can_review = "mod_books" in await get_admin_permissions(int(user_id))
+            if not can_review:
+                raise HTTPException(status_code=404, detail="Страница скрыта после проверки.")
+        if (
+            allowed
+            and not moderation_access
+            and not preview_allowed
+            and int(chapter["is_free"] or 0) != 1
+            and int(chapter["price_stars"] or 0) > 0
+        ):
+            await mark_purchase_access_used(
+                int(user_id), graphic_chapter_id=graphic_chapter_id
+            )
+        selected = select_page_variant(
+            page, requested=variant, target_width=max(0, int(width or 0)), root=GRAPHIC_STORAGE_ROOT
+        )
+        if not selected:
+            raise HTTPException(status_code=404, detail="Файл страницы не найден.")
+        path = Path(selected["path"])
+        return FileResponse(
+            path,
+            media_type=str(selected.get("mime_type") or "image/webp"),
+            headers={
+                "Cache-Control": (
+                    "private, max-age=604800, immutable"
+                    if int(chapter["allow_download"] or 0) == 1
+                    else "private, no-store, max-age=0"
+                ),
+                "Content-Disposition": f'inline; filename="comic_{graphic_chapter_id}_{page_number}_{variant}.webp"',
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
     @app.get("/api/audio/{audio_id}/meta")
     async def api_audio_meta(audio_id: int, x_telegram_init_data: str | None = Header(default=None)):
         user = await _tma_user(x_telegram_init_data)
@@ -1027,6 +1947,7 @@ def create_app() -> FastAPI:
                 "duration_seconds": int(audio["duration_seconds"] or 0),
                 "is_free": int(audio["is_free"] or 0) == 1,
                 "price_stars": int(audio["price_stars"] or 0),
+                "buyer_estimate_minor": int(audio["price_stars"] or 0) * (await load_runtime_payment_settings()).buyer_star_rate_minor,
             },
         }
 
@@ -1050,6 +1971,8 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="Аудиоглава не найдена.")
         if not await user_can_access_audio(user.app_user_id, audio_id):
             raise HTTPException(status_code=403, detail="Аудиоглава доступна после покупки.")
+        if int(audio["is_free"] or 0) != 1 and int(audio["price_stars"] or 0) > 0:
+            await mark_purchase_access_used(user.app_user_id, audio_chapter_id=audio_id)
         path = Path(audio["file_path"])
         if not path.exists() or not path.is_file():
             raise HTTPException(status_code=404, detail="Аудиофайл не найден.")
@@ -1060,19 +1983,219 @@ def create_app() -> FastAPI:
         user, profile = await author_session(x_telegram_init_data)
         stats = await get_author_dashboard_stats(user.app_user_id)
         finance = await get_author_finance_summary(user.app_user_id)
+        rub_finance = {
+            "held_minor": int(finance.get("held_minor", 0)),
+            "available_minor": int(finance.get("available_minor", 0)),
+            "pending_minor": int(finance.get("requested_minor", 0)),
+            "paid_minor": int(finance.get("paid_minor", 0)),
+            "gross_minor": int(finance.get("net_minor", 0)),
+            "commission_minor": 0,
+        }
+        financial_profile = await get_author_financial_profile(user.app_user_id)
         books = await list_author_books_with_counts(user.app_user_id)
+        public_financial_profile = None
+        if financial_profile:
+            public_financial_profile = {
+                "legal_status": financial_profile["legal_status"],
+                "legal_name": financial_profile["legal_name"],
+                "inn": financial_profile["inn"],
+                "ogrn": financial_profile["ogrn"],
+                "country": financial_profile["country"],
+                "sbp_phone_masked": mask_phone(decrypt_text(financial_profile["sbp_phone_encrypted"] or "")),
+                "sbp_bank_id": financial_profile["sbp_bank_id"],
+                "sbp_bank_name": financial_profile["sbp_bank_name"],
+                "verification_status": financial_profile["verification_status"],
+                "rejection_reason": financial_profile["rejection_reason"],
+            }
         return {
             "ok": True,
             "profile": _row_to_dict(profile),
             "stats": stats,
             "finance": finance,
+            "rub_finance": rub_finance,
+            "financial_profile": public_financial_profile,
+            "pricing_policy": {
+                "model": "stars_only_two_rates",
+                "commission_percent": 20,
+                "hold_days": 14,
+                "example": two_rate_price(
+                    10,
+                    (await load_runtime_payment_settings()).buyer_star_rate_minor,
+                    (await load_runtime_payment_settings()).author_star_rate_minor,
+                    20,
+                ),
+                "yookassa_payouts_configured": False,
+                "manual_payouts_only": True,
+                "payout_min_minor": 10000,
+            },
             "books": _rows_to_dicts(books),
             "upload": {
                 "chunk_size": CHUNK_SIZE_BYTES,
                 "max_mb": int(settings.MAX_BOOK_UPLOAD_MB or 0),
                 "formats": ["TXT", "DOCX", "FB2", "EPUB", "PDF", "ZIP"],
             },
+            "graphic_upload": {
+                "chunk_size": CHUNK_SIZE_BYTES,
+                "max_mb": int(settings.MAX_COMIC_UPLOAD_MB or 0),
+                "max_pages": int(settings.MAX_COMIC_PAGES or 500),
+                "formats": ["PDF", "CBZ", "ZIP", "CBR", "RAR", "7Z", "EPUB fixed-layout", "JPG", "PNG", "WEBP", "AVIF", "GIF", "BMP", "TIFF"],
+            },
         }
+
+    @app.get("/api/author/sbp-banks")
+    async def api_author_sbp_banks(x_telegram_init_data: str | None = Header(default=None)):
+        await author_session(x_telegram_init_data)
+        if not await payouts_configured():
+            return {"ok": True, "configured": False, "items": []}
+        try:
+            items = await list_sbp_banks()
+        except YooKassaPayoutError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return {"ok": True, "configured": True, "items": items}
+
+    @app.put("/api/author/financial-profile")
+    async def api_author_financial_profile(
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user, _ = await author_session(x_telegram_init_data)
+        required = [(code, LEGAL_DOCS[code].version, LEGAL_DOCS[code].digest) for code in ("author_license", "author_data_consent")]
+        missing = await get_missing_legal_documents(user.app_user_id, required)
+        if missing:
+            raise HTTPException(status_code=409, detail="Сначала примите актуальный договор автора и отдельное согласие на обработку данных в боте.")
+        status = str(payload.get("legal_status") or "").strip()
+        if status not in {"self_employed", "individual_entrepreneur", "legal_entity", "individual"}:
+            raise HTTPException(status_code=400, detail="Выберите правовой и налоговый статус автора.")
+        legal_name = str(payload.get("legal_name") or "").strip()
+        inn = "".join(ch for ch in str(payload.get("inn") or "") if ch.isdigit())
+        ogrn = "".join(ch for ch in str(payload.get("ogrn") or "") if ch.isdigit())
+        if len(legal_name) < 3 or len(inn) not in {10, 12}:
+            raise HTTPException(status_code=400, detail="Укажите ФИО/наименование и корректный ИНН.")
+        current_profile = await get_author_financial_profile(user.app_user_id)
+        raw_phone = str(payload.get("sbp_phone") or "").strip()
+        if raw_phone:
+            try:
+                phone = normalize_phone(raw_phone)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            phone_encrypted = encrypt_text(phone)
+        elif current_profile and current_profile["sbp_phone_encrypted"]:
+            phone_encrypted = str(current_profile["sbp_phone_encrypted"])
+            phone = decrypt_text(phone_encrypted)
+        else:
+            raise HTTPException(status_code=400, detail="Укажите номер телефона, привязанный к СБП.")
+        bank_id = str(payload.get("sbp_bank_id") or "").strip()
+        bank_name = str(payload.get("sbp_bank_name") or "").strip()
+        if (not bank_id or not bank_name) and current_profile:
+            bank_id = bank_id or str(current_profile["sbp_bank_id"] or "")
+            bank_name = bank_name or str(current_profile["sbp_bank_name"] or "")
+        if not bank_id or not bank_name:
+            raise HTTPException(status_code=400, detail="Выберите банк для СБП.")
+        ok = await upsert_author_financial_profile(
+            user.app_user_id,
+            legal_status=status,
+            legal_name=legal_name,
+            inn=inn,
+            ogrn=ogrn,
+            country=str(payload.get("country") or "RU"),
+            sbp_phone_encrypted=phone_encrypted,
+            sbp_bank_id=bank_id,
+            sbp_bank_name=bank_name,
+        )
+        if not ok:
+            raise HTTPException(status_code=404, detail="Профиль автора не найден.")
+        await add_audit(user.app_user_id, "author_financial_profile_updated", "author", str(user.app_user_id), None, status)
+        return {"ok": True, "verification_status": "pending", "sbp_phone_masked": mask_phone(phone)}
+
+    @app.post("/api/author/rub-payouts")
+    async def api_author_request_rub_payout(
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user, _ = await author_session(x_telegram_init_data)
+        profile = await get_author_financial_profile(user.app_user_id)
+        if not profile or profile["verification_status"] != "verified":
+            raise HTTPException(status_code=409, detail="Сначала заполните и подтвердите платёжный профиль автора.")
+        amount_minor = int(payload.get("amount_minor") or 0)
+        if amount_minor < 10000:
+            raise HTTPException(status_code=400, detail="Минимальная заявка на выплату — 100 рублей.")
+        payout_id = await create_author_rub_payout_request(
+            user.app_user_id,
+            amount_minor=amount_minor,
+            phone_encrypted=str(profile["sbp_phone_encrypted"] or ""),
+            bank_id=str(profile["sbp_bank_id"] or ""),
+            bank_name=str(profile["sbp_bank_name"] or ""),
+            idempotence_key=str(uuid.uuid4()),
+        )
+        await add_audit(user.app_user_id, "author_rub_payout_requested", "rub_payout", str(payout_id), None, str(amount_minor))
+        return {"ok": True, "payout_id": payout_id, "status": "new", "amount_minor": amount_minor}
+
+    @app.post("/api/control/rub-payout/{payout_id}/execute")
+    async def api_control_execute_rub_payout(
+        payout_id: int,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        actor, _, _ = await control_session(x_telegram_init_data, "payouts")
+        request_row = await get_author_rub_payout_request(payout_id)
+        if not request_row:
+            raise HTTPException(status_code=404, detail="Заявка не найдена.")
+        if request_row["status"] not in {"new", "failed"}:
+            raise HTTPException(status_code=409, detail="Заявка уже обрабатывается или завершена.")
+        if not await payouts_configured():
+            raise HTTPException(status_code=503, detail="Выплаты ЮKassa ещё не подключены владельцем.")
+        phone = decrypt_text(str(request_row["phone_encrypted"] or ""))
+        try:
+            await update_author_rub_payout_status(payout_id, "processing")
+            result = await create_sbp_payout(
+                amount_minor=int(request_row["amount_minor"]),
+                phone=phone,
+                bank_id=str(request_row["bank_id"] or ""),
+                description=f"Вознаграждение автора Вокслиры, заявка {payout_id}",
+                metadata={"voxlyra_payout_id": payout_id, "author_id": int(request_row["author_id"])},
+                idempotence_key=str(request_row["idempotence_key"]),
+            )
+            local_status = "succeeded" if result.status == "succeeded" else "processing"
+            await update_author_rub_payout_status(
+                payout_id,
+                local_status,
+                provider_payout_id=result.payout_id,
+            )
+            await add_audit(actor.app_user_id, "author_rub_payout_executed", "rub_payout", str(payout_id), None, result.status)
+            return {"ok": True, "status": result.status, "provider_payout_id": result.payout_id}
+        except (ValueError, YooKassaPayoutError) as exc:
+            await update_author_rub_payout_status(payout_id, "failed", failure_reason=str(exc))
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @app.post("/api/author/projects")
+    async def api_author_create_project(
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user, profile = await author_session(x_telegram_init_data)
+        title = str(payload.get("title") or "").strip()
+        content_type = str(payload.get("content_type") or "book")
+        reading_mode = str(payload.get("reading_mode") or ("rtl" if content_type == "manga" else "vertical" if content_type in {"manhwa", "webtoon"} else "ltr"))
+        if len(title) < 2:
+            raise HTTPException(status_code=400, detail="Введите название произведения.")
+        if content_type not in {"book", *GRAPHIC_CONTENT_TYPES}:
+            raise HTTPException(status_code=400, detail="Выберите тип произведения из списка.")
+        if reading_mode not in GRAPHIC_READING_MODES - {"inherit"}:
+            raise HTTPException(status_code=400, detail="Выберите режим чтения из списка.")
+        book_id = await create_book(
+            int(profile["id"]),
+            title[:160],
+            str(payload.get("description") or "").strip()[:12000],
+            str(payload.get("age_limit") or "16+"),
+            "writing",
+            False,
+            "free",
+            0,
+            content_type=content_type,
+            reading_mode=reading_mode,
+        )
+        await add_audit(user.app_user_id, "author_project_created_web", "book", str(book_id), None, content_type)
+        book = await get_book(book_id)
+        return {"ok": True, "book": _row_to_dict(book)}
 
     @app.get("/api/author/book/{book_id}/cover")
     async def api_author_book_cover(book_id: int, x_telegram_init_data: str | None = Header(default=None)):
@@ -1104,11 +2227,17 @@ def create_app() -> FastAPI:
         if not book_row or book_row["publication_status"] == "deleted":
             raise HTTPException(status_code=404, detail="Книга не найдена.")
         chapters = await list_chapters_for_book(book_id)
+        graphic_chapters = await list_graphic_chapters_for_book(book_id)
+        graphic_volumes = await list_graphic_volumes_for_book(book_id)
+        chapter_packages = await list_chapter_packages_for_book(book_id, include_inactive=True)
         audio = await list_audio_chapters_for_book(book_id)
         return {
             "ok": True,
             "book": _row_to_dict(book_row),
             "chapters": _rows_to_dicts(chapters),
+            "graphic_chapters": _rows_to_dicts(graphic_chapters),
+            "graphic_volumes": _rows_to_dicts(graphic_volumes),
+            "chapter_packages": _rows_to_dicts(chapter_packages),
             "audio": _rows_to_dicts(audio),
         }
 
@@ -1123,7 +2252,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="Книга не найдена.")
         values = {key: payload[key] for key in (
             "title", "description", "age_limit", "writing_status",
-            "allow_download", "pricing_type", "price_stars",
+            "allow_download", "pricing_type", "price_stars", "content_type", "reading_mode",
         ) if key in payload}
         if "age_limit" in values and values["age_limit"] not in {"0+", "6+", "12+", "16+", "18+"}:
             raise HTTPException(status_code=400, detail="Выберите возрастное ограничение из списка.")
@@ -1131,6 +2260,10 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="Выберите состояние книги из списка.")
         if "pricing_type" in values and values["pricing_type"] not in {"free", "chapters", "whole_book"}:
             raise HTTPException(status_code=400, detail="Выберите способ продажи из списка.")
+        if "content_type" in values and values["content_type"] not in {"book", *GRAPHIC_CONTENT_TYPES}:
+            raise HTTPException(status_code=400, detail="Выберите тип произведения из списка.")
+        if "reading_mode" in values and values["reading_mode"] not in GRAPHIC_READING_MODES - {"inherit"}:
+            raise HTTPException(status_code=400, detail="Выберите режим чтения из списка.")
         ok = await update_author_book_fields(book_id, user.app_user_id, values)
         if not ok:
             raise HTTPException(status_code=400, detail="Не удалось сохранить изменения.")
@@ -1138,13 +2271,80 @@ def create_app() -> FastAPI:
         book_row = await get_book(book_id)
         return {"ok": True, "book": _row_to_dict(book_row)}
 
+    @app.post("/api/author/book/{book_id}/chapter-packages")
+    async def api_author_create_chapter_package(
+        book_id: int,
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user, _ = await author_session(x_telegram_init_data)
+        if not await book_belongs_to_author(book_id, user.app_user_id):
+            raise HTTPException(status_code=404, detail="Произведение не найдено.")
+        count = int(payload.get("chapters_count") or 0)
+        price = int(payload.get("price_stars") or 0)
+        scope = str(payload.get("content_scope") or "text")
+        if count < 1 or count > 10000:
+            raise HTTPException(status_code=400, detail="В пакете должно быть от 1 до 10 000 глав.")
+        if price < 1 or price > 1000000:
+            raise HTTPException(status_code=400, detail="Цена пакета должна быть от 1 до 1 000 000 Stars.")
+        if scope not in {"text", "graphic", "all"}:
+            raise HTTPException(status_code=400, detail="Выберите вид глав для пакета.")
+        package_id = await create_chapter_package_for_author(
+            book_id, user.app_user_id,
+            title=str(payload.get("title") or ""),
+            chapters_count=count,
+            price_stars=price,
+            content_scope=scope,
+        )
+        await add_audit(user.app_user_id, "chapter_package_created", "chapter_package", str(package_id), None, f"{count}:{price}:{scope}")
+        packages = await list_chapter_packages_for_book(book_id, include_inactive=True)
+        return {"ok": True, "package_id": package_id, "items": _rows_to_dicts(packages)}
+
+    @app.patch("/api/author/chapter-package/{package_id}")
+    async def api_author_update_chapter_package(
+        package_id: int,
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user, _ = await author_session(x_telegram_init_data)
+        count = int(payload.get("chapters_count") or 0)
+        price = int(payload.get("price_stars") or 0)
+        scope = str(payload.get("content_scope") or "text")
+        if count < 1 or count > 10000 or price < 1 or price > 1000000 or scope not in {"text", "graphic", "all"}:
+            raise HTTPException(status_code=400, detail="Проверьте количество глав, цену и тип пакета.")
+        ok = await update_chapter_package_for_author(
+            package_id, user.app_user_id,
+            title=str(payload.get("title") or ""),
+            chapters_count=count,
+            price_stars=price,
+            content_scope=scope,
+            is_active=bool(payload.get("is_active", True)),
+        )
+        if not ok:
+            raise HTTPException(status_code=404, detail="Пакет не найден.")
+        await add_audit(user.app_user_id, "chapter_package_updated", "chapter_package", str(package_id), None, f"{count}:{price}:{scope}")
+        return {"ok": True}
+
+    @app.delete("/api/author/chapter-package/{package_id}")
+    async def api_author_delete_chapter_package(
+        package_id: int,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user, _ = await author_session(x_telegram_init_data)
+        ok = await deactivate_chapter_package_for_author(package_id, user.app_user_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail="Пакет не найден.")
+        await add_audit(user.app_user_id, "chapter_package_deactivated", "chapter_package", str(package_id), None, "")
+        return {"ok": True}
+
     @app.post("/api/author/book/{book_id}/submit")
     async def api_author_submit_book(book_id: int, x_telegram_init_data: str | None = Header(default=None)):
         user, _ = await author_session(x_telegram_init_data)
         if not await book_belongs_to_author(book_id, user.app_user_id):
             raise HTTPException(status_code=404, detail="Книга не найдена.")
         chapters = await list_chapters_for_book(book_id)
-        if not chapters:
+        graphic_chapters = await list_graphic_chapters_for_book(book_id)
+        if not chapters and not graphic_chapters:
             raise HTTPException(status_code=400, detail="Перед отправкой добавьте хотя бы одну главу.")
         if not settings.BOT_TOKEN:
             raise HTTPException(status_code=503, detail="Бот временно недоступен для проверки книги.")
@@ -1265,6 +2465,701 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="Глава не найдена.")
         await add_audit(user.app_user_id, "chapter_deleted_web", "chapter", str(chapter_id))
         return {"ok": True}
+
+    @app.patch("/api/author/graphic-chapter/{graphic_chapter_id}")
+    async def api_author_update_graphic_chapter(
+        graphic_chapter_id: int,
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user, _ = await author_session(x_telegram_init_data)
+        reading_mode = payload.get("reading_mode")
+        if reading_mode is not None and str(reading_mode) not in GRAPHIC_READING_MODES:
+            raise HTTPException(status_code=400, detail="Выберите режим чтения из списка.")
+        price = max(0, min(100000, int(payload.get("price_stars") or 0))) if "price_stars" in payload else None
+        ok = await update_graphic_chapter_for_author(
+            graphic_chapter_id,
+            user.app_user_id,
+            title=payload.get("title"),
+            reading_mode=str(reading_mode) if reading_mode is not None else None,
+            is_free=(price == 0) if price is not None else None,
+            price_stars=price,
+            volume_number=(max(1, int(payload.get("volume_number") or 1)) if "volume_number" in payload else None),
+            volume_title=(str(payload.get("volume_title") or "").strip()[:120] if "volume_title" in payload else None),
+        )
+        preview_changed = False
+        if "preview_pages" in payload:
+            preview_changed = await set_graphic_chapter_preview_for_author(
+                graphic_chapter_id, user.app_user_id, max(0, min(50, int(payload.get("preview_pages") or 0)))
+            )
+        if not ok and not preview_changed:
+            raise HTTPException(status_code=404, detail="Графическая глава не найдена.")
+        await add_audit(user.app_user_id, "graphic_chapter_updated_web", "graphic_chapter", str(graphic_chapter_id))
+        chapter = await get_graphic_chapter(graphic_chapter_id)
+        return {"ok": True, "chapter": _row_to_dict(chapter)}
+
+    @app.patch("/api/author/book/{book_id}/graphic-volume/{volume_number}")
+    async def api_author_update_graphic_volume(
+        book_id: int,
+        volume_number: int,
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user, _ = await author_session(x_telegram_init_data)
+        if not await book_belongs_to_author(book_id, user.app_user_id):
+            raise HTTPException(status_code=404, detail="Произведение не найдено.")
+        price = max(0, min(100000, int(payload.get("price_stars") or 0)))
+        ok = await upsert_graphic_volume_for_author(
+            book_id,
+            max(1, min(10000, int(volume_number))),
+            user.app_user_id,
+            title=str(payload.get("title") or "").strip()[:120],
+            is_free=bool(payload.get("is_free", price <= 0)),
+            price_stars=price,
+        )
+        if not ok:
+            raise HTTPException(status_code=404, detail="Том не найден.")
+        row = await get_graphic_volume(book_id, volume_number)
+        await add_audit(user.app_user_id, "graphic_volume_updated_web", "book", str(book_id), None, str(volume_number))
+        return {"ok": True, "volume": _row_to_dict(row)}
+
+    @app.delete("/api/author/graphic-chapter/{graphic_chapter_id}")
+    async def api_author_delete_graphic_chapter(
+        graphic_chapter_id: int,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user, _ = await author_session(x_telegram_init_data)
+        chapter = await get_graphic_chapter(graphic_chapter_id)
+        pages = await list_graphic_pages(graphic_chapter_id) if chapter else []
+        if not await delete_graphic_chapter_for_author(graphic_chapter_id, user.app_user_id):
+            raise HTTPException(status_code=404, detail="Графическая глава не найдена.")
+        for page in pages:
+            delete_page_files(page, root=GRAPHIC_STORAGE_ROOT)
+        if pages:
+            parent = _safe_graphic_path(str(Path(str(pages[0]["file_path"])).parent))
+            if parent:
+                shutil.rmtree(parent, ignore_errors=True)
+        await add_audit(user.app_user_id, "graphic_chapter_deleted_web", "graphic_chapter", str(graphic_chapter_id))
+        return {"ok": True}
+
+    @app.get("/api/author/graphic-chapter/{graphic_chapter_id}/pages")
+    async def api_author_graphic_pages(
+        graphic_chapter_id: int,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user, _ = await author_session(x_telegram_init_data)
+        pages = await list_graphic_pages_for_author(graphic_chapter_id, user.app_user_id)
+        if pages is None:
+            raise HTTPException(status_code=404, detail="Графическая глава не найдена.")
+        chapter = await get_graphic_chapter(graphic_chapter_id)
+        page_items = _graphic_page_payloads(
+            user_id=user.app_user_id, chapter_id=graphic_chapter_id, pages=pages, include_ids=True
+        )
+        for item in page_items:
+            page_id = int(item.get("id") or 0)
+            item["texts"] = _rows_to_dicts(await list_graphic_page_texts(page_id))
+            item["translations"] = _rows_to_dicts(await list_graphic_translation_regions(page_id, "ru"))
+            item["frames"] = _rows_to_dicts(await list_graphic_page_frames(page_id))
+        return {
+            "ok": True,
+            "chapter": _row_to_dict(chapter),
+            "pages": page_items,
+            "ocr_available": ocr_engine_available(),
+        }
+
+    @app.post("/api/author/graphic-chapter/{graphic_chapter_id}/pages/reorder")
+    async def api_author_reorder_graphic_pages(
+        graphic_chapter_id: int,
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user, _ = await author_session(x_telegram_init_data)
+        raw_ids = payload.get("page_ids")
+        if not isinstance(raw_ids, list):
+            raise HTTPException(status_code=400, detail="Передан неверный порядок страниц.")
+        try:
+            page_ids = [int(value) for value in raw_ids]
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="Передан неверный порядок страниц.") from exc
+        if not await reorder_graphic_pages_for_author(graphic_chapter_id, user.app_user_id, page_ids):
+            raise HTTPException(status_code=400, detail="Не удалось сохранить порядок страниц. Обновите редактор и повторите.")
+        await add_audit(
+            user.app_user_id,
+            "graphic_pages_reordered_web",
+            "graphic_chapter",
+            str(graphic_chapter_id),
+            None,
+            f"{len(page_ids)} pages",
+        )
+        pages = await list_graphic_pages_for_author(graphic_chapter_id, user.app_user_id) or []
+        return {
+            "ok": True,
+            "pages": _graphic_page_payloads(
+                user_id=user.app_user_id, chapter_id=graphic_chapter_id, pages=pages, include_ids=True
+            ),
+        }
+
+    @app.post("/api/author/graphic-page/{graphic_page_id}/ocr")
+    async def api_author_graphic_page_ocr(
+        graphic_page_id: int,
+        payload: dict[str, Any] | None = None,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user, _ = await author_session(x_telegram_init_data)
+        page = await get_graphic_page(graphic_page_id)
+        if not page or int(page["author_user_id"] or 0) != int(user.app_user_id):
+            raise HTTPException(status_code=404, detail="Страница не найдена.")
+        source = _safe_graphic_path(str(page["file_path"] or ""))
+        if not source:
+            raise HTTPException(status_code=404, detail="Файл страницы не найден.")
+        language = str((payload or {}).get("language") or "rus+eng")[:32]
+        try:
+            result = await asyncio.to_thread(recognize_graphic_text, source, language)
+        except GraphicOCRError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        await upsert_graphic_page_text(
+            graphic_page_id, user.app_user_id, language_code="ru", text_kind="ocr",
+            text=result["text"], confidence=float(result["confidence"]), status="published",
+        )
+        await add_audit(user.app_user_id, "graphic_page_ocr", "graphic_page", str(graphic_page_id), None, language)
+        return {"ok": True, **result}
+
+    @app.put("/api/author/graphic-page/{graphic_page_id}/text")
+    async def api_author_graphic_page_text(
+        graphic_page_id: int,
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user, _ = await author_session(x_telegram_init_data)
+        ok = await upsert_graphic_page_text(
+            graphic_page_id, user.app_user_id,
+            language_code=str(payload.get("language_code") or "ru"),
+            text_kind=str(payload.get("text_kind") or "ocr"),
+            text=str(payload.get("text") or ""),
+            confidence=float(payload.get("confidence") or 100),
+            status="published",
+        )
+        if not ok:
+            raise HTTPException(status_code=404, detail="Страница не найдена.")
+        return {"ok": True}
+
+    @app.put("/api/author/graphic-page/{graphic_page_id}/translations")
+    async def api_author_graphic_page_translations(
+        graphic_page_id: int,
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user, _ = await author_session(x_telegram_init_data)
+        regions = payload.get("regions")
+        if not isinstance(regions, list):
+            raise HTTPException(status_code=400, detail="Передайте список переводных областей.")
+        ok = await replace_graphic_translation_regions_for_author(
+            graphic_page_id, user.app_user_id, str(payload.get("language_code") or "ru"), regions
+        )
+        if not ok:
+            raise HTTPException(status_code=404, detail="Страница не найдена.")
+        return {"ok": True, "regions": _rows_to_dicts(await list_graphic_translation_regions(graphic_page_id, str(payload.get("language_code") or "ru")))}
+
+    @app.post("/api/author/graphic-page/{graphic_page_id}/frames/auto")
+    async def api_author_graphic_page_frames_auto(
+        graphic_page_id: int,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user, _ = await author_session(x_telegram_init_data)
+        page = await get_graphic_page(graphic_page_id)
+        if not page or int(page["author_user_id"] or 0) != int(user.app_user_id):
+            raise HTTPException(status_code=404, detail="Страница не найдена.")
+        source = _safe_graphic_path(str(page["file_path"] or ""))
+        if not source:
+            raise HTTPException(status_code=404, detail="Файл страницы не найден.")
+        try:
+            frames = await asyncio.to_thread(suggest_graphic_frames, source)
+        except GraphicOCRError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        await replace_graphic_frames_for_author(graphic_page_id, user.app_user_id, frames, source="auto")
+        return {"ok": True, "frames": _rows_to_dicts(await list_graphic_page_frames(graphic_page_id))}
+
+    @app.put("/api/author/graphic-page/{graphic_page_id}/frames")
+    async def api_author_graphic_page_frames(
+        graphic_page_id: int,
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user, _ = await author_session(x_telegram_init_data)
+        frames = payload.get("frames")
+        if not isinstance(frames, list):
+            raise HTTPException(status_code=400, detail="Передайте список кадров.")
+        ok = await replace_graphic_frames_for_author(graphic_page_id, user.app_user_id, frames, source="manual")
+        if not ok:
+            raise HTTPException(status_code=404, detail="Страница не найдена.")
+        return {"ok": True, "frames": _rows_to_dicts(await list_graphic_page_frames(graphic_page_id))}
+
+    @app.get("/api/author/graphic-chapter/{graphic_chapter_id}/statistics")
+    async def api_author_graphic_statistics(
+        graphic_chapter_id: int,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user, _ = await author_session(x_telegram_init_data)
+        chapter = await get_graphic_chapter(graphic_chapter_id)
+        if not chapter or int(chapter["author_user_id"] or 0) != int(user.app_user_id):
+            raise HTTPException(status_code=404, detail="Глава не найдена.")
+        return {"ok": True, "statistics": await get_graphic_chapter_statistics(graphic_chapter_id)}
+
+    @app.post("/api/author/graphic-page/{graphic_page_id}/rotate")
+    async def api_author_rotate_graphic_page(
+        graphic_page_id: int,
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user, _ = await author_session(x_telegram_init_data)
+        page = await get_graphic_page(graphic_page_id)
+        if not page or int(page["author_user_id"] or 0) != int(user.app_user_id):
+            raise HTTPException(status_code=404, detail="Страница не найдена.")
+        try:
+            degrees = int(payload.get("degrees") or 0)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="Выберите корректный поворот.") from exc
+        source = _safe_graphic_path(str(page["file_path"] or ""))
+        if not source or not source.is_file():
+            raise HTTPException(status_code=404, detail="Файл страницы не найден.")
+        temporary = source.with_name(f".{source.stem}-rotate-{uuid.uuid4().hex}.webp")
+        try:
+            prepared = await asyncio.to_thread(rotate_graphic_page_file, source, temporary, degrees)
+            installed = install_prepared_page(prepared, source)
+            ok = await update_graphic_page_file_for_author(
+                graphic_page_id,
+                user.app_user_id,
+                source_filename=str(page["source_filename"] or source.name),
+                mime_type=str(installed["mime_type"]),
+                width=int(installed["width"]),
+                height=int(installed["height"]),
+                file_size=int(installed["file_size"]),
+                checksum=str(installed["checksum"]),
+                variants_json=str(installed["variants_json"]),
+                storage_backend=str(installed["storage_backend"]),
+                storage_key=str(installed["storage_key"]),
+            )
+            if not ok:
+                raise HTTPException(status_code=404, detail="Страница не найдена.")
+        except GraphicImportError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Не удалось повернуть страницу.") from exc
+        finally:
+            temporary.unlink(missing_ok=True)
+            for item in (getattr(locals().get("prepared", None), "variants", None) or {}).values():
+                try:
+                    Path(str(item.get("path") or "")).unlink(missing_ok=True)
+                except Exception:
+                    pass
+        await add_audit(user.app_user_id, "graphic_page_rotated_web", "graphic_page", str(graphic_page_id), None, str(degrees))
+        updated = await get_graphic_page(graphic_page_id)
+        return {"ok": True, "page": _row_to_dict(updated)}
+
+    @app.post("/api/author/graphic-page/{graphic_page_id}/replace")
+    async def api_author_replace_graphic_page(
+        graphic_page_id: int,
+        file: UploadFile = File(...),
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user, _ = await author_session(x_telegram_init_data)
+        page = await get_graphic_page(graphic_page_id)
+        if not page or int(page["author_user_id"] or 0) != int(user.app_user_id):
+            raise HTTPException(status_code=404, detail="Страница не найдена.")
+        target = _safe_graphic_path(str(page["file_path"] or ""))
+        if not target or not target.is_file():
+            raise HTTPException(status_code=404, detail="Файл страницы не найден.")
+        temp_dir = GRAPHIC_TEMP_ROOT / f"replace-{uuid.uuid4().hex}"
+        temp_dir.mkdir(parents=True, exist_ok=False)
+        original_name = Path(file.filename or "replacement.png").name
+        uploaded = temp_dir / original_name
+        max_bytes = max(1, int(settings.MAX_COMIC_PAGE_MB or 30)) * 1024 * 1024
+        written = 0
+        try:
+            with uploaded.open("wb") as stream:
+                while True:
+                    block = await file.read(1024 * 1024)
+                    if not block:
+                        break
+                    written += len(block)
+                    if written > max_bytes:
+                        raise GraphicImportError(
+                            f"Страница больше допустимых {settings.MAX_COMIC_PAGE_MB} МБ."
+                        )
+                    stream.write(block)
+            if written <= 0:
+                raise GraphicImportError("Загружен пустой файл.")
+            prepared = await asyncio.to_thread(
+                prepare_replacement_page, uploaded, original_name, temp_dir / "prepared"
+            )
+            installed = install_prepared_page(prepared, target)
+            ok = await update_graphic_page_file_for_author(
+                graphic_page_id,
+                user.app_user_id,
+                source_filename=original_name,
+                mime_type=str(installed["mime_type"]),
+                width=int(installed["width"]),
+                height=int(installed["height"]),
+                file_size=int(installed["file_size"]),
+                checksum=str(installed["checksum"]),
+                variants_json=str(installed["variants_json"]),
+                storage_backend=str(installed["storage_backend"]),
+                storage_key=str(installed["storage_key"]),
+            )
+            if not ok:
+                raise HTTPException(status_code=404, detail="Страница не найдена.")
+        except GraphicImportError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Не удалось заменить страницу.") from exc
+        finally:
+            await file.close()
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        await add_audit(user.app_user_id, "graphic_page_replaced_web", "graphic_page", str(graphic_page_id), None, original_name)
+        updated = await get_graphic_page(graphic_page_id)
+        return {"ok": True, "page": _row_to_dict(updated)}
+
+    @app.delete("/api/author/graphic-page/{graphic_page_id}")
+    async def api_author_delete_graphic_page(
+        graphic_page_id: int,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user, _ = await author_session(x_telegram_init_data)
+        deleted = await delete_graphic_page_for_author(graphic_page_id, user.app_user_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Страница не найдена.")
+        if deleted.get("error") == "last_page":
+            raise HTTPException(status_code=400, detail="В главе должна остаться хотя бы одна страница.")
+        delete_page_files(deleted, root=GRAPHIC_STORAGE_ROOT)
+        chapter_id = int(deleted["graphic_chapter_id"])
+        await add_audit(user.app_user_id, "graphic_page_deleted_web", "graphic_page", str(graphic_page_id), None, str(chapter_id))
+        pages = await list_graphic_pages_for_author(chapter_id, user.app_user_id) or []
+        return {
+            "ok": True,
+            "pages": _graphic_page_payloads(
+                user_id=user.app_user_id, chapter_id=chapter_id, pages=pages, include_ids=True
+            ),
+        }
+
+    @app.post("/api/author/book/{book_id}/graphic/upload/start")
+    async def api_author_graphic_upload_start(
+        book_id: int,
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user, _ = await author_session(x_telegram_init_data)
+        if not await book_belongs_to_author(book_id, user.app_user_id):
+            raise HTTPException(status_code=404, detail="Произведение не найдено.")
+        book = await get_book(book_id)
+        if not book or str(book["content_type"] or "book") not in GRAPHIC_CONTENT_TYPES:
+            raise HTTPException(status_code=400, detail="Сначала выберите тип: комикс, манга, манхва, вебтун или графический роман.")
+        resume_id = str(payload.get("resume_upload_id") or "").strip()
+        try:
+            meta = None
+            resumed = False
+            if resume_id:
+                existing = load_upload(resume_id, user_id=user.app_user_id, book_id=book_id)
+                if (
+                    str(existing.get("filename") or "") == Path(str(payload.get("filename") or "")).name
+                    and int(existing.get("total_size") or 0) == int(payload.get("size") or 0)
+                    and str(existing.get("kind") or "") == "graphic"
+                ):
+                    meta = existing
+                    resumed = True
+            if meta is None:
+                meta = create_graphic_upload(
+                    user_id=user.app_user_id,
+                    book_id=book_id,
+                    filename=str(payload.get("filename") or ""),
+                    total_size=int(payload.get("size") or 0),
+                )
+            status = get_upload_status(meta["upload_id"], user_id=user.app_user_id, book_id=book_id)
+        except ChunkedUploadError as exc:
+            if resume_id:
+                meta = create_graphic_upload(
+                    user_id=user.app_user_id,
+                    book_id=book_id,
+                    filename=str(payload.get("filename") or ""),
+                    total_size=int(payload.get("size") or 0),
+                )
+                status = get_upload_status(meta["upload_id"], user_id=user.app_user_id, book_id=book_id)
+                resumed = False
+            else:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "ok": True, "upload_id": meta["upload_id"], "chunk_size": CHUNK_SIZE_BYTES,
+            "resumed": resumed, "received": status.get("received", []),
+            "progress_percent": status.get("progress_percent", 0),
+        }
+
+    @app.get("/api/author/book/{book_id}/graphic/upload/{upload_id}/status")
+    async def api_author_graphic_upload_status(
+        book_id: int,
+        upload_id: str,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user, _ = await author_session(x_telegram_init_data)
+        if not await book_belongs_to_author(book_id, user.app_user_id):
+            raise HTTPException(status_code=404, detail="Произведение не найдено.")
+        try:
+            status = get_upload_status(upload_id, user_id=user.app_user_id, book_id=book_id)
+        except ChunkedUploadError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return {"ok": True, **status, "chunk_size": CHUNK_SIZE_BYTES}
+
+    @app.delete("/api/author/book/{book_id}/graphic/upload/{upload_id}")
+    async def api_author_graphic_upload_cancel(
+        book_id: int,
+        upload_id: str,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user, _ = await author_session(x_telegram_init_data)
+        try:
+            load_upload(upload_id, user_id=user.app_user_id, book_id=book_id)
+        except ChunkedUploadError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        cleanup_upload(upload_id)
+        return {"ok": True}
+
+    @app.post("/api/author/book/{book_id}/graphic/upload/{upload_id}/chunk")
+    async def api_author_graphic_upload_chunk(
+        book_id: int,
+        upload_id: str,
+        index: int = Form(...),
+        total_chunks: int = Form(...),
+        chunk: UploadFile = File(...),
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user, _ = await author_session(x_telegram_init_data)
+        if not await book_belongs_to_author(book_id, user.app_user_id):
+            raise HTTPException(status_code=404, detail="Произведение не найдено.")
+        try:
+            result = await save_chunk(
+                upload_id,
+                user_id=user.app_user_id,
+                book_id=book_id,
+                index=int(index),
+                total_chunks=int(total_chunks),
+                chunk=chunk,
+            )
+        except ChunkedUploadError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"ok": True, **result}
+
+    @app.post("/api/author/book/{book_id}/graphic/upload/{upload_id}/finish")
+    async def api_author_graphic_upload_finish(
+        book_id: int,
+        upload_id: str,
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user, _ = await author_session(x_telegram_init_data)
+        if not await book_belongs_to_author(book_id, user.app_user_id):
+            cleanup_upload(upload_id)
+            raise HTTPException(status_code=404, detail="Произведение не найдено.")
+        book = await get_book(book_id)
+        if not book or str(book["content_type"] or "book") not in GRAPHIC_CONTENT_TYPES:
+            cleanup_upload(upload_id)
+            raise HTTPException(status_code=400, detail="Для загрузки страниц выберите графический тип произведения.")
+        title = str(payload.get("title") or "").strip()
+        if len(title) < 2:
+            cleanup_upload(upload_id)
+            raise HTTPException(status_code=400, detail="Введите название главы.")
+        reading_mode = str(payload.get("reading_mode") or "inherit")
+        if reading_mode not in GRAPHIC_READING_MODES:
+            cleanup_upload(upload_id)
+            raise HTTPException(status_code=400, detail="Выберите режим чтения из списка.")
+        price = max(0, min(100000, int(payload.get("price_stars") or 0)))
+        volume_number = max(1, min(10000, int(payload.get("volume_number") or 1)))
+        volume_title = str(payload.get("volume_title") or "").strip()[:120]
+        preview_pages = max(0, min(50, int(payload.get("preview_pages") or 0)))
+        total_chunks = int(payload.get("total_chunks") or 0)
+        try:
+            path, meta = assemble_upload(
+                upload_id,
+                user_id=user.app_user_id,
+                book_id=book_id,
+                total_chunks=total_chunks,
+            )
+            work_dir = path.parent / "graphic-prepared"
+            split_long_pages = bool(payload.get("split_long_pages")) or reading_mode == "vertical" or str(book["content_type"] or "") in {"webtoon", "manhwa"}
+            prepared = await asyncio.to_thread(
+                prepare_graphic_file,
+                path,
+                str(meta.get("filename") or path.name),
+                work_dir,
+                split_long_pages=split_long_pages,
+            )
+            report = graphic_report(prepared)
+            chapter = await _commit_graphic_chapter(
+                book_id=book_id,
+                title=title,
+                reading_mode=reading_mode,
+                price_stars=price,
+                source_filename=str(meta.get("filename") or path.name),
+                prepared_pages=prepared,
+                volume_number=volume_number,
+                volume_title=volume_title,
+                preview_pages=preview_pages,
+            )
+            await add_audit(
+                user.app_user_id,
+                "graphic_chapter_imported_web",
+                "graphic_chapter",
+                str(chapter["id"]),
+                None,
+                f"{report['pages_count']} pages",
+            )
+            workflow = None
+            if settings.BOT_TOKEN:
+                delivery_bot = Bot(token=settings.BOT_TOKEN)
+                try:
+                    result = await finish_book_content_workflow(
+                        bot=delivery_bot,
+                        book_id=book_id,
+                        actor_user_id=user.app_user_id,
+                        actor_telegram_id=user.telegram_id,
+                        source="miniapp_graphic_import",
+                    )
+                    workflow = {
+                        "status": result.workflow_status,
+                        "channel_status": result.channel_status,
+                        "channel_message": result.channel_message,
+                        "review_reasons": result.duplicate_text,
+                    }
+                except Exception:
+                    workflow = {"status": "saved", "channel_status": "", "channel_message": ""}
+                finally:
+                    await delivery_bot.session.close()
+            notification = await _notify_graphic_chapter_if_published(
+                book_id=book_id, chapter=chapter, actor_user_id=user.app_user_id
+            )
+            return {"ok": True, "chapter": chapter, "report": report, "workflow": workflow, "notification": notification}
+        except (ChunkedUploadError, GraphicImportError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Не удалось обработать страницы. Проверьте файл и повторите попытку.") from exc
+        finally:
+            cleanup_upload(upload_id)
+
+    @app.post("/api/author/book/{book_id}/graphic/images")
+    async def api_author_graphic_images(
+        book_id: int,
+        title: str = Form(...),
+        reading_mode: str = Form("inherit"),
+        price_stars: int = Form(0),
+        volume_number: int = Form(1),
+        volume_title: str = Form(""),
+        preview_pages: int = Form(3),
+        split_long_pages: bool = Form(False),
+        files: list[UploadFile] = File(...),
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user, _ = await author_session(x_telegram_init_data)
+        if not await book_belongs_to_author(book_id, user.app_user_id):
+            raise HTTPException(status_code=404, detail="Произведение не найдено.")
+        book = await get_book(book_id)
+        if not book or str(book["content_type"] or "book") not in GRAPHIC_CONTENT_TYPES:
+            raise HTTPException(status_code=400, detail="Для загрузки страниц выберите графический тип произведения.")
+        clean_title = str(title or "").strip()
+        if len(clean_title) < 2:
+            raise HTTPException(status_code=400, detail="Введите название главы.")
+        if reading_mode not in GRAPHIC_READING_MODES:
+            raise HTTPException(status_code=400, detail="Выберите режим чтения из списка.")
+        if not files:
+            raise HTTPException(status_code=400, detail="Выберите изображения страниц.")
+        max_pages = max(1, int(settings.MAX_COMIC_PAGES or 500))
+        if len(files) > max_pages:
+            raise HTTPException(status_code=400, detail=f"В одной главе можно загрузить не больше {max_pages} страниц.")
+
+        temp_dir = GRAPHIC_TEMP_ROOT / uuid.uuid4().hex
+        source_dir = temp_dir / "uploads"
+        source_dir.mkdir(parents=True, exist_ok=False)
+        saved: list[tuple[Path, str]] = []
+        total_bytes = 0
+        max_total = int(settings.MAX_COMIC_UPLOAD_MB or 0) * 1024 * 1024
+        max_one = max(1, int(settings.MAX_COMIC_PAGE_MB or 30)) * 1024 * 1024
+        try:
+            for index, upload in enumerate(files, 1):
+                filename = Path(upload.filename or f"page-{index}.jpg").name
+                target = source_dir / f"{index:05d}-{filename}"
+                written = 0
+                with target.open("wb") as destination:
+                    while True:
+                        data = await upload.read(1024 * 1024)
+                        if not data:
+                            break
+                        written += len(data)
+                        total_bytes += len(data)
+                        if written > max_one:
+                            raise GraphicImportError(f"Страница «{filename}» больше допустимых {settings.MAX_COMIC_PAGE_MB} МБ.")
+                        if max_total > 0 and total_bytes > max_total:
+                            raise GraphicImportError(f"Файлы превышают допустимый общий размер {settings.MAX_COMIC_UPLOAD_MB} МБ.")
+                        destination.write(data)
+                await upload.close()
+                saved.append((target, filename))
+            use_slicing = bool(split_long_pages) or reading_mode == "vertical" or str(book["content_type"] or "") in {"webtoon", "manhwa"}
+            prepared = await asyncio.to_thread(
+                prepare_graphic_images, saved, temp_dir / "prepared", split_long_pages=use_slicing
+            )
+            report = graphic_report(prepared)
+            chapter = await _commit_graphic_chapter(
+                book_id=book_id,
+                title=clean_title,
+                reading_mode=reading_mode,
+                price_stars=max(0, min(100000, int(price_stars or 0))),
+                source_filename=f"{len(saved)} изображений",
+                prepared_pages=prepared,
+                volume_number=max(1, min(10000, int(volume_number or 1))),
+                volume_title=str(volume_title or "").strip()[:120],
+                preview_pages=max(0, min(50, int(preview_pages or 0))),
+            )
+            await add_audit(
+                user.app_user_id,
+                "graphic_images_imported_web",
+                "graphic_chapter",
+                str(chapter["id"]),
+                None,
+                f"{report['pages_count']} pages",
+            )
+            workflow = None
+            if settings.BOT_TOKEN:
+                delivery_bot = Bot(token=settings.BOT_TOKEN)
+                try:
+                    result = await finish_book_content_workflow(
+                        bot=delivery_bot,
+                        book_id=book_id,
+                        actor_user_id=user.app_user_id,
+                        actor_telegram_id=user.telegram_id,
+                        source="miniapp_graphic_images",
+                    )
+                    workflow = {
+                        "status": result.workflow_status,
+                        "channel_status": result.channel_status,
+                        "channel_message": result.channel_message,
+                        "review_reasons": result.duplicate_text,
+                    }
+                except Exception:
+                    workflow = {"status": "saved", "channel_status": "", "channel_message": ""}
+                finally:
+                    await delivery_bot.session.close()
+            notification = await _notify_graphic_chapter_if_published(
+                book_id=book_id, chapter=chapter, actor_user_id=user.app_user_id
+            )
+            return {"ok": True, "chapter": chapter, "report": report, "workflow": workflow, "notification": notification}
+        except GraphicImportError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        finally:
+            for upload in files:
+                try:
+                    await upload.close()
+                except Exception:
+                    pass
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
     @app.post("/api/author/book/{book_id}/upload/start")
     async def api_author_upload_start(
@@ -1461,7 +3356,14 @@ def create_app() -> FastAPI:
                         else "Главы сохранены, но публикация остановлена из-за возможной копии книги."
                     )
                 )
-                await delivery_bot.send_message(user.telegram_id, message_text)
+                updated_book = await get_book(book_id)
+                await delivery_bot.send_message(
+                    user.telegram_id,
+                    message_text,
+                    reply_markup=author_book_card_menu(
+                        book_id, str(updated_book["publication_status"] if updated_book else "draft")
+                    ),
+                )
             except Exception:
                 workflow = workflow or {"status": "saved", "channel_status": "", "channel_message": ""}
             finally:
@@ -1499,12 +3401,134 @@ def create_app() -> FastAPI:
             key: value for key, value in queues.items()
             if is_owner or queue_map.get(key) in permissions
         }
+        if is_owner or "mod_books" in permissions:
+            result["queues"]["graphic_page_reports"] = len(await list_graphic_page_reports("new", limit=500))
+        if is_owner or "mod_comments" in permissions:
+            result["queues"]["graphic_page_comments"] = len(await list_graphic_page_comments_for_moderation("pending", limit=500))
         if is_owner or "stats" in permissions:
             result["platform"] = await get_platform_stats()
             result["today"] = await get_owner_today_stats()
         if is_owner or permissions.intersection({"view_finance", "refunds", "payouts"}):
             result["finance"] = await get_platform_finance_summary()
+            rub = await get_rub_control_summary()
+            result["rub_finance"] = rub
+            if is_owner or "payouts" in permissions:
+                result["queues"]["rub_profiles_pending"] = rub.get("profiles_pending", 0)
+                result["queues"]["rub_payouts_new"] = rub.get("payouts_new", 0)
+                result["queues"]["rub_payouts_processing"] = rub.get("payouts_processing", 0)
         return result
+
+    @app.get("/api/control/payment-settings")
+    async def api_control_payment_settings(x_telegram_init_data: str | None = Header(default=None)):
+        user, is_owner, _ = await control_session(x_telegram_init_data)
+        if not is_owner:
+            raise HTTPException(status_code=403, detail="Настройки платежей доступны только владельцу.")
+        return {"ok": True, "settings": await public_runtime_payment_settings()}
+
+    @app.patch("/api/control/payment-settings")
+    async def api_control_update_payment_settings(
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user, is_owner, _ = await control_session(x_telegram_init_data)
+        if not is_owner:
+            raise HTTPException(status_code=403, detail="Настройки платежей доступны только владельцу.")
+        allowed = {
+            "stars_enabled", "content_protection_enabled", "watermark_enabled",
+            "buyer_star_rate_minor", "author_star_rate_minor", "purchase_cancel_minutes",
+        }
+        clean = {key: value for key, value in payload.items() if key in allowed}
+        try:
+            result = await update_runtime_payment_settings(clean)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        await add_audit(user.app_user_id, "payment_settings_updated_web", "setting", "payments", None, ",".join(sorted(clean)))
+        return {"ok": True, "settings": result}
+
+    @app.post("/api/control/payment-settings/test/{kind}")
+    async def api_control_test_payment_settings(
+        kind: str,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user, is_owner, _ = await control_session(x_telegram_init_data)
+        if not is_owner:
+            raise HTTPException(status_code=403, detail="Проверка платежей доступна только владельцу.")
+        try:
+            if kind == "shop":
+                await test_shop_connection()
+                message = "ShopID и секретный ключ магазина подтверждены ЮKassa."
+            elif kind == "payouts":
+                banks = await list_sbp_banks()
+                message = f"Ключи выплат подтверждены. Получено банков СБП: {len(banks)}."
+            else:
+                raise HTTPException(status_code=404, detail="Неизвестный вид проверки.")
+        except (YooKassaCheckoutError, YooKassaPayoutError) as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        await add_audit(user.app_user_id, "payment_settings_tested", "setting", kind, None, "ok")
+        return {"ok": True, "message": message}
+
+    @app.get("/api/control/graphic-page-reports")
+    async def api_control_graphic_page_reports(
+        status: str = "new",
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        await control_session(x_telegram_init_data, "mod_books")
+        return {"ok": True, "status": status, "items": _rows_to_dicts(await list_graphic_page_reports(status, limit=200))}
+
+    @app.post("/api/control/graphic-page/{graphic_page_id}/{action}")
+    async def api_control_graphic_page_action(
+        graphic_page_id: int,
+        action: str,
+        payload: dict[str, Any] | None = None,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user, _, _ = await control_session(x_telegram_init_data, "mod_books")
+        if action not in {"approve", "reject", "pending"}:
+            raise HTTPException(status_code=404, detail="Действие не найдено.")
+        note = str((payload or {}).get("note") or "").strip()
+        if action == "reject" and len(note) < 5:
+            raise HTTPException(status_code=400, detail="Укажите причину отклонения страницы.")
+        page_before = await get_graphic_page(graphic_page_id)
+        ok = await moderate_graphic_page(graphic_page_id, user.app_user_id, decision=action, note=note)
+        if not ok:
+            raise HTTPException(status_code=404, detail="Страница не найдена.")
+        await add_audit(user.app_user_id, f"graphic_page_{action}", "graphic_page", str(graphic_page_id), None, note)
+        if action == "reject" and page_before and page_before["author_user_id"]:
+            author_user = await get_user_by_id(int(page_before["author_user_id"]))
+            await notify_after_action(
+                actor_user_id=user.app_user_id,
+                event="graphic_page_rejected",
+                target_type="graphic_page",
+                target_id=graphic_page_id,
+                app_user_id=int(page_before["author_user_id"]),
+                telegram_id=int(author_user["telegram_id"]) if author_user else None,
+                text=(
+                    f"<b>Страница графической главы скрыта после проверки</b>\n\n"
+                    f"Глава: <b>{page_before['chapter_title']}</b>\n"
+                    f"Страница: <b>{page_before['page_number']}</b>\n"
+                    f"Причина: {note}\n\n"
+                    "Замените или исправьте страницу в кабинете автора, затем сохраните изменения."
+                ),
+            )
+        return {"ok": True}
+
+    @app.post("/api/control/graphic-page-report/{report_id}/{action}")
+    async def api_control_graphic_page_report_action(
+        report_id: int,
+        action: str,
+        payload: dict[str, Any] | None = None,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user, _, _ = await control_session(x_telegram_init_data, "mod_books")
+        status = {"pending": "pending", "close": "closed", "reject": "rejected"}.get(action)
+        if not status:
+            raise HTTPException(status_code=404, detail="Действие не найдено.")
+        ok = await set_graphic_page_report_status(
+            report_id, user.app_user_id, status, str((payload or {}).get("note") or "").strip()
+        )
+        if not ok:
+            raise HTTPException(status_code=404, detail="Жалоба не найдена.")
+        return {"ok": True}
 
     @app.get("/api/control/books")
     async def api_control_books(x_telegram_init_data: str | None = Header(default=None)):
@@ -1619,7 +3643,24 @@ def create_app() -> FastAPI:
             "ok": True,
             "comments": _rows_to_dicts(await list_moderation_comments(50)),
             "reviews": _rows_to_dicts(await list_moderation_reviews(50)),
+            "graphic_comments": _rows_to_dicts(await list_graphic_page_comments_for_moderation("pending", 100)),
         }
+
+    @app.post("/api/control/graphic-comment/{comment_id}/{action}")
+    async def api_control_graphic_comment(
+        comment_id: int,
+        action: str,
+        payload: dict[str, Any] | None = None,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user, _, _ = await control_session(x_telegram_init_data, "mod_comments")
+        status = {"publish": "published", "hide": "hidden", "reject": "rejected"}.get(action)
+        if not status:
+            raise HTTPException(status_code=404, detail="Действие не найдено.")
+        if not await set_graphic_page_comment_status(comment_id, user.app_user_id, status, str((payload or {}).get("note") or "")):
+            raise HTTPException(status_code=404, detail="Комментарий не найден.")
+        await add_audit(user.app_user_id, f"graphic_comment_{status}", "graphic_page_comment", str(comment_id))
+        return {"ok": True}
 
     @app.post("/api/control/{kind}/{item_id}/hide")
     async def api_control_hide_content(
@@ -1763,6 +3804,86 @@ def create_app() -> FastAPI:
             text=refund_message("refunded", refund["amount_stars"]),
         )
         return {"ok": True, "status": "refunded", "notification": notification}
+
+    @app.get("/api/control/rub-profiles")
+    async def api_control_rub_profiles(
+        status: str = "pending",
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        await control_session(x_telegram_init_data, "payouts")
+        if status not in {"pending", "verified", "rejected", "blocked"}:
+            status = "pending"
+        rows = await list_author_financial_profiles(status, 100)
+        items = []
+        for row in rows:
+            items.append({
+                "id": int(row["id"]),
+                "author_id": int(row["author_id"]),
+                "pen_name": row["pen_name"],
+                "telegram_id": row["telegram_id"],
+                "username": row["username"],
+                "full_name": row["full_name"],
+                "legal_status": row["legal_status"],
+                "legal_name": row["legal_name"],
+                "inn": row["inn"],
+                "ogrn": row["ogrn"],
+                "country": row["country"],
+                "sbp_phone_masked": mask_phone(decrypt_text(row["sbp_phone_encrypted"] or "")),
+                "sbp_bank_id": row["sbp_bank_id"],
+                "sbp_bank_name": row["sbp_bank_name"],
+                "verification_status": row["verification_status"],
+                "rejection_reason": row["rejection_reason"],
+                "updated_at": row["updated_at"],
+            })
+        return {"ok": True, "items": items}
+
+    @app.post("/api/control/rub-profile/{profile_id}/{action}")
+    async def api_control_rub_profile_action(
+        profile_id: int,
+        action: str,
+        payload: dict[str, Any] | None = None,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        actor, _, _ = await control_session(x_telegram_init_data, "payouts")
+        if action not in {"approve", "reject", "block"}:
+            raise HTTPException(status_code=404, detail="Действие не найдено.")
+        status = {"approve": "verified", "reject": "rejected", "block": "blocked"}[action]
+        reason = str((payload or {}).get("reason") or "").strip()
+        if status in {"rejected", "blocked"} and len(reason) < 8:
+            raise HTTPException(status_code=400, detail="Укажите понятную причину не короче 8 символов.")
+        if not await set_author_financial_profile_status(
+            profile_id, status, actor_user_id=actor.app_user_id, reason=reason
+        ):
+            raise HTTPException(status_code=404, detail="Платёжный профиль не найден.")
+        await add_audit(actor.app_user_id, f"author_financial_profile_{status}", "financial_profile", str(profile_id), None, reason)
+        return {"ok": True, "status": status}
+
+    @app.get("/api/control/rub-payouts")
+    async def api_control_rub_payouts(
+        status: str = "new",
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        await control_session(x_telegram_init_data, "payouts")
+        if status not in {"new", "processing", "succeeded", "failed", "canceled"}:
+            status = "new"
+        rows = await list_author_rub_payout_requests(status, 100)
+        items = [{
+            "id": int(row["id"]),
+            "author_id": int(row["author_id"]),
+            "pen_name": row["pen_name"],
+            "telegram_id": row["telegram_id"],
+            "username": row["username"],
+            "full_name": row["full_name"],
+            "amount_minor": int(row["amount_minor"]),
+            "currency": row["currency"],
+            "bank_name": row["bank_name"],
+            "provider_payout_id": row["provider_payout_id"],
+            "status": row["status"],
+            "failure_reason": row["failure_reason"],
+            "requested_at": row["requested_at"],
+            "paid_at": row["paid_at"],
+        } for row in rows]
+        return {"ok": True, "items": items, "provider_ready": await payouts_configured()}
 
     @app.get("/api/control/payouts")
     async def api_control_payouts(

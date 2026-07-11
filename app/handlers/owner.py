@@ -44,6 +44,7 @@ from app.keyboards import (
     admins_menu,
     back_to_main,
     finance_owner_menu,
+    payment_systems_owner_menu,
     owner_menu,
     reader_ads_owner_menu,
     owner_search_menu,
@@ -60,6 +61,7 @@ from app.permissions import DELEGABLE_PERMISSION_CODES, PERMISSION_BY_CODE
 from app.services.diagnostics import format_diagnostics_for_owner
 from app.services.notifications import complaint_message, send_user_notification
 from app.services.publication import post_book_to_channel
+from app.services.payment_runtime import public_runtime_payment_settings, update_runtime_payment_settings
 
 router = Router()
 
@@ -274,6 +276,43 @@ async def owner_finance(call: CallbackQuery) -> None:
         reply_markup=finance_owner_menu(),
     )
     await call.answer()
+
+
+@router.callback_query(F.data == "owner:payment_systems")
+async def owner_payment_systems(call: CallbackQuery) -> None:
+    if await deny_if_not_owner(call):
+        return
+    cfg = await public_runtime_payment_settings()
+    await call.message.edit_text(
+        "<b>💳 Оплата и расчёты</b>\n\n"
+        f"Telegram Stars: <b>{'включены' if cfg['stars_enabled'] else 'выключены'}</b>\n"
+        f"Ориентир для покупателя: <b>{cfg['buyer_star_rate_rubles']:.2f} ₽ за 1 Star</b>\n"
+        f"Расчётный курс автора: <b>{cfg['author_star_rate_rubles']:.2f} ₽ за 1 Star</b>\n"
+        f"Разница курсов: <b>{cfg['rate_spread_minor'] / 100:.2f} ₽</b>\n"
+        f"Защита содержимого: <b>{'включена' if cfg['content_protection_enabled'] else 'выключена'}</b>\n"
+        f"Водяной знак: <b>{'включён' if cfg['watermark_enabled'] else 'выключен'}</b>\n\n"
+        "ЮKassa и сторонние провайдеры отключены. Все цифровые покупки проходят только в Telegram Stars. "
+        "Рублёвый ориентир покупателя не является отдельной оплатой. Курс автора фиксируется для каждой продажи после удержания комиссии платформы.",
+        reply_markup=payment_systems_owner_menu(cfg),
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("owner:payment_toggle:"))
+async def owner_payment_toggle(call: CallbackQuery) -> None:
+    if await deny_if_not_owner(call):
+        return
+    key = call.data.split(":", 2)[-1]
+    allowed = {"stars_enabled", "content_protection_enabled", "watermark_enabled"}
+    if key not in allowed:
+        await call.answer("Эта платёжная система отключена", show_alert=True)
+        return
+    current = await public_runtime_payment_settings()
+    updated = await update_runtime_payment_settings({key: not bool(current.get(key))})
+    owner = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
+    await add_audit(owner["id"], "payment_setting_changed", "setting", key, str(current.get(key)), str(updated.get(key)))
+    await call.message.edit_reply_markup(reply_markup=payment_systems_owner_menu(updated))
+    await call.answer("Сохранено")
 
 
 @router.callback_query(F.data.startswith("owner:set_commission:"))

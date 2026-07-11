@@ -235,7 +235,8 @@ def author_books_menu(books) -> InlineKeyboardMarkup:
         }.get(book["publication_status"], book["publication_status"])
         kb.button(text=f"📘 {book['title']} · {status}", callback_data=f"author:book:{book['id']}")
     kb.button(text="➕ Добавить книгу", callback_data="author:add_book")
-    kb.button(text="⬅️ Назад", callback_data="author:menu")
+    kb.button(text="⬅️ Кабинет автора", callback_data="author:menu")
+    kb.button(text="🏠 Главное меню", callback_data="menu:main")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -255,7 +256,8 @@ def author_book_card_menu(book_id: int, publication_status: str) -> InlineKeyboa
     kb.button(text="📥 Скачивание", callback_data=f"book:edit_download:{book_id}")
     kb.button(text="💰 Цена", callback_data=f"book:edit_price:{book_id}")
     kb.button(text="🗑 Удалить книгу", callback_data=f"book:delete_ask:{book_id}")
-    kb.button(text="📚 Мои книги", callback_data="author:books")
+    kb.button(text="⬅️ К моим книгам", callback_data="author:books")
+    kb.button(text="🏠 Главное меню", callback_data="menu:main")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -288,6 +290,7 @@ def moderation_book_card_menu(book_id: int) -> InlineKeyboardMarkup:
 
 def finance_owner_menu() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
+    kb.button(text="💳 Платёжные системы", callback_data="owner:payment_systems")
     kb.button(text="📤 Заявки на выплату", callback_data="owner:payouts")
     kb.button(text="⚙️ Удержания и вывод", callback_data="owner:payout_settings")
     kb.button(text="Комиссия книг", callback_data="owner:set_commission:commission_books")
@@ -298,6 +301,31 @@ def finance_owner_menu() -> InlineKeyboardMarkup:
     kb.adjust(1)
     return kb.as_markup()
 
+
+
+
+def payment_systems_owner_menu(config: dict) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(
+        text=f"{'✅' if config.get('stars_enabled') else '▫️'} Оплата Stars",
+        callback_data="owner:payment_toggle:stars_enabled",
+    )
+    kb.button(
+        text=f"{'✅' if config.get('content_protection_enabled') else '▫️'} Защита содержимого",
+        callback_data="owner:payment_toggle:content_protection_enabled",
+    )
+    kb.button(
+        text=f"{'✅' if config.get('watermark_enabled') else '▫️'} Персональный водяной знак",
+        callback_data="owner:payment_toggle:watermark_enabled",
+    )
+    if settings.WEBAPP_URL:
+        kb.button(
+            text="⚙️ Курсы и расчёты",
+            web_app=WebAppInfo(url=f"{settings.WEBAPP_URL.rstrip('/')}/control?section=payments"),
+        )
+    kb.button(text="⬅️ Финансы", callback_data="owner:finance")
+    kb.adjust(1)
+    return kb.as_markup()
 
 def reader_ads_owner_menu(settings_dict) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
@@ -413,6 +441,22 @@ def audio_view_menu(book_id: int, audio_id: int) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
+def payment_invoice_menu(token: str, amount_stars: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text=f"💫 Оплатить {int(amount_stars)} Stars", pay=True)
+    kb.button(text="❌ Отменить покупку", callback_data=f"payment:cancel:{str(token)}")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def purchase_cancel_confirm_menu(purchase_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Да, отменить и вернуть Stars", callback_data=f"purchase:cancel_confirm:{int(purchase_id)}")
+    kb.button(text="Нет, оставить покупку", callback_data=f"purchase:view:{int(purchase_id)}")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
 def pay_target_menu(kind: str, target_id: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="💫 Купить за Stars", callback_data=f"buy:{kind}:{target_id}")
@@ -424,24 +468,30 @@ def pay_target_menu(kind: str, target_id: int) -> InlineKeyboardMarkup:
 def user_purchases_menu(purchases) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     for row in purchases[:20]:
-        if row["book_title"]:
-            title = f"Книга: {row['book_title']}"
+        if "graphic_volume_number" in row.keys() and row["graphic_volume_number"]:
+            title = f"Том {row['graphic_volume_number']}: {row['graphic_volume_title'] or row['book_title'] or 'произведение'}"
+        elif "graphic_chapter_title" in row.keys() and row["graphic_chapter_title"]:
+            title = f"Графика: {row['graphic_chapter_title']}"
         elif row["chapter_title"]:
             title = f"Глава: {row['chapter_title']}"
         elif row["audio_title"]:
             title = f"Аудио: {row['audio_title']}"
+        elif row["book_title"]:
+            title = f"Книга: {row['book_title']}"
         else:
             title = "Покупка"
-        status = "возврат" if row["status"] == "refunded" else "оплачено"
+        status = "возврат" if row["status"] == "refunded" else "отменяется" if row["status"] == "canceling" else "оплачено"
         kb.button(text=f"{title[:35]} · {row['amount_stars']} ⭐ · {status}", callback_data=f"purchase:view:{row['id']}")
     kb.button(text="⬅️ В меню", callback_data="menu:main")
     kb.adjust(1)
     return kb.as_markup()
 
 
-def purchase_card_menu(purchase_id: int, status: str) -> InlineKeyboardMarkup:
+def purchase_card_menu(purchase_id: int, status: str, can_cancel: bool = False) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     if status == "paid":
+        if can_cancel:
+            kb.button(text="❌ Отменить неиспользованную покупку", callback_data=f"purchase:cancel:{purchase_id}")
         kb.button(text="↩️ Запросить возврат", callback_data=f"refund:request:{purchase_id}")
     kb.button(text="⭐ Мои покупки", callback_data="main:my")
     kb.button(text="⬅️ В меню", callback_data="menu:main")
@@ -453,7 +503,7 @@ def refund_requests_menu(refunds) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     for row in refunds[:30]:
         buyer = row["username"] or row["full_name"] or row["telegram_id"]
-        title = row["book_title"] or row["chapter_title"] or row["audio_title"] or "Покупка"
+        title = row["book_title"] or row["chapter_title"] or row["audio_title"] or (row["graphic_chapter_title"] if "graphic_chapter_title" in row.keys() else None) or "Покупка"
         kb.button(text=f"#{row['id']} · {title[:28]} · {buyer}", callback_data=f"refund:card:{row['id']}")
     kb.button(text="⬅️ В меню", callback_data="menu:main")
     kb.adjust(1)
@@ -478,6 +528,10 @@ def access_granted_menu(kind: str, target_id: int) -> InlineKeyboardMarkup:
         kb.button(text="🎧 Получить аудио", callback_data=f"listen:audio:{target_id}")
     elif kind == "book":
         kb.button(text="📚 Открыть книгу", callback_data=f"open:book:{target_id}")
+    elif kind == "chapter_package" and settings.WEBAPP_URL:
+        kb.button(text="📚 Выбрать главы", web_app=WebAppInfo(url=f"{settings.WEBAPP_URL.rstrip('/')}/book/{int(target_id)}"))
+    elif kind == "graphic" and settings.WEBAPP_URL:
+        kb.button(text="🖼 Открыть графическую главу", web_app=WebAppInfo(url=f"{settings.WEBAPP_URL.rstrip('/')}/comic/{int(target_id)}"))
     kb.button(text="⭐ Мои покупки", callback_data="main:my")
     kb.button(text="⬅️ В меню", callback_data="menu:main")
     kb.adjust(1)
@@ -750,24 +804,33 @@ def complaint_card_menu(complaint_id: int, prefix: str = "complaint") -> InlineK
 
 def legal_menu() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.button(text="📄 Пользовательское соглашение", callback_data="legal:view:terms")
-    kb.button(text="🔐 Персональные данные", callback_data="legal:view:privacy")
+    kb.button(text="📄 Оферта для читателей", callback_data="legal:view:terms")
+    kb.button(text="🔐 Политика данных", callback_data="legal:view:privacy")
+    kb.button(text="✅ Согласие на данные", callback_data="legal:view:personal_data_consent")
     kb.button(text="↩️ Возвраты", callback_data="legal:view:refunds")
+    kb.button(text="✍️ Договор автора", callback_data="legal:view:author_license")
+    kb.button(text="🔏 Данные автора", callback_data="legal:view:author_data_consent")
+    kb.button(text="💳 Комиссии и выплаты", callback_data="legal:view:fees_payouts")
     kb.button(text="©️ Авторские права", callback_data="legal:view:copyright")
-    kb.button(text="✍️ Правила авторов", callback_data="legal:view:authors")
     kb.button(text="🛡 Контент и модерация", callback_data="legal:view:content")
-    kb.button(text="✅ Принять базовые условия", callback_data="legal:accept_required")
-    kb.button(text="✅ Принять правила автора", callback_data="legal:accept_author")
     kb.button(text="🧾 Мои согласия", callback_data="legal:my_acceptances")
     kb.button(text="⬅️ Назад", callback_data="main:more")
     kb.adjust(1)
     return kb.as_markup()
 
 
-def legal_doc_menu(code: str) -> InlineKeyboardMarkup:
+def legal_doc_menu(code: str, consent_kind: str = "agreement") -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.button(text="✅ Принять этот документ", callback_data=f"legal:accept:{code}")
-    kb.button(text="📜 Все правила", callback_data="main:legal")
+    if consent_kind == "consent":
+        accept_text = "✅ Даю отдельное согласие"
+    elif consent_kind == "agreement":
+        accept_text = "✅ Принимаю условия"
+    else:
+        accept_text = "✅ Ознакомился"
+    kb.button(text=accept_text, callback_data=f"legal:accept:{code}")
+    if consent_kind in {"consent", "agreement"}:
+        kb.button(text="Не принимаю", callback_data=f"legal:decline:{code}")
+    kb.button(text="📜 Все документы", callback_data="main:legal")
     kb.button(text="⬅️ В меню", callback_data="menu:main")
     kb.adjust(1)
     return kb.as_markup()

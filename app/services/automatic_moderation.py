@@ -8,6 +8,7 @@ from app.db import (
     get_author_auto_moderation_stats,
     get_book,
     list_chapters_for_book,
+    list_graphic_chapters_for_book,
 )
 from app.services.duplicate_books import duplicate_warning_text, find_book_duplicates
 
@@ -42,17 +43,29 @@ async def evaluate_book_for_auto_publication(
         return AutoModerationResult(False, ["Книга не найдена."])
 
     chapters = await list_chapters_for_book(int(book_id), published_only=False)
+    graphic_chapters = await list_graphic_chapters_for_book(int(book_id), published_only=False)
     texts = [str(row["text"] or "") for row in chapters if str(row["status"] or "") != "deleted"]
+    graphics = [row for row in graphic_chapters if str(row["status"] or "") != "deleted"]
     total_characters = sum(len(text.strip()) for text in texts)
+    total_graphic_pages = sum(int(row["pages_count"] or row["actual_pages_count"] or 0) for row in graphics)
     hard_reasons: list[str] = []
     review_reasons: list[str] = []
 
-    if not texts:
-        hard_reasons.append("В книге нет глав для проверки.")
-    elif total_characters < 2000:
-        review_reasons.append("Объём книги слишком мал для надёжной автоматической проверки.")
-    if any(0 < len(text.strip()) < 300 for text in texts):
-        review_reasons.append("Есть слишком короткая глава — нужна ручная проверка структуры.")
+    is_graphic = str(book["content_type"] or "book") != "book"
+    if is_graphic:
+        if not graphics or total_graphic_pages < 1:
+            hard_reasons.append("В графическом произведении нет страниц для проверки.")
+        if any(int(row["pages_count"] or row["actual_pages_count"] or 0) < 1 for row in graphics):
+            hard_reasons.append("Есть пустая графическая глава.")
+        if total_graphic_pages < 3:
+            review_reasons.append("Слишком мало страниц для надёжной автоматической проверки.")
+    else:
+        if not texts:
+            hard_reasons.append("В книге нет глав для проверки.")
+        elif total_characters < 2000:
+            review_reasons.append("Объём книги слишком мал для надёжной автоматической проверки.")
+        if any(0 < len(text.strip()) < 300 for text in texts):
+            review_reasons.append("Есть слишком короткая глава — нужна ручная проверка структуры.")
 
     if len(str(book["title"] or "").strip()) < 2:
         hard_reasons.append("Название книги не заполнено.")
@@ -62,12 +75,13 @@ async def evaluate_book_for_auto_publication(
         review_reasons.append("Обложка не загружена.")
 
     combined = "\n".join(texts)
-    if len(_URL_RE.findall(combined)) > 4:
-        hard_reasons.append("В тексте много внешних ссылок.")
-    if _LONG_REPEAT_RE.search(combined):
-        hard_reasons.append("Обнаружены длинные повторяющиеся символы, похожие на повреждение или спам.")
-    if _EXTERNAL_PAYMENT_RE.search(combined):
-        hard_reasons.append("Найдена возможная просьба об оплате вне платформы.")
+    if combined:
+        if len(_URL_RE.findall(combined)) > 4:
+            hard_reasons.append("В тексте много внешних ссылок.")
+        if _LONG_REPEAT_RE.search(combined):
+            hard_reasons.append("Обнаружены длинные повторяющиеся символы, похожие на повреждение или спам.")
+        if _EXTERNAL_PAYMENT_RE.search(combined):
+            hard_reasons.append("Найдена возможная просьба об оплате вне платформы.")
 
     matches = await find_book_duplicates(
         title=str(book["title"] or ""),
@@ -101,6 +115,6 @@ async def evaluate_book_for_auto_publication(
     return AutoModerationResult(
         auto_publish=is_owner_upload and not unique_reasons,
         reasons=unique_reasons,
-        checked_chapters=len(texts),
+        checked_chapters=len(texts) + len(graphics),
         total_characters=total_characters,
     )

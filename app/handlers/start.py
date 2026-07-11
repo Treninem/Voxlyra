@@ -6,6 +6,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from app.config import settings
 from app.db import claim_daily_bonus, get_admin_permissions, get_author_profile, get_bonus_balance, get_referral_stats, list_bonus_transactions, register_referral, reward_referral_if_needed, upsert_user, get_user_preferences, set_user_preference, reset_user_preferences, get_book
 from app.keyboards import back_to_main, bonuses_menu, main_menu, more_menu, user_settings_menu, user_notifications_menu, user_theme_menu, user_font_menu
+from app.handlers.legal import send_next_required_document
 
 router = Router()
 
@@ -36,6 +37,8 @@ async def cmd_start(message: Message) -> None:
                 ref_user = await upsert_user(ref_tg_id, None, None)
                 await register_referral(int(ref_user["id"]), user_id)
                 await reward_referral_if_needed(user_id)
+    if settings.LEGAL_REQUIRE_ON_START and await send_next_required_document(message, user_id):
+        return
     if payload.startswith("promote_book_"):
         raw_book_id = payload.replace("promote_book_", "", 1)
         if raw_book_id.isdigit():

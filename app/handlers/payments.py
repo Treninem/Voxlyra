@@ -10,6 +10,13 @@ from app.config import settings
 from app.db import (
     add_audit,
     create_paid_purchase,
+    create_payment_intent,
+    attach_payment_intent_message,
+    cancel_payment_intent,
+    validate_payment_intent,
+    get_payment_intent,
+    get_immediate_purchase_cancel_eligibility,
+    create_immediate_cancel_request,
     create_free_promo_purchase,
     create_refund_request,
     get_admin_permissions,
@@ -35,6 +42,8 @@ from app.db import (
     finish_channel_promotion,
     list_chapters_for_book,
     get_purchase_target,
+    get_user_chapter_credit_summary,
+    redeem_chapter_package_credit,
     get_user_by_telegram_id,
     get_refund_request,
     has_purchase_access,
@@ -56,14 +65,19 @@ from app.keyboards import (
     payout_requests_menu,
     payout_settings_menu,
     purchase_card_menu,
+    payment_invoice_menu,
+    purchase_cancel_confirm_menu,
     refund_card_menu,
     refund_requests_menu,
     user_purchases_menu,
     channel_promotion_confirm_menu,
 )
 from app.services.payments import build_pay_target, describe_purchase_row
+from app.services.payment_runtime import load_runtime_payment_settings
 from app.services.notifications import payout_message, refund_message, send_user_notification
 from app.services.publication import post_book_to_channel
+from app.handlers.legal import missing_legal_codes, send_next_required_document
+from app.legal_texts import REQUIRED_ON_START
 
 router = Router()
 
@@ -105,14 +119,19 @@ class PayoutSettingState(StatesGroup):
 
 
 def _target_label(row) -> str:
-    if row["book_title"]:
-        return f"Книга: {row['book_title']}"
+    if "chapter_package_title" in row.keys() and row["chapter_package_title"]:
+        return f"Пакет глав: {row['chapter_package_title']}"
+    if "graphic_volume_number" in row.keys() and row["graphic_volume_number"]:
+        return f"Том {row['graphic_volume_number']}: {row['graphic_volume_title'] or row['book_title'] or 'произведение'}"
+    if "graphic_chapter_title" in row.keys() and row["graphic_chapter_title"]:
+        return f"Графическая глава: {row['graphic_chapter_title']}"
     if row["chapter_title"]:
         return f"Глава: {row['chapter_title']}"
     if row["audio_title"]:
         return f"Аудио: {row['audio_title']}"
+    if row["book_title"]:
+        return f"Книга: {row['book_title']}"
     return "Покупка"
-
 
 async def _can_manage_refunds(tg_user_id: int) -> tuple[bool, int | None]:
     user = await get_user_by_telegram_id(tg_user_id)
@@ -215,6 +234,11 @@ async def _show_channel_promotion(message_or_call, book_id: int) -> None:
 async def _send_invoice(message_or_call, kind: str, target_id: int, promo_code: str | None = None, amount_stars: int | None = None) -> None:
     tg = message_or_call.from_user
     user = await upsert_user(tg.id, tg.username, tg.full_name)
+    target_message = message_or_call.message if isinstance(message_or_call, CallbackQuery) else message_or_call
+    if await send_next_required_document(target_message, int(user["id"])):
+        if isinstance(message_or_call, CallbackQuery):
+            await message_or_call.answer("Сначала примите обязательные документы", show_alert=True)
+        return
     target = await build_pay_target(kind, target_id, user_id=user["id"], promo_code=promo_code, amount_stars=amount_stars)
     if target is None:
         if isinstance(message_or_call, CallbackQuery):
@@ -223,7 +247,7 @@ async def _send_invoice(message_or_call, kind: str, target_id: int, promo_code: 
             await message_or_call.answer("Покупка не найдена.")
         return
     if target.amount_stars <= 0:
-        if promo_code and kind in {"book", "chapter", "audio"}:
+        if promo_code and kind in {"book", "chapter", "audio", "graphic"}:
             try:
                 purchase_id = await create_free_promo_purchase(user["id"], kind, target_id, promo_code)
                 await add_audit(user["id"], "promo_free_access", "purchase", str(purchase_id), None, target.payload)
@@ -242,18 +266,29 @@ async def _send_invoice(message_or_call, kind: str, target_id: int, promo_code: 
         else:
             await message_or_call.answer(text, reply_markup=back_to_main())
         return
+    payment_cfg = await load_runtime_payment_settings()
+    if not payment_cfg.stars_enabled:
+        text = "Оплата через Telegram Stars временно выключена владельцем. Бесплатные материалы остаются доступны."
+        if isinstance(message_or_call, CallbackQuery):
+            await message_or_call.answer(text, show_alert=True)
+        else:
+            await message_or_call.answer(text, reply_markup=back_to_main())
+        return
     bot = message_or_call.bot
     chat_id = message_or_call.message.chat.id if isinstance(message_or_call, CallbackQuery) else message_or_call.chat.id
-    await bot.send_invoice(
+    intent = await create_payment_intent(int(user["id"]), target.payload, target.amount_stars)
+    invoice_message = await bot.send_invoice(
         chat_id=chat_id,
         title=target.title,
         description=target.description,
-        payload=target.payload,
+        payload=intent["payload"],
         provider_token="",
         currency="XTR",
-        prices=[LabeledPrice(label="Публикация" if kind == "channel_promo" else "Доступ", amount=target.amount_stars)],
+        prices=[LabeledPrice(label=("Публикация" if kind == "channel_promo" else "Пакет глав" if kind == "chapter_package" else "Доступ"), amount=target.amount_stars)],
         protect_content=True,
+        reply_markup=payment_invoice_menu(intent["token"], target.amount_stars),
     )
+    await attach_payment_intent_message(intent["token"], invoice_message.message_id)
     if isinstance(message_or_call, CallbackQuery):
         await message_or_call.answer("Счёт отправлен")
 
@@ -265,11 +300,26 @@ async def start_deeplink(message: Message, state: FSMContext) -> None:
     if payload.startswith("buy_chapter_"):
         await _send_invoice(message, "chapter", int(payload.replace("buy_chapter_", "")))
         return
+    if payload.startswith("buy_package_"):
+        raw = payload.replace("buy_package_", "", 1)
+        if raw.isdigit():
+            await _send_invoice(message, "chapter_package", int(raw))
+        return
     if payload.startswith("buy_audio_"):
         await _send_invoice(message, "audio", int(payload.replace("buy_audio_", "")))
         return
     if payload.startswith("buy_book_"):
         await _send_invoice(message, "book", int(payload.replace("buy_book_", "")))
+        return
+    if payload.startswith("buy_graphic_"):
+        raw = payload.replace("buy_graphic_", "", 1)
+        if raw.isdigit():
+            await _send_invoice(message, "graphic", int(raw))
+        return
+    if payload.startswith("buy_volume_"):
+        raw = payload.replace("buy_volume_", "", 1).split("_")
+        if len(raw) == 2 and raw[0].isdigit() and raw[1].isdigit():
+            await _send_invoice(message, "graphic_volume", int(raw[1]), amount_stars=int(raw[0]))
         return
     if payload.startswith("promote_book_"):
         raw = payload.replace("promote_book_", "")
@@ -326,10 +376,36 @@ async def channel_promote_pay(call: CallbackQuery) -> None:
     await _send_invoice(call, "channel_promo", promotion_id)
 
 
+@router.callback_query(F.data.startswith("payment:cancel:"))
+async def payment_invoice_cancel(call: CallbackQuery) -> None:
+    token = call.data.split(":", 2)[-1]
+    user = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
+    intent = await get_payment_intent(token)
+    if not intent or int(intent["user_id"]) != int(user["id"]):
+        await call.answer("Счёт не найден", show_alert=True)
+        return
+    if str(intent["status"]) == "paid":
+        await call.answer("Покупка уже оплачена", show_alert=True)
+        return
+    if not await cancel_payment_intent(token, int(user["id"])):
+        await call.answer("Счёт уже отменён или устарел", show_alert=True)
+        return
+    await add_audit(int(user["id"]), "payment_invoice_canceled", "payment_intent", token, None, str(intent["canonical_payload"]))
+    try:
+        await call.message.delete()
+    except Exception:
+        try:
+            await call.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+    await call.message.answer("Покупка отменена. Stars не списывались.", reply_markup=back_to_main())
+    await call.answer("Покупка отменена")
+
+
 @router.callback_query(F.data.startswith("buy:"))
 async def buy_callback(call: CallbackQuery) -> None:
     _, kind, raw_id = call.data.split(":", 2)
-    if kind not in {"book", "chapter", "audio"} or not raw_id.isdigit():
+    if kind not in {"book", "chapter", "audio", "graphic", "chapter_package"} or not raw_id.isdigit():
         await call.answer("Неверная покупка", show_alert=True)
         return
     await _send_invoice(call, kind, int(raw_id))
@@ -337,6 +413,19 @@ async def buy_callback(call: CallbackQuery) -> None:
 
 @router.pre_checkout_query()
 async def pre_checkout_handler(query: PreCheckoutQuery) -> None:
+    payment_cfg = await load_runtime_payment_settings()
+    if not payment_cfg.stars_enabled:
+        await query.answer(ok=False, error_message="Оплата через Telegram Stars временно выключена владельцем.")
+        return
+    user = await upsert_user(query.from_user.id, query.from_user.username, query.from_user.full_name)
+    if str(query.invoice_payload or "").startswith("vox:intent:"):
+        intent = await validate_payment_intent(query.invoice_payload, int(user["id"]), int(query.total_amount))
+        if not intent:
+            await query.answer(ok=False, error_message="Счёт отменён или срок его действия истёк. Откройте покупку заново.")
+            return
+    if await missing_legal_codes(int(user["id"]), REQUIRED_ON_START):
+        await query.answer(ok=False, error_message="Сначала откройте бота и примите актуальную оферту и согласие на обработку данных.")
+        return
     target = await get_purchase_target(query.invoice_payload)
     if not target:
         await query.answer(ok=False, error_message="Покупка не найдена или уже недоступна.")
@@ -409,10 +498,21 @@ async def successful_payment_handler(message: Message) -> None:
                     reply_markup=back_to_main(),
                 )
         else:
-            await message.answer(
-                "<b>Оплата прошла.</b>\n\nДоступ открыт. Покупку можно найти в разделе «Моё».",
-                reply_markup=access_granted_menu(target["kind"], int(target["target_id"])),
-            )
+            if target["kind"] == "chapter_package":
+                count = int(target.get("chapters_count") or 0)
+                await message.answer(
+                    f"<b>Пакет оплачен.</b>\n\nНа книгу «{target.get('book_title') or 'Книга'}» доступно <b>{count} открытий глав</b>. "
+                    "Они не привязаны к диапазону: можно открыть любые платные главы этой книги в любом порядке. "
+                    "Каждая выбранная глава останется доступной навсегда.",
+                    reply_markup=access_granted_menu("chapter_package", int(target["book_id"])),
+                )
+            else:
+                access_kind = "graphic" if target["kind"] == "graphic_volume" else target["kind"]
+                access_target = int(target.get("first_chapter_id") or target["target_id"])
+                await message.answer(
+                    "<b>Оплата прошла.</b>\n\nДоступ открыт. Покупку можно найти в разделе «Моё».",
+                    reply_markup=access_granted_menu(access_kind, access_target),
+                )
     else:
         await message.answer(
             "<b>Оплата прошла.</b>\n\nДоступ открыт. Покупку можно найти в разделе «Моё».",
@@ -440,15 +540,74 @@ async def purchase_view(call: CallbackQuery) -> None:
         await call.answer("Покупка не найдена", show_alert=True)
         return
     target = _target_label(purchase)
+    cancel_info = await get_immediate_purchase_cancel_eligibility(purchase_id, int(user["id"]))
+    cancel_line = (
+        f"\nАвтоматическая отмена: <b>доступна ещё {int(cancel_info.get('minutes_left') or 0)} мин.</b>"
+        if cancel_info.get("allowed") else ""
+    )
     await call.message.edit_text(
         f"<b>{target}</b>\n\n"
         f"Сумма: <b>{purchase['amount_stars']} Stars</b>\n"
         f"Статус: <b>{purchase['status']}</b>\n"
-        f"Дата: <b>{purchase['created_at'][:16]}</b>\n\n"
-        "Возврат можно запросить, если доступ не выдан, материал битый, оплата продублировалась или есть другая обоснованная причина.",
-        reply_markup=purchase_card_menu(purchase_id, purchase["status"]),
+        f"Дата: <b>{purchase['created_at'][:16]}</b>{cancel_line}\n\n"
+        "Неиспользованную покупку можно быстро отменить в отведённое время. После начала чтения или прослушивания остаётся обычный запрос на возврат с проверкой.",
+        reply_markup=purchase_card_menu(purchase_id, purchase["status"], bool(cancel_info.get("allowed"))),
     )
     await call.answer()
+
+
+@router.callback_query(F.data.startswith("purchase:cancel:"))
+async def purchase_cancel_preview(call: CallbackQuery) -> None:
+    purchase_id = int(call.data.split(":")[-1])
+    user = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
+    purchase = await get_purchase(purchase_id)
+    if not purchase or int(purchase["user_id"]) != int(user["id"]):
+        await call.answer("Покупка не найдена", show_alert=True)
+        return
+    info = await get_immediate_purchase_cancel_eligibility(purchase_id, int(user["id"]))
+    if not info.get("allowed"):
+        await call.answer(str(info.get("reason") or "Автоматическая отмена недоступна"), show_alert=True)
+        return
+    await call.message.edit_text(
+        "<b>Отменить покупку?</b>\n\n"
+        f"Telegram вернёт <b>{int(purchase['amount_stars'])} Stars</b>, а доступ к материалу будет закрыт. "
+        "Это действие нельзя отменить.",
+        reply_markup=purchase_cancel_confirm_menu(purchase_id),
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("purchase:cancel_confirm:"))
+async def purchase_cancel_confirm(call: CallbackQuery) -> None:
+    purchase_id = int(call.data.split(":")[-1])
+    user = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
+    purchase = await get_purchase(purchase_id)
+    if not purchase or int(purchase["user_id"]) != int(user["id"]):
+        await call.answer("Покупка не найдена", show_alert=True)
+        return
+    try:
+        refund_id = await create_immediate_cancel_request(purchase_id, int(user["id"]))
+    except ValueError as exc:
+        await call.answer(str(exc), show_alert=True)
+        return
+    try:
+        await call.bot.refund_star_payment(
+            user_id=int(purchase["telegram_id"]),
+            telegram_payment_charge_id=str(purchase["telegram_payment_charge_id"]),
+        )
+    except Exception as exc:
+        await add_audit(int(user["id"]), "purchase_cancel_refund_failed", "purchase", str(purchase_id), None, str(exc))
+        await call.answer("Telegram не выполнил автоматический возврат. Запрос сохранён для проверки владельцем, доступ временно приостановлен.", show_alert=True)
+        return
+    if not await finalize_refund(refund_id, int(user["id"]), "Покупка отменена пользователем в период автоматической отмены"):
+        await call.answer("Stars возвращены, но запись уже была обработана. Проверьте раздел покупок.", show_alert=True)
+        return
+    await add_audit(int(user["id"]), "purchase_canceled_by_user", "purchase", str(purchase_id), None, str(refund_id))
+    await call.message.edit_text(
+        f"Покупка отменена. <b>{int(purchase['amount_stars'])} Stars</b> возвращены через Telegram, доступ закрыт.",
+        reply_markup=back_to_main(),
+    )
+    await call.answer("Покупка отменена")
 
 
 @router.callback_query(F.data.startswith("refund:request:"))
@@ -604,19 +763,21 @@ async def author_income(call: CallbackQuery) -> None:
     user = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
     summary = await get_author_finance_summary(user["id"])
     min_stars = (await get_payout_settings()).get("payout_min_stars", "100")
+    cfg = await load_runtime_payment_settings()
     frozen_line = "\n🧊 Выплаты заморожены до проверки." if summary.get("frozen", 0) else ""
     await call.message.edit_text(
         "<b>💰 Доход автора</b>\n\n"
         f"Продажи всего: <b>{summary.get('gross', 0)} Stars</b>\n"
         f"Комиссия платформы: <b>{summary.get('commission', 0)} Stars</b>\n"
-        f"Доход автора: <b>{summary.get('net', 0)} Stars</b>\n"
-        f"В удержании: <b>{summary.get('held', 0)} Stars</b>\n"
-        f"Доступно к выводу: <b>{summary.get('available', 0)} Stars</b>\n"
-        f"В заявках на выплату: <b>{summary.get('requested', 0)} Stars</b>\n"
-        f"Уже выплачено: <b>{summary.get('paid', 0)} Stars</b>\n"
+        f"Чистый доход: <b>{summary.get('net', 0)} Stars</b>\n"
+        f"Расчётный курс новых продаж: <b>{cfg.author_star_rate_minor / 100:.2f} ₽ за 1 Star</b>\n\n"
+        f"В удержании: <b>{summary.get('held', 0)} Stars · {summary.get('held_minor', 0) / 100:.2f} ₽</b>\n"
+        f"Доступно к выплате: <b>{summary.get('available', 0)} Stars · {summary.get('available_minor', 0) / 100:.2f} ₽</b>\n"
+        f"В заявках: <b>{summary.get('requested', 0)} Stars · {summary.get('requested_minor', 0) / 100:.2f} ₽</b>\n"
+        f"Уже выплачено: <b>{summary.get('paid', 0)} Stars · {summary.get('paid_minor', 0) / 100:.2f} ₽</b>\n"
         f"Возвращено покупателям: <b>{summary.get('refunded', 0)} Stars</b>\n"
-        f"Минимальная сумма вывода: <b>{min_stars} Stars</b>{frozen_line}\n\n"
-        "Выплата создаётся заявкой и проверяется владельцем или человеком с правом выплат.",
+        f"Минимальная сумма заявки: <b>{min_stars} Stars</b>{frozen_line}\n\n"
+        "Курс фиксируется отдельно для каждой продажи. Изменение курса владельцем не пересчитывает уже начисленный доход.",
         reply_markup=author_income_menu(summary.get('available', 0)),
     )
     await call.answer()
@@ -673,6 +834,24 @@ async def read_paid_or_free_chapter(call: CallbackQuery) -> None:
         return
     allowed = bool(chapter["is_free"]) or await has_purchase_access(user["id"], chapter_id=chapter_id)
     if not allowed:
+        credits = await get_user_chapter_credit_summary(user["id"], int(chapter["book_id"]), "text")
+        if int(credits.get("remaining") or 0) > 0:
+            from aiogram.utils.keyboard import InlineKeyboardBuilder
+            kb = InlineKeyboardBuilder()
+            kb.button(
+                text=f"📖 Открыть из пакета · осталось {int(credits['remaining'])}",
+                callback_data=f"package:unlock:chapter:{chapter_id}",
+            )
+            kb.button(text=f"⭐ Купить отдельно · {int(chapter['price_stars'] or 0)}", callback_data=f"buy:chapter:{chapter_id}")
+            kb.button(text="⬅️ В меню", callback_data="menu:main")
+            kb.adjust(1)
+            await call.message.edit_text(
+                f"<b>{chapter['book_title']}</b>\n{chapter['title']}\n\n"
+                "Можно списать одно открытие из купленного пакета. После этого глава останется доступной навсегда.",
+                reply_markup=kb.as_markup(),
+            )
+            await call.answer()
+            return
         await call.answer("Сначала купите доступ", show_alert=True)
         await _send_invoice(call, "chapter", chapter_id)
         return
@@ -683,6 +862,34 @@ async def read_paid_or_free_chapter(call: CallbackQuery) -> None:
         await call.message.answer(chunk)
     await call.message.answer("Глава открыта.", reply_markup=back_to_main())
     await call.answer()
+
+
+@router.callback_query(F.data.startswith("package:unlock:chapter:"))
+async def unlock_chapter_from_package_in_bot(call: CallbackQuery) -> None:
+    raw = call.data.rsplit(":", 1)[-1]
+    if not raw.isdigit():
+        await call.answer("Неверная глава", show_alert=True)
+        return
+    chapter_id = int(raw)
+    user = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
+    try:
+        result = await redeem_chapter_package_credit(user["id"], chapter_id=chapter_id)
+    except ValueError as exc:
+        await call.answer(str(exc), show_alert=True)
+        return
+    chapter = await get_chapter(chapter_id)
+    if not chapter:
+        await call.answer("Глава не найдена", show_alert=True)
+        return
+    header = f"<b>{chapter['book_title']}</b>\n<b>{chapter['title']}</b>\n\n"
+    chunks = _split_text(chapter["text"])
+    await call.message.edit_text(header + chunks[0][:3500])
+    for chunk in chunks[1:]:
+        await call.message.answer(chunk)
+    remaining = result.get("remaining")
+    suffix = f" В пакете осталось: {remaining}." if remaining is not None else ""
+    await call.message.answer(f"Глава открыта навсегда.{suffix}", reply_markup=back_to_main())
+    await call.answer("Открытие списано")
 
 
 @router.callback_query(F.data.startswith("listen:audio:"))
@@ -834,7 +1041,7 @@ async def author_payout_request(call: CallbackQuery) -> None:
         return
     await add_audit(user["id"], "author_payout_requested", "payout", str(payout_id))
     await call.message.edit_text(
-        f"Заявка на выплату #{payout_id} создана.\n\n"
+        f"Заявка на выплату #{payout_id} создана.\n\nСумма зафиксирована в рублях по курсам конкретных продаж.\n\n"
         "Администрация проверит удержания, жалобы, возвраты и реквизиты. После реальной выплаты заявка будет отмечена как выплаченная.",
         reply_markup=author_income_menu(),
     )
@@ -850,7 +1057,7 @@ async def author_payout_history(call: CallbackQuery) -> None:
     else:
         lines = ["<b>🧾 История выплат</b>\n"]
         for row in rows:
-            lines.append(f"#{row['id']} · {row['amount_stars']} Stars · {row['status']} · {row['requested_at'][:16]}")
+            lines.append(f"#{row['id']} · {row['amount_stars']} Stars · {int(row['amount_minor'] or 0) / 100:.2f} ₽ · {row['status']} · {row['requested_at'][:16]}")
         text = "\n".join(lines)
     await call.message.edit_text(text, reply_markup=author_income_menu())
     await call.answer()
@@ -891,7 +1098,8 @@ async def payout_card(call: CallbackQuery) -> None:
         f"<b>Заявка на выплату #{row['id']}</b>\n\n"
         f"Автор: <b>{author}</b>\n"
         f"Telegram: <b>{row['username'] or row['telegram_id']}</b>\n"
-        f"Сумма: <b>{row['amount_stars']} Stars</b>\n"
+        f"Сумма начислений: <b>{row['amount_stars']} Stars</b>\n"
+        f"К выплате: <b>{int(row['amount_minor'] or 0) / 100:.2f} ₽</b>\n"
         f"Способ: <b>{row['method_type']}</b>\n"
         f"Статус: <b>{row['status']}</b>\n"
         f"Дата: <b>{row['requested_at'][:16]}</b>{frozen}\n\n"

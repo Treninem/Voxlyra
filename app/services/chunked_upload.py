@@ -4,6 +4,7 @@ import json
 import re
 import shutil
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,7 @@ from fastapi import UploadFile
 
 from app.config import settings
 from app.services.book_parser import SUPPORTED_BOOK_EXTENSIONS
+from app.services.graphic_import import SUPPORTED_GRAPHIC_EXTENSIONS
 
 UPLOAD_ROOT = Path("storage/temp/chunked_book_uploads")
 CHUNK_SIZE_BYTES = 6 * 1024 * 1024
@@ -33,14 +35,23 @@ def _upload_dir(upload_id: str) -> Path:
     return UPLOAD_ROOT / upload_id
 
 
-def create_upload(*, user_id: int, book_id: int, filename: str, total_size: int) -> dict[str, Any]:
+def _create_upload(
+    *,
+    user_id: int,
+    book_id: int,
+    filename: str,
+    total_size: int,
+    allowed_extensions: set[str],
+    max_mb: int,
+    kind: str,
+    error_text: str,
+) -> dict[str, Any]:
     safe_name = _safe_filename(filename)
     ext = Path(safe_name).suffix.lower()
-    if ext not in SUPPORTED_BOOK_EXTENSIONS:
-        raise ChunkedUploadError("Поддерживаются TXT, DOCX, FB2, EPUB, PDF и ZIP.")
+    if ext not in allowed_extensions:
+        raise ChunkedUploadError(error_text)
     if total_size <= 0:
         raise ChunkedUploadError("Не удалось определить размер файла.")
-    max_mb = int(settings.MAX_BOOK_UPLOAD_MB or 0)
     if max_mb > 0 and total_size > max_mb * 1024 * 1024:
         raise ChunkedUploadError(f"Файл превышает допустимый размер {max_mb} МБ.")
 
@@ -53,10 +64,39 @@ def create_upload(*, user_id: int, book_id: int, filename: str, total_size: int)
         "book_id": int(book_id),
         "filename": safe_name,
         "total_size": int(total_size),
+        "kind": kind,
         "received": [],
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
     }
     (folder / "meta.json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
     return meta
+
+
+def create_upload(*, user_id: int, book_id: int, filename: str, total_size: int) -> dict[str, Any]:
+    return _create_upload(
+        user_id=user_id,
+        book_id=book_id,
+        filename=filename,
+        total_size=total_size,
+        allowed_extensions=set(SUPPORTED_BOOK_EXTENSIONS),
+        max_mb=int(settings.MAX_BOOK_UPLOAD_MB or 0),
+        kind="book",
+        error_text="Поддерживаются TXT, DOCX, FB2, EPUB, PDF и ZIP.",
+    )
+
+
+def create_graphic_upload(*, user_id: int, book_id: int, filename: str, total_size: int) -> dict[str, Any]:
+    return _create_upload(
+        user_id=user_id,
+        book_id=book_id,
+        filename=filename,
+        total_size=total_size,
+        allowed_extensions=set(SUPPORTED_GRAPHIC_EXTENSIONS),
+        max_mb=int(settings.MAX_COMIC_UPLOAD_MB or 0),
+        kind="graphic",
+        error_text="Поддерживаются PDF, CBZ, ZIP, JPG, PNG, WebP и AVIF.",
+    )
 
 
 def load_upload(upload_id: str, *, user_id: int, book_id: int) -> dict[str, Any]:
@@ -113,9 +153,35 @@ async def save_chunk(
     received.add(index)
     meta["received"] = sorted(received)
     meta["total_chunks"] = int(total_chunks)
+    meta["updated_at"] = datetime.now(timezone.utc).isoformat()
     _save_meta(upload_id, meta)
     return {"received_chunks": len(received), "total_chunks": total_chunks, "chunk_bytes": written}
 
+
+
+def get_upload_status(upload_id: str, *, user_id: int, book_id: int) -> dict[str, Any]:
+    meta = load_upload(upload_id, user_id=user_id, book_id=book_id)
+    total_chunks = max(0, int(meta.get("total_chunks") or 0))
+    received = sorted({int(value) for value in meta.get("received", []) if int(value) >= 0})
+    missing = [index for index in range(total_chunks) if index not in set(received)] if total_chunks else []
+    total_size = max(0, int(meta.get("total_size") or 0))
+    received_bytes = 0
+    folder = _upload_dir(upload_id)
+    for index in received:
+        part = folder / f"{index:06d}.part"
+        if part.is_file():
+            received_bytes += int(part.stat().st_size)
+    return {
+        "upload_id": str(meta.get("upload_id") or upload_id),
+        "filename": str(meta.get("filename") or ""),
+        "total_size": total_size,
+        "total_chunks": total_chunks,
+        "received": received,
+        "missing": missing,
+        "received_bytes": min(received_bytes, total_size) if total_size else received_bytes,
+        "progress_percent": round((received_bytes / total_size) * 100, 1) if total_size else 0.0,
+        "updated_at": str(meta.get("updated_at") or ""),
+    }
 
 def assemble_upload(upload_id: str, *, user_id: int, book_id: int, total_chunks: int) -> tuple[Path, dict[str, Any]]:
     meta = load_upload(upload_id, user_id=user_id, book_id=book_id)
