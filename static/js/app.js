@@ -88,6 +88,72 @@ function notify(message) {
   toast._hideTimer = setTimeout(() => toast.classList.remove('show'), 2200);
 }
 
+let contentProtectionBound = false;
+
+function protectedTarget(event) {
+  return event?.target?.closest?.('.protected-content');
+}
+
+function bindContentProtectionEvents() {
+  if (contentProtectionBound) return;
+  contentProtectionBound = true;
+  ['copy', 'cut', 'contextmenu', 'dragstart', 'selectstart'].forEach((type) => {
+    document.addEventListener(type, (event) => {
+      if (!protectedTarget(event)) return;
+      event.preventDefault();
+      notify('Автор разрешил только чтение внутри Вокслиры');
+    }, { capture: true });
+  });
+  document.addEventListener('keydown', (event) => {
+    if (!document.querySelector('.protected-content')) return;
+    const key = String(event.key || '').toLowerCase();
+    if ((event.ctrlKey || event.metaKey) && ['c', 'x', 's', 'p', 'a', 'u'].includes(key)) {
+      event.preventDefault();
+      notify('Копирование и сохранение отключены автором');
+    }
+  }, { capture: true });
+}
+
+function applyContentProtection(protection, rootElement = null) {
+  const target = rootElement || document.getElementById('readerText') || document.getElementById('graphicReader');
+  if (!target) return;
+  const enabled = Boolean(protection?.protected);
+  target.classList.toggle('protected-content', enabled);
+  target.querySelectorAll('img').forEach((image) => { image.draggable = !enabled; });
+  document.querySelectorAll('.content-watermark-layer').forEach((node) => node.remove());
+  if (enabled && protection?.watermark) {
+    const layer = document.createElement('div');
+    layer.className = 'content-watermark-layer';
+    layer.setAttribute('aria-hidden', 'true');
+    const label = String(protection.watermark || 'Вокслира');
+    layer.innerHTML = Array.from({ length: 18 }, () => `<span>${escapeHtml(label)}</span>`).join('');
+    target.appendChild(layer);
+  }
+  if (enabled) bindContentProtectionEvents();
+}
+window.applyContentProtection = applyContentProtection;
+
+async function downloadAllowedBook(url) {
+  if (!url) return;
+  const response = await apiFetch(url);
+  const blob = await response.blob();
+  const disposition = response.headers.get('content-disposition') || '';
+  const match = disposition.match(/filename\*?=(?:UTF-8''|\")?([^\";]+)/i);
+  const filename = decodeURIComponent((match?.[1] || 'book.txt').replaceAll('"', ''));
+  const objectUrl = URL.createObjectURL(blob);
+  try {
+    const link = document.createElement('a');
+    link.href = objectUrl;
+    link.download = filename;
+    link.rel = 'noopener';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  } finally {
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 60000);
+  }
+}
+
 function applyTheme(theme = getPrefs().theme) {
   document.body.classList.remove('light-theme', 'dark-theme', 'sepia-theme');
   const tg = window.Telegram?.WebApp;
@@ -342,8 +408,31 @@ async function initReader() {
   try {
     const data = await apiFetch(`/api/reader/${reader.dataset.chapterId}`);
     if (!data.allowed) {
-      if (status) status.textContent = 'Для этой главы нужен доступ.';
-      if (paragraphs) paragraphs.innerHTML = `<section class="empty-card paywall-card"><div class="empty-icon">◇</div><h3>Глава закрыта</h3><p><b>${Number(data.chapter.price_stars || 0)} Stars</b></p>${data.purchase_url ? `<a class="button-link" href="${escapeHtml(data.purchase_url)}">Купить главу</a>` : ''}</section>`;
+      const packageRemaining = Number(data.package_credits?.remaining || 0);
+      if (status) status.textContent = packageRemaining > 0 ? `Можно открыть из пакета · осталось ${packageRemaining}` : 'Для этой главы нужен доступ.';
+      if (paragraphs) {
+        const packageButton = packageRemaining > 0
+          ? `<button class="button-link gold-button" id="unlockChapterWithPackage" type="button">Открыть за 1 главу из пакета · осталось ${packageRemaining}</button>`
+          : '';
+        paragraphs.innerHTML = `<section class="empty-card paywall-card"><div class="empty-icon">◇</div><h3>Глава закрыта</h3><p><b>${Number(data.chapter.price_stars || 0)} Stars</b> · ≈ ${(Number(data.chapter.buyer_estimate_minor || 0) / 100).toFixed(2)} ₽</p>${packageButton}${data.purchase_url ? `<a class="button-link secondary" href="${escapeHtml(data.purchase_url)}">Купить только эту главу</a>` : ''}<a class="quiet-link" href="/book/${Number(data.chapter.book_id)}#chapterPackages">Посмотреть пакеты глав</a></section>`;
+        const unlockButton = document.getElementById('unlockChapterWithPackage');
+        if (unlockButton) {
+          unlockButton.addEventListener('click', async () => {
+            const approved = window.confirm(`Списать 1 открытие из пакета? После этого глава останется доступной навсегда. В пакете останется ${Math.max(0, packageRemaining - 1)}.`);
+            if (!approved) return;
+            unlockButton.disabled = true;
+            unlockButton.textContent = 'Открываем главу…';
+            try {
+              await apiFetch(data.package_unlock_url || `/api/reader/${reader.dataset.chapterId}/unlock-package`, { method: 'POST' });
+              window.location.reload();
+            } catch (error) {
+              unlockButton.disabled = false;
+              unlockButton.textContent = `Открыть за 1 главу из пакета · осталось ${packageRemaining}`;
+              notify(error.message || 'Не удалось использовать пакет');
+            }
+          });
+        }
+      }
       return;
     }
     const moderationNotice = document.getElementById('readerModerationNotice');
@@ -357,6 +446,20 @@ async function initReader() {
     } else {
       if (moderationNotice) moderationNotice.hidden = true;
       if (status) status.textContent = data.progress_percent ? `Продолжаем с отметки ${data.progress_percent}%` : 'Глава открыта';
+    }
+    applyContentProtection(data.protection, reader);
+    const readerActions = document.querySelector('.reader-actions');
+    if (readerActions && data.protection?.allow_download && data.protection?.download_url) {
+      let downloadButton = document.getElementById('downloadBookText');
+      if (!downloadButton) {
+        downloadButton = document.createElement('button');
+        downloadButton.id = 'downloadBookText';
+        downloadButton.className = 'secondary';
+        downloadButton.type = 'button';
+        downloadButton.textContent = 'Скачать текст';
+        readerActions.appendChild(downloadButton);
+      }
+      downloadButton.onclick = () => downloadAllowedBook(data.protection.download_url).catch((error) => notify(error.message));
     }
     updateReaderNavigation(data);
     const jumpInput = document.getElementById('chapterJumpNumber');
@@ -1153,6 +1256,7 @@ function applyCatalogFilter() {
     const score = exactTitleExists ? (title === query ? 100000 : 0) : catalogTextScore(card, query);
     const matchesText = !query || score > 0;
     const matchesFilter = active === 'all'
+      || (active === 'graphic' && card.dataset.graphic === '1')
       || (active === 'audio' && card.dataset.audio === '1')
       || (active === 'free' && card.dataset.free === '1')
       || (active === 'popular' && Number(card.dataset.popular || 0) > 0);
@@ -1195,10 +1299,13 @@ function bookmarkCard(item) {
 
 function purchaseCard(item) {
   const refunded = item.status === 'refunded';
-  let title = item.book_title || item.chapter_title || item.audio_title || 'Покупка';
+  const isPackage = item.purchase_kind === 'chapter_package';
+  const packageTotal = Number(item.chapter_package_total ?? item.chapter_package_count ?? 0);
+  let title = isPackage ? (item.chapter_package_title || `Пакет на ${packageTotal} глав`) : (item.book_title || item.chapter_title || item.audio_title || 'Покупка');
   let href = item.audio_chapter_id ? `/audio/${Number(item.audio_chapter_id)}` : item.chapter_id ? `/reader/${Number(item.chapter_id)}` : item.book_id ? `/book/${Number(item.book_id)}` : '#';
-  let type = item.audio_chapter_id ? 'Аудиоглава' : item.chapter_id ? 'Глава' : 'Книга';
-  return `<a class="purchase-card${refunded ? ' refunded' : ''}" href="${href}"><div><span>${type}</span><h3>${escapeHtml(title)}</h3><p>${refunded ? 'Возврат оформлен' : 'Доступ открыт'}</p></div><b>${Number(item.amount_stars || 0)} Stars</b></a>`;
+  let type = isPackage ? 'Пакет глав' : item.audio_chapter_id ? 'Аудиоглава' : item.chapter_id ? 'Глава' : 'Книга';
+  const stateText = refunded ? 'Возврат оформлен' : isPackage ? `Осталось открытий: ${Number(item.chapter_package_remaining || 0)} из ${packageTotal}` : 'Доступ открыт';
+  return `<a class="purchase-card${refunded ? ' refunded' : ''}" href="${href}"><div><span>${type}</span><h3>${escapeHtml(title)}</h3><p>${escapeHtml(stateText)}</p></div><b>${Number(item.amount_stars || 0)} Stars</b></a>`;
 }
 
 function renderLibraryTab(tab, data) {
@@ -1220,7 +1327,9 @@ function renderLibraryTab(tab, data) {
     return;
   }
   const purchases = data.purchases || [];
-  content.innerHTML = purchases.length ? `<div class="purchase-list">${purchases.map(purchaseCard).join('')}</div>` : '<article class="empty-card premium-empty"><div class="empty-icon">★</div><h3>Покупок пока нет</h3><p>После покупки книги, главы или аудио доступ появится здесь.</p></article>';
+  const packageBalances = (data.chapter_package_balances || []).filter((item) => Number(item.remaining_credits || 0) > 0);
+  const packageBlock = packageBalances.length ? `<section class="library-package-balances"><div class="section-title slim"><h2>Доступные главы из пакетов</h2></div><div class="chapter-package-balance-grid">${packageBalances.map((item) => `<a class="chapter-package-balance-card" href="/book/${Number(item.book_id)}"><span>${escapeHtml(item.book_title || 'Книга')}</span><strong>${Number(item.remaining_credits || 0)} глав</strong><small>${escapeHtml(item.package_title || 'Пакет')} · использовано ${Number(item.used_credits || 0)} из ${Number(item.total_credits || 0)}</small></a>`).join('')}</div></section>` : '';
+  content.innerHTML = packageBlock + (purchases.length ? `<div class="purchase-list">${purchases.map(purchaseCard).join('')}</div>` : '<article class="empty-card premium-empty"><div class="empty-icon">★</div><h3>Покупок пока нет</h3><p>После покупки книги, главы, пакета или аудио доступ появится здесь.</p></article>');
 }
 
 async function initLibrary() {
@@ -1353,6 +1462,17 @@ function bindEvents() {
     if (target.id === 'audioForward') { event.preventDefault(); seekAudio(getPrefs().rewindStep); return; }
     if (target.matches('[data-sleep-minutes]')) { event.preventDefault(); setSleepTimer(Number(target.dataset.sleepMinutes)); return; }
     if (target.matches('[data-catalog-filter]')) { event.preventDefault(); document.querySelectorAll('[data-catalog-filter]').forEach((btn) => btn.classList.remove('active')); target.classList.add('active'); applyCatalogFilter(); return; }
+    if (target.matches('[data-open-graphic-filter]')) {
+      event.preventDefault();
+      const filter = document.querySelector('[data-catalog-filter="graphic"]');
+      if (filter) {
+        document.querySelectorAll('[data-catalog-filter]').forEach((btn) => btn.classList.remove('active'));
+        filter.classList.add('active');
+        document.getElementById('all-books')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        applyCatalogFilter();
+      }
+      return;
+    }
     if (target.matches('[data-library-tab]')) { event.preventDefault(); document.querySelectorAll('[data-library-tab]').forEach((btn) => btn.classList.remove('active')); target.classList.add('active'); const page = document.getElementById('libraryPage'); if (page?._libraryData) renderLibraryTab(target.dataset.libraryTab, page._libraryData); return; }
 
     if (target.matches('[data-card-bookmark]')) {
@@ -1435,3 +1555,47 @@ document.addEventListener('DOMContentLoaded', () => {
   initBookPage();
   initLibrary();
 });
+
+// v1.9.8 — единый возврат: экранная кнопка, Telegram BackButton и безопасный запасной маршрут.
+(function initRouteNavigation() {
+  const nav = document.getElementById('routeNav');
+  const back = document.getElementById('routeBackButton');
+  const tg = window.Telegram?.WebApp;
+  const path = window.location.pathname || '/';
+  const isHome = path === '/' || path === '';
+
+  function fallbackUrl() {
+    if (path.startsWith('/book/')) return '/catalog';
+    if (path.startsWith('/reader/') || path.startsWith('/comic/') || path.startsWith('/audio/')) {
+      const explicit = document.querySelector('[data-reader-book-url], .quiet-back[href^="/book/"]');
+      return explicit?.getAttribute('data-reader-book-url') || explicit?.getAttribute('href') || '/library';
+    }
+    if (['/catalog', '/library', '/settings', '/author', '/control', '/audio'].some((prefix) => path === prefix || path.startsWith(`${prefix}/`))) return '/';
+    return '/';
+  }
+
+  function canUseHistory() {
+    if (window.history.length <= 1) return false;
+    try {
+      const ref = document.referrer ? new URL(document.referrer) : null;
+      return Boolean(ref && ref.origin === window.location.origin && ref.pathname !== path);
+    } catch (_) { return false; }
+  }
+
+  function goBack() {
+    if (canUseHistory()) window.history.back();
+    else window.location.assign(fallbackUrl());
+  }
+
+  if (!isHome) {
+    if (nav) nav.hidden = false;
+    back?.addEventListener('click', goBack);
+    try {
+      tg?.BackButton?.show();
+      tg?.BackButton?.onClick(goBack);
+    } catch (_) {}
+  } else {
+    if (nav) nav.hidden = true;
+    try { tg?.BackButton?.hide(); } catch (_) {}
+  }
+})();
