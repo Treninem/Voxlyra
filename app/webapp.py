@@ -26,6 +26,7 @@ from app.services.yookassa_payouts import create_sbp_payout, list_sbp_banks, nor
 from app.services.payment_runtime import load_runtime_payment_settings, public_runtime_payment_settings, update_runtime_payment_settings
 from app.services.yookassa_checkout import test_shop_connection, YooKassaCheckoutError
 from app.services.pricing import split_platform_commission, final_price_for_desired_net, two_rate_price
+from app.services.rankings import attach_ranking, attach_rankings
 from app.db import (
     add_comment,
     add_audit,
@@ -733,7 +734,7 @@ def create_app() -> FastAPI:
 
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request):
-        books = await list_catalog_books(limit=80, include_drafts=False)
+        books = await attach_rankings(await list_catalog_books(limit=80, include_drafts=False))
         sections = _showcase_sections(books)
         return templates.TemplateResponse(
             request,
@@ -743,7 +744,7 @@ def create_app() -> FastAPI:
 
     @app.get("/catalog", response_class=HTMLResponse)
     async def catalog(request: Request):
-        books = await list_catalog_books(limit=80, include_drafts=False)
+        books = await attach_rankings(await list_catalog_books(limit=80, include_drafts=False))
         sections = _showcase_sections(books)
         return templates.TemplateResponse(
             request,
@@ -751,11 +752,24 @@ def create_app() -> FastAPI:
             common_context({"books": books, **sections, **(await price_context())}),
         )
 
+    @app.get("/comics", response_class=HTMLResponse)
+    async def comics_catalog(request: Request):
+        rows = await list_catalog_books(limit=120, include_drafts=False)
+        graphic_rows = [row for row in rows if str(row["content_type"] or "book") in GRAPHIC_CONTENT_TYPES]
+        books = await attach_rankings(graphic_rows, category="comic")
+        return templates.TemplateResponse(
+            request,
+            "comics.html",
+            common_context({"books": books, **(await price_context())}),
+        )
+
     @app.get("/book/{book_id}", response_class=HTMLResponse)
     async def book(request: Request, book_id: int):
         book_row = await get_book_with_counts(book_id)
         if book_row and book_row["publication_status"] != "published":
             book_row = None
+        if book_row:
+            book_row = await attach_ranking(book_row)
         chapters = await list_chapters_for_book(book_id, published_only=True) if book_row else []
         graphic_chapters = await list_graphic_chapters_for_book(book_id, published_only=True) if book_row else []
         graphic_volumes = await list_graphic_volumes_for_book(book_id, published_only=True) if book_row else []
@@ -763,6 +777,8 @@ def create_app() -> FastAPI:
         audios = await list_audio_chapters_for_book(book_id, published_only=True) if book_row else []
         options = await get_book_options(book_id) if book_row else {}
         similar_books = await list_similar_books(book_id, limit=6) if book_row else []
+        if similar_books:
+            similar_books = await attach_rankings(similar_books)
         public_reviews = await list_reviews_for_book(book_id, limit=20) if book_row else []
         return templates.TemplateResponse(
             request,
@@ -925,7 +941,8 @@ def create_app() -> FastAPI:
     @app.get("/audio", response_class=HTMLResponse)
     async def audio_index(request: Request):
         rows = await list_catalog_books(limit=60, include_drafts=False)
-        books = [book for book in rows if int(book["audio_count"] or 0) > 0 or int(book["has_audio"] or 0) == 1]
+        audio_rows = [book for book in rows if int(book["audio_count"] or 0) > 0 or int(book["has_audio"] or 0) == 1]
+        books = await attach_rankings(audio_rows, category="audio")
         return templates.TemplateResponse(request, "audio.html", common_context({"books": books, **(await price_context())}))
 
     @app.get("/audio/{audio_id}", response_class=HTMLResponse)

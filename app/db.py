@@ -1,4 +1,6 @@
+import asyncio
 import os
+import sqlite3
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -29,7 +31,41 @@ async def connect():
         await db.close()
 
 
+_INIT_DB_LOCK = asyncio.Lock()
+_INITIALIZED_DATABASES: set[str] = set()
+
+
+async def _execute_schema_ddl(db: aiosqlite.Connection, sql: str) -> None:
+    """Execute schema DDL and tolerate a concurrent identical ADD COLUMN.
+
+    Bot polling and FastAPI lifespan start together. On an older database both
+    startup paths can discover the same missing column before either connection
+    commits it. SQLite then raises ``duplicate column name`` for the slower path.
+    Rechecking the schema is unnecessary when SQLite explicitly reports that
+    another initializer already added the column. Other migration errors remain
+    fatal.
+    """
+    try:
+        await db.execute(sql)
+    except sqlite3.OperationalError as exc:
+        if "duplicate column name" in str(exc).lower():
+            return
+        raise
+
+
 async def init_db() -> None:
+    """Initialize one database path once per process, safely under concurrency."""
+    database_key = os.path.abspath(os.path.expanduser(str(settings.DATABASE_PATH)))
+    if database_key in _INITIALIZED_DATABASES:
+        return
+    async with _INIT_DB_LOCK:
+        if database_key in _INITIALIZED_DATABASES:
+            return
+        await _init_db_impl()
+        _INITIALIZED_DATABASES.add(database_key)
+
+
+async def _init_db_impl() -> None:
     async with connect() as db:
         await db.executescript(
             """
@@ -476,7 +512,7 @@ async def _ensure_book_columns(db: aiosqlite.Connection) -> None:
     }
     for column, sql in migrations.items():
         if column not in existing:
-            await db.execute(sql)
+            await _execute_schema_ddl(db, sql)
 
 
 async def _ensure_audio_columns(db: aiosqlite.Connection) -> None:
@@ -491,7 +527,7 @@ async def _ensure_audio_columns(db: aiosqlite.Connection) -> None:
     }
     for column, sql in migrations.items():
         if column not in existing:
-            await db.execute(sql)
+            await _execute_schema_ddl(db, sql)
 
 
 async def _ensure_defaults(db: aiosqlite.Connection) -> None:
@@ -570,13 +606,13 @@ async def _ensure_stage9_schema(db: aiosqlite.Connection) -> None:
     cur = await db.execute("PRAGMA table_info(purchases)")
     existing = {row[1] for row in await cur.fetchall()}
     if "payload" not in existing:
-        await db.execute("ALTER TABLE purchases ADD COLUMN payload TEXT")
+        await _execute_schema_ddl(db, "ALTER TABLE purchases ADD COLUMN payload TEXT")
     if "purchase_kind" not in existing:
-        await db.execute("ALTER TABLE purchases ADD COLUMN purchase_kind TEXT NOT NULL DEFAULT 'content'")
+        await _execute_schema_ddl(db, "ALTER TABLE purchases ADD COLUMN purchase_kind TEXT NOT NULL DEFAULT 'content'")
     cur = await db.execute("PRAGMA table_info(complaints)")
     existing = {row[1] for row in await cur.fetchall()}
     if "handled_by_user_id" not in existing:
-        await db.execute("ALTER TABLE complaints ADD COLUMN handled_by_user_id INTEGER")
+        await _execute_schema_ddl(db, "ALTER TABLE complaints ADD COLUMN handled_by_user_id INTEGER")
     for key, value in {
         "ad_budget_min_stars": "10",
         "ad_budget_units_per_star": "10",
@@ -2244,7 +2280,7 @@ async def _ensure_v179_schema(db: aiosqlite.Connection) -> None:
     existing = {row[1] for row in await cur.fetchall()}
     for column in ("notifications_chapters", "notifications_audio", "notifications_discounts"):
         if column not in existing:
-            await db.execute(f"ALTER TABLE user_preferences ADD COLUMN {column} INTEGER NOT NULL DEFAULT 1")
+            await _execute_schema_ddl(db, f"ALTER TABLE user_preferences ADD COLUMN {column} INTEGER NOT NULL DEFAULT 1")
     await db.executescript(
         """
         CREATE TABLE IF NOT EXISTS notification_deliveries (
@@ -4570,7 +4606,7 @@ async def _ensure_v176_schema(db: aiosqlite.Connection) -> None:
     cur = await db.execute("PRAGMA table_info(author_ledger)")
     existing = {row[1] for row in await cur.fetchall()}
     if "payout_request_id" not in existing:
-        await db.execute("ALTER TABLE author_ledger ADD COLUMN payout_request_id INTEGER")
+        await _execute_schema_ddl(db, "ALTER TABLE author_ledger ADD COLUMN payout_request_id INTEGER")
     await db.execute(
         "CREATE INDEX IF NOT EXISTS idx_author_ledger_payout_request ON author_ledger(payout_request_id)"
     )
@@ -5118,14 +5154,14 @@ async def _ensure_v191_schema(db: aiosqlite.Connection) -> None:
     cur = await db.execute("PRAGMA table_info(books)")
     book_columns = {row[1] for row in await cur.fetchall()}
     if "content_type" not in book_columns:
-        await db.execute("ALTER TABLE books ADD COLUMN content_type TEXT NOT NULL DEFAULT 'book'")
+        await _execute_schema_ddl(db, "ALTER TABLE books ADD COLUMN content_type TEXT NOT NULL DEFAULT 'book'")
     if "reading_mode" not in book_columns:
-        await db.execute("ALTER TABLE books ADD COLUMN reading_mode TEXT NOT NULL DEFAULT 'ltr'")
+        await _execute_schema_ddl(db, "ALTER TABLE books ADD COLUMN reading_mode TEXT NOT NULL DEFAULT 'ltr'")
 
     cur = await db.execute("PRAGMA table_info(purchases)")
     purchase_columns = {row[1] for row in await cur.fetchall()}
     if "graphic_chapter_id" not in purchase_columns:
-        await db.execute("ALTER TABLE purchases ADD COLUMN graphic_chapter_id INTEGER")
+        await _execute_schema_ddl(db, "ALTER TABLE purchases ADD COLUMN graphic_chapter_id INTEGER")
 
     await db.executescript(
         """
@@ -5196,9 +5232,9 @@ async def _ensure_v196_schema(db: aiosqlite.Connection) -> None:
     cur = await db.execute("PRAGMA table_info(author_ledger)")
     columns = {row[1] for row in await cur.fetchall()}
     if "settlement_rate_minor" not in columns:
-        await db.execute("ALTER TABLE author_ledger ADD COLUMN settlement_rate_minor INTEGER NOT NULL DEFAULT 100")
+        await _execute_schema_ddl(db, "ALTER TABLE author_ledger ADD COLUMN settlement_rate_minor INTEGER NOT NULL DEFAULT 100")
     if "net_minor" not in columns:
-        await db.execute("ALTER TABLE author_ledger ADD COLUMN net_minor INTEGER NOT NULL DEFAULT 0")
+        await _execute_schema_ddl(db, "ALTER TABLE author_ledger ADD COLUMN net_minor INTEGER NOT NULL DEFAULT 0")
     await db.execute(
         "UPDATE author_ledger SET settlement_rate_minor=100 WHERE settlement_rate_minor IS NULL OR settlement_rate_minor<=0"
     )
@@ -5209,9 +5245,9 @@ async def _ensure_v196_schema(db: aiosqlite.Connection) -> None:
     cur = await db.execute("PRAGMA table_info(author_payout_requests)")
     payout_columns = {row[1] for row in await cur.fetchall()}
     if "amount_minor" not in payout_columns:
-        await db.execute("ALTER TABLE author_payout_requests ADD COLUMN amount_minor INTEGER NOT NULL DEFAULT 0")
+        await _execute_schema_ddl(db, "ALTER TABLE author_payout_requests ADD COLUMN amount_minor INTEGER NOT NULL DEFAULT 0")
     if "settlement_note" not in payout_columns:
-        await db.execute("ALTER TABLE author_payout_requests ADD COLUMN settlement_note TEXT")
+        await _execute_schema_ddl(db, "ALTER TABLE author_payout_requests ADD COLUMN settlement_note TEXT")
     await db.execute(
         "UPDATE author_payout_requests SET amount_minor=amount_stars*100 WHERE amount_minor IS NULL OR amount_minor=0"
     )
@@ -5238,11 +5274,11 @@ async def _ensure_v197_schema(db: aiosqlite.Connection) -> None:
     cur = await db.execute("PRAGMA table_info(graphic_pages)")
     columns = {row[1] for row in await cur.fetchall()}
     if "variants_json" not in columns:
-        await db.execute("ALTER TABLE graphic_pages ADD COLUMN variants_json TEXT NOT NULL DEFAULT '{}'")
+        await _execute_schema_ddl(db, "ALTER TABLE graphic_pages ADD COLUMN variants_json TEXT NOT NULL DEFAULT '{}'")
     if "storage_backend" not in columns:
-        await db.execute("ALTER TABLE graphic_pages ADD COLUMN storage_backend TEXT NOT NULL DEFAULT 'local'")
+        await _execute_schema_ddl(db, "ALTER TABLE graphic_pages ADD COLUMN storage_backend TEXT NOT NULL DEFAULT 'local'")
     if "storage_key" not in columns:
-        await db.execute("ALTER TABLE graphic_pages ADD COLUMN storage_key TEXT NOT NULL DEFAULT ''")
+        await _execute_schema_ddl(db, "ALTER TABLE graphic_pages ADD COLUMN storage_key TEXT NOT NULL DEFAULT ''")
     await db.execute(
         "UPDATE graphic_pages SET storage_backend='local' WHERE storage_backend IS NULL OR storage_backend=''"
     )
@@ -5252,9 +5288,9 @@ async def _ensure_v197_schema(db: aiosqlite.Connection) -> None:
     cur = await db.execute("PRAGMA table_info(graphic_chapters)")
     chapter_columns = {row[1] for row in await cur.fetchall()}
     if "volume_number" not in chapter_columns:
-        await db.execute("ALTER TABLE graphic_chapters ADD COLUMN volume_number INTEGER NOT NULL DEFAULT 1")
+        await _execute_schema_ddl(db, "ALTER TABLE graphic_chapters ADD COLUMN volume_number INTEGER NOT NULL DEFAULT 1")
     if "volume_title" not in chapter_columns:
-        await db.execute("ALTER TABLE graphic_chapters ADD COLUMN volume_title TEXT NOT NULL DEFAULT ''")
+        await _execute_schema_ddl(db, "ALTER TABLE graphic_chapters ADD COLUMN volume_title TEXT NOT NULL DEFAULT ''")
     await db.execute("UPDATE graphic_chapters SET volume_number=1 WHERE volume_number IS NULL OR volume_number<1")
 
 
@@ -5264,7 +5300,7 @@ async def _ensure_v198_schema(db: aiosqlite.Connection) -> None:
     cur = await db.execute("PRAGMA table_info(purchases)")
     purchase_columns = {row[1] for row in await cur.fetchall()}
     if "graphic_volume_number" not in purchase_columns:
-        await db.execute("ALTER TABLE purchases ADD COLUMN graphic_volume_number INTEGER")
+        await _execute_schema_ddl(db, "ALTER TABLE purchases ADD COLUMN graphic_volume_number INTEGER")
 
     cur = await db.execute("PRAGMA table_info(graphic_chapters)")
     chapter_columns = {row[1] for row in await cur.fetchall()}
@@ -5277,7 +5313,7 @@ async def _ensure_v198_schema(db: aiosqlite.Connection) -> None:
     }
     for name, sql in chapter_migrations.items():
         if name not in chapter_columns:
-            await db.execute(sql)
+            await _execute_schema_ddl(db, sql)
 
     cur = await db.execute("PRAGMA table_info(graphic_pages)")
     page_columns = {row[1] for row in await cur.fetchall()}
@@ -5289,7 +5325,7 @@ async def _ensure_v198_schema(db: aiosqlite.Connection) -> None:
     }
     for name, sql in page_migrations.items():
         if name not in page_columns:
-            await db.execute(sql)
+            await _execute_schema_ddl(db, sql)
 
     await db.executescript(
         """
@@ -5354,7 +5390,7 @@ async def _ensure_v199_schema(db: aiosqlite.Connection) -> None:
     cur = await db.execute("PRAGMA table_info(purchases)")
     purchase_columns = {row[1] for row in await cur.fetchall()}
     if "chapter_package_id" not in purchase_columns:
-        await db.execute("ALTER TABLE purchases ADD COLUMN chapter_package_id INTEGER")
+        await _execute_schema_ddl(db, "ALTER TABLE purchases ADD COLUMN chapter_package_id INTEGER")
 
     await db.executescript(
         """
@@ -5438,7 +5474,7 @@ async def _ensure_v193_schema(db: aiosqlite.Connection) -> None:
     }
     for name, sql in migrations.items():
         if name not in columns:
-            await db.execute(sql)
+            await _execute_schema_ddl(db, sql)
 
     await db.executescript(
         """
@@ -5529,9 +5565,9 @@ async def _ensure_v193_schema(db: aiosqlite.Connection) -> None:
     cur = await db.execute("PRAGMA table_info(author_financial_profiles)")
     financial_columns = {row[1] for row in await cur.fetchall()}
     if "verified_by_user_id" not in financial_columns:
-        await db.execute("ALTER TABLE author_financial_profiles ADD COLUMN verified_by_user_id INTEGER")
+        await _execute_schema_ddl(db, "ALTER TABLE author_financial_profiles ADD COLUMN verified_by_user_id INTEGER")
     if "rejection_reason" not in financial_columns:
-        await db.execute("ALTER TABLE author_financial_profiles ADD COLUMN rejection_reason TEXT")
+        await _execute_schema_ddl(db, "ALTER TABLE author_financial_profiles ADD COLUMN rejection_reason TEXT")
 
     for key, value in {
         "legal_terms_version": "2026-07-10",

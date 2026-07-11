@@ -17,6 +17,7 @@ from app.legal_texts import LEGAL_DOCS, LegalDoc, get_doc
 
 
 LEGAL_STORAGE_ROOT = Path("storage/legal")
+LEGAL_PDF_LAYOUT_VERSION = "2"
 _FONT_REGULAR = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 _FONT_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 
@@ -45,7 +46,7 @@ def _footer(canvas, document, doc: LegalDoc) -> None:
     canvas.setFont(regular, 7)
     canvas.setFillColor(colors.HexColor("#626277"))
     width, _ = A4
-    canvas.drawString(18 * mm, 11 * mm, f"Вокслира · редакция {doc.version} · SHA-256 {doc.digest[:16]}…")
+    canvas.drawString(18 * mm, 11 * mm, f"Вокслира · редакция от {doc.version}")
     canvas.drawRightString(width - 18 * mm, 11 * mm, f"Страница {document.page}")
     canvas.restoreState()
 
@@ -108,7 +109,7 @@ def _build_story(doc: LegalDoc):
     story = [
         Paragraph(doc.title, title),
         Paragraph(
-            f"Редакция: {doc.version}<br/>Контрольная сумма документа: {doc.digest}<br/>"
+            f"Редакция от {doc.version}<br/>"
             "Документ сформирован платформой Вокслира. Сохраните файл для ознакомления.",
             meta,
         ),
@@ -144,7 +145,8 @@ def ensure_legal_pdf(code: str, *, force: bool = False) -> Path:
     LEGAL_STORAGE_ROOT.mkdir(parents=True, exist_ok=True)
     path = LEGAL_STORAGE_ROOT / _safe_name(doc.filename)
     digest_path = path.with_suffix(path.suffix + ".sha256")
-    if not force and path.is_file() and digest_path.is_file() and digest_path.read_text(encoding="utf-8").strip() == doc.digest:
+    expected_marker = f"{doc.digest}:layout-{LEGAL_PDF_LAYOUT_VERSION}"
+    if not force and path.is_file() and digest_path.is_file() and digest_path.read_text(encoding="utf-8").strip() == expected_marker:
         return path
 
     pdf = SimpleDocTemplate(
@@ -163,7 +165,7 @@ def ensure_legal_pdf(code: str, *, force: bool = False) -> Path:
         onFirstPage=lambda canvas, document: _footer(canvas, document, doc),
         onLaterPages=lambda canvas, document: _footer(canvas, document, doc),
     )
-    digest_path.write_text(doc.digest, encoding="utf-8")
+    digest_path.write_text(expected_marker, encoding="utf-8")
     return path
 
 

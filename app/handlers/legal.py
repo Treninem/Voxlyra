@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, FSInputFile, Message
@@ -37,9 +39,9 @@ async def missing_legal_codes(user_id: int, codes: list[str]) -> list[str]:
 
 def _legal_menu_text() -> str:
     return (
-        "<b>📜 Документы Вокслиры</b>\n\n"
-        "Каждый документ доступен отдельным PDF-файлом. Оферта и согласия принимаются раздельно: "
-        "получение файла само по себе не означает принятия. Версия и контрольная сумма сохраняются в журнале."
+        "<b>📜 Правила и документы Вокслиры</b>\n\n"
+        "Откройте нужный PDF и ознакомьтесь с ним. Договоры и согласия подтверждаются отдельной кнопкой — "
+        "само получение файла ничего не подтверждает."
     )
 
 
@@ -48,16 +50,20 @@ def _caption(code: str, *, required: bool = False) -> str:
     if not doc:
         return "Документ не найден."
     action = {
-        "agreement": "После ознакомления нажмите «Принимаю условия».",
-        "consent": "Согласие оформляется отдельно. После ознакомления нажмите «Даю отдельное согласие».",
-        "information": "После ознакомления можно подтвердить получение документа.",
+        "agreement": "Откройте PDF, прочитайте документ и нажмите «Принимаю условия».",
+        "consent": "Откройте PDF, прочитайте согласие и нажмите «Даю отдельное согласие».",
+        "information": "Откройте PDF и ознакомьтесь с документом.",
     }.get(doc.consent_kind, "Ознакомьтесь с документом.")
     prefix = "<b>Обязательный шаг</b>\n\n" if required else ""
-    return (
-        f"{prefix}<b>{doc.title}</b>\n"
-        f"Редакция: <b>{doc.version}</b>\n"
-        f"Контрольная сумма: <code>{doc.digest[:20]}…</code>\n\n{action}"
-    )
+    return f"{prefix}<b>{doc.title}</b>\nРедакция от <b>{doc.version}</b>\n\n{action}"
+
+
+def _telegram_filename(code: str) -> str:
+    doc = get_doc(code)
+    title = (doc.short_title if doc else "Документ").strip() or "Документ"
+    safe = re.sub(r'[\\/:*?"<>|]+', ' ', title)
+    safe = re.sub(r'\s+', ' ', safe).strip()
+    return f"Вокслира — {safe}.pdf"
 
 
 async def send_legal_document(message: Message, code: str, *, required: bool = False) -> None:
@@ -67,9 +73,9 @@ async def send_legal_document(message: Message, code: str, *, required: bool = F
         return
     path = ensure_legal_pdf(code)
     await message.answer_document(
-        document=FSInputFile(path, filename=doc.filename),
+        document=FSInputFile(path, filename=_telegram_filename(code)),
         caption=_caption(code, required=required),
-        reply_markup=legal_doc_menu(code, doc.consent_kind),
+        reply_markup=legal_doc_menu(code, doc.consent_kind, required=required),
         protect_content=False,
     )
 
@@ -89,7 +95,6 @@ async def _completion_markup(author: bool = False):
         kb.button(text="✍️ Продолжить регистрацию", callback_data="author:register")
     else:
         kb.button(text="🏠 Открыть Вокслиру", callback_data="menu:main")
-    kb.button(text="📜 Все документы", callback_data="main:legal")
     kb.adjust(1)
     return kb.as_markup()
 

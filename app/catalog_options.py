@@ -17,7 +17,6 @@ BOOK_TYPES = [
     Choice("poetry", "Стихи / поэзия"),
     Choice("fanfic", "Фанфик"),
     Choice("translation", "Перевод"),
-    Choice("manga", "Манга / манхва / комикс"),
     Choice("audio", "Аудиокнига"),
     Choice("mixed", "Текст + аудио"),
 ]

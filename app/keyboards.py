@@ -10,7 +10,8 @@ def main_menu(is_owner: bool, has_admin_access: bool, has_author_profile: bool =
     kb = InlineKeyboardBuilder()
     if settings.WEBAPP_URL:
         base = settings.WEBAPP_URL.rstrip('/')
-        kb.button(text="📚 Читать", web_app=WebAppInfo(url=f"{base}/catalog"))
+        kb.button(text="📚 Книги", web_app=WebAppInfo(url=f"{base}/catalog"))
+        kb.button(text="🖼 Комиксы", web_app=WebAppInfo(url=f"{base}/comics"))
         kb.button(text="🎧 Слушать", web_app=WebAppInfo(url=f"{base}/audio"))
     kb.button(text="⭐ Моё", callback_data="main:my")
     kb.button(text="✍️ Автору", callback_data="author:menu")
@@ -21,7 +22,7 @@ def main_menu(is_owner: bool, has_admin_access: bool, has_author_profile: bool =
     if is_owner:
         kb.button(text="👑 Управление", callback_data="owner:menu")
     if settings.WEBAPP_URL:
-        kb.adjust(2, 2, 2, 1, 1)
+        kb.adjust(2, 1, 2, 2, 1, 1)
     else:
         kb.adjust(2, 2, 1, 1)
     return kb.as_markup()
@@ -115,7 +116,7 @@ def author_menu(has_profile: bool) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     if has_profile:
         rows = [
-            ("📚 Мои книги", "author:books"),
+            ("📚 Мои произведения", "author:books"),
             ("➕ Добавить книгу", "author:add_book"),
             ("🎧 Аудиокниги", "author:audio"),
             ("💰 Доход", "author:income"),
@@ -127,6 +128,11 @@ def author_menu(has_profile: bool) -> InlineKeyboardMarkup:
         rows = [("✍️ Стать автором", "author:register")]
     for text, data in rows:
         kb.button(text=text, callback_data=data)
+    if has_profile and settings.WEBAPP_URL:
+        kb.button(
+            text="🖼 Добавить комикс / мангу",
+            web_app=WebAppInfo(url=f"{settings.WEBAPP_URL.rstrip('/')}/author?new=graphic"),
+        )
     kb.button(text="⬅️ Назад", callback_data="menu:main")
     kb.adjust(2, 2, 2, 1)
     return kb.as_markup()
@@ -819,7 +825,7 @@ def legal_menu() -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-def legal_doc_menu(code: str, consent_kind: str = "agreement") -> InlineKeyboardMarkup:
+def legal_doc_menu(code: str, consent_kind: str = "agreement", *, required: bool = False) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     if consent_kind == "consent":
         accept_text = "✅ Даю отдельное согласие"
@@ -830,7 +836,8 @@ def legal_doc_menu(code: str, consent_kind: str = "agreement") -> InlineKeyboard
     kb.button(text=accept_text, callback_data=f"legal:accept:{code}")
     if consent_kind in {"consent", "agreement"}:
         kb.button(text="Не принимаю", callback_data=f"legal:decline:{code}")
-    kb.button(text="📜 Все документы", callback_data="main:legal")
+    if not required:
+        kb.button(text="📜 Другие документы", callback_data="main:legal")
     kb.button(text="⬅️ В меню", callback_data="menu:main")
     kb.adjust(1)
     return kb.as_markup()
