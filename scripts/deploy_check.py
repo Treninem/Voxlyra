@@ -47,6 +47,7 @@ def main() -> int:
         "app/services/legal_documents.py",
         "app/services/secure_fields.py",
         "app/services/payment_runtime.py",
+        "app/services/rankings.py",
         "templates/catalog.html",
         "templates/reader.html",
         "templates/comic_reader.html",
@@ -90,6 +91,15 @@ def main() -> int:
         "docs/PURCHASE_CANCELLATION_V1_10_0.md",
         "docs/STATUS_V1_10_0.md",
         "docs/RELEASE_CHECK_V1_10_0.md",
+        "docs/DB_STARTUP_HOTFIX_V1_10_1.md",
+        "docs/STATUS_V1_10_1.md",
+        "docs/RELEASE_CHECK_V1_10_1.md",
+        "docs/LEGAL_AND_COMICS_UI_V1_10_2.md",
+        "docs/STATUS_V1_10_2.md",
+        "docs/RELEASE_CHECK_V1_10_2.md",
+        "docs/RANKINGS_V1_10_3.md",
+        "docs/STATUS_V1_10_3.md",
+        "docs/RELEASE_CHECK_V1_10_3.md",
         "storage/legal/.gitkeep",
     ]:
         ok, text = check_file(path)

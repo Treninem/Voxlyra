@@ -1024,6 +1024,26 @@ function armDelete(button, message, resetText) {
   return false;
 }
 
+
+function openNewProjectForm(kind = 'book') {
+  const form = document.getElementById('newProjectForm');
+  const type = document.getElementById('newProjectType');
+  const mode = document.getElementById('newProjectReadingMode');
+  const heading = document.getElementById('newProjectFormTitle');
+  const hint = document.getElementById('newProjectFormHint');
+  if (!form || !type || !mode) return;
+  const graphic = kind === 'graphic';
+  type.value = graphic ? 'comic' : 'book';
+  mode.value = defaultReadingMode(type.value);
+  if (heading) heading.textContent = graphic ? 'Новое графическое произведение' : 'Новая книга';
+  if (hint) hint.textContent = graphic
+    ? 'Выберите комикс, мангу, манхву, вебтун или графический роман. После создания откроется загрузка страниц.'
+    : 'Создайте текстовую книгу. После создания откроется добавление и импорт глав.';
+  form.hidden = false;
+  document.getElementById('newProjectTitle')?.focus();
+  form.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
 async function createAuthorProject(event) {
   event.preventDefault();
   const title = document.getElementById('newProjectTitle').value.trim();
@@ -1114,7 +1134,8 @@ function bindAuthorEvents() {
     if (target.dataset.pageDelete) { await deleteGraphicPage(target, target.dataset.pageDelete); return; }
     if (target.id === 'closeGraphicPageEditor') { document.getElementById('graphicPageEditor').hidden = true; return; }
     if (target.dataset.authorBookId) { await openAuthorBook(target.dataset.authorBookId); return; }
-    if (target.id === 'newAuthorProject') { document.getElementById('newProjectForm').hidden = false; document.getElementById('newProjectTitle').focus(); return; }
+    if (target.id === 'newTextProject') { openNewProjectForm('book'); return; }
+    if (target.id === 'newGraphicProject') { openNewProjectForm('graphic'); return; }
     if (target.id === 'cancelNewProject') { document.getElementById('newProjectForm').hidden = true; return; }
     if (target.id === 'closeBookEditor') { document.getElementById('authorBookEditor').hidden = true; authorState.book = null; return; }
     if (target.id === 'newChapterButton') { resetChapterForm(); document.getElementById('chapterForm').hidden = false; return; }
@@ -1354,4 +1375,7 @@ document.addEventListener('DOMContentLoaded', () => {
   bindAuthorEvents();
   setGraphicUploadTab('file');
   loadAuthorDashboard();
+  const newKind = new URLSearchParams(window.location.search).get('new');
+  if (newKind === 'graphic') setTimeout(() => openNewProjectForm('graphic'), 250);
+  else if (newKind === 'book') setTimeout(() => openNewProjectForm('book'), 250);
 });

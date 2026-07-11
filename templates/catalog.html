@@ -30,11 +30,11 @@
     <span class="story-portal-shade" aria-hidden="true"></span>
     <span class="story-portal-copy"><small>Личное пространство</small><strong>Моя полка</strong><em>Книги, покупки и прогресс</em></span>
   </a>
-  {% if graphic_books %}<a class="story-portal portal-comics" href="#graphic-books">
+  <a class="story-portal portal-comics" href="/comics">
     <span class="story-portal-image" aria-hidden="true"></span>
     <span class="story-portal-shade" aria-hidden="true"></span>
     <span class="story-portal-copy"><small>Истории в кадрах</small><strong>Комиксы и манга</strong><em>Манхва, вебтуны и графические романы</em></span>
-  </a>{% endif %}
+  </a>
   <a class="story-portal portal-stories" href="/settings">
     <span class="story-portal-image" aria-hidden="true"></span>
     <span class="story-portal-shade" aria-hidden="true"></span>
@@ -87,7 +87,7 @@
   <label class="search-box"><span aria-hidden="true">⌕</span><input id="catalogSearch" type="search" placeholder="Название или автор" autocomplete="off"></label>
   <div class="filter-pills" role="group" aria-label="Фильтр каталога">
     <button class="filter-pill active" data-catalog-filter="all">Все</button>
-    {% if graphic_books %}<button class="filter-pill" data-catalog-filter="graphic">Комиксы и манга</button>{% endif %}
+    <button class="filter-pill" data-catalog-filter="graphic">Комиксы и манга</button>
     {% if audio_books %}<button class="filter-pill" data-catalog-filter="audio">С аудио</button>{% endif %}
     {% if free_books %}<button class="filter-pill" data-catalog-filter="free">Бесплатное</button>{% endif %}
     {% if popular %}<button class="filter-pill" data-catalog-filter="popular">Популярное</button>{% endif %}

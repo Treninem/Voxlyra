@@ -107,11 +107,14 @@
     </section>
 
     <div class="section-title split-title">
-      <div><span class="eyebrow">Проекты</span><h2>Мои произведения</h2><p>Книги, комиксы, манга, манхва, вебтуны и графические романы.</p></div>
-      <button class="button-link compact-button" id="newAuthorProject" type="button">Новое произведение</button>
+      <div><span class="eyebrow">Проекты</span><h2>Мои произведения</h2><p>Выберите, что создаёте: текстовую книгу или графическое произведение.</p></div>
+    </div>
+    <div class="author-create-choices" aria-label="Создать новое произведение">
+      <button class="author-create-choice" id="newTextProject" type="button"><span>📚</span><strong>Создать книгу</strong><small>Текстовые главы, аудио и пакеты глав</small></button>
+      <button class="author-create-choice graphic" id="newGraphicProject" type="button"><span>🖼</span><strong>Создать комикс / мангу</strong><small>Комикс, манга, манхва, вебтун или графический роман</small></button>
     </div>
     <form id="newProjectForm" class="author-form panel-card new-project-form" hidden>
-      <h3>Новое произведение</h3>
+      <h3 id="newProjectFormTitle">Новое произведение</h3><p class="muted" id="newProjectFormHint">Сначала выберите тип, затем создайте проект и загрузите главы.</p>
       <label>Название<input id="newProjectTitle" maxlength="160" required></label>
       <div class="form-grid two">
         <label>Тип<select id="newProjectType">

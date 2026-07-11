@@ -1259,7 +1259,8 @@ function applyCatalogFilter() {
       || (active === 'graphic' && card.dataset.graphic === '1')
       || (active === 'audio' && card.dataset.audio === '1')
       || (active === 'free' && card.dataset.free === '1')
-      || (active === 'popular' && Number(card.dataset.popular || 0) > 0);
+      || (active === 'popular' && Number(card.dataset.popular || 0) > 0)
+      || (['comic', 'manga', 'manhwa', 'webtoon', 'graphic_novel'].includes(active) && card.dataset.contentType === active);
     const show = matchesText && matchesFilter;
     card.hidden = !show;
     if (show) visible += 1;
@@ -1570,7 +1571,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const explicit = document.querySelector('[data-reader-book-url], .quiet-back[href^="/book/"]');
       return explicit?.getAttribute('data-reader-book-url') || explicit?.getAttribute('href') || '/library';
     }
-    if (['/catalog', '/library', '/settings', '/author', '/control', '/audio'].some((prefix) => path === prefix || path.startsWith(`${prefix}/`))) return '/';
+    if (['/catalog', '/comics', '/library', '/settings', '/author', '/control', '/audio'].some((prefix) => path === prefix || path.startsWith(`${prefix}/`))) return '/';
     return '/';
   }
 

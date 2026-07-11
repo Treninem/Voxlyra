@@ -5,7 +5,7 @@
 <section class="hero compact legal-hero">
   <div class="eyebrow">ПРАВИЛА И ДОКУМЕНТЫ</div>
   <h1>{% if document %}{{ document.title }}{% else %}Документы Вокслиры{% endif %}</h1>
-  <p>{% if document %}Редакция {{ document.version }} · SHA-256 {{ document.digest[:20] }}…{% else %}Публичные версии договоров, согласий, правил возвратов и выплат.{% endif %}</p>
+  <p>{% if document %}Редакция от {{ document.version }}{% else %}Публичные версии договоров, согласий, правил возвратов и выплат.{% endif %}</p>
 </section>
 
 {% if not operator_configured %}
@@ -19,10 +19,9 @@
 <section class="surface-card legal-document">
   <div class="legal-actions">
     <a class="primary-button" href="/legal/{{ document.code }}.pdf">Скачать PDF</a>
-    <a class="secondary-button" href="/legal">Все документы</a>
+    <a class="secondary-button" href="/legal">К списку документов</a>
   </div>
   <article class="legal-text">{{ document.body | safe }}</article>
-  <div class="legal-hash">Полная контрольная сумма: <code>{{ document.digest }}</code></div>
 </section>
 {% else %}
 <section class="legal-grid">

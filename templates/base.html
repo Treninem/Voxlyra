@@ -15,6 +15,7 @@
   <svg class="icon-sprite" aria-hidden="true">
     <symbol id="icon-home" viewBox="0 0 24 24"><path d="M3 10.7 12 3l9 7.7v9.1a1.2 1.2 0 0 1-1.2 1.2h-5.1v-6.2H9.3V21H4.2A1.2 1.2 0 0 1 3 19.8z"/></symbol>
     <symbol id="icon-books" viewBox="0 0 24 24"><path d="M5 3.5h5.2A1.8 1.8 0 0 1 12 5.3V21a3.3 3.3 0 0 0-3.3-3.3H5zM19 3.5h-5.2A1.8 1.8 0 0 0 12 5.3V21a3.3 3.3 0 0 1 3.3-3.3H19z"/></symbol>
+    <symbol id="icon-comics" viewBox="0 0 24 24"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H11a2 2 0 0 1 2 2v14H6.5A2.5 2.5 0 0 1 4 16.5z"/><path d="M13 5a2 2 0 0 1 2-2h2.5A2.5 2.5 0 0 1 20 5.5v11a2.5 2.5 0 0 1-2.5 2.5H13z"/><path d="m7 12 2-2 2 2M15.5 9.5h2M15.5 12.5h2"/></symbol>
     <symbol id="icon-audio" viewBox="0 0 24 24"><path d="M9 18V6l11-2v12"/><circle cx="6" cy="18" r="3"/><circle cx="17" cy="16" r="3"/></symbol>
     <symbol id="icon-library" viewBox="0 0 24 24"><path d="M5 4.5h12.5A1.5 1.5 0 0 1 19 6v14H6.5A2.5 2.5 0 0 1 4 17.5v-11A2 2 0 0 1 6 4.5z"/><path d="M4 17.5A2.5 2.5 0 0 1 6.5 15H19M8 8h7"/></symbol>
     <symbol id="icon-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.6v-.2h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1z"/></symbol>
@@ -29,7 +30,8 @@
   {% block bottom_nav %}
   <nav class="bottom-nav" aria-label="Главная навигация">
     <a href="/" data-nav="home"><svg aria-hidden="true"><use href="#icon-home"></use></svg><span>Главная</span></a>
-    <a href="/catalog#all-books" data-nav="books"><svg aria-hidden="true"><use href="#icon-books"></use></svg><span>Каталог</span></a>
+    <a href="/catalog#all-books" data-nav="books"><svg aria-hidden="true"><use href="#icon-books"></use></svg><span>Книги</span></a>
+    <a href="/comics" data-nav="comics"><svg aria-hidden="true"><use href="#icon-comics"></use></svg><span>Комиксы</span></a>
     <a href="/audio" data-nav="audio"><svg aria-hidden="true"><use href="#icon-audio"></use></svg><span>Аудио</span></a>
     <a href="/library" data-nav="library"><svg aria-hidden="true"><use href="#icon-library"></use></svg><span>Моё</span></a>
     <a href="/settings" data-nav="settings"><svg aria-hidden="true"><use href="#icon-settings"></use></svg><span>Настройки</span></a>

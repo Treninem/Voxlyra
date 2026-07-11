@@ -17,7 +17,7 @@ def _make_image(path: Path, size: tuple[int, int] = (180, 260), value: int = 120
 def test_v191_build_and_reader_assets_exist():
     from app.build_info import OWNER_BUILD_NAME, OWNER_BUILD_VERSION
 
-    assert OWNER_BUILD_VERSION in {"v1.9.1", "v1.9.2", "v1.9.3", "v1.9.4", "v1.9.5", "v1.9.6", "v1.9.7", "v1.9.8", "v1.9.9", "v1.10.0"}
+    assert OWNER_BUILD_VERSION in {"v1.9.1", "v1.9.2", "v1.9.3", "v1.9.4", "v1.9.5", "v1.9.6", "v1.9.7", "v1.9.8", "v1.9.9", "v1.10.0", "v1.10.1", "v1.10.2"}
     assert OWNER_BUILD_NAME
     for relative in (
         "templates/comic_reader.html",
