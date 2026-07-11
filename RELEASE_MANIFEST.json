@@ -1,0 +1,60 @@
+{
+  "project": "Voxlyra",
+  "version": "v1.10.0",
+  "build": "comics_complete_purchase_cancel",
+  "created_utc": "2026-07-11T14:21:29.890008+00:00",
+  "files": 221,
+  "tests": {
+    "collected": 136,
+    "passed": 135,
+    "skipped": 1,
+    "ui_buttons": "88/88",
+    "deploy_checks": "84/84",
+    "python_compile": "passed",
+    "javascript_syntax": "passed"
+  },
+  "payment_model": {
+    "digital_payments": "Telegram Stars only",
+    "yookassa": "disabled",
+    "buyer_rate_minor_default": 145,
+    "author_rate_minor_default": 100,
+    "commission_percent_default": 20,
+    "author_rate_applies_to": "net Stars after commission"
+  },
+  "purchase_cancellation": {
+    "unpaid_invoice_cancel": true,
+    "paid_unused_cancel": true,
+    "default_window_minutes": 15,
+    "configurable_window_minutes": "1-120",
+    "freeze_before_refund": true,
+    "telegram_refund_star_payment": true,
+    "actual_content_delivery_usage_marker": true,
+    "package_requires_all_credits_unused": true,
+    "manual_refund_after_use": true
+  },
+  "chapter_packages": {
+    "strict_user_and_book_scope": true,
+    "selection_model": "N arbitrary paid chapters in one book",
+    "text_chapters": true,
+    "graphic_chapters": true,
+    "permanent_access_after_redeem": true
+  },
+  "comics": {
+    "overall_percent": 100,
+    "completed_stages": 5,
+    "remaining_major_stages": 0,
+    "ocr": "local Tesseract rus+eng",
+    "search_access_filtered": true,
+    "translation_layers": true,
+    "frame_reader": true,
+    "page_bookmarks": true,
+    "moderated_page_comments": true,
+    "reading_statistics": true,
+    "new_chapter_notifications": true
+  },
+  "legal": {
+    "refund_policy_version": "2026-07-11",
+    "required_start_documents_version_unchanged": true
+  },
+  "avatars_changed": false
+}

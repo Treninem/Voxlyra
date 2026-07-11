@@ -1,28 +1,33 @@
 {% macro cover(book, size='mini', audio=false) -%}
-  <img class="cover-image cover-{{ size }}{% if audio %} audio{% endif %}" src="/media/cover/{{ book.id }}?v={{ book.updated_at|default(book.id, true) }}" alt="Обложка книги {{ book.title }}" loading="lazy" onerror="this.hidden=true;this.nextElementSibling.hidden=false">
+  <img class="cover-image cover-{{ size }}{% if audio %} audio{% endif %}" src="/media/cover/{{ book.id }}?v={{ book.updated_at|default(book.id, true) }}" alt="Обложка произведения {{ book.title }}" loading="lazy" onerror="this.hidden=true;this.nextElementSibling.hidden=false">
   <div class="cover-mini{% if size == 'big' %} cover-big{% endif %}{% if audio %} audio{% endif %}" aria-hidden="true" hidden>{{ (book.title or 'В')[:1] }}</div>
 {%- endmacro %}
 
 {% macro book_card(book, mode='grid') -%}
 {% set has_audio = book.audio_count|default(0)|int > 0 or book.has_audio|default(0)|int == 1 %}
+{% set content_type = book.content_type|default('book', true) %}
+{% set is_graphic = content_type != 'book' %}
 {% set first_chapter = book.first_chapter_id|default(0)|int %}
+{% set first_graphic = book.first_graphic_chapter_id|default(0)|int %}
 {% set first_audio = book.first_audio_id|default(0)|int %}
-<article class="book-card premium-book-card {{ mode }}"
+{% set type_label = {'comic':'Комикс','manga':'Манга','manhwa':'Манхва','webtoon':'Вебтун','graphic_novel':'Графический роман'}.get(content_type, 'Книга') %}
+<article class="book-card premium-book-card {{ mode }}{% if is_graphic %} graphic-book-card{% endif %}"
    data-catalog-card
    data-title="{{ (book.title or '')|lower }}"
    data-author="{{ (book.pen_name or '')|lower }}"
    data-audio="{{ 1 if has_audio else 0 }}"
+   data-graphic="{{ 1 if is_graphic else 0 }}"
    data-free="{{ 1 if (book.price_stars|int <= 0 or book.free_chapters_count|default(0)|int > 0) else 0 }}"
    data-popular="{{ book.purchase_count|default(0)|int + book.reviews_count|default(0)|int }}">
-  <a class="book-cover-link" href="/book/{{ book.id }}" aria-label="Открыть книгу {{ book.title }}">
+  <a class="book-cover-link" href="/book/{{ book.id }}" aria-label="Открыть произведение {{ book.title }}">
     {{ cover(book) }}
-    {% if has_audio %}<span class="cover-badge">Аудио</span>{% endif %}
+    {% if is_graphic %}<span class="cover-badge graphic-badge">{{ type_label }}</span>{% elif has_audio %}<span class="cover-badge">Аудио</span>{% endif %}
   </a>
   <div class="book-info">
     <div class="book-topline">
       <span>{{ book.age_limit }}</span>
       {% if book.rating|default(0)|float > 0 %}<span>★ {{ '%.1f'|format(book.rating|float) }}</span>{% endif %}
-      <span>{{ book.chapters_count|default(0) }} глав</span>
+      {% if is_graphic %}<span>{{ book.graphic_pages_count|default(0) }} стр.</span>{% else %}<span>{{ book.chapters_count|default(0) }} глав</span>{% endif %}
     </div>
     <a class="book-title-link" href="/book/{{ book.id }}"><h3>{{ book.title }}</h3></a>
     <p class="book-author">{{ book.pen_name or 'Автор не указан' }}</p>
@@ -32,16 +37,16 @@
       </div>
     {% endif %}
     {% if mode != 'shelf' %}
-      <p class="desc">{{ (book.description or 'Откройте книгу, чтобы увидеть описание и доступные главы.')[:120] }}{% if book.description and book.description|length > 120 %}…{% endif %}</p>
+      <p class="desc">{{ (book.description or 'Откройте произведение, чтобы увидеть описание и доступные главы.')[:120] }}{% if book.description and book.description|length > 120 %}…{% endif %}</p>
     {% endif %}
     <div class="book-price-line">
-      <strong>{% if book.price_stars|int > 0 %}{{ book.price_stars }} Stars{% else %}Бесплатно{% endif %}</strong>
+      <strong>{% if book.price_stars|int > 0 %}{{ book.price_stars }} Stars <small>≈ {{ '%.2f'|format((book.price_stars|int * buyer_star_rate_minor|default(145)) / 100) }} ₽</small>{% else %}Бесплатно{% endif %}</strong>
       {% if book.free_chapters_count|default(0)|int > 0 %}<span>{{ book.free_chapters_count }} глав бесплатно</span>{% endif %}
     </div>
     <div class="card-actions">
-      <a class="card-action primary" href="{% if first_chapter %}/reader/{{ first_chapter }}{% else %}/book/{{ book.id }}{% endif %}">Читать</a>
+      <a class="card-action primary" href="{% if first_graphic %}/comic/{{ first_graphic }}{% elif first_chapter %}/reader/{{ first_chapter }}{% else %}/book/{{ book.id }}{% endif %}">{% if is_graphic %}Смотреть{% else %}Читать{% endif %}</a>
       {% if first_audio %}<a class="card-action" href="/audio/{{ first_audio }}">Слушать</a>{% endif %}
-      <button class="card-action save" type="button" data-card-bookmark="{{ book.id }}" aria-label="Добавить книгу в библиотеку">В библиотеку</button>
+      <button class="card-action save" type="button" data-card-bookmark="{{ book.id }}" aria-label="Добавить произведение в библиотеку">В библиотеку</button>
     </div>
   </div>
 </article>

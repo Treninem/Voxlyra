@@ -348,7 +348,7 @@ def test_stage11_legal_docs_present():
     from app.legal_texts import LEGAL_DOCS, REQUIRED_FOR_AUTHOR, REQUIRED_ON_START
     assert "terms" in LEGAL_DOCS
     assert "privacy" in REQUIRED_ON_START
-    assert "authors" in REQUIRED_FOR_AUTHOR
+    assert "author_license" in REQUIRED_FOR_AUTHOR
     assert len(LEGAL_DOCS["refunds"].body) > 200
 
 

@@ -3,18 +3,22 @@
 {% block title %}{% if book %}{{ book.title }} — Вокслира{% else %}Книга не найдена{% endif %}{% endblock %}
 {% block content %}
 {% if book %}
-<section class="book-page premium-book-page" id="bookPage" data-book-id="{{ book_id }}">
+{% set content_type = book.content_type|default('book', true) %}
+{% set is_graphic = content_type != 'book' %}
+{% set type_label = {'comic':'Комикс','manga':'Манга','manhwa':'Манхва','webtoon':'Вебтун','graphic_novel':'Графический роман'}.get(content_type, 'Книга') %}
+<section class="book-page premium-book-page{% if is_graphic %} graphic-work-page{% endif %}" id="bookPage" data-book-id="{{ book_id }}">
   <a class="quiet-back" href="/catalog">← Каталог</a>
   <section class="book-hero-card deluxe-book-hero">
     {{ cover(book, 'big') }}
     <div class="book-hero-copy">
-      <span class="eyebrow">{{ book.age_limit }} · {{ book.pen_name or 'Автор не указан' }}</span>
+      <span class="eyebrow">{{ type_label }} · {{ book.age_limit }} · {{ book.pen_name or 'Автор не указан' }}</span>
       <h1>{{ book.title }}</h1>
       <div class="book-rating-line">
         {% if book.rating|float > 0 %}<strong>★ {{ '%.1f'|format(book.rating|float) }}</strong><span>{{ book.reviews_count }} отзывов</span>{% else %}<span>Оценка появится после первых отзывов</span>{% endif %}
       </div>
-      <p class="muted">{{ book.chapters_count }} глав · {{ book.audio_count }} аудио{% if book.free_chapters_count|int > 0 %} · {{ book.free_chapters_count }} бесплатно{% endif %}</p>
+      <p class="muted">{% if is_graphic %}{{ book.graphic_chapters_count|default(graphic_chapters|length) }} глав · {{ book.graphic_pages_count|default(0) }} страниц{% else %}{{ book.text_chapters_count|default(book.chapters_count) }} текстовых глав{% endif %} · {{ book.audio_count }} аудио{% if book.free_chapters_count|int > 0 %} · {{ book.free_chapters_count }} бесплатно{% endif %}</p>
       <div class="chips">
+        {% if is_graphic %}<span>{{ type_label }}</span><span>{% if book.reading_mode == 'rtl' %}Справа налево{% elif book.reading_mode == 'vertical' %}Вертикальная лента{% elif book.reading_mode == 'spread' %}Разворот{% elif book.reading_mode == 'single' %}Одна страница{% else %}Слева направо{% endif %}</span>{% endif %}
         {% if book.audio_count|int > 0 %}<span>Есть аудиоверсия</span>{% endif %}
         {% if book.allow_download %}<span>Можно скачать</span>{% else %}<span>Чтение в приложении</span>{% endif %}
         {% if book.writing_status == 'finished' %}<span>Завершена</span>{% else %}<span>В процессе</span>{% endif %}
@@ -23,16 +27,16 @@
   </section>
 
   <div class="action-grid premium-actions book-primary-actions">
-    {% if chapters %}<a class="button-link" href="/reader/{{ chapters[0].id }}">Читать</a>{% endif %}
+    {% if graphic_chapters %}<a class="button-link" href="/comic/{{ graphic_chapters[0].id }}">Смотреть</a>{% elif chapters %}<a class="button-link" href="/reader/{{ chapters[0].id }}">Читать</a>{% endif %}
     {% if audios %}<a class="button-link purple-btn" href="/audio/{{ audios[0].id }}">Слушать</a>{% endif %}
     <button id="bookmarkReading" class="secondary">В библиотеку</button>
     <button id="bookmarkFavorite" class="secondary">В любимое</button>
-    {% if book.price_stars|int > 0 and bot_username %}<a class="button-link gold-button full-span" href="https://t.me/{{ bot_username }}?start=buy_book_{{ book.id }}">Купить книгу · {{ book.price_stars }} Stars</a>{% endif %}
+    {% if book.price_stars|int > 0 and bot_username %}<a class="button-link gold-button full-span" href="https://t.me/{{ bot_username }}?start=buy_book_{{ book.id }}">Купить {% if is_graphic %}произведение{% else %}книгу{% endif %} · {{ book.price_stars }} Stars · ≈ {{ '%.2f'|format((book.price_stars|int * buyer_star_rate_minor|default(145)) / 100) }} ₽</a>{% endif %}
     {% if bot_username and channel_promotion_enabled %}<a class="button-link secondary full-span" href="https://t.me/{{ bot_username }}?start=promote_book_{{ book.id }}">📢 Опубликовать книгу в канале</a>{% endif %}
   </div>
 
   <section class="description-card">
-    <div class="section-title slim"><h2>О книге</h2></div>
+    <div class="section-title slim"><h2>О произведении</h2></div>
     <p class="book-description{% if not book.description %} muted{% endif %}">{{ book.description or 'Автор пока не добавил описание. Доступные главы уже можно открыть ниже.' }}</p>
   </section>
 
@@ -45,20 +49,73 @@
   </section>
   {% endif %}
 
-  <section class="chapter-list premium-list">
-    <div class="section-title shelf-title"><div><span class="eyebrow">Текстовая версия</span><h2>Главы</h2></div><span class="section-count">{{ chapters|length }}</span></div>
-    {% if chapters %}
+  {% if chapter_packages %}
+  <section class="chapter-package-offers panel-card" id="chapterPackages">
+    <div class="section-title split-title slim">
+      <div><span class="eyebrow">Выгодные наборы</span><h2>Пакеты глав</h2><p>Пакет не привязан к порядку. После покупки вы сами выбираете, какие платные главы открыть, даже если читаете с пропусками.</p></div>
+      <span class="section-count">{{ chapter_packages|length }}</span>
+    </div>
+    <div class="chapter-package-grid">
+      {% for package in chapter_packages %}
+      <article class="chapter-package-card">
+        <div class="chapter-package-card-head">
+          <span>{% if package.content_scope == 'graphic' %}Графические главы{% elif package.content_scope == 'all' %}Любые главы{% else %}Текстовые главы{% endif %}</span>
+          <b>{{ package.chapters_count }} глав</b>
+        </div>
+        <h3>{{ package.title or ('Пакет на ' ~ package.chapters_count ~ ' глав') }}</h3>
+        <p><strong>{{ package.price_stars }} Stars</strong> · ≈ {{ '%.2f'|format((package.price_stars|int * buyer_star_rate_minor|default(145)) / 100) }} ₽</p>
+        <small>В среднем {{ '%.2f'|format(package.price_stars|float / package.chapters_count|int) }} Stars за одну выбранную главу. Открытая глава остаётся вашей.</small>
+        {% if bot_username %}<a class="button-link gold-button wide-button" href="https://t.me/{{ bot_username }}?start=buy_package_{{ package.id }}">Купить пакет</a>{% endif %}
+      </article>
+      {% endfor %}
+    </div>
+  </section>
+  {% endif %}
+
+  {% if graphic_chapters %}
+  <section class="chapter-list premium-list graphic-chapter-list">
+    <div class="section-title shelf-title"><div><span class="eyebrow">Графическая версия</span><h2>Тома и главы</h2></div><span class="section-count">{{ graphic_chapters|length }}</span></div>
+    {% for volume_number, volume_chapters in graphic_chapters|groupby('volume_number') %}
+    <div class="graphic-volume-block">
+      {% set volume_info = graphic_volume_map.get(volume_number|int) if graphic_volume_map else none %}
+      <div class="graphic-volume-heading">
+        <div><strong>Том {{ volume_number|default(1) }}</strong><span>{{ (volume_info.title if volume_info and volume_info.title else volume_chapters[0].volume_title) or 'Без отдельного названия' }}</span></div>
+        {% if volume_info and volume_info.price_stars|int > 0 and bot_username %}<a class="button-link compact-button gold-button" href="https://t.me/{{ bot_username }}?start=buy_volume_{{ book.id }}_{{ volume_number|int }}">Купить том · {{ volume_info.price_stars }} Stars · ≈ {{ '%.2f'|format((volume_info.price_stars|int * buyer_star_rate_minor|default(145)) / 100) }} ₽</a>{% elif volume_info and volume_info.is_free %}<b class="free-volume-label">Том бесплатный</b>{% endif %}
+      </div>
       <div class="episode-list">
-      {% for chapter in chapters %}
-        <a class="chapter-row" href="/reader/{{ chapter.id }}">
-          <span class="episode-number">{{ '%02d'|format(chapter.number) }}</span>
-          <span class="episode-copy"><strong>{{ chapter.title }}</strong><small>{% if chapter.is_free %}Открыта бесплатно{% else %}Доступ после покупки{% endif %}</small></span>
-          <b>{% if chapter.is_free %}Открыть{% else %}{{ chapter.price_stars }} ★{% endif %}</b>
-        </a>
+      {% for chapter in volume_chapters %}
+        <div class="chapter-row graphic-episode-row">
+          <a class="graphic-episode-main" href="/comic/{{ chapter.id }}">
+            <span class="episode-number">{{ '%02d'|format(chapter.number) }}</span>
+            <span class="episode-copy"><strong>{{ chapter.title }}</strong><small>{{ chapter.actual_pages_count|default(chapter.pages_count) }} страниц · {% if chapter.reading_mode == 'rtl' %}справа налево{% elif chapter.reading_mode == 'vertical' %}вертикальная лента{% elif chapter.reading_mode == 'spread' %}разворот{% elif chapter.reading_mode == 'single' %}одна страница{% else %}слева направо{% endif %}{% if not chapter.is_free and chapter.preview_pages|int > 0 %} · {{ chapter.preview_pages }} стр. бесплатно{% endif %}</small></span>
+          </a>
+          {% if chapter.is_free %}<a class="episode-open-link" href="/comic/{{ chapter.id }}">Открыть</a>{% elif bot_username %}<a class="episode-buy-link" href="https://t.me/{{ bot_username }}?start=buy_graphic_{{ chapter.id }}">{{ chapter.price_stars }} ★</a>{% else %}<b>{{ chapter.price_stars }} ★</b>{% endif %}
+        </div>
       {% endfor %}
       </div>
-    {% else %}<article class="empty-card"><h3>Глав пока нет</h3><p>Они появятся после публикации автором.</p></article>{% endif %}
+    </div>
+    {% endfor %}
   </section>
+  {% endif %}
+
+  {% if chapters %}
+  <section class="chapter-list premium-list">
+    <div class="section-title shelf-title"><div><span class="eyebrow">Текстовая версия</span><h2>Главы</h2></div><span class="section-count">{{ chapters|length }}</span></div>
+    <div class="episode-list">
+    {% for chapter in chapters %}
+      <a class="chapter-row" href="/reader/{{ chapter.id }}">
+        <span class="episode-number">{{ '%02d'|format(chapter.number) }}</span>
+        <span class="episode-copy"><strong>{{ chapter.title }}</strong><small>{% if chapter.is_free %}Открыта бесплатно{% else %}Доступ после покупки{% endif %}</small></span>
+        <b>{% if chapter.is_free %}Открыть{% else %}{{ chapter.price_stars }} ★{% endif %}</b>
+      </a>
+    {% endfor %}
+    </div>
+  </section>
+  {% endif %}
+
+  {% if not chapters and not graphic_chapters %}
+  <section class="chapter-list premium-list"><article class="empty-card"><h3>Глав пока нет</h3><p>Они появятся после публикации автором.</p></article></section>
+  {% endif %}
 
   {% if audios %}
   <section class="chapter-list audio-list premium-list">
@@ -91,6 +148,6 @@
   {% endif %}
 </section>
 {% else %}
-<section class="empty-card premium-empty"><h1>Книга не найдена</h1><p>Она могла быть скрыта, удалена или ещё не опубликована.</p><a class="button-link" href="/catalog">Вернуться в каталог</a></section>
+<section class="empty-card premium-empty"><h1>Произведение не найдено</h1><p>Оно могло быть скрыто, удалено или ещё не опубликовано.</p><a class="button-link" href="/catalog">Вернуться в каталог</a></section>
 {% endif %}
 {% endblock %}

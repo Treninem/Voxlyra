@@ -90,7 +90,7 @@
   <p class="reader-kicker">{{ chapter.book_title }} · {{ chapter.pen_name or 'Автор не указан' }}</p>
   <h1>{{ chapter.title }}</h1>
   {% if server_text_visible %}<div id="readerParagraphs">{% for paragraph in chapter.text.split('\n') %}{% if paragraph.strip() %}<p>{{ paragraph }}</p>{% endif %}{% endfor %}</div>
-  {% else %}<div id="readerParagraphs" class="empty-card paywall-card"><div class="empty-icon">◇</div><h3>Глава закрыта</h3><p>Откройте её внутри Telegram. Если доступ уже куплен, текст загрузится автоматически.</p><p><b>{{ chapter.price_stars }} Stars</b></p>{% if purchase_url %}<a class="button-link" href="{{ purchase_url }}">Купить главу</a>{% endif %}</div>{% endif %}
+  {% else %}<div id="readerParagraphs" class="empty-card paywall-card"><div class="empty-icon">◇</div><h3>Глава закрыта</h3><p>Откройте её внутри Telegram. Если доступ уже куплен, текст загрузится автоматически.</p><p><b>{{ chapter.price_stars }} Stars</b> · ≈ {{ '%.2f'|format((chapter.price_stars|int * buyer_star_rate_minor|default(145)) / 100) }} ₽</p>{% if purchase_url %}<a class="button-link" href="{{ purchase_url }}">Купить главу</a>{% endif %}</div>{% endif %}
 </article>
 <section class="reader-actions premium-reader-actions"><button id="saveReadingProgress" class="secondary">Сохранить место</button><span id="progressLabel" class="muted"></span></section>
 <nav class="chapter-navigation" aria-label="Переход между главами">

@@ -8,7 +8,7 @@
   <title>{% block title %}{{ project_name }}{% endblock %}</title>
   <link rel="icon" type="image/webp" href="/static/img/miniapp/voxlyra-v.webp">
   <link rel="preload" as="image" href="/static/img/miniapp/voxlyra-mark.webp" fetchpriority="high">
-  <link rel="stylesheet" href="/static/css/style.css">
+  <link rel="stylesheet" href="/static/css/style.css?v={{ asset_version }}">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body class="{% block body_class %}{% endblock %}">
@@ -19,6 +19,10 @@
     <symbol id="icon-library" viewBox="0 0 24 24"><path d="M5 4.5h12.5A1.5 1.5 0 0 1 19 6v14H6.5A2.5 2.5 0 0 1 4 17.5v-11A2 2 0 0 1 6 4.5z"/><path d="M4 17.5A2.5 2.5 0 0 1 6.5 15H19M8 8h7"/></symbol>
     <symbol id="icon-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.6v-.2h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1z"/></symbol>
   </svg>
+  <nav class="route-nav" id="routeNav" aria-label="Возврат и главное меню" hidden>
+    <button class="route-nav-back" id="routeBackButton" type="button" aria-label="Вернуться назад">← <span>Назад</span></button>
+    <a class="route-nav-home" href="/" aria-label="Перейти в главное меню">⌂ <span>В меню</span></a>
+  </nav>
   <main class="app-shell">
     {% block content %}{% endblock %}
   </main>
@@ -32,7 +36,7 @@
   </nav>
   {% endblock %}
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="/static/js/app.js"></script>
+  <script src="/static/js/app.js?v={{ asset_version }}"></script>
   {% block scripts %}{% endblock %}
 </body>
 </html>

@@ -7,7 +7,7 @@ ENV PIPER_VOICE_DIR=/opt/voxlyra-voices
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
+    && apt-get install -y --no-install-recommends ffmpeg ca-certificates libarchive13 fonts-dejavu-core tesseract-ocr tesseract-ocr-rus tesseract-ocr-eng \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
@@ -35,6 +35,6 @@ COPY . .
 EXPOSE 8080
 EXPOSE 3000
 
-RUN mkdir -p data storage/covers storage/books storage/audio storage/tts storage/temp
+RUN mkdir -p data storage/covers storage/books storage/audio storage/tts storage/comics storage/temp storage/legal
 
 CMD ["python", "main.py"]

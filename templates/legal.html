@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Документы · {{ project_name }}{% endblock %}
+{% block body_class %}legal-page{% endblock %}
+{% block content %}
+<section class="hero compact legal-hero">
+  <div class="eyebrow">ПРАВИЛА И ДОКУМЕНТЫ</div>
+  <h1>{% if document %}{{ document.title }}{% else %}Документы Вокслиры{% endif %}</h1>
+  <p>{% if document %}Редакция {{ document.version }} · SHA-256 {{ document.digest[:20] }}…{% else %}Публичные версии договоров, согласий, правил возвратов и выплат.{% endif %}</p>
+</section>
+
+{% if not operator_configured %}
+<section class="surface-card legal-warning">
+  <strong>Режим подготовки</strong>
+  <p>Реквизиты владельца платформы ещё не заполнены. Платные рублёвые функции должны оставаться выключенными до заполнения реквизитов и юридической проверки.</p>
+</section>
+{% endif %}
+
+{% if document %}
+<section class="surface-card legal-document">
+  <div class="legal-actions">
+    <a class="primary-button" href="/legal/{{ document.code }}.pdf">Скачать PDF</a>
+    <a class="secondary-button" href="/legal">Все документы</a>
+  </div>
+  <article class="legal-text">{{ document.body | safe }}</article>
+  <div class="legal-hash">Полная контрольная сумма: <code>{{ document.digest }}</code></div>
+</section>
+{% else %}
+<section class="legal-grid">
+  {% for item in documents %}
+  <a class="surface-card legal-card" href="/legal/{{ item.code }}">
+    <span class="eyebrow">{{ item.short_title }}</span>
+    <h2>{{ item.title }}</h2>
+    <p>Редакция {{ item.version }}</p>
+    <span>Открыть документ →</span>
+  </a>
+  {% endfor %}
+</section>
+{% endif %}
+{% endblock %}

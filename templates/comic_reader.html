@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+{% block title %}{% if graphic_chapter %}{{ graphic_chapter.title }} — {{ project_name }}{% else %}Глава не найдена{% endif %}{% endblock %}
+{% block body_class %}graphic-reader-page{% endblock %}
+{% block content %}
+<section class="graphic-reader-shell" id="graphicReader" data-chapter-id="{{ graphic_chapter_id }}">
+  <header class="graphic-reader-toolbar">
+    <a class="graphic-toolbar-button graphic-toolbar-back" data-reader-book-url="{% if graphic_chapter %}/book/{{ graphic_chapter.book_id }}{% else %}/catalog{% endif %}" href="{% if graphic_chapter %}/book/{{ graphic_chapter.book_id }}{% else %}/catalog{% endif %}" aria-label="Вернуться к произведению">← <span>К книге</span></a>
+    <div class="graphic-reader-heading">
+      <small id="graphicBookTitle">{% if graphic_chapter %}{{ graphic_chapter.book_title }}{% else %}Вокслира{% endif %}</small>
+      <strong id="graphicChapterTitle">{% if graphic_chapter %}{{ graphic_chapter.title }}{% else %}Глава{% endif %}</strong>
+    </div>
+    <button class="graphic-toolbar-button" id="graphicSettingsToggle" type="button" aria-expanded="false" aria-label="Настройки чтения">⚙</button>
+  </header>
+
+  <div class="graphic-progress-track" aria-hidden="true"><i id="graphicProgressBar"></i></div>
+
+  <section class="graphic-reader-settings" id="graphicReaderSettings" hidden>
+    <div>
+      <span>Отображение</span>
+      <button type="button" data-graphic-layout="vertical">Лента</button>
+      <button type="button" data-graphic-layout="single">Одна</button>
+      <button type="button" data-graphic-layout="spread">Разворот</button>
+    </div>
+    <div>
+      <span>Направление</span>
+      <button type="button" data-graphic-direction="ltr">Слева направо</button>
+      <button type="button" data-graphic-direction="rtl">Справа налево</button>
+    </div>
+    <div>
+      <span>Расширенное чтение</span>
+      <button type="button" id="graphicFrameMode">Покадрово</button>
+      <button type="button" id="graphicTranslationToggle">Перевод: выкл.</button>
+      <select id="graphicTranslationLanguage" aria-label="Язык переводного слоя"><option value="ru">Русский</option><option value="en">English</option></select>
+      <button type="button" id="graphicCurrentBookmark">☆ Закладка</button>
+      <button type="button" id="graphicCurrentComments">Комментарии</button>
+    </div>
+    <div class="graphic-search-tools">
+      <span>Поиск по тексту</span>
+      <div><input id="graphicSearchInput" type="search" minlength="2" maxlength="200" placeholder="Фраза на странице"><button type="button" id="graphicSearchButton">Найти</button></div>
+      <div id="graphicSearchResults" class="graphic-search-results" hidden></div>
+    </div>
+    <div>
+      <span>Офлайн-чтение</span>
+      <button type="button" id="graphicCacheChapter">Сохранить главу</button>
+      <button type="button" id="graphicCacheVolume">Сохранить том</button>
+      <button type="button" id="graphicClearChapterCache">Удалить главу</button>
+      <button type="button" id="graphicClearVolumeCache">Удалить том</button>
+    </div>
+    <div class="graphic-reader-connection">
+      <span>Состояние</span>
+      <small id="graphicNetworkStatus">Проверяем соединение…</small>
+      <small id="graphicCacheStatus">Кэш хранится только на этом устройстве.</small>
+    </div>
+  </section>
+
+  <article id="graphicModerationNotice" class="reader-moderation-notice" hidden>
+    <strong>Служебный просмотр</strong>
+    <span>Страницы открыты только для проверки и не сохраняются в личный прогресс.</span>
+  </article>
+
+  <article id="graphicPreviewNotice" class="reader-preview-notice" hidden>
+    <strong>Бесплатный фрагмент</strong>
+    <span id="graphicPreviewText">Доступна часть страниц для знакомства.</span>
+    <a id="graphicPreviewBuy" class="button-link compact-button" href="#">Открыть всю главу</a>
+  </article>
+
+  <div class="graphic-reader-status" id="graphicReaderStatus">Готовим страницы…</div>
+
+  <section class="graphic-pages vertical" id="graphicPages" aria-live="polite"></section>
+
+  <section class="graphic-frame-viewer" id="graphicFrameViewer" hidden aria-live="polite">
+    <button type="button" class="graphic-frame-close" id="graphicExitFrameMode">Закрыть покадровый режим</button>
+    <div class="graphic-frame-canvas-wrap"><canvas id="graphicFrameCanvas"></canvas></div>
+    <div>
+      <div class="graphic-frame-caption"><strong id="graphicFrameIndicator">Кадр 1 / 1</strong><span id="graphicFramePageLabel">Страница 1</span></div>
+      <nav class="graphic-frame-nav"><button type="button" id="graphicPreviousFrame">← Кадр</button><button type="button" id="graphicNextFrame">Кадр →</button></nav>
+    </div>
+  </section>
+
+  <aside class="graphic-comments-drawer" id="graphicCommentsDrawer" hidden>
+    <div class="graphic-comments-head"><div><span class="eyebrow">Страница</span><h3 id="graphicCommentsTitle">Комментарии</h3></div><button type="button" class="secondary compact-button" id="graphicCommentsClose">Закрыть</button></div>
+    <div id="graphicCommentsList" class="graphic-comments-list"></div>
+    <div class="graphic-comment-form"><textarea id="graphicCommentText" maxlength="2000" placeholder="Комментарий к странице"></textarea><button type="button" class="button-link gold-button" id="graphicCommentSend">Отправить на модерацию</button></div>
+  </aside>
+
+  <nav class="graphic-page-controls" id="graphicPageControls" hidden>
+    <button type="button" id="graphicPreviousPage">← Предыдущая</button>
+    <strong id="graphicPageIndicator">1 / 1</strong>
+    <button type="button" id="graphicNextPage">Следующая →</button>
+  </nav>
+
+  <nav class="chapter-navigation graphic-chapter-navigation" id="graphicChapterNavigation">
+    {% if previous_chapter %}<a href="/comic/{{ previous_chapter.id }}"><small>Предыдущая глава</small><strong>← {{ previous_chapter.title }}</strong></a>{% else %}<span></span>{% endif %}
+    {% if next_chapter %}<a href="/comic/{{ next_chapter.id }}"><small>Следующая глава</small><strong>{{ next_chapter.title }} →</strong></a>{% elif graphic_chapter %}<a href="/book/{{ graphic_chapter.book_id }}"><small>Конец</small><strong>К произведению →</strong></a>{% endif %}
+  </nav>
+</section>
+{% endblock %}
+{% block bottom_nav %}{% endblock %}
+{% block scripts %}<script src="/static/js/comic.js?v={{ asset_version }}"></script>{% endblock %}

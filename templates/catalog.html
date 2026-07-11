@@ -9,8 +9,8 @@
   <div class="hero-copy">
     <span class="eyebrow">Истории, которые звучат</span>
     <h1>Откройте мир, в который хочется вернуться</h1>
-    <p>Читайте с нужного места, слушайте в своём темпе и собирайте личную библиотеку внутри Telegram.</p>
-    <div class="hero-points" aria-label="Возможности Вокслиры"><span>Чтение</span><span>Аудио</span><span>Личная библиотека</span></div>
+    <p>Читайте книги, листайте комиксы и мангу, слушайте истории и собирайте личную библиотеку внутри Telegram.</p>
+    <div class="hero-points" aria-label="Возможности Вокслиры"><span>Книги</span><span>Комиксы</span><span>Аудио</span><span>Личная библиотека</span></div>
     <div class="hero-actions">
       <a class="button-link" href="#all-books">Открыть каталог</a>
       {% if audio_books %}<a class="button-link secondary" href="/audio">Слушать</a>{% endif %}
@@ -30,6 +30,11 @@
     <span class="story-portal-shade" aria-hidden="true"></span>
     <span class="story-portal-copy"><small>Личное пространство</small><strong>Моя полка</strong><em>Книги, покупки и прогресс</em></span>
   </a>
+  {% if graphic_books %}<a class="story-portal portal-comics" href="#graphic-books">
+    <span class="story-portal-image" aria-hidden="true"></span>
+    <span class="story-portal-shade" aria-hidden="true"></span>
+    <span class="story-portal-copy"><small>Истории в кадрах</small><strong>Комиксы и манга</strong><em>Манхва, вебтуны и графические романы</em></span>
+  </a>{% endif %}
   <a class="story-portal portal-stories" href="/settings">
     <span class="story-portal-image" aria-hidden="true"></span>
     <span class="story-portal-shade" aria-hidden="true"></span>
@@ -46,6 +51,13 @@
 <section class="showcase-section">
   <div class="section-title shelf-title"><div><span class="eyebrow">Свежие публикации</span><h2>Новинки</h2></div><a href="#all-books">Смотреть все →</a></div>
   <div class="horizontal-shelf">{% for book in newest %}{{ book_card(book, 'shelf') }}{% endfor %}</div>
+</section>
+{% endif %}
+
+{% if graphic_books %}
+<section class="showcase-section graphic-showcase" id="graphic-books">
+  <div class="section-title shelf-title"><div><span class="eyebrow">Истории в изображениях</span><h2>Комиксы, манга и вебтуны</h2></div><a href="#all-books" data-open-graphic-filter>Все графические →</a></div>
+  <div class="horizontal-shelf">{% for book in graphic_books %}{{ book_card(book, 'shelf') }}{% endfor %}</div>
 </section>
 {% endif %}
 
@@ -75,6 +87,7 @@
   <label class="search-box"><span aria-hidden="true">⌕</span><input id="catalogSearch" type="search" placeholder="Название или автор" autocomplete="off"></label>
   <div class="filter-pills" role="group" aria-label="Фильтр каталога">
     <button class="filter-pill active" data-catalog-filter="all">Все</button>
+    {% if graphic_books %}<button class="filter-pill" data-catalog-filter="graphic">Комиксы и манга</button>{% endif %}
     {% if audio_books %}<button class="filter-pill" data-catalog-filter="audio">С аудио</button>{% endif %}
     {% if free_books %}<button class="filter-pill" data-catalog-filter="free">Бесплатное</button>{% endif %}
     {% if popular %}<button class="filter-pill" data-catalog-filter="popular">Популярное</button>{% endif %}
@@ -88,7 +101,7 @@
     <article class="empty-card premium-empty catalog-empty-state">
       <div class="empty-icon">✦</div>
       <h3>Пока здесь тихо</h3>
-      <p>Когда появятся опубликованные книги, они будут ждать вас на этой витрине.</p>
+      <p>Когда появятся опубликованные книги и графические произведения, они будут ждать вас на этой витрине.</p>
     </article>
   {% endif %}
 </section>

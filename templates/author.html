@@ -31,9 +31,100 @@
 
     <div class="author-stat-grid" id="authorStats"></div>
 
+    <section class="panel-card author-finance-policy" id="authorFinancePolicy">
+      <div class="section-title split-title slim">
+        <div><span class="eyebrow">Прозрачные расчёты</span><h2>Комиссии и выплаты</h2><p>Цена задаётся в Telegram Stars. Покупателю показывается ориентировочная стоимость в рублях, а вознаграждение автора фиксируется по отдельному курсу.</p></div>
+        <a class="button-link secondary compact-button" href="/legal/fees_payouts">Правила выплат</a>
+      </div>
+      <div class="author-finance-breakdown">
+        <article><span>Комиссия платформы</span><strong id="authorCommissionPercent">20%</strong></article>
+        <article><span>Договорное удержание</span><strong id="authorHoldDays">14 дней</strong></article>
+        <article><span>К выплате автору</span><strong id="authorRubAvailable">0 ₽</strong></article>
+        <article><span>В удержании</span><strong id="authorRubHeld">0 ₽</strong></article>
+      </div>
+      <div class="author-price-example" id="authorPriceExample">При цене 10 Stars: покупателю ≈ 14,50 ₽, после комиссии автору 8,00 ₽.</div>
+      <div class="form-grid two author-price-calculator">
+        <label>Цена произведения, Stars<input id="authorDesiredNet" type="number" min="1" step="1" value="10"></label>
+        <label>Начисление автору, ₽<input id="authorSuggestedFinal" type="text" value="8,00" readonly></label>
+      </div>
+      <p class="muted" id="authorPayoutState">Покупки идут только через Stars. После удержания заявка автора на выплату обрабатывается владельцем вручную.</p>
+    </section>
+
+    <section class="author-payment-grid" id="authorPaymentArea" hidden>
+      <form class="panel-card author-payment-profile" id="authorFinancialProfileForm">
+        <div class="section-title split-title slim">
+          <div>
+            <span class="eyebrow">Получение вознаграждения</span>
+            <h2>Платёжный профиль</h2>
+            <p>Реквизиты используются только для проверки автора и выплаты через СБП. Полные данные банковской карты Вокслира не запрашивает.</p>
+          </div>
+          <span class="finance-status pending" id="authorFinancialProfileStatus">Не заполнен</span>
+        </div>
+        <div class="form-grid two">
+          <label>Статус автора
+            <select id="authorLegalStatus" required>
+              <option value="">Выберите статус</option>
+              <option value="self_employed">Самозанятый</option>
+              <option value="individual_entrepreneur">Индивидуальный предприниматель</option>
+              <option value="legal_entity">Юридическое лицо</option>
+              <option value="individual">Физическое лицо</option>
+            </select>
+          </label>
+          <label>ФИО или наименование<input id="authorLegalName" maxlength="240" autocomplete="name" required></label>
+          <label>ИНН<input id="authorInn" inputmode="numeric" maxlength="12" placeholder="10 или 12 цифр" required></label>
+          <label>ОГРН / ОГРНИП<input id="authorOgrn" inputmode="numeric" maxlength="15" placeholder="Для ИП и организаций"></label>
+          <label>Телефон СБП<input id="authorSbpPhone" type="tel" autocomplete="tel" placeholder="+7 900 000-00-00" required></label>
+          <label>Банк для выплаты
+            <select id="authorSbpBank" required>
+              <option value="">Загрузим список банков после подключения ЮKassa</option>
+            </select>
+          </label>
+        </div>
+        <input id="authorSbpBankName" type="hidden">
+        <label class="switch-row finance-confirm-row"><input id="authorOwnsSbpAccount" type="checkbox" required><span>Подтверждаю, что счёт СБП принадлежит мне или указанному получателю по договору.</span></label>
+        <p class="muted" id="authorFinancialProfileHint">После отправки владелец или уполномоченный сотрудник проверит профиль. Изменение реквизитов возвращает профиль на повторную проверку.</p>
+        <div class="form-actions">
+          <button class="button-link" id="authorSaveFinancialProfile" type="submit">Отправить на проверку</button>
+          <a class="button-link secondary" href="/legal/author_data_consent">Согласие на данные</a>
+        </div>
+      </form>
+
+      <section class="panel-card author-payout-card" id="authorRubPayoutCard">
+        <div class="section-title slim">
+          <span class="eyebrow">Вывод средств</span>
+          <h2>Выплата через СБП</h2>
+          <p>Запрос доступен после проверки профиля и окончания периода удержания.</p>
+        </div>
+        <div class="payout-amount-card">
+          <span>Доступно к выводу</span>
+          <strong id="authorPayoutAvailable">0,00 ₽</strong>
+          <small id="authorPayoutPending">В обработке: 0,00 ₽</small>
+        </div>
+        <label>Сумма выплаты, ₽<input id="authorPayoutAmount" type="number" min="100" step="0.01" value="100.00"></label>
+        <button class="button-link wide-button" id="authorRequestPayout" type="button" disabled>Запросить выплату</button>
+        <p class="muted" id="authorPayoutHint">Минимальная заявка — 100 ₽. При отмене или ошибке сумма автоматически возвращается в доступный баланс.</p>
+      </section>
+    </section>
+
     <div class="section-title split-title">
-      <div><span class="eyebrow">Проекты</span><h2>Мои книги</h2><p>Выберите книгу, чтобы изменить её, добавить главы или отправить на проверку.</p></div>
+      <div><span class="eyebrow">Проекты</span><h2>Мои произведения</h2><p>Книги, комиксы, манга, манхва, вебтуны и графические романы.</p></div>
+      <button class="button-link compact-button" id="newAuthorProject" type="button">Новое произведение</button>
     </div>
+    <form id="newProjectForm" class="author-form panel-card new-project-form" hidden>
+      <h3>Новое произведение</h3>
+      <label>Название<input id="newProjectTitle" maxlength="160" required></label>
+      <div class="form-grid two">
+        <label>Тип<select id="newProjectType">
+          <option value="book">Книга</option><option value="comic">Комикс</option><option value="manga">Манга</option>
+          <option value="manhwa">Манхва</option><option value="webtoon">Вебтун</option><option value="graphic_novel">Графический роман</option>
+        </select></label>
+        <label>Основное чтение<select id="newProjectReadingMode">
+          <option value="ltr">Слева направо</option><option value="rtl">Справа налево</option>
+          <option value="vertical">Вертикальная лента</option><option value="single">Одна страница</option><option value="spread">Разворот</option>
+        </select></label>
+      </div>
+      <div class="form-actions"><button class="button-link" type="submit">Создать</button><button class="button-link secondary" id="cancelNewProject" type="button">Отмена</button></div>
+    </form>
     <div id="authorBooks" class="author-book-grid"></div>
 
     <section id="authorBookEditor" class="author-editor" hidden>
@@ -58,6 +149,16 @@
             <label>Состояние<select id="bookWritingInput"><option value="writing">Пишется</option><option value="finished">Завершена</option><option value="frozen">Заморожена</option></select></label>
           </div>
           <div class="form-grid two">
+            <label>Тип произведения<select id="bookContentTypeInput">
+              <option value="book">Книга</option><option value="comic">Комикс</option><option value="manga">Манга</option>
+              <option value="manhwa">Манхва</option><option value="webtoon">Вебтун</option><option value="graphic_novel">Графический роман</option>
+            </select></label>
+            <label>Режим чтения<select id="bookReadingModeInput">
+              <option value="ltr">Слева направо</option><option value="rtl">Справа налево</option>
+              <option value="vertical">Вертикальная лента</option><option value="single">Одна страница</option><option value="spread">Разворот</option>
+            </select></label>
+          </div>
+          <div class="form-grid two">
             <label>Продажа<select id="bookPricingInput"><option value="free">Бесплатно</option><option value="chapters">По главам</option><option value="whole_book">Вся книга</option></select></label>
             <label>Цена, Stars<input id="bookPriceInput" type="number" min="0" max="100000" value="0"></label>
           </div>
@@ -67,7 +168,7 @@
           <button class="danger-button" id="deleteBookButton" type="button">Удалить книгу</button>
         </form>
 
-        <div class="panel-card import-panel">
+        <div class="panel-card import-panel" id="textImportPanel">
           <h3>Импорт книги</h3>
           <p class="muted">Крупные файлы загружаются частями, поэтому ограничение Telegram здесь не мешает.</p>
           <label class="file-drop" for="bookFileInput">
@@ -85,7 +186,148 @@
         </div>
       </div>
 
-      <section class="chapter-manager panel-card">
+      <section class="panel-card graphic-author-panel" id="graphicImportPanel" hidden>
+        <div class="section-title split-title slim">
+          <div><span class="eyebrow">Графическая глава</span><h2>Загрузить страницы</h2><p>PDF, CBZ/ZIP, CBR/RAR, 7Z, EPUB fixed-layout или отдельные изображения. Страницы сортируются и сжимаются в WebP.</p></div>
+          <span class="graphic-type-badge" id="graphicProjectTypeLabel">Комикс</span>
+        </div>
+        <div class="form-grid two">
+          <label>Том<input id="graphicVolumeNumber" type="number" min="1" max="10000" value="1"></label>
+          <label>Название тома<input id="graphicVolumeTitle" maxlength="120" placeholder="Например: Начало пути"></label>
+        </div>
+        <div class="form-grid two">
+          <label>Название главы<input id="graphicChapterTitle" maxlength="160" placeholder="Глава 1" required></label>
+          <label>Чтение<select id="graphicChapterMode">
+            <option value="inherit">Как у произведения</option><option value="ltr">Слева направо</option><option value="rtl">Справа налево</option>
+            <option value="vertical">Вертикальная лента</option><option value="single">Одна страница</option><option value="spread">Разворот</option>
+          </select></label>
+        </div>
+        <div class="form-grid two">
+          <label>Цена главы, Stars<input id="graphicChapterPrice" type="number" min="0" max="100000" value="0"><small>Платную графическую главу можно купить отдельно.</small></label>
+          <label>Страниц для предпросмотра<input id="graphicPreviewPages" type="number" min="0" max="20" value="3"><small>Эти страницы видны до покупки. Укажите 0, чтобы отключить фрагмент.</small></label>
+        </div>
+        <div class="graphic-upload-tabs">
+          <button type="button" class="secondary active" data-graphic-upload-tab="file">Файл или архив</button>
+          <button type="button" class="secondary" data-graphic-upload-tab="images">Отдельные картинки</button>
+        </div>
+        <label class="file-drop graphic-file-picker" id="graphicFilePicker" for="graphicFileInput">
+          <input id="graphicFileInput" type="file" accept=".pdf,.cbz,.zip,.cbr,.rar,.7z,.epub,.jpg,.jpeg,.png,.webp,.avif,.gif,.bmp,.tif,.tiff">
+          <strong>Выбрать PDF, CBZ, CBR, ZIP, RAR, 7Z, EPUB или изображение</strong>
+          <span id="graphicFileName">Файл не выбран</span>
+        </label>
+        <label class="file-drop graphic-image-picker" id="graphicImagesPicker" for="graphicImagesInput" hidden>
+          <input id="graphicImagesInput" type="file" accept="image/jpeg,image/png,image/webp,image/avif,image/gif,image/bmp,image/tiff" multiple>
+          <strong>Выбрать все страницы главы</strong>
+          <span id="graphicImagesName">Изображения не выбраны</span>
+        </label>
+        <label class="switch-row graphic-split-toggle"><input id="graphicSplitLongInput" type="checkbox"><span>Разделять очень длинные страницы вебтуна на лёгкие фрагменты</span></label>
+        <button class="button-link" id="startGraphicUpload" type="button">Загрузить графическую главу</button>
+        <div class="upload-progress" id="graphicUploadProgress" hidden><i></i><span>0%</span></div>
+        <div id="graphicUploadResult" class="import-preview" hidden></div>
+      </section>
+
+      <section class="chapter-package-manager panel-card" id="chapterPackageManager">
+        <div class="section-title split-title slim">
+          <div><span class="eyebrow">Продажа наборами</span><h2>Пакеты глав</h2><p>Покупатель получает заданное число открытий и сам выбирает любые платные главы этой книги — не обязательно подряд.</p></div>
+          <button class="button-link compact-button" id="newChapterPackageButton" type="button">Новый пакет</button>
+        </div>
+        <div class="package-rule-note">Например: 20 глав — 99 Stars, 50 глав — 240 Stars, 100 глав — 490 Stars. Цена и количество полностью задаются автором.</div>
+        <form id="chapterPackageForm" class="author-form chapter-package-form" hidden>
+          <input id="chapterPackageIdInput" type="hidden">
+          <label>Название пакета<input id="chapterPackageTitleInput" maxlength="120" placeholder="Например: 20 глав выгоднее"></label>
+          <div class="form-grid three">
+            <label>Количество глав<input id="chapterPackageCountInput" type="number" min="1" max="10000" value="20" required></label>
+            <label>Цена, Stars<input id="chapterPackagePriceInput" type="number" min="1" max="1000000" value="99" required></label>
+            <label>Какие главы<select id="chapterPackageScopeInput">
+              <option value="text">Текстовые</option>
+              <option value="graphic">Графические</option>
+              <option value="all">Любые в произведении</option>
+            </select></label>
+          </div>
+          <label class="switch-row"><input id="chapterPackageActiveInput" type="checkbox" checked><span>Показывать пакет читателям</span></label>
+          <div class="chapter-package-preview" id="chapterPackagePreview">20 глав за 99 Stars · 4,95 Stars за главу</div>
+          <div class="form-actions">
+            <button class="button-link" type="submit">Сохранить пакет</button>
+            <button class="button-link secondary" id="cancelChapterPackageEdit" type="button">Отмена</button>
+            <button class="danger-button" id="deleteChapterPackageButton" type="button" hidden>Убрать пакет</button>
+          </div>
+        </form>
+        <div id="authorChapterPackages" class="chapter-package-author-list"></div>
+      </section>
+
+      <section class="chapter-manager panel-card" id="graphicChapterManager" hidden>
+        <div class="section-title split-title slim">
+          <div><h2>Графические главы</h2><p>Количество страниц, предпросмотр, порядок чтения и публикация.</p></div>
+        </div>
+        <section class="graphic-volume-pricing" id="graphicVolumePricing">
+          <div class="section-title slim"><span class="eyebrow">Продажа томами</span><h3>Тома и цены</h3><p>Цена тома открывает все входящие в него графические главы. Покупка отдельных глав остаётся доступна.</p></div>
+          <div id="authorGraphicVolumes" class="graphic-volume-price-list"></div>
+        </section>
+        <form id="graphicChapterEditForm" class="author-form chapter-form" hidden>
+          <input id="graphicChapterIdInput" type="hidden">
+          <label>Название<input id="graphicChapterEditTitle" maxlength="160" required></label>
+          <div class="form-grid two">
+            <label>Том<input id="graphicChapterEditVolumeNumber" type="number" min="1" max="10000" value="1"></label>
+            <label>Название тома<input id="graphicChapterEditVolumeTitle" maxlength="120"></label>
+          </div>
+          <div class="form-grid two">
+            <label>Режим<select id="graphicChapterEditMode">
+              <option value="inherit">Как у произведения</option><option value="ltr">Слева направо</option><option value="rtl">Справа налево</option>
+              <option value="vertical">Вертикальная лента</option><option value="single">Одна страница</option><option value="spread">Разворот</option>
+            </select></label>
+            <label>Цена, Stars<input id="graphicChapterEditPrice" type="number" min="0" max="100000" value="0"></label>
+          </div>
+          <label>Страниц для предпросмотра<input id="graphicChapterEditPreview" type="number" min="0" max="20" value="3"><small>Бесплатный фрагмент до покупки главы.</small></label>
+          <div class="form-actions">
+            <button class="button-link" type="submit">Сохранить</button>
+            <button class="button-link secondary" id="cancelGraphicChapterEdit" type="button">Отмена</button>
+            <button class="danger-button" id="deleteGraphicChapterButton" type="button">Удалить главу</button>
+          </div>
+        </form>
+        <section id="graphicPageEditor" class="graphic-page-editor" hidden>
+          <div class="section-title split-title slim graphic-page-editor-heading">
+            <div><span class="eyebrow">Редактор страниц</span><h3 id="graphicPageEditorTitle">Страницы главы</h3><p>Перетаскивайте карточки или используйте стрелки. Можно повернуть, заменить и удалить отдельную страницу.</p></div>
+            <div class="inline-actions graphic-page-editor-tools">
+              <button class="secondary compact-button" id="graphicProcessChapterOcr" type="button">OCR всей главы</button>
+              <button class="secondary compact-button" id="graphicProcessChapterFrames" type="button">Кадры всей главы</button>
+              <button class="secondary compact-button" id="graphicChapterStatistics" type="button">Статистика</button>
+              <button class="secondary compact-button" id="closeGraphicPageEditor" type="button">Свернуть</button>
+            </div>
+          </div>
+          <div class="graphic-page-editor-status" id="graphicPageEditorStatus" hidden></div>
+          <div id="graphicPageGrid" class="graphic-page-grid"></div>
+          <input id="graphicPageReplacementInput" type="file" accept="image/jpeg,image/png,image/webp,image/avif,image/gif,image/bmp,image/tiff" hidden>
+
+          <section class="graphic-advanced-editor" id="graphicAdvancedEditor" hidden>
+            <div class="section-title split-title slim"><div><span class="eyebrow">Текст и кадры</span><h3 id="graphicAdvancedEditorTitle">Страница</h3><p>OCR работает локально на сервере. Распознанный текст можно исправить вручную.</p></div><button type="button" class="secondary compact-button" id="graphicAdvancedEditorClose">Закрыть</button></div>
+            <input id="graphicAdvancedPageId" type="hidden">
+            <div class="graphic-advanced-preview"><img id="graphicAdvancedPreview" alt="Редактируемая страница"></div>
+            <div class="graphic-advanced-columns">
+              <section>
+                <h4>Распознанный текст</h4>
+                <div class="inline-actions"><button type="button" id="graphicRunOcr">Распознать локально</button><span id="graphicOcrStatus"></span></div>
+                <textarea id="graphicOcrText" rows="9" maxlength="200000" placeholder="Текст страницы"></textarea>
+                <button type="button" class="secondary" id="graphicSaveOcrText">Сохранить исправления</button>
+              </section>
+              <section>
+                <h4>Покадровое чтение</h4>
+                <div class="inline-actions"><button type="button" id="graphicAutoFrames">Определить кадры</button><button type="button" class="secondary" id="graphicAddFrame">Добавить кадр</button></div>
+                <div id="graphicFramesEditor" class="graphic-coordinate-list"></div>
+                <button type="button" class="secondary" id="graphicSaveFrames">Сохранить кадры</button>
+              </section>
+            </div>
+            <section>
+              <div class="section-title split-title slim"><div><h4>Переводные области</h4><p>Координаты задаются долями страницы от 0 до 1. Оригинальная картинка не изменяется.</p></div><button type="button" class="secondary compact-button" id="graphicAddTranslationRegion">Добавить область</button></div>
+              <label>Язык слоя<select id="graphicTranslationEditorLanguage"><option value="ru">Русский</option><option value="en">English</option></select></label>
+              <div id="graphicTranslationsEditor" class="graphic-coordinate-list"></div>
+              <button type="button" class="secondary" id="graphicSaveTranslations">Сохранить переводной слой</button>
+            </section>
+          </section>
+        </section>
+        <div id="authorGraphicChapters" class="author-chapter-list"></div>
+      </section>
+
+      <section class="chapter-manager panel-card" id="textChapterManager">
         <div class="section-title split-title slim">
           <div><h2>Главы</h2><p>Редактирование, цена и безопасное удаление.</p></div>
           <button class="button-link compact-button" id="newChapterButton" type="button">Добавить главу</button>
@@ -113,4 +355,4 @@
   </article>
 </section>
 {% endblock %}
-{% block scripts %}<script src="/static/js/author.js"></script>{% endblock %}
+{% block scripts %}<script src="/static/js/author.js?v={{ asset_version }}"></script>{% endblock %}
