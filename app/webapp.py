@@ -240,6 +240,14 @@ from app.services.web_import_store import (
 from app.services.publication import finish_book_content_workflow, publish_book_and_channel
 from app.services.cover_storage import ensure_book_cover_file
 from app.services.moderation_alerts import notify_moderation_resolved
+from app.services.tts_providers import TTSProviderError, TTSProviderUnavailable
+from app.services.tts_queue import build_default_generation_queue
+from app.services.tts_sessions import (
+    TTSSessionManager,
+    TTSSessionNotFound,
+    TTSSegmentNotReady,
+    validate_segment_media_token,
+)
 from app.services.reader_tts import (
     TTS_CACHE_VERSION,
     ReaderTTSError,
@@ -576,9 +584,15 @@ def _showcase_sections(books: list[Any]) -> dict[str, list[Any]]:
 
 def create_app() -> FastAPI:
     @asynccontextmanager
-    async def lifespan(_: FastAPI):
+    async def lifespan(application: FastAPI):
         await init_db()
-        yield
+        tts_sessions = TTSSessionManager(build_default_generation_queue())
+        application.state.tts_sessions = tts_sessions
+        await tts_sessions.start()
+        try:
+            yield
+        finally:
+            await tts_sessions.close()
 
     app = FastAPI(title="Вокслира", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -1245,23 +1259,126 @@ def create_app() -> FastAPI:
     @app.get("/api/reader/tts/voices")
     async def api_reader_tts_voices(x_telegram_init_data: str | None = Header(default=None)):
         await _tma_user(x_telegram_init_data)
-        status = tts_engine_status()
+        legacy_status = tts_engine_status()
+        manager: TTSSessionManager = app.state.tts_sessions
+        provider_statuses = await manager.queue.registry.statuses()
+        providers = [
+            {
+                "name": item.name,
+                "available": bool(item.available),
+                "warmed": bool(item.warmed),
+                "message": item.message,
+                "details": dict(item.details),
+            }
+            for item in provider_statuses
+        ]
+        enabled = any(item["available"] for item in providers) or bool(legacy_status["enabled"])
         return {
             "ok": True,
-            "enabled": bool(status["enabled"]),
-            "message": status["message"],
-            "engine": status.get("engine", "piper"),
+            "enabled": enabled,
+            "message": "Сегментное озвучивание готово" if enabled else legacy_status["message"],
+            "engine": "segmented-v1.10.5",
+            "providers": providers,
             "voices": available_voices(),
             "styles": available_styles(),
             "rates": available_rates(),
+            "playback_rate_in_player": True,
+            "quality_control": {
+                "enabled": True,
+                "first_segment_wait_seconds": int(settings.TTS_FIRST_SEGMENT_WAIT_SECONDS),
+                "automatic_retries": int(settings.TTS_QUALITY_RETRIES),
+                "segment_cache_version": "v2-quality",
+            },
         }
+
+    @app.post("/api/reader/{chapter_id}/tts/session")
+    async def api_reader_tts_session_create(
+        chapter_id: int,
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        chapter = await get_chapter(chapter_id)
+        if not chapter:
+            raise HTTPException(status_code=404, detail="Глава не найдена.")
+        allowed, moderation_access = await _chapter_access(
+            app_user_id=user.app_user_id, telegram_id=user.telegram_id, chapter=chapter,
+        )
+        is_public = chapter["publication_status"] == "published" and chapter["status"] == "published"
+        if not is_public and not moderation_access:
+            raise HTTPException(status_code=404, detail="Глава не найдена.")
+        if not allowed:
+            raise HTTPException(status_code=403, detail="Озвучивание доступно после открытия главы.")
+        if not moderation_access and int(chapter["is_free"] or 0) != 1 and int(chapter["price_stars"] or 0) > 0:
+            await mark_purchase_access_used(user.app_user_id, chapter_id=chapter_id)
+
+        selected_voice = validate_voice(str(payload.get("voice") or "irina"))
+        selected_style = validate_style(str(payload.get("style") or "natural"))
+        selected_rate = validate_rate(payload.get("rate"))
+        high_quality = bool(payload.get("high_quality", False))
+        manager: TTSSessionManager = app.state.tts_sessions
+        try:
+            session = await manager.create_session(
+                user_id=user.app_user_id, chapter_id=chapter_id, text=str(chapter["text"] or ""),
+                voice=selected_voice, style=selected_style, high_quality=high_quality, reuse=True,
+            )
+            await manager.await_first(session.id)
+            manifest = await manager.manifest(
+                session.id, user_id=user.app_user_id, start_index=0, count=settings.TTS_SESSION_INITIAL_SEGMENTS,
+            )
+        except (ReaderTTSError, ValueError, TTSProviderError, TTSProviderUnavailable) as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+        adjacent = await (get_adjacent_chapters_for_moderation(chapter_id) if moderation_access else get_adjacent_chapters(chapter_id))
+        profile_key = tts_profile_key(selected_voice, selected_rate, selected_style)
+        progress = await get_tts_progress(user.app_user_id, chapter_id, profile_key)
+        manifest.update({
+            "ok": True, "moderation_access": moderation_access,
+            "access_mode": "moderation" if moderation_access else "reader",
+            "device_cache_allowed": not moderation_access,
+            "playback_rate": selected_rate, "progress_seconds": int(progress or 0),
+            "chapter": {
+                "id": int(chapter["id"]), "book_id": int(chapter["book_id"]),
+                "book_title": chapter["book_title"], "pen_name": chapter["pen_name"] or "Автор не указан",
+                "title": chapter["title"], "number": int(chapter["number"]), "text": chapter["text"],
+            },
+            "navigation": {
+                "previous": _row_to_dict(adjacent["previous"]) if adjacent["previous"] else None,
+                "next": _row_to_dict(adjacent["next"]) if adjacent["next"] else None,
+            },
+        })
+        if moderation_access:
+            await _audit_moderation_reader_access(user_id=user.app_user_id, chapter_id=chapter_id, action="moderation_chapter_tts_segmented")
+        return manifest
+
+    @app.get("/api/reader/tts/session/{session_id}")
+    async def api_reader_tts_session_manifest(
+        session_id: str, start: int = 0, count: int = 10,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        manager: TTSSessionManager = app.state.tts_sessions
+        try:
+            manifest = await manager.manifest(session_id, user_id=user.app_user_id, start_index=start, count=count)
+        except TTSSessionNotFound as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return {"ok": True, **manifest}
+
+    @app.delete("/api/reader/tts/session/{session_id}")
+    async def api_reader_tts_session_delete(
+        session_id: str, x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        manager: TTSSessionManager = app.state.tts_sessions
+        removed = await manager.remove(session_id, user_id=user.app_user_id)
+        return {"ok": True, "removed": removed}
 
     @app.get("/api/reader/{chapter_id}/tts")
     async def api_reader_tts(
         chapter_id: int,
         voice: str = "irina",
         rate: float = 1.0,
-        style: str = "expressive",
+        style: str = "natural",
         x_telegram_init_data: str | None = Header(default=None),
     ):
         user = await _tma_user(x_telegram_init_data)
@@ -1371,7 +1488,7 @@ def create_app() -> FastAPI:
         position = max(0, int(payload.get("position_seconds") or 0))
         selected_voice = validate_voice(str(payload.get("voice") or "irina"))
         selected_rate = validate_rate(payload.get("rate"))
-        selected_style = validate_style(str(payload.get("style") or "expressive"))
+        selected_style = validate_style(str(payload.get("style") or "natural"))
         profile_key = tts_profile_key(selected_voice, selected_rate, selected_style)
         await save_tts_progress(user.app_user_id, chapter_id, position, profile_key)
         return {
@@ -1383,13 +1500,61 @@ def create_app() -> FastAPI:
             "moderation_access": moderation_access,
         }
 
+    @app.get("/media/reader-tts/session/{session_id}/{segment_index}.mp3")
+    async def media_reader_tts_segment(
+        session_id: str, segment_index: int, uid: int, exp: int = 0, sig: str = "",
+    ):
+        manager: TTSSessionManager = app.state.tts_sessions
+        try:
+            session = await manager.get(session_id, user_id=int(uid))
+        except TTSSessionNotFound as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        if not 0 <= int(segment_index) < session.segment_count:
+            raise HTTPException(status_code=404, detail="Аудиофрагмент не найден.")
+        segment = session.prepared.segments[int(segment_index)]
+        if not validate_segment_media_token(
+            user_id=int(uid), session_id=session_id, segment_index=int(segment_index),
+            segment_digest=segment.digest, expires_at=int(exp), signature=sig,
+        ):
+            raise HTTPException(status_code=403, detail="Ссылка на аудиофрагмент устарела.")
+        user_row = await get_user_by_id(int(uid))
+        if not user_row or int(user_row["is_blocked"] or 0) == 1:
+            raise HTTPException(status_code=403, detail="Доступ закрыт.")
+        chapter = await get_chapter(session.chapter_id)
+        if not chapter:
+            raise HTTPException(status_code=404, detail="Глава не найдена.")
+        allowed, moderation_access = await _chapter_access(
+            app_user_id=int(uid), telegram_id=int(user_row["telegram_id"]), chapter=chapter,
+        )
+        is_public = chapter["publication_status"] == "published" and chapter["status"] == "published"
+        if not is_public and not moderation_access:
+            raise HTTPException(status_code=404, detail="Глава не найдена.")
+        if not allowed:
+            raise HTTPException(status_code=403, detail="Нет доступа к главе.")
+        try:
+            audio = await manager.await_segment(
+                session.id, int(segment_index), user_id=int(uid), timeout=settings.TTS_REMOTE_TIMEOUT_SECONDS,
+            )
+        except TTSSegmentNotReady as exc:
+            raise HTTPException(status_code=425, detail=str(exc)) from exc
+        except (TTSProviderError, TTSProviderUnavailable) as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        return FileResponse(
+            audio.path, media_type="audio/mpeg",
+            headers={
+                "Cache-Control": "private, max-age=3600", "Accept-Ranges": "bytes",
+                "Content-Disposition": f'inline; filename="tts_{session.chapter_id}_{segment_index}.mp3"',
+                "X-Voxlyra-TTS-Provider": audio.provider, "X-Content-Type-Options": "nosniff",
+            },
+        )
+
     @app.get("/media/reader-tts/{chapter_id}.mp3")
     async def media_reader_tts(
         chapter_id: int,
         uid: int,
         voice: str,
         rate: float = 1.0,
-        style: str = "expressive",
+        style: str = "natural",
         exp: int = 0,
         sig: str = "",
     ):

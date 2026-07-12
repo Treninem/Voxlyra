@@ -42,7 +42,7 @@
     </div>
   </div>
   <div class="reader-tts-options" id="readerTtsOptions" hidden>
-    <p class="reader-tts-note">Естественный локальный голос читает только текст главы — с паузами по пунктуации, без рекламы, кнопок и комментариев.</p>
+    <p class="reader-tts-note">Голос читает только текст главы. Фрагменты проверяются автоматически, а продолжение готовится заранее без ожидания всей главы.</p>
     <div class="reader-tts-settings">
       <label>Голос
         <select id="readerTtsVoice">
@@ -52,8 +52,8 @@
       </label>
       <label>Подача
         <select id="readerTtsStyle">
-          <option value="natural">Естественно</option>
-          <option value="expressive" selected>С выражением</option>
+          <option value="natural" selected>Естественно</option>
+          <option value="expressive">С выражением</option>
           <option value="calm">Спокойно</option>
         </select>
       </label>
@@ -71,7 +71,14 @@
     </div>
   </div>
   <div id="readerTtsStatus" class="muted">Нажмите «Озвучить»</div>
-  <audio id="readerTtsPlayer" controls preload="metadata" playsinline hidden></audio>
+  <audio id="readerTtsPlayer" preload="auto" playsinline hidden></audio>
+  <audio id="readerTtsBuffer" preload="auto" playsinline hidden></audio>
+  <div class="reader-tts-stream-controls" id="readerTtsStreamControls" hidden>
+    <button type="button" id="readerTtsPlayPause" class="reader-tts-play" aria-label="Воспроизведение">▶</button>
+    <span id="readerTtsCurrentTime">0:00</span>
+    <input id="readerTtsProgressRange" type="range" min="0" max="1" value="0" step="1" aria-label="Позиция озвучивания">
+    <span id="readerTtsTotalTime">—:—</span>
+  </div>
   <div class="reader-tts-controls" id="readerTtsControls" hidden>
     <button type="button" class="secondary" id="readerTtsBack">−15 сек</button>
     <button type="button" class="secondary" id="readerTtsForward">+15 сек</button>

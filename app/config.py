@@ -40,6 +40,24 @@ class Settings(BaseSettings):
     TTS_MAX_CACHE_MB: int = 512
     TTS_MAX_VARIANTS_PER_CHAPTER: int = 6
     TTS_SIGNING_SECRET: str = ""
+    TTS_PROVIDER_ORDER: str = "moss,qwen,piper"
+    TTS_PROVIDER_ORDER_HQ: str = "qwen,moss,piper"
+    TTS_QWEN_URL: str = ""
+    TTS_MOSS_URL: str = ""
+    TTS_REMOTE_TOKEN: str = ""
+    TTS_REMOTE_TIMEOUT_SECONDS: int = 120
+    TTS_REMOTE_FIRST_TIMEOUT_SECONDS: int = 10
+    TTS_REMOTE_COOLDOWN_SECONDS: int = 60
+    TTS_WORKERS: int = 2
+    TTS_SESSION_TTL_SECONDS: int = 7200
+    TTS_SESSION_INITIAL_SEGMENTS: int = 8
+    TTS_SESSION_WINDOW_SEGMENTS: int = 10
+    TTS_FIRST_SEGMENT_WAIT_SECONDS: int = 2
+    TTS_SEGMENT_TARGET_CHARS: int = 280
+    TTS_SEGMENT_MAX_CHARS: int = 480
+    TTS_FIRST_SEGMENT_MAX_CHARS: int = 150
+    TTS_QUALITY_RETRIES: int = 1
+    TTS_SEGMENT_SESSION_RETRIES: int = 2
 
     # Юридические реквизиты. До заполнения платный режим в рублях остаётся выключенным.
     LEGAL_OPERATOR_NAME: str = ""
