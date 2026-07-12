@@ -2585,9 +2585,17 @@ body { position: relative; isolation: isolate; }
   width: 46px;
   height: 46px;
   border-radius: 14px;
-  object-fit: cover;
+  object-fit: contain;
+  object-position: center;
   box-shadow: 0 8px 24px rgba(0,0,0,.34), 0 0 22px rgba(157,99,255,.24);
-  border: 1px solid rgba(255,255,255,.18);
+}
+
+
+/* Независимые иконки v1.10.4: каждый файл имеет собственный холст 512×512. */
+img[src*="/static/img/miniapp/icons/"] {
+  display: block;
+  box-sizing: border-box;
+  image-rendering: auto;
 }
 
 /* Новый набор мини-иконок. */
@@ -2596,7 +2604,8 @@ body { position: relative; isolation: isolate; }
 .bottom-nav a img {
   width: 28px;
   height: 28px;
-  object-fit: cover;
+  object-fit: contain;
+  object-position: center;
   border-radius: 9px;
   filter: saturate(.92) brightness(.92);
   transition: transform .18s ease, filter .18s ease;
@@ -2604,21 +2613,21 @@ body { position: relative; isolation: isolate; }
 .bottom-nav a.active img,
 .bottom-nav a:hover img { transform: translateY(-2px) scale(1.08); filter: saturate(1.08) brightness(1.08); }
 .search-box { grid-template-columns: 34px 1fr; }
-.search-box > img { width: 30px; height: 30px; border-radius: 9px; object-fit: cover; }
+.search-box > img { width: 30px; height: 30px; border-radius: 9px; object-fit: contain; object-position: center; }
 .author-studio-entry > img {
   width: 50px;
   height: 50px;
   border-radius: 16px;
-  object-fit: cover;
-  border: 1px solid rgba(255,255,255,.13);
+  object-fit: contain;
+  object-position: center;
   box-shadow: 0 10px 28px rgba(84,51,186,.22);
 }
 .author-create-choice img {
   width: 54px;
   height: 54px;
   border-radius: 17px;
-  object-fit: cover;
-  border: 1px solid rgba(255,255,255,.13);
+  object-fit: contain;
+  object-position: center;
   box-shadow: 0 10px 28px rgba(84,51,186,.24);
 }
 
@@ -2793,7 +2802,7 @@ body { position: relative; isolation: isolate; }
 }
 .profile-frame-options button b { font-size: 10px; line-height: 1.15; }
 .profile-frame-preview { width: 54px; height: 54px; }
-.profile-frame-preview img { width: 44px; height: 44px; border-radius: 50%; object-fit: cover; }
+.profile-frame-preview img { width: 44px; height: 44px; border-radius: 13px; object-fit: contain; object-position: center; }
 
 /* Сезонное оформление — тихое и необязательное. */
 body.seasonal-decor[data-season="winter"] .app-ambient i,

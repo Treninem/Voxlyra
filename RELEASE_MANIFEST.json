@@ -1,13 +1,23 @@
 {
   "project": "Voxlyra",
   "version": "v1.10.4",
-  "build": "rich_miniapp_visuals",
-  "created_utc": "2026-07-11T19:56:40.371635+00:00",
+  "build": "rich_miniapp_visuals_independent_icons",
+  "created_utc": "2026-07-12T07:02:47.363883+00:00",
   "features": {
     "main_banner": true,
     "menu_background": true,
     "animated_css_splash": true,
-    "local_webp_icons": 16,
+    "independent_webp_icons": 20,
+    "icon_canvas": "512x512",
+    "icon_sheet_slicing_used": false,
+    "icon_rendering": "object-fit: contain; object-position: center",
+    "icon_cache_key": "v1.10.4-icons2",
+    "semantic_icons": [
+      "control",
+      "create-book",
+      "create-comic",
+      "moderator"
+    ],
     "illustrated_empty_states": 6,
     "section_artworks": 7,
     "ambient_particles": true,
@@ -34,14 +44,15 @@
     "avatars_changed": false
   },
   "verification": {
-    "pytest_collected": 146,
-    "pytest_passed": 146,
-    "pytest_skipped": 0,
+    "pytest_collected": 148,
+    "pytest_passed": 147,
+    "pytest_skipped": 1,
     "ui_buttons": "88/88",
-    "deploy_checks": "129/129",
+    "deploy_checks": "133/133",
     "python_compile": true,
     "javascript_syntax": true,
-    "jinja_templates": true
+    "jinja_templates": 14,
+    "icon_dimensions_and_safe_margins": true
   },
-  "files_in_full_project": 271
+  "files_in_full_project": 276
 }
