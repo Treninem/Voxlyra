@@ -461,8 +461,75 @@ async def _init_db_impl() -> None:
         await _ensure_v1110_assistant_schema(db)
         await _ensure_v1110_analytics_schema(db)
         await _ensure_v1110_premium_schema(db)
+        await _ensure_v1111_final_schema(db)
         await db.commit()
 
+
+
+async def _ensure_v1111_final_schema(db: aiosqlite.Connection) -> None:
+    """Финальная безопасная нормализация бесплатных книг и согласий.
+
+    Миграция идемпотентна: её можно выполнять при каждом Redeploy. Она не
+    удаляет покупки, тексты, прогресс или файлы пользователей.
+    """
+    now = utc_now()
+    # Сохраняем старые цены глав как черновик, затем полностью открываем книги
+    # с нулевой ценой. Это исправляет старые противоречивые записи, где книга
+    # бесплатна, а глава всё ещё имела закрывающий флаг.
+    await db.execute(
+        """
+        UPDATE chapters
+        SET saved_is_free=CASE
+                WHEN saved_is_free IS NULL THEN is_free
+                ELSE saved_is_free
+            END,
+            saved_price_stars=CASE
+                WHEN COALESCE(saved_price_stars, 0)=0 AND COALESCE(price_stars, 0)>0
+                    THEN price_stars
+                ELSE saved_price_stars
+            END,
+            is_free=1,
+            price_stars=0,
+            updated_at=?
+        WHERE status!='deleted' AND book_id IN (
+            SELECT id FROM books
+            WHERE publication_status!='deleted' AND COALESCE(price_stars, 0)<=0
+        )
+        """,
+        (now,),
+    )
+    await db.execute(
+        """
+        UPDATE books
+        SET price_stars=0, pricing_type='free', updated_at=?
+        WHERE publication_status!='deleted' AND COALESCE(price_stars, 0)<=0
+          AND (pricing_type!='free' OR price_stars!=0)
+        """,
+        (now,),
+    )
+    # У полностью бесплатных книг платные пакеты текстовых глав бессмысленны.
+    await db.execute(
+        """
+        UPDATE chapter_packages
+        SET is_active=0, updated_at=?
+        WHERE content_scope IN ('text','all') AND book_id IN (
+            SELECT id FROM books
+            WHERE publication_status!='deleted' AND COALESCE(price_stars, 0)<=0
+        )
+        """,
+        (now,),
+    )
+    # Обычный выпуск приложения не требует повторного согласия. Для реальной
+    # существенной редакции документа владелец/разработчик указывает здесь
+    # конкретную версию через настройку legal_reaccept_<code>_version.
+    for code in ("terms", "privacy", "personal_data_consent", "author_license", "author_data_consent"):
+        await db.execute(
+            """
+            INSERT INTO settings(key, value, updated_at) VALUES(?, '', ?)
+            ON CONFLICT(key) DO NOTHING
+            """,
+            (f"legal_reaccept_{code}_version", now),
+        )
 
 
 async def _ensure_stage11_schema(db: aiosqlite.Connection) -> None:
@@ -4914,17 +4981,50 @@ async def accept_legal_document(
 
 
 async def has_accepted_legal_document(user_id: int, doc_code: str, doc_version: str, doc_hash: str = "") -> bool:
+    """Проверяет действующее согласие без повторных запросов после обычного обновления.
+
+    Текстовый хэш хранится как доказательство принятой редакции, но изменение
+    технических реквизитов, шаблона PDF или кода приложения само по себе не
+    аннулирует согласие. Повторное подтверждение требуется только если для
+    конкретного документа явно установлена настройка
+    ``legal_reaccept_<код>_version`` со значением текущей версии.
+    """
+    code = str(doc_code)
+    version = str(doc_version)
+    # Старый callback-код ``authors`` равнозначен действующему author_license.
+    equivalent_codes = [code]
+    if code == "author_license":
+        equivalent_codes.append("authors")
+    elif code == "authors":
+        equivalent_codes.append("author_license")
+    placeholders = ",".join("?" for _ in equivalent_codes)
     async with connect() as db:
-        sql = (
-            "SELECT id FROM legal_acceptances "
-            "WHERE user_id=? AND doc_code=? AND doc_version=? AND withdrawn_at IS NULL"
+        cur = await db.execute(
+            f"SELECT id FROM legal_acceptances "
+            f"WHERE user_id=? AND doc_code IN ({placeholders}) "
+            "AND doc_version=? AND withdrawn_at IS NULL LIMIT 1",
+            (int(user_id), *equivalent_codes, version),
         )
-        params: list[Any] = [int(user_id), str(doc_code), str(doc_version)]
-        if doc_hash:
-            sql += " AND doc_hash=?"
-            params.append(str(doc_hash))
-        sql += " LIMIT 1"
-        cur = await db.execute(sql, tuple(params))
+        if await cur.fetchone() is not None:
+            return True
+
+        # Существенная редакция включается явно. Пока ключ пустой, любое ранее
+        # сохранённое активное согласие по этому документу остаётся действующим.
+        cur = await db.execute(
+            "SELECT value FROM settings WHERE key=? LIMIT 1",
+            (f"legal_reaccept_{code}_version",),
+        )
+        row = await cur.fetchone()
+        forced_version = str(row["value"] or "").strip() if row else ""
+        if forced_version and forced_version == version:
+            return False
+
+        cur = await db.execute(
+            f"SELECT id FROM legal_acceptances "
+            f"WHERE user_id=? AND doc_code IN ({placeholders}) "
+            "AND withdrawn_at IS NULL ORDER BY accepted_at DESC LIMIT 1",
+            (int(user_id), *equivalent_codes),
+        )
         return await cur.fetchone() is not None
 
 

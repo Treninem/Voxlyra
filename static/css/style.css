@@ -233,6 +233,36 @@ textarea { min-height: 110px; resize: vertical; }
 .play-circle { width: 68px; height: 68px; border-radius: 50%; display: grid; place-items: center; background: linear-gradient(135deg, #e0a353, #7957ff); font-size: 28px; }
 .rating-row { display: grid; grid-template-columns: 1fr auto; gap: 10px; margin-bottom: 10px; }
 .paywall-card { text-align: center; }
+.access-card {
+  position: relative;
+  overflow: hidden;
+  text-align: center;
+  border-color: rgba(151, 108, 255, .28);
+  background:
+    radial-gradient(circle at 50% 0%, rgba(177, 116, 255, .18), transparent 42%),
+    linear-gradient(145deg, rgba(22, 24, 54, .96), rgba(12, 14, 34, .96));
+}
+.access-card::after {
+  content: "";
+  position: absolute;
+  inset: auto -18% -54% 38%;
+  height: 170px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(224, 163, 83, .13), transparent 68%);
+  pointer-events: none;
+}
+.access-card .empty-icon {
+  width: 64px;
+  height: 64px;
+  margin: 0 auto 14px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  color: #fff4d8;
+  font-size: 28px;
+  background: linear-gradient(145deg, rgba(116, 79, 246, .96), rgba(224, 163, 83, .82));
+  box-shadow: 0 12px 36px rgba(121, 87, 255, .28);
+}
 @media (max-width: 520px) {
   .app-shell { padding-left: 12px; padding-right: 12px; }
   .hero { padding: 16px; gap: 14px; border-radius: 24px; }

@@ -35,7 +35,7 @@ let readerTtsLifecycleBound = false;
 const TTS_DEVICE_CACHE_NAME = 'voxlyra-reader-tts-v3-continuity';
 const TTS_LEGACY_DEVICE_CACHE_NAMES = ['voxlyra-reader-tts-v2-quality'];
 const TTS_DEVICE_CACHE_PREFIX = `${window.location.origin}/__voxlyra_tts_cache__/`;
-const READER_TTS_PLAYER_VERSION = 'v1.11.0-stage3-continuity-1';
+const READER_TTS_PLAYER_VERSION = 'v1.11.1-final-continuity-1';
 const READER_TTS_TRANSITION_LEAD_SECONDS = 0.22;
 const READER_TTS_CROSSFADE_MS = 90;
 const READER_TTS_STALL_TIMEOUT_MS = 7000;
@@ -563,7 +563,16 @@ async function initReader() {
   try {
     const data = await apiFetch(`/api/reader/${reader.dataset.chapterId}`);
     if (!data.allowed) {
-      const canBuyChapter = Boolean(data.can_buy_chapter);
+      // Бесплатная книга никогда не должна попадать на экран покупки. Если
+      // сервер вернул противоречивое старое состояние, показываем безопасное
+      // нейтральное сообщение и не предлагаем покупку за 0 Stars.
+      const freeAccessExpected = data.pricing_mode === 'free' || Boolean(data.chapter?.is_free);
+      if (freeAccessExpected) {
+        if (status) status.textContent = 'Глава бесплатная. Обновляем доступ…';
+        if (paragraphs) paragraphs.innerHTML = '<section class="empty-card access-card"><div class="empty-icon">✦</div><h3>Глава бесплатная</h3><p>Обновите страницу внутри Telegram. Покупка для этой главы не требуется.</p></section>';
+        return;
+      }
+      const canBuyChapter = Boolean(data.can_buy_chapter) && Number(data.chapter?.price_stars || 0) > 0;
       const packageRemaining = canBuyChapter ? Number(data.package_credits?.remaining || 0) : 0;
       if (status) status.textContent = packageRemaining > 0
         ? `Можно открыть из пакета · осталось ${packageRemaining}`

@@ -1044,7 +1044,28 @@ def create_app() -> FastAPI:
             and chapter["publication_status"] == "published"
             and chapter["status"] == "published"
         )
-        purchase_url = _bot_purchase_url("chapter", chapter_id) if is_public else ""
+        book_price = int(chapter["book_price_stars"] or 0) if chapter else 0
+        pricing_mode = (
+            "free" if book_price <= 0
+            else ("chapters" if chapter and str(chapter["pricing_type"] or "") == "chapters" else "whole_book")
+        )
+        chapter_is_free = bool(
+            chapter
+            and (pricing_mode == "free" or int(chapter["is_free"] or 0) == 1)
+        )
+        can_buy_chapter = bool(
+            is_public
+            and chapter
+            and pricing_mode == "chapters"
+            and not chapter_is_free
+            and int(chapter["price_stars"] or 0) > 0
+        )
+        purchase_url = _bot_purchase_url("chapter", chapter_id) if can_buy_chapter else ""
+        book_purchase_url = (
+            _bot_purchase_url("book", int(chapter["book_id"]))
+            if is_public and chapter and pricing_mode != "free"
+            else ""
+        )
         ads = []
         adjacent = await get_adjacent_chapters(chapter_id) if is_public else {"previous": None, "next": None}
         chapter_bounds = (
@@ -1059,7 +1080,7 @@ def create_app() -> FastAPI:
         server_text_visible = bool(
             is_public
             and chapter
-            and (int(chapter["book_price_stars"] or 0) <= 0 or int(chapter["is_free"] or 0) == 1)
+            and chapter_is_free
             and (not runtime_cfg.content_protection_enabled or int(chapter["allow_download"] or 0) == 1)
         )
         return templates.TemplateResponse(
@@ -1069,6 +1090,10 @@ def create_app() -> FastAPI:
                 "chapter": chapter,
                 "chapter_id": chapter_id,
                 "purchase_url": purchase_url,
+                "book_purchase_url": book_purchase_url,
+                "pricing_mode": pricing_mode,
+                "chapter_is_free": chapter_is_free,
+                "can_buy_chapter": can_buy_chapter,
                 "reader_ads": ads,
                 "ad_settings": ad_settings,
                 "previous_chapter": adjacent.get("previous"),
@@ -1443,7 +1468,8 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="Глава не найдена.")
         book_price = int(chapter["book_price_stars"] or 0)
         pricing_mode = "free" if book_price <= 0 else ("chapters" if str(chapter["pricing_type"] or "") == "chapters" else "whole_book")
-        can_buy_chapter = pricing_mode == "chapters" and int(chapter["is_free"] or 0) != 1 and int(chapter["price_stars"] or 0) > 0
+        chapter_is_free = pricing_mode == "free" or int(chapter["is_free"] or 0) == 1
+        can_buy_chapter = pricing_mode == "chapters" and not chapter_is_free and int(chapter["price_stars"] or 0) > 0
         purchase_url = "" if moderation_access or not can_buy_chapter else _bot_purchase_url("chapter", chapter_id)
         book_purchase_url = "" if moderation_access or book_price <= 0 else _bot_purchase_url("book", int(chapter["book_id"]))
         comments = await list_comments_for_chapter(chapter_id, limit=100, viewer_user_id=user.app_user_id) if allowed and is_public and not moderation_access else []
@@ -1516,7 +1542,7 @@ def create_app() -> FastAPI:
                 "book_title": chapter["book_title"],
                 "title": chapter["title"],
                 "number": int(chapter["number"]),
-                "is_free": int(chapter["is_free"] or 0) == 1,
+                "is_free": chapter_is_free,
                 "price_stars": int(chapter["price_stars"] or 0),
                 "buyer_estimate_minor": (int(chapter["price_stars"] or 0) if can_buy_chapter else 0) * (await load_runtime_payment_settings()).buyer_star_rate_minor,
                 "book_price_stars": book_price,
@@ -4316,7 +4342,7 @@ def create_app() -> FastAPI:
                 "standard": [item.strip() for item in str(settings.TTS_PROVIDER_ORDER or "").split(",") if item.strip()],
                 "high_quality": [item.strip() for item in str(settings.TTS_PROVIDER_ORDER_HQ or "").split(",") if item.strip()],
             },
-            "player_contract_version": "v1.11.0-stage3-continuity-1",
+            "player_contract_version": "v1.11.1-final-continuity-1",
             **client,
         }
 

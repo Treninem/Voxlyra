@@ -28,12 +28,12 @@ def test_player_events_are_validated_and_visible_in_owner_diagnostics():
     async def scenario():
         await manager.record_client_event(
             session.id, user_id=17, event='segment_transition_complete', segment_index=1,
-            player_version='v1.11.0-stage3-continuity-1', details={'seamless': True},
+            player_version='v1.11.1-final-continuity-1', details={'seamless': True},
         )
         return await manager.client_diagnostics()
 
     data = asyncio.run(scenario())
-    assert data['active_sessions'][0]['player_version'] == 'v1.11.0-stage3-continuity-1'
+    assert data['active_sessions'][0]['player_version'] == 'v1.11.1-final-continuity-1'
     assert data['active_sessions'][0]['counters']['segment_transition_complete'] == 1
     assert data['recent_events'][0]['details']['seamless'] is True
 
@@ -51,7 +51,7 @@ def test_continuity_player_contract_is_wired():
     sessions = (root / 'app/services/tts_sessions.py').read_text(encoding='utf-8')
     control = (root / 'static/js/control.js').read_text(encoding='utf-8')
 
-    assert "READER_TTS_PLAYER_VERSION = 'v1.11.0-stage3-continuity-1'" in script
+    assert "READER_TTS_PLAYER_VERSION = 'v1.11.1-final-continuity-1'" in script
     assert 'crossfadeReaderTtsPlayers' in script
     assert 'maybeStartReaderTtsBoundaryTransition' in script
     assert 'waitForPrefetchedReaderTtsFirst' in script
