@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import book_card %}
+{% from "_macros.html" import book_card, empty_state %}
 {% block title %}Комиксы и манга — Вокслира{% endblock %}
 {% block body_class %}comics-catalog-page illustrated-miniapp{% endblock %}
 {% block content %}
@@ -10,7 +10,7 @@
 </section>
 <section class="catalog-toolbar" id="all-comics">
   <div class="section-title slim"><span class="eyebrow">Форматы</span><h2>Выберите направление</h2><p>Комикс, манга, манхва и вебтун — это тип произведения. Жанры, например фэнтези или романтика, выбираются отдельно.</p></div>
-  <label class="search-box"><span aria-hidden="true">⌕</span><input id="catalogSearch" type="search" placeholder="Название или автор" autocomplete="off"></label>
+  <label class="search-box"><img src="/static/img/miniapp/icons/search.webp" alt="" aria-hidden="true"><input id="catalogSearch" type="search" placeholder="Название или автор" autocomplete="off"></label>
   <div class="filter-pills graphic-type-pills" role="group" aria-label="Тип графического произведения">
     <button class="filter-pill active" data-catalog-filter="graphic">Все</button>
     <button class="filter-pill" data-catalog-filter="comic">Комиксы</button>
@@ -22,9 +22,9 @@
 </section>
 {% if books %}
 <section class="book-list premium-grid catalog-grid" id="catalogGrid">{% for book in books %}{{ book_card(book) }}{% endfor %}</section>
-<article id="catalogEmptySearch" class="empty-card premium-empty" hidden><div class="empty-icon">⌕</div><h3>В этом разделе пока пусто</h3><p>Выберите другой тип или измените запрос.</p></article>
+<div id="catalogEmptySearch" hidden>{{ empty_state('nothing-found', 'В этом разделе пока пусто', 'Выберите другой тип или измените запрос.') }}</div>
 {% else %}
-<section class="empty-card premium-empty comics-empty-state"><div class="empty-icon">🖼</div><h2>Графических произведений пока нет</h2><p>Раздел уже работает. Первый автор может добавить комикс, мангу, манхву, вебтун или графический роман.</p><a class="button-link" href="/author?new=graphic">Добавить графическое произведение</a></section>
+{{ empty_state('no-books', 'Графических произведений пока нет', 'Раздел уже работает. Первый автор может добавить комикс, мангу, манхву, вебтун или графический роман.', '/author?new=graphic', 'Добавить графическое произведение', heading='h2', extra_class='comics-empty-state') }}
 {% endif %}
 <section class="panel-card comics-author-guide">
   <div class="section-title slim"><span class="eyebrow">Авторам</span><h2>Как добавить</h2></div>

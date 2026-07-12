@@ -1,6 +1,7 @@
 {% extends "base.html" %}
+{% from "_macros.html" import empty_state %}
 {% block title %}Кабинет автора — Вокслира{% endblock %}
-{% block body_class %}author-studio-page{% endblock %}
+{% block body_class %}author-studio-page illustrated-miniapp{% endblock %}
 {% block content %}
 <section class="hero compact author-hero illustrated-hero author-illustrated-hero">
   <div class="illustrated-hero-backdrop" aria-hidden="true"></div>
@@ -13,11 +14,7 @@
 </section>
 
 <section id="authorStudio" class="author-studio">
-  <article class="empty-card premium-empty loading-card" id="authorLoading">
-    <div class="loading-orbit"></div>
-    <h3>Открываем студию</h3>
-    <p>Загружаем ваши книги и главы.</p>
-  </article>
+  <div id="authorLoading">{{ empty_state('chapter-loading', 'Открываем студию', 'Загружаем ваши книги и главы.', extra_class='loading-card') }}</div>
 
   <div id="authorDashboard" hidden>
     <section class="author-welcome">
@@ -110,8 +107,8 @@
       <div><span class="eyebrow">Проекты</span><h2>Мои произведения</h2><p>Выберите, что создаёте: текстовую книгу или графическое произведение.</p></div>
     </div>
     <div class="author-create-choices" aria-label="Создать новое произведение">
-      <button class="author-create-choice" id="newTextProject" type="button"><span>📚</span><strong>Создать книгу</strong><small>Текстовые главы, аудио и пакеты глав</small></button>
-      <button class="author-create-choice graphic" id="newGraphicProject" type="button"><span>🖼</span><strong>Создать комикс / мангу</strong><small>Комикс, манга, манхва, вебтун или графический роман</small></button>
+      <button class="author-create-choice" id="newTextProject" type="button"><img src="/static/img/miniapp/icons/author.webp" alt="" aria-hidden="true"><strong>Создать книгу</strong><small>Текстовые главы, аудио и пакеты глав</small></button>
+      <button class="author-create-choice graphic" id="newGraphicProject" type="button"><img src="/static/img/miniapp/icons/comics.webp" alt="" aria-hidden="true"><strong>Создать комикс / мангу</strong><small>Комикс, манга, манхва, вебтун или графический роман</small></button>
     </div>
     <form id="newProjectForm" class="author-form panel-card new-project-form" hidden>
       <h3 id="newProjectFormTitle">Новое произведение</h3><p class="muted" id="newProjectFormHint">Сначала выберите тип, затем создайте проект и загрузите главы.</p>
@@ -351,11 +348,21 @@
     </section>
   </div>
 
-  <article id="authorError" class="empty-card premium-empty" hidden>
-    <div class="empty-icon">✦</div>
+  <article id="authorError" class="empty-card premium-empty illustrated-empty" data-empty-state="no-books" hidden>
+    <img class="empty-state-art" src="/static/img/miniapp/empty/no-books.webp" alt="" aria-hidden="true">
     <h3>Кабинет пока недоступен</h3>
     <p id="authorErrorText">Откройте этот раздел из Telegram.</p>
   </article>
+
+  <div class="state-dialog" id="moderationSuccess" role="dialog" aria-modal="true" aria-labelledby="moderationSuccessTitle" hidden>
+    <div class="state-dialog-backdrop" data-close-moderation></div>
+    <article class="state-dialog-card illustrated-empty" data-empty-state="moderation">
+      <img class="empty-state-art" src="/static/img/miniapp/empty/moderation.webp" alt="" aria-hidden="true">
+      <h2 id="moderationSuccessTitle">Произведение отправлено на проверку</h2>
+      <p>Модераторы и владелец получили уведомление. После решения статус книги обновится автоматически.</p>
+      <button class="button-link" id="closeModerationSuccess" type="button">Понятно</button>
+    </article>
+  </div>
 </section>
 {% endblock %}
 {% block scripts %}<script src="/static/js/author.js?v={{ asset_version }}"></script>{% endblock %}

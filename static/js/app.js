@@ -16,6 +16,7 @@ const DEFAULTS = {
   ttsVoice: 'irina', ttsStyle: 'expressive', ttsRate: 1, ttsAutoNext: true,
   notifications: true, notificationChapters: true, notificationAudio: true, notificationDiscounts: true,
   contrast: 'normal', focusMode: false, showReaderAds: true,
+  profileFrame: 'standard', seasonalDecor: true,
 };
 let meDataPromise = null;
 let autoProgressTimer = null;
@@ -59,6 +60,8 @@ function getPrefs() {
     contrast: localStorage.getItem('voxContrast') || DEFAULTS.contrast,
     focusMode: getStoredBool('voxFocusMode', DEFAULTS.focusMode),
     showReaderAds: getStoredBool('voxShowReaderAds', DEFAULTS.showReaderAds),
+    profileFrame: localStorage.getItem('voxProfileFrame') || DEFAULTS.profileFrame,
+    seasonalDecor: getStoredBool('voxSeasonalDecor', DEFAULTS.seasonalDecor),
   };
 }
 
@@ -71,7 +74,7 @@ function setPref(key, value) {
     notifications: 'voxNotifications', notificationChapters: 'voxNotificationChapters',
     notificationAudio: 'voxNotificationAudio', notificationDiscounts: 'voxNotificationDiscounts',
     contrast: 'voxContrast', focusMode: 'voxFocusMode',
-    showReaderAds: 'voxShowReaderAds',
+    showReaderAds: 'voxShowReaderAds', profileFrame: 'voxProfileFrame', seasonalDecor: 'voxSeasonalDecor',
   };
   localStorage.setItem(map[key], typeof value === 'boolean' ? (value ? '1' : '0') : String(value));
   applySettings();
@@ -154,6 +157,48 @@ async function downloadAllowedBook(url) {
   }
 }
 
+function currentSeasonKey(date = new Date()) {
+  const month = date.getMonth() + 1;
+  const day = date.getDate();
+  if ((month === 12 && day >= 20) || (month === 1 && day <= 10)) return 'new-year';
+  if (month === 10 && day >= 20) return 'halloween';
+  if ([12, 1, 2].includes(month)) return 'winter';
+  if ([9, 10, 11].includes(month)) return 'autumn';
+  return 'calm';
+}
+
+function applyProfileFrame(frame = getPrefs().profileFrame) {
+  const allowed = ['standard', 'author', 'moderator', 'premium', 'holiday'];
+  const safe = allowed.includes(frame) ? frame : 'standard';
+  document.querySelectorAll('[data-profile-frame]').forEach((button) => button.classList.toggle('active', button.dataset.profileFrame === safe));
+  const medallion = document.getElementById('libraryProfileFrame');
+  if (medallion) {
+    allowed.forEach((name) => medallion.classList.remove(`frame-${name}`));
+    medallion.classList.add(`frame-${safe}`);
+  }
+}
+
+function initVoxSplash() {
+  const splash = document.getElementById('voxSplash');
+  if (!splash || document.documentElement.classList.contains('vox-splash-seen')) return;
+  const started = performance.now();
+  let hidden = false;
+  const hide = () => {
+    if (hidden) return;
+    const wait = Math.max(0, 920 - (performance.now() - started));
+    setTimeout(() => {
+      if (hidden) return;
+      hidden = true;
+      splash.classList.add('is-leaving');
+      try { sessionStorage.setItem('voxSplashSeen', '1'); } catch (_) {}
+      setTimeout(() => splash.remove(), 520);
+    }, wait);
+  };
+  if (document.readyState === 'complete') hide();
+  else window.addEventListener('load', hide, { once: true });
+  setTimeout(hide, 1900);
+}
+
 function applyTheme(theme = getPrefs().theme) {
   document.body.classList.remove('light-theme', 'dark-theme', 'sepia-theme');
   const tg = window.Telegram?.WebApp;
@@ -171,6 +216,9 @@ function applySettings() {
   document.body.classList.toggle('high-contrast', prefs.contrast === 'high');
   document.body.classList.toggle('focus-mode', Boolean(prefs.focusMode));
   document.body.classList.toggle('ads-hidden', !Boolean(prefs.showReaderAds));
+  document.body.classList.toggle('seasonal-decor', Boolean(prefs.seasonalDecor));
+  document.body.dataset.season = currentSeasonKey();
+  applyProfileFrame(prefs.profileFrame);
 
   document.querySelectorAll('[data-theme]').forEach((btn) => btn.classList.toggle('active', btn.dataset.theme === prefs.theme));
   document.querySelectorAll('[data-line-height]').forEach((btn) => btn.classList.toggle('active', Number(btn.dataset.lineHeight) === prefs.lineHeight));
@@ -214,7 +262,7 @@ function changeFont(delta) {
 }
 
 async function resetSettings() {
-  ['voxTheme','readerFontSize','readerLineHeight','readerWidth','voxAudioRate','voxRewindStep','voxAutoplayNext','voxSaveOnPause','voxTtsVoice','voxTtsStyle','voxTtsRate','voxTtsAutoNext','voxNotifications','voxNotificationChapters','voxNotificationAudio','voxNotificationDiscounts','voxContrast','voxFocusMode','voxShowReaderAds'].forEach((key) => localStorage.removeItem(key));
+  ['voxTheme','readerFontSize','readerLineHeight','readerWidth','voxAudioRate','voxRewindStep','voxAutoplayNext','voxSaveOnPause','voxTtsVoice','voxTtsStyle','voxTtsRate','voxTtsAutoNext','voxNotifications','voxNotificationChapters','voxNotificationAudio','voxNotificationDiscounts','voxContrast','voxFocusMode','voxShowReaderAds','voxProfileFrame','voxSeasonalDecor'].forEach((key) => localStorage.removeItem(key));
   applySettings();
   if (tgInitData()) {
     try { await apiFetch('/api/preferences', { method: 'DELETE' }); }
@@ -285,6 +333,11 @@ function loadMeData() {
 
 function escapeHtml(value) {
   return String(value ?? '').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'",'&#039;');
+}
+
+function emptyStateMarkup(kind, title, text, href = '', action = '', extraClass = '') {
+  const button = href && action ? `<a class="button-link" href="${escapeHtml(href)}">${escapeHtml(action)}</a>` : '';
+  return `<article class="empty-card premium-empty illustrated-empty ${escapeHtml(extraClass)}" data-empty-state="${escapeHtml(kind)}"><img class="empty-state-art" src="/static/img/miniapp/empty/${escapeHtml(kind)}.webp" alt="" aria-hidden="true" loading="lazy"><h3>${escapeHtml(title)}</h3><p>${escapeHtml(text)}</p>${button}</article>`;
 }
 
 function formatTime(seconds) {
@@ -1316,7 +1369,7 @@ function renderLibraryTab(tab, data) {
     const reading = data.continue_reading || [];
     const audio = data.continue_listening || [];
     if (!reading.length && !audio.length) {
-      content.innerHTML = '<article class="empty-card premium-empty"><div class="empty-icon">◇</div><h3>Продолжать пока нечего</h3><p>Откройте любую главу или аудио — прогресс появится здесь.</p><a class="button-link" href="/catalog">Выбрать книгу</a></article>';
+      content.innerHTML = emptyStateMarkup('history-empty', 'Продолжать пока нечего', 'Откройте любую главу или аудио — прогресс появится здесь.', '/catalog', 'Выбрать книгу');
       return;
     }
     content.innerHTML = `${reading.length ? `<div class="section-title slim"><h2>Чтение</h2></div><div class="library-continue-grid">${reading.map((item) => continueCard(item,'reading')).join('')}</div>` : ''}${audio.length ? `<div class="section-title slim"><h2>Аудио</h2></div><div class="library-continue-grid">${audio.map((item) => continueCard(item,'audio')).join('')}</div>` : ''}`;
@@ -1324,13 +1377,13 @@ function renderLibraryTab(tab, data) {
   }
   if (tab === 'saved') {
     const items = data.bookmarks || [];
-    content.innerHTML = items.length ? `<div class="book-list">${items.map(bookmarkCard).join('')}</div>` : '<article class="empty-card premium-empty"><div class="empty-icon">☆</div><h3>Полка пока пустая</h3><p>Добавляйте книги в библиотеку или любимое.</p><a class="button-link" href="/catalog">Открыть каталог</a></article>';
+    content.innerHTML = items.length ? `<div class="book-list">${items.map(bookmarkCard).join('')}</div>` : emptyStateMarkup('no-bookmarks', 'Полка пока пустая', 'Добавляйте книги в библиотеку или любимое.', '/catalog', 'Открыть каталог');
     return;
   }
   const purchases = data.purchases || [];
   const packageBalances = (data.chapter_package_balances || []).filter((item) => Number(item.remaining_credits || 0) > 0);
   const packageBlock = packageBalances.length ? `<section class="library-package-balances"><div class="section-title slim"><h2>Доступные главы из пакетов</h2></div><div class="chapter-package-balance-grid">${packageBalances.map((item) => `<a class="chapter-package-balance-card" href="/book/${Number(item.book_id)}"><span>${escapeHtml(item.book_title || 'Книга')}</span><strong>${Number(item.remaining_credits || 0)} глав</strong><small>${escapeHtml(item.package_title || 'Пакет')} · использовано ${Number(item.used_credits || 0)} из ${Number(item.total_credits || 0)}</small></a>`).join('')}</div></section>` : '';
-  content.innerHTML = packageBlock + (purchases.length ? `<div class="purchase-list">${purchases.map(purchaseCard).join('')}</div>` : '<article class="empty-card premium-empty"><div class="empty-icon">★</div><h3>Покупок пока нет</h3><p>После покупки книги, главы, пакета или аудио доступ появится здесь.</p></article>');
+  content.innerHTML = packageBlock + (purchases.length ? `<div class="purchase-list">${purchases.map(purchaseCard).join('')}</div>` : emptyStateMarkup('no-books', 'Покупок пока нет', 'После покупки книги, главы, пакета или аудио доступ появится здесь.'));
 }
 
 async function initLibrary() {
@@ -1338,12 +1391,21 @@ async function initLibrary() {
   if (!page) return;
   const content = document.getElementById('libraryContent');
   if (!tgInitData()) {
-    if (content) content.innerHTML = '<article class="empty-card premium-empty"><div class="empty-icon">◇</div><h3>Откройте внутри Telegram</h3><p>Личная библиотека привязана к вашему Telegram-профилю.</p><a class="button-link" href="/catalog">Смотреть каталог</a></article>';
+    if (content) content.innerHTML = emptyStateMarkup('no-books', 'Откройте внутри Telegram', 'Личная библиотека привязана к вашему Telegram-профилю.', '/catalog', 'Смотреть каталог');
     return;
   }
   try {
     const data = await loadMeData();
     page._libraryData = data;
+    const profileName = String(data.user?.full_name || data.user?.username || '').trim();
+    const initial = (profileName || 'В').slice(0, 1).toUpperCase();
+    const profileInitial = document.getElementById('libraryProfileInitial');
+    const profileFallback = document.getElementById('libraryProfileFallback');
+    const profileHeading = document.getElementById('libraryProfileName');
+    if (profileInitial) { profileInitial.textContent = initial; profileInitial.hidden = false; }
+    if (profileFallback) profileFallback.hidden = true;
+    if (profileHeading && profileName) profileHeading.textContent = `Моё · ${profileName.split(/\s+/)[0]}`;
+    applyProfileFrame();
     const authorEntry = document.getElementById('authorStudioEntry');
     if (authorEntry && data.author?.enabled) authorEntry.hidden = false;
     const controlEntry = document.getElementById('controlCenterEntry');
@@ -1354,7 +1416,7 @@ async function initLibrary() {
     }
     renderLibraryTab('continue', data);
   } catch (_) {
-    if (content) content.innerHTML = '<article class="empty-card premium-empty"><h3>Не удалось открыть полку</h3><p>Закройте Mini App и откройте его снова из бота.</p></article>';
+    if (content) content.innerHTML = emptyStateMarkup('nothing-found', 'Не удалось открыть полку', 'Закройте Mini App и откройте его снова из бота.');
   }
 }
 
@@ -1363,7 +1425,8 @@ function markActiveNav() {
   document.querySelectorAll('.bottom-nav a').forEach((link) => {
     const nav = link.dataset.nav;
     const active = (nav === 'home' && path === '/') ||
-      (nav === 'books' && (path.startsWith('/catalog') || path.startsWith('/book'))) ||
+      (nav === 'books' && (path.startsWith('/catalog') || path.startsWith('/book') || path.startsWith('/reader/'))) ||
+      (nav === 'comics' && (path.startsWith('/comics') || path.startsWith('/comic/'))) ||
       (nav === 'audio' && path.startsWith('/audio')) || (nav === 'library' && (path.startsWith('/library') || path.startsWith('/author') || path.startsWith('/control'))) || (nav === 'settings' && path.startsWith('/settings'));
     link.classList.toggle('active', active);
   });
@@ -1427,6 +1490,7 @@ function bindEvents() {
     const target = event.target.closest('button, a');
     if (!target) return;
 
+    if (target.matches('[data-profile-frame]')) { event.preventDefault(); setPref('profileFrame', target.dataset.profileFrame); notify('Рамка профиля сохранена'); return; }
     if (target.matches('[data-theme]')) { event.preventDefault(); setPref('theme', target.dataset.theme); return; }
     if (target.id === 'fontPlus') { event.preventDefault(); changeFont(1); return; }
     if (target.id === 'fontMinus') { event.preventDefault(); changeFont(-1); return; }
@@ -1544,6 +1608,7 @@ function bindEvents() {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
+  initVoxSplash();
   applySettings();
   syncNotificationPreferences();
   markActiveNav();

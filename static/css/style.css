@@ -2429,3 +2429,430 @@ body.sepia-theme .top-rank-day { color: #786000 !important; background: linear-g
 @media (prefers-reduced-motion: reduce) {
   .top-rank-place-1 { animation: none; }
 }
+
+/* v1.10.4 — богатое фирменное оформление Mini App */
+:root {
+  --vox-gold: #f2c36d;
+  --vox-violet: #9b63ff;
+  --vox-deep: #080a18;
+}
+body { position: relative; isolation: isolate; }
+.app-shell { z-index: 2; }
+.app-ambient {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.app-ambient::before,
+.app-ambient::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+}
+.app-ambient::before {
+  background:
+    radial-gradient(circle at 50% 84%, rgba(125, 77, 255, .15), transparent 35%),
+    linear-gradient(180deg, rgba(5, 7, 18, .18), rgba(5, 7, 18, .70));
+}
+.home-page .app-ambient::before {
+  background:
+    linear-gradient(180deg, rgba(7,8,21,.73), rgba(7,8,21,.90)),
+    url('/static/img/miniapp/menu-background.webp') center 26% / cover no-repeat;
+  opacity: .56;
+}
+.app-ambient::after {
+  background:
+    radial-gradient(circle at 15% 20%, rgba(157,99,255,.14), transparent 26%),
+    radial-gradient(circle at 86% 14%, rgba(242,195,109,.09), transparent 22%);
+  animation: vox-ambient-breathe 9s ease-in-out infinite alternate;
+}
+.app-ambient i {
+  position: absolute;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: rgba(235, 217, 255, .76);
+  box-shadow: 0 0 16px rgba(155,99,255,.85);
+  animation: vox-particle-drift 12s linear infinite;
+  opacity: .52;
+}
+.app-ambient i:nth-child(1) { left: 8%; top: 78%; animation-delay: -2s; animation-duration: 14s; }
+.app-ambient i:nth-child(2) { left: 24%; top: 94%; animation-delay: -7s; animation-duration: 17s; }
+.app-ambient i:nth-child(3) { left: 47%; top: 87%; animation-delay: -10s; animation-duration: 13s; }
+.app-ambient i:nth-child(4) { left: 67%; top: 96%; animation-delay: -4s; animation-duration: 18s; }
+.app-ambient i:nth-child(5) { left: 83%; top: 81%; animation-delay: -12s; animation-duration: 15s; }
+.app-ambient i:nth-child(6) { left: 94%; top: 91%; animation-delay: -5s; animation-duration: 16s; }
+@keyframes vox-particle-drift {
+  0% { transform: translate3d(0, 0, 0) scale(.75); opacity: 0; }
+  14% { opacity: .58; }
+  76% { opacity: .42; }
+  100% { transform: translate3d(-28px, -108vh, 0) scale(1.35); opacity: 0; }
+}
+@keyframes vox-ambient-breathe {
+  from { opacity: .62; transform: scale(1); }
+  to { opacity: .95; transform: scale(1.035); }
+}
+
+/* Фирменный экран запуска. */
+.vox-splash {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  background: #050714;
+  opacity: 1;
+  transition: opacity .46s ease, visibility .46s ease;
+}
+.vox-splash img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center;
+  animation: vox-splash-zoom 5s ease-out both;
+}
+.vox-splash-shade {
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(180deg, rgba(4,5,15,.10), rgba(4,5,15,.22) 60%, rgba(4,5,15,.66)),
+    radial-gradient(circle at 50% 48%, transparent 0 18%, rgba(4,5,15,.12) 48%, rgba(4,5,15,.54) 100%);
+}
+.vox-splash-pulse {
+  position: absolute;
+  left: 50%;
+  top: 41%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  width: 150px;
+  height: 64px;
+  filter: drop-shadow(0 0 15px rgba(165,100,255,.82));
+}
+.vox-splash-pulse span {
+  display: block;
+  width: 5px;
+  height: 18px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #ffe5a2, #a45fff 65%, #6e54ff);
+  animation: vox-splash-bars .74s ease-in-out infinite alternate;
+}
+.vox-splash-pulse span:nth-child(2), .vox-splash-pulse span:nth-child(4) { animation-delay: -.26s; height: 34px; }
+.vox-splash-pulse span:nth-child(3) { animation-delay: -.5s; height: 54px; }
+.vox-splash.is-leaving { opacity: 0; visibility: hidden; }
+.vox-splash-seen .vox-splash { display: none; }
+@keyframes vox-splash-bars { from { transform: scaleY(.58); opacity: .58; } to { transform: scaleY(1.18); opacity: 1; } }
+@keyframes vox-splash-zoom { from { transform: scale(1.045); } to { transform: scale(1); } }
+
+/* Новые сцены разделов. */
+.home-illustrated-hero .illustrated-hero-backdrop {
+  background-image: url('/static/img/miniapp/hero-main.webp');
+  background-position: 50% 58%;
+}
+.audio-illustrated-hero .illustrated-hero-backdrop {
+  background-image: url('/static/img/miniapp/sections/audio-stories.webp');
+  background-position: 50% 56%;
+}
+.library-illustrated-hero .illustrated-hero-backdrop {
+  background-image: url('/static/img/miniapp/sections/library.webp');
+  background-position: 50% 52%;
+}
+.settings-illustrated-hero .illustrated-hero-backdrop,
+.author-illustrated-hero .illustrated-hero-backdrop {
+  background-image: url('/static/img/miniapp/menu-background.webp');
+  background-position: 50% 56%;
+}
+.comics-hero .illustrated-hero-backdrop {
+  background-image: url('/static/img/miniapp/sections/comics.webp');
+  background-position: 50% 50%;
+}
+.portal-audio .story-portal-image { background-image: url('/static/img/miniapp/sections/audio-stories.webp'); background-position: 50% 45%; }
+.portal-reading .story-portal-image { background-image: url('/static/img/miniapp/sections/reading.webp'); background-position: 50% 52%; }
+.portal-comics .story-portal-image { background-image: url('/static/img/miniapp/sections/comics.webp'); background-position: 52% 48%; }
+.portal-stories .story-portal-image { background-image: url('/static/img/miniapp/menu-background.webp'); background-position: 50% 58%; }
+.story-portal-icon {
+  position: absolute;
+  z-index: 3;
+  top: 13px;
+  right: 13px;
+  width: 46px;
+  height: 46px;
+  border-radius: 14px;
+  object-fit: cover;
+  box-shadow: 0 8px 24px rgba(0,0,0,.34), 0 0 22px rgba(157,99,255,.24);
+  border: 1px solid rgba(255,255,255,.18);
+}
+
+/* Новый набор мини-иконок. */
+.bottom-nav { grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 4px; }
+.bottom-nav a { min-width: 0; }
+.bottom-nav a img {
+  width: 28px;
+  height: 28px;
+  object-fit: cover;
+  border-radius: 9px;
+  filter: saturate(.92) brightness(.92);
+  transition: transform .18s ease, filter .18s ease;
+}
+.bottom-nav a.active img,
+.bottom-nav a:hover img { transform: translateY(-2px) scale(1.08); filter: saturate(1.08) brightness(1.08); }
+.search-box { grid-template-columns: 34px 1fr; }
+.search-box > img { width: 30px; height: 30px; border-radius: 9px; object-fit: cover; }
+.author-studio-entry > img {
+  width: 50px;
+  height: 50px;
+  border-radius: 16px;
+  object-fit: cover;
+  border: 1px solid rgba(255,255,255,.13);
+  box-shadow: 0 10px 28px rgba(84,51,186,.22);
+}
+.author-create-choice img {
+  width: 54px;
+  height: 54px;
+  border-radius: 17px;
+  object-fit: cover;
+  border: 1px solid rgba(255,255,255,.13);
+  box-shadow: 0 10px 28px rgba(84,51,186,.24);
+}
+
+/* Иллюстрированные пустые состояния. */
+.illustrated-empty {
+  overflow: hidden;
+  text-align: center;
+  justify-items: center;
+  align-content: center;
+  min-height: 330px;
+  background:
+    radial-gradient(circle at 50% 24%, rgba(122,76,242,.18), transparent 35%),
+    linear-gradient(155deg, rgba(24,25,49,.96), rgba(11,13,29,.96));
+  border-color: rgba(212,175,255,.20);
+}
+.empty-state-art {
+  display: block;
+  width: min(215px, 72vw);
+  height: 190px;
+  margin: -4px auto 14px;
+  object-fit: cover;
+  object-position: center 54%;
+  border-radius: 26px;
+  border: 1px solid rgba(242,195,109,.25);
+  box-shadow: 0 18px 40px rgba(0,0,0,.32), 0 0 36px rgba(118,72,231,.14);
+  mask-image: linear-gradient(180deg, #000 0 83%, transparent 100%);
+}
+.illustrated-empty h2,
+.illustrated-empty h3 { margin: 0 0 8px; }
+.illustrated-empty p { max-width: 490px; margin: 0 auto 15px; line-height: 1.55; }
+.loading-card .empty-state-art { animation: vox-loading-float 2.4s ease-in-out infinite; }
+.loading-card::after {
+  content: "";
+  width: 72px;
+  height: 3px;
+  margin-top: 2px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, transparent, #9f65ff, #f2c36d, transparent);
+  background-size: 200% 100%;
+  animation: vox-loading-line 1.2s linear infinite;
+}
+@keyframes vox-loading-float { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-7px); } }
+@keyframes vox-loading-line { to { background-position: -200% 0; } }
+.catalog-empty-state { min-height: 360px; }
+
+/* Карточки с глубиной и цветным свечением обложки. */
+.premium-book-card {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  transition: transform .22s ease, border-color .22s ease, box-shadow .22s ease;
+}
+.premium-book-card::before {
+  content: "";
+  position: absolute;
+  z-index: -2;
+  inset: -38%;
+  background-image: linear-gradient(rgba(14,16,34,.38), rgba(14,16,34,.86)), var(--book-cover-image);
+  background-size: cover;
+  background-position: center;
+  filter: blur(34px) saturate(1.35);
+  opacity: .20;
+  transform: scale(1.05);
+}
+.premium-book-card::after {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  inset: 0;
+  width: auto;
+  height: auto;
+  border-radius: inherit;
+  background:
+    linear-gradient(145deg, rgba(255,255,255,.055), transparent 44%),
+    radial-gradient(circle at 100% 0%, rgba(242,195,109,.09), transparent 38%);
+  pointer-events: none;
+}
+.premium-book-card > * { position: relative; z-index: 1; }
+.premium-book-card .book-cover-link,
+.premium-book-card .cover-image { transition: transform .24s ease, filter .24s ease, box-shadow .24s ease; }
+.premium-book-card:hover,
+.premium-book-card:focus-within {
+  transform: translateY(-3px);
+  border-color: rgba(242,195,109,.32);
+  box-shadow: 0 22px 48px rgba(0,0,0,.30), 0 0 34px rgba(115,73,226,.12);
+}
+.premium-book-card:hover .book-cover-link,
+.premium-book-card:focus-within .book-cover-link { transform: translateY(-3px) rotate(-.7deg); }
+.premium-book-card:active { transform: translateY(0) scale(.99); }
+
+/* Тонкие фоновые сцены для поиска и личной полки. */
+.catalog-toolbar,
+.library-panel { overflow: hidden; position: relative; isolation: isolate; }
+.catalog-toolbar::after,
+.library-panel::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  inset: 0 0 0 auto;
+  width: 45%;
+  opacity: .075;
+  background-position: center;
+  background-size: cover;
+  mask-image: linear-gradient(90deg, transparent, #000 48%);
+  pointer-events: none;
+}
+.catalog-toolbar::after { background-image: url('/static/img/miniapp/sections/search.webp'); }
+.library-panel::before { background-image: url('/static/img/miniapp/sections/bookmarks.webp'); opacity: .065; }
+
+/* Рамки профиля. */
+.profile-medallion,
+.profile-frame-preview {
+  position: relative;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: rgba(7,8,24,.84);
+  isolation: isolate;
+}
+.profile-medallion { width: 92px; height: 92px; }
+.profile-medallion img,
+.profile-medallion span {
+  width: 76px;
+  height: 76px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  object-fit: cover;
+  color: #fff;
+  font-size: 34px;
+  font-weight: 950;
+  background: radial-gradient(circle at 35% 25%, #b67aff, #4c2ea2 58%, #14162f);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.18);
+}
+.profile-medallion::before,
+.profile-frame-preview::before {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  z-index: -1;
+  border-radius: inherit;
+  background: conic-gradient(from 30deg, #7f58ff, #f0c26d, #7f58ff);
+  box-shadow: 0 0 30px rgba(132,82,255,.28);
+}
+.frame-author::before { background: conic-gradient(from 10deg, #e7b95e, #8555ff, #f6d891, #8555ff, #e7b95e); }
+.frame-moderator::before { background: conic-gradient(from 0deg, #4dd8ff, #785dff, #d6f7ff, #4dd8ff); }
+.frame-premium::before { background: conic-gradient(from 0deg, #fff1a8, #a66cff, #f2b84c, #fff1a8); animation: vox-frame-spin 8s linear infinite; }
+.frame-holiday::before { background: conic-gradient(from 0deg, #ffcf6a, #d660ff, #68dfff, #ffcf6a); animation: vox-frame-glow 2.4s ease-in-out infinite alternate; }
+@keyframes vox-frame-spin { to { transform: rotate(1turn); } }
+@keyframes vox-frame-glow { from { filter: brightness(.88); } to { filter: brightness(1.25); } }
+.profile-frame-options {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 9px;
+}
+.profile-frame-options button {
+  min-width: 0;
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  padding: 10px 6px;
+  color: var(--muted);
+  background: rgba(255,255,255,.05);
+  border: 1px solid rgba(255,255,255,.08);
+  box-shadow: none;
+}
+.profile-frame-options button.active {
+  color: #fff;
+  border-color: rgba(242,195,109,.48);
+  background: rgba(126,77,255,.16);
+}
+.profile-frame-options button b { font-size: 10px; line-height: 1.15; }
+.profile-frame-preview { width: 54px; height: 54px; }
+.profile-frame-preview img { width: 44px; height: 44px; border-radius: 50%; object-fit: cover; }
+
+/* Сезонное оформление — тихое и необязательное. */
+body.seasonal-decor[data-season="winter"] .app-ambient i,
+body.seasonal-decor[data-season="new-year"] .app-ambient i { background: rgba(221,244,255,.92); box-shadow: 0 0 13px rgba(116,196,255,.84); }
+body.seasonal-decor[data-season="autumn"] .app-ambient i { background: rgba(242,183,91,.85); box-shadow: 0 0 13px rgba(211,116,47,.70); }
+body.seasonal-decor[data-season="halloween"] .app-ambient::after { background: radial-gradient(circle at 18% 14%, rgba(255,112,30,.13), transparent 27%), radial-gradient(circle at 82% 10%, rgba(148,63,255,.18), transparent 24%); }
+body.seasonal-decor[data-season="new-year"] .app-ambient::after { background: radial-gradient(circle at 18% 14%, rgba(76,201,255,.14), transparent 27%), radial-gradient(circle at 82% 10%, rgba(255,207,97,.15), transparent 24%); }
+
+/* Сообщение об отправке на модерацию. */
+body.dialog-open { overflow: hidden; }
+.state-dialog {
+  position: fixed;
+  inset: 0;
+  z-index: 110;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+}
+.state-dialog-backdrop { position: absolute; inset: 0; background: rgba(3,4,13,.78); backdrop-filter: blur(14px); }
+.state-dialog-card {
+  position: relative;
+  z-index: 1;
+  width: min(100%, 480px);
+  padding: 22px;
+  border-radius: 28px;
+  border: 1px solid rgba(242,195,109,.28);
+  box-shadow: 0 28px 80px rgba(0,0,0,.54), 0 0 60px rgba(119,74,230,.15);
+}
+.state-dialog-card .empty-state-art { height: 220px; }
+
+@media (max-width: 620px) {
+  .bottom-nav { gap: 2px; padding: 7px 5px; }
+  .bottom-nav a { min-height: 49px; }
+  .bottom-nav a img { width: 25px; height: 25px; border-radius: 8px; }
+  .bottom-nav a span { font-size: 8.5px; }
+  .profile-frame-options { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .profile-medallion { width: 76px; height: 76px; }
+  .profile-medallion img,
+  .profile-medallion span { width: 62px; height: 62px; font-size: 28px; }
+  .empty-state-art { width: min(190px, 72vw); height: 170px; }
+}
+@media (max-width: 560px) {
+  .home-illustrated-hero .illustrated-hero-backdrop { background-position: 50% 48%; }
+  .home-illustrated-hero { min-height: 610px; padding-top: 230px; }
+  .audio-illustrated-hero .illustrated-hero-backdrop,
+  .library-illustrated-hero .illustrated-hero-backdrop,
+  .settings-illustrated-hero .illustrated-hero-backdrop,
+  .author-illustrated-hero .illustrated-hero-backdrop,
+  .comics-hero .illustrated-hero-backdrop { background-position: 50% 36%; }
+  .profile-medallion { position: absolute; left: 17px; top: 17px; }
+  .library-illustrated-hero { padding-top: 120px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .app-ambient i,
+  .app-ambient::after,
+  .vox-splash img,
+  .vox-splash-pulse span,
+  .loading-card .empty-state-art,
+  .loading-card::after,
+  .frame-premium::before,
+  .frame-holiday::before { animation: none !important; }
+}

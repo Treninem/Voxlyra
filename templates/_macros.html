@@ -1,3 +1,13 @@
+
+{% macro empty_state(kind, title, text, action_href='', action_text='', heading='h3', extra_class='') -%}
+<article class="empty-card premium-empty illustrated-empty {{ extra_class }}" data-empty-state="{{ kind }}">
+  <img class="empty-state-art" src="/static/img/miniapp/empty/{{ kind }}.webp" alt="" aria-hidden="true" loading="lazy">
+  <{{ heading }}>{{ title }}</{{ heading }}>
+  <p>{{ text }}</p>
+  {% if action_href and action_text %}<a class="button-link" href="{{ action_href }}">{{ action_text }}</a>{% endif %}
+</article>
+{%- endmacro %}
+
 {% macro cover(book, size='mini', audio=false) -%}
   <img class="cover-image cover-{{ size }}{% if audio %} audio{% endif %}" src="/media/cover/{{ book.id }}?v={{ book.updated_at|default(book.id, true) }}" alt="Обложка произведения {{ book.title }}" loading="lazy" onerror="this.hidden=true;this.nextElementSibling.hidden=false">
   <div class="cover-mini{% if size == 'big' %} cover-big{% endif %}{% if audio %} audio{% endif %}" aria-hidden="true" hidden>{{ (book.title or 'В')[:1] }}</div>
@@ -19,7 +29,8 @@
    data-graphic="{{ 1 if is_graphic else 0 }}"
    data-content-type="{{ content_type }}"
    data-free="{{ 1 if (book.price_stars|int <= 0 or book.free_chapters_count|default(0)|int > 0) else 0 }}"
-   data-popular="{{ book.purchase_count|default(0)|int + book.reviews_count|default(0)|int }}">
+   data-popular="{{ book.purchase_count|default(0)|int + book.reviews_count|default(0)|int }}"
+   style="--book-cover-image:url('/media/cover/{{ book.id }}?v={{ book.updated_at|default(book.id, true) }}')">
   <a class="book-cover-link" href="/book/{{ book.id }}" aria-label="Открыть произведение {{ book.title }}">
     {{ cover(book) }}
     {% if is_graphic %}<span class="cover-badge graphic-badge">{{ type_label }}</span>{% elif has_audio %}<span class="cover-badge">Аудио</span>{% endif %}

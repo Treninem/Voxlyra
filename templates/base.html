@@ -8,10 +8,18 @@
   <title>{% block title %}{{ project_name }}{% endblock %}</title>
   <link rel="icon" type="image/webp" href="/static/img/miniapp/voxlyra-v.webp">
   <link rel="preload" as="image" href="/static/img/miniapp/voxlyra-mark.webp" fetchpriority="high">
+  <link rel="preload" as="image" href="/static/img/miniapp/splash-v.webp">
+  <script>try{if(sessionStorage.getItem("voxSplashSeen")){document.documentElement.classList.add("vox-splash-seen")}}catch(_){}</script>
   <link rel="stylesheet" href="/static/css/style.css?v={{ asset_version }}">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body class="{% block body_class %}{% endblock %}">
+  <div class="app-ambient" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i></div>
+  <div class="vox-splash" id="voxSplash" role="status" aria-label="Вокслира загружается">
+    <img src="/static/img/miniapp/splash-v.webp" alt="">
+    <div class="vox-splash-shade"></div>
+    <div class="vox-splash-pulse"><span></span><span></span><span></span><span></span><span></span></div>
+  </div>
   <svg class="icon-sprite" aria-hidden="true">
     <symbol id="icon-home" viewBox="0 0 24 24"><path d="M3 10.7 12 3l9 7.7v9.1a1.2 1.2 0 0 1-1.2 1.2h-5.1v-6.2H9.3V21H4.2A1.2 1.2 0 0 1 3 19.8z"/></symbol>
     <symbol id="icon-books" viewBox="0 0 24 24"><path d="M5 3.5h5.2A1.8 1.8 0 0 1 12 5.3V21a3.3 3.3 0 0 0-3.3-3.3H5zM19 3.5h-5.2A1.8 1.8 0 0 0 12 5.3V21a3.3 3.3 0 0 1 3.3-3.3H19z"/></symbol>
@@ -29,12 +37,12 @@
   </main>
   {% block bottom_nav %}
   <nav class="bottom-nav" aria-label="Главная навигация">
-    <a href="/" data-nav="home"><svg aria-hidden="true"><use href="#icon-home"></use></svg><span>Главная</span></a>
-    <a href="/catalog#all-books" data-nav="books"><svg aria-hidden="true"><use href="#icon-books"></use></svg><span>Книги</span></a>
-    <a href="/comics" data-nav="comics"><svg aria-hidden="true"><use href="#icon-comics"></use></svg><span>Комиксы</span></a>
-    <a href="/audio" data-nav="audio"><svg aria-hidden="true"><use href="#icon-audio"></use></svg><span>Аудио</span></a>
-    <a href="/library" data-nav="library"><svg aria-hidden="true"><use href="#icon-library"></use></svg><span>Моё</span></a>
-    <a href="/settings" data-nav="settings"><svg aria-hidden="true"><use href="#icon-settings"></use></svg><span>Настройки</span></a>
+    <a href="/" data-nav="home"><img src="/static/img/miniapp/icons/home.webp" alt="" aria-hidden="true"><span>Главная</span></a>
+    <a href="/catalog#all-books" data-nav="books"><img src="/static/img/miniapp/icons/reading.webp" alt="" aria-hidden="true"><span>Книги</span></a>
+    <a href="/comics" data-nav="comics"><img src="/static/img/miniapp/icons/comics.webp" alt="" aria-hidden="true"><span>Комиксы</span></a>
+    <a href="/audio" data-nav="audio"><img src="/static/img/miniapp/icons/audio.webp" alt="" aria-hidden="true"><span>Аудио</span></a>
+    <a href="/library" data-nav="library"><img src="/static/img/miniapp/icons/library.webp" alt="" aria-hidden="true"><span>Моё</span></a>
+    <a href="/settings" data-nav="settings"><img src="/static/img/miniapp/icons/settings.webp" alt="" aria-hidden="true"><span>Настройки</span></a>
   </nav>
   {% endblock %}
   <div id="toast" class="toast" role="status" aria-live="polite"></div>

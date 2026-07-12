@@ -1,7 +1,7 @@
 """Внутренняя метка установленной сборки."""
 
-OWNER_BUILD_VERSION = "v1.10.3"
-OWNER_BUILD_NAME = "живые топы книг · аудио · комиксов"
+OWNER_BUILD_VERSION = "v1.10.4"
+OWNER_BUILD_NAME = "иллюстрированный Mini App · книги, аудио и комиксы · безопасная база"
 
 
 def owner_build_label() -> str:

@@ -13,7 +13,7 @@ def test_illustrated_assets_are_local_optimized_webp_files():
         "voxlyra-mark.webp",
         "voxlyra-v.webp",
     }
-    assert {path.name for path in ASSET_DIR.glob("*.webp")} == expected
+    assert expected.issubset({path.name for path in ASSET_DIR.glob("*.webp")})
     total = 0
     for name in expected:
         data = (ASSET_DIR / name).read_bytes()

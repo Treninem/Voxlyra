@@ -1061,6 +1061,14 @@ async function createAuthorProject(event) {
   } catch (error) { notify(error.message || 'Не удалось создать произведение'); }
 }
 
+function setModerationSuccessVisible(visible) {
+  const dialog = document.getElementById('moderationSuccess');
+  if (!dialog) return;
+  dialog.hidden = !visible;
+  document.body.classList.toggle('dialog-open', Boolean(visible));
+  if (visible) document.getElementById('closeModerationSuccess')?.focus();
+}
+
 function bindAuthorEvents() {
   document.getElementById('authorSbpBank')?.addEventListener('change', (event) => {
     const option = event.target.options[event.target.selectedIndex];
@@ -1127,6 +1135,7 @@ function bindAuthorEvents() {
   document.addEventListener('click', async (event) => {
     const target = event.target.closest('button');
     if (!target || !document.getElementById('authorStudio')) return;
+    if (target.id === 'closeModerationSuccess') { setModerationSuccessVisible(false); return; }
     if (target.dataset.pageMove) { await moveGraphicPage(target.dataset.pageId, Number(target.dataset.pageMove)); return; }
     if (target.dataset.pageRotate) { await rotateGraphicPage(target.dataset.pageId, Number(target.dataset.pageRotate)); return; }
     if (target.dataset.pageAdvanced) { openGraphicAdvancedEditor(target.dataset.pageAdvanced); return; }
@@ -1163,7 +1172,7 @@ function bindAuthorEvents() {
     if (target.id === 'startGraphicUpload') { await startGraphicUpload(); return; }
     if (target.id === 'confirmBookImport') { await confirmBookImport(); return; }
     if (target.id === 'submitBookReview') {
-      try { await apiFetch(`/api/author/book/${authorState.book.book.id}/submit`, { method: 'POST' }); notify('Произведение отправлено на проверку'); await refreshAuthorDashboard(); }
+      try { await apiFetch(`/api/author/book/${authorState.book.book.id}/submit`, { method: 'POST' }); notify('Произведение отправлено на проверку'); setModerationSuccessVisible(true); await refreshAuthorDashboard(); }
       catch (error) { notify(error.message); }
       return;
     }
@@ -1372,6 +1381,7 @@ function bindAuthorEvents() {
 
 document.addEventListener('DOMContentLoaded', () => {
   if (!document.getElementById('authorStudio')) return;
+  document.querySelector('[data-close-moderation]')?.addEventListener('click', () => setModerationSuccessVisible(false));
   bindAuthorEvents();
   setGraphicUploadTab('file');
   loadAuthorDashboard();

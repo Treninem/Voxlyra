@@ -7,7 +7,7 @@ from pathlib import Path
 def test_v196_build_and_required_assets_exist():
     from app.build_info import OWNER_BUILD_NAME, OWNER_BUILD_VERSION
 
-    assert OWNER_BUILD_VERSION in {"v1.9.6", "v1.9.7", "v1.9.8", "v1.9.9", "v1.10.0", "v1.10.1", "v1.10.2"}
+    assert OWNER_BUILD_VERSION in {"v1.9.6", "v1.9.7", "v1.9.8", "v1.9.9", "v1.10.0", "v1.10.1", "v1.10.2", "v1.10.3", "v1.10.4"}
     assert OWNER_BUILD_NAME
     for relative in (
         "app/services/payment_runtime.py",

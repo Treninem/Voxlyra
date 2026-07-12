@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import book_card %}
+{% from "_macros.html" import book_card, empty_state %}
 {% block title %}Вокслира — библиотека историй{% endblock %}
 {% block body_class %}home-page illustrated-miniapp{% endblock %}
 {% block content %}
@@ -23,21 +23,25 @@
   <a class="story-portal portal-audio" href="/audio">
     <span class="story-portal-image" aria-hidden="true"></span>
     <span class="story-portal-shade" aria-hidden="true"></span>
+    <img class="story-portal-icon" src="/static/img/miniapp/icons/audio.webp" alt="" aria-hidden="true">
     <span class="story-portal-copy"><small>Голосовые истории</small><strong>Слушать</strong><em>Продолжить с сохранённого места</em></span>
   </a>
   <a class="story-portal portal-reading" href="/library">
     <span class="story-portal-image" aria-hidden="true"></span>
     <span class="story-portal-shade" aria-hidden="true"></span>
+    <img class="story-portal-icon" src="/static/img/miniapp/icons/library.webp" alt="" aria-hidden="true">
     <span class="story-portal-copy"><small>Личное пространство</small><strong>Моя полка</strong><em>Книги, покупки и прогресс</em></span>
   </a>
   <a class="story-portal portal-comics" href="/comics">
     <span class="story-portal-image" aria-hidden="true"></span>
     <span class="story-portal-shade" aria-hidden="true"></span>
+    <img class="story-portal-icon" src="/static/img/miniapp/icons/comics.webp" alt="" aria-hidden="true">
     <span class="story-portal-copy"><small>Истории в кадрах</small><strong>Комиксы и манга</strong><em>Манхва, вебтуны и графические романы</em></span>
   </a>
   <a class="story-portal portal-stories" href="/settings">
     <span class="story-portal-image" aria-hidden="true"></span>
     <span class="story-portal-shade" aria-hidden="true"></span>
+    <img class="story-portal-icon" src="/static/img/miniapp/icons/settings.webp" alt="" aria-hidden="true">
     <span class="story-portal-copy"><small>Комфорт чтения</small><strong>Настроить</strong><em>Тема, текст, звук и уведомления</em></span>
   </a>
 </nav>
@@ -84,7 +88,7 @@
 
 <section class="catalog-toolbar" id="all-books">
   <div class="section-title slim"><span class="eyebrow">Полная витрина</span><h2>Каталог</h2><p>Найдите историю по названию или автору и оставьте только подходящие варианты.</p></div>
-  <label class="search-box"><span aria-hidden="true">⌕</span><input id="catalogSearch" type="search" placeholder="Название или автор" autocomplete="off"></label>
+  <label class="search-box"><img src="/static/img/miniapp/icons/search.webp" alt="" aria-hidden="true"><input id="catalogSearch" type="search" placeholder="Название или автор" autocomplete="off"></label>
   <div class="filter-pills" role="group" aria-label="Фильтр каталога">
     <button class="filter-pill active" data-catalog-filter="all">Все</button>
     <button class="filter-pill" data-catalog-filter="graphic">Комиксы и манга</button>
@@ -98,12 +102,8 @@
   {% if books %}
     {% for book in books %}{{ book_card(book) }}{% endfor %}
   {% else %}
-    <article class="empty-card premium-empty catalog-empty-state">
-      <div class="empty-icon">✦</div>
-      <h3>Пока здесь тихо</h3>
-      <p>Когда появятся опубликованные книги и графические произведения, они будут ждать вас на этой витрине.</p>
-    </article>
+    {{ empty_state('no-books', 'Пока здесь тихо', 'Когда появятся опубликованные книги и графические произведения, они будут ждать вас на этой витрине.', extra_class='catalog-empty-state') }}
   {% endif %}
 </section>
-<article id="catalogEmptySearch" class="empty-card premium-empty" hidden><div class="empty-icon">⌕</div><h3>Ничего не нашлось</h3><p>Попробуйте другое название или снимите фильтр.</p></article>
+<div id="catalogEmptySearch" hidden>{{ empty_state('nothing-found', 'Ничего не нашлось', 'Попробуйте другое название или снимите фильтр.') }}</div>
 {% endblock %}
