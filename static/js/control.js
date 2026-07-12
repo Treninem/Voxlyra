@@ -52,6 +52,10 @@
       stats.push(statCard('Удерживается авторам', finance.held_authors || 0, 'Stars'));
       stats.push(statCard('К выплате', finance.available_authors || 0, 'Stars'));
     }
+    if (data.role === 'owner' && data.premium) {
+      stats.push(statCard('Premium', data.premium.active_users || 0, 'активных'));
+      stats.push(statCard('Premium-оборот', data.premium.gross_stars || 0, 'Stars'));
+    }
     $('controlStats').innerHTML = stats.join('');
 
     const sections = [];
@@ -65,7 +69,11 @@
     if (can('payouts')) {
       sections.push(sectionButton('payouts', 'Выплаты авторам', 'Stars и точная сумма в рублях', (q.payouts_new || 0) + (q.payouts_approved || 0)));
     }
-    if (data.role === 'owner') sections.push(sectionButton('payments', 'Stars и курсы', 'Оплата, расчёты автора и защита', 0));
+    if (data.role === 'owner') {
+      sections.push(sectionButton('tts', 'Озвучивание', 'Движки, голоса и очередь', 0));
+      sections.push(sectionButton('payments', 'Stars и курсы', 'Оплата, расчёты автора и защита', 0));
+      sections.push(sectionButton('premium', 'Premium', 'Цена, включение и статистика подписки', data.premium?.active_users || 0));
+    }
     $('controlSections').innerHTML = sections.length ? sections.join('') : '<article class="empty-card"><h3>Нет доступных действий</h3><p>Права можно изменить в меню владельца.</p></article>';
 
     $('controlLoading').hidden = true;
@@ -264,6 +272,49 @@
     return `<label class="payment-secret-field"><span>${esc(label)}</span><input type="password" name="${esc(name)}" autocomplete="new-password" placeholder="${esc(masked || 'не задан')}">${hint ? `<small>${esc(hint)}</small>` : ''}</label>`;
   }
 
+  function providerBadge(provider) {
+    const mark = provider.available ? '✅' : '⚠️';
+    const warm = provider.warmed ? ' · прогрет' : '';
+    return `<article class="control-item"><div class="control-item-main"><span>${mark} ${esc(provider.name)}</span><h3>${esc(provider.message || 'Нет данных')}</h3><p>${provider.available ? 'Доступен' : 'Недоступен'}${warm}</p><small>${esc(JSON.stringify(provider.details || {}))}</small></div></article>`;
+  }
+
+  async function playTtsSample(speakerId) {
+    const response = await apiFetch(`/api/control/tts-vosk/sample/${Number(speakerId)}`);
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const audio = new Audio(url);
+    audio.addEventListener('ended', () => URL.revokeObjectURL(url), { once: true });
+    audio.addEventListener('error', () => URL.revokeObjectURL(url), { once: true });
+    await audio.play();
+  }
+
+  async function loadTtsDiagnostics() {
+    openWorkspace('Диагностика озвучивания', 'Показывается фактический движок, выбранные русские голоса и состояние очереди.', 'Владелец');
+    $('workspaceTabs').innerHTML = '';
+    const data = await apiFetch('/api/control/tts-diagnostics');
+    const profile = data.vosk_profile || {};
+    const selected = profile.selected || {};
+    const benchmark = profile.benchmark || {};
+    const candidates = benchmark.candidates || [];
+    const queue = data.queue || {};
+    const activeSessions = data.active_sessions || [];
+    const recentEvents = data.recent_events || [];
+    const sampleCards = candidates.length ? candidates.map((item) => {
+      const speaker = Number(item.speaker_id);
+      const group = item.gender_group === 'male' ? 'мужская группа' : 'женская группа';
+      const current = selected.female === speaker ? ' · выбран женским' : selected.male === speaker ? ' · выбран мужским' : '';
+      const score = Number(item.score || 0).toFixed(1);
+      return `<article class="control-item" data-speaker="${speaker}"><div class="control-item-main"><span>Голос ${speaker} · ${esc(group)}${esc(current)}</span><h3>Оценка стабильности: ${esc(score)}</h3><p>${item.passed ? 'Техническая проверка пройдена' : 'Есть замечания'}</p><small>${esc((item.issues || []).join(', ') || 'Без технических замечаний')}</small></div><div class="control-actions">${item.sample_ready ? actionButton('Прослушать', `ttssample:play:${speaker}`) : ''}${actionButton('Выбрать женским', `ttsvoice:female:${speaker}`, selected.female === speaker ? 'approve' : '')}${actionButton('Выбрать мужским', `ttsvoice:male:${speaker}`, selected.male === speaker ? 'approve' : '')}</div></article>`;
+    }).join('') : '<article class="empty-card"><h3>Образцы ещё не созданы</h3><p>Запустите автоматическую проверку. Она создаст пять локальных образцов и выберет стабильную пару.</p></article>';
+    const activeCards = activeSessions.length ? activeSessions.map((item) => {
+      const last = item.last_event || {};
+      const counters = item.counters || {};
+      return `<article class="control-item"><div class="control-item-main"><span>Глава ${Number(item.chapter_id || 0)} · ${esc(item.voice || '')}</span><h3>${esc(last.event || 'сессия активна')}</h3><p>Плеер: ${esc(item.player_version || 'не сообщил версию')} · переходов: ${Number(counters.segment_transition_complete || 0)} · восстановлений: ${Number(counters.player_recovered || 0)}</p><small>${esc(JSON.stringify(last.details || {}))}</small></div></article>`;
+    }).join('') : '<article class="empty-card"><h3>Активных сессий нет</h3><p>События появятся после запуска озвучивания читателем.</p></article>';
+    const eventCards = recentEvents.slice(0, 12).map((item) => `<article class="control-item"><div class="control-item-main"><span>${esc(item.event || '')}</span><h3>Глава ${Number(item.chapter_id || 0)} · фрагмент ${Number(item.segment_index ?? 0) + 1}</h3><p>${new Date(Number(item.at_ms || 0)).toLocaleString('ru-RU')}</p><small>${esc(JSON.stringify(item.details || {}))}</small></div></article>`).join('') || '<article class="empty-card"><p>Событий плеера пока нет.</p></article>';
+    $('workspaceList').innerHTML = `<article class="control-item payment-settings-card"><div class="control-item-main"><span>Локальный Vosk</span><h3>Женский: ${esc(selected.female ?? '—')} · Мужской: ${esc(selected.male ?? '—')}</h3><p>Источник выбора: ${esc(profile.source || 'по умолчанию')} · проверка: ${esc(benchmark.status || 'ожидается')}</p><small>${esc(benchmark.error || 'URL и API-ключ не требуются.')}</small></div><div class="control-actions">${actionButton('Проверить все голоса заново', 'ttsbenchmark:run:1', 'approve')}</div></article><article class="control-item payment-settings-card"><div class="control-item-main"><span>Очередь</span><h3>${Number(queue.running || 0)} выполняется · ${Number(queue.queued || 0)} ожидает</h3><p>Готово: ${Number(queue.completed || 0)} · ошибок: ${Number(queue.failed || 0)} · повторно использовано: ${Number(queue.deduplicated || 0)}</p><small>Рабочих процессов: ${Number(queue.workers || 0)} · контракт плеера: ${esc(data.player_contract_version || '—')}</small></div></article>${(data.providers || []).map(providerBadge).join('')}<div class="section-title"><div><span class="eyebrow">Живые сессии</span><h2>Переходы и восстановления</h2><p>Здесь видно, остановился ли плеер, был ли переход между главами и сработало ли автоматическое восстановление.</p></div></div>${activeCards}<div class="section-title"><div><span class="eyebrow">Последние события</span><h2>Журнал плеера</h2></div></div>${eventCards}<div class="section-title"><div><span class="eyebrow">Образцы</span><h2>Пять русских голосов</h2><p>Автовыбор оценивает стабильность. Окончательный тембр можно выбрать после прослушивания.</p></div></div>${sampleCards}`;
+  }
+
   async function loadPaymentSettings() {
     openWorkspace('Stars и курсы', 'ЮKassa отключена. Все цифровые покупки принимаются только в Telegram Stars.', 'Владелец');
     $('workspaceTabs').innerHTML = '';
@@ -317,6 +368,41 @@
     });
   }
 
+  async function loadPremiumSettings() {
+    openWorkspace('VoxLyra Premium', 'Premium добавляет комфорт и оформление, но не закрывает базовое чтение и стандартные функции.', 'Подписка');
+    $('workspaceTabs').innerHTML = '';
+    const data = await apiFetch('/api/control/premium');
+    const plan = (data.plans || [])[0] || {};
+    const summary = data.summary || {};
+    $('workspaceList').innerHTML = `<form id="premiumSettingsForm" class="payment-settings-form">
+      <article class="control-item payment-settings-card"><div class="control-item-main"><span>Тариф</span><h3>${esc(plan.title || 'VoxLyra Premium')}</h3><p>${esc(plan.description || '')}</p></div>
+        <div class="payment-settings-stack">
+          ${paymentToggle('enabled', 'Разрешить новые подписки Premium', Number(plan.is_active || 0) === 1, 'Отключение не отнимает уже оплаченный период у действующих пользователей.')}
+          <label class="payment-secret-field"><span>Цена за 30 дней, Stars</span><input type="number" min="1" max="10000" step="1" name="price_stars" value="${Number(plan.price_stars || 99)}"><small>Цена книги и глав не связана с Premium и не меняется.</small></label>
+        </div>
+      </article>
+      <div class="control-stat-grid premium-control-summary">
+        ${statCard('Активные', summary.active_users || 0, 'пользователей')}
+        ${statCard('Автопродление', summary.auto_renew || 0, 'подписок')}
+        ${statCard('Оплаты', summary.payments || 0)}
+        ${statCard('Оборот', summary.gross_stars || 0, 'Stars')}
+      </div>
+      <div class="control-actions payment-settings-actions"><button type="submit" class="approve">Сохранить Premium</button></div>
+    </form>`;
+    const form = $('premiumSettingsForm');
+    form?.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const payload = {
+        enabled: Boolean(form.elements.enabled.checked),
+        price_stars: Math.max(1, Math.min(10000, Number(form.elements.price_stars.value || 99))),
+      };
+      await apiFetch('/api/control/premium', { method: 'PATCH', body: JSON.stringify(payload) });
+      notify('Настройки Premium сохранены');
+      await loadPremiumSettings();
+      await refreshDashboard();
+    });
+  }
+
   async function refreshDashboard() {
     state.dashboard = await apiFetch('/api/control/dashboard');
     renderDashboard(state.dashboard);
@@ -325,6 +411,23 @@
   async function performAction(action) {
     const [kind, verb, id] = action.split(':');
     if (!kind || !verb || !id) return;
+    if (kind === 'ttssample' && verb === 'play') {
+      await playTtsSample(id);
+      return;
+    }
+    if (kind === 'ttsbenchmark' && verb === 'run') {
+      notify('Проверяем пять голосов. Это может занять несколько минут.');
+      await apiFetch('/api/control/tts-vosk/benchmark', { method: 'POST' });
+      notify('Проверка голосов завершена');
+      await loadTtsDiagnostics();
+      return;
+    }
+    if (kind === 'ttsvoice' && ['female', 'male'].includes(verb)) {
+      await apiFetch('/api/control/tts-vosk/selection', { method: 'PATCH', body: JSON.stringify({ gender: verb, speaker_id: Number(id) }) });
+      notify(verb === 'female' ? 'Женский голос сохранён' : 'Мужской голос сохранён');
+      await loadTtsDiagnostics();
+      return;
+    }
     let url = '';
     let body = undefined;
     if (kind === 'book') {
@@ -395,7 +498,7 @@
     const section = event.target.closest('[data-section]');
     if (section) {
       state.active = section.dataset.section;
-      const loaders = { books: loadBooks, graphic_pages: loadGraphicPages, comments: loadComments, complaints: loadComplaints, refunds: loadRefunds, payouts: loadPayouts, rub_profiles: loadRubProfiles, rub_payouts: loadRubPayouts, payments: loadPaymentSettings };
+      const loaders = { books: loadBooks, graphic_pages: loadGraphicPages, comments: loadComments, complaints: loadComplaints, refunds: loadRefunds, payouts: loadPayouts, rub_profiles: loadRubProfiles, rub_payouts: loadRubPayouts, tts: loadTtsDiagnostics, payments: loadPaymentSettings, premium: loadPremiumSettings };
       loaders[state.active]?.().catch(handleError);
       return;
     }
@@ -414,6 +517,14 @@
     if (requested === 'payments' && data.role === 'owner') {
       state.active = 'payments';
       loadPaymentSettings().catch(handleError);
+    }
+    if (requested === 'tts' && data.role === 'owner') {
+      state.active = 'tts';
+      loadTtsDiagnostics().catch(handleError);
+    }
+    if (requested === 'premium' && data.role === 'owner') {
+      state.active = 'premium';
+      loadPremiumSettings().catch(handleError);
     }
   }).catch((error) => showError(error.message));
 })();

@@ -41,10 +41,12 @@ def build_new_book_post(
     safe_age = escape(_clean_line(age_limit, "16+"))
     safe_description = escape(_short_description(description, 260))
     audio_line = "\n🎧 <b>Есть аудиоверсия</b>" if has_audio else ""
-    if str(pricing_type or "free") == "free" or int(price_stars or 0) <= 0:
-        price_line = "Бесплатно"
+    if int(price_stars or 0) > 0:
+        price_line = f"Вся книга: {int(price_stars)} Stars"
+    elif str(pricing_type or "free") == "chapters":
+        price_line = "Есть платные главы"
     else:
-        price_line = f"{int(price_stars)} Stars"
+        price_line = "Бесплатно"
     heading = "✨ <b>Снова в центре внимания</b>" if repeated else "✨ <b>Новая книга на Вокслире</b>"
     description_block = f"\n\n<i>{safe_description}</i>" if safe_description else ""
     link_block = f"\n\n🔗 <b>Открыть книгу:</b>\n{escape(book_url)}" if book_url else ""

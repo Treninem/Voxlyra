@@ -24,6 +24,8 @@ from app.db import (
     update_chapter_title,
     update_chapter_text,
     update_chapter_price,
+    update_chapter_price_range,
+    update_chapter_access_range,
     create_book,
     create_promo_code,
     add_manual_chapter,
@@ -104,6 +106,31 @@ logger = logging.getLogger(__name__)
 router = Router()
 
 
+def _book_text_pricing_mode(book) -> str:
+    if not book or int(book["price_stars"] or 0) <= 0:
+        return "free"
+    return "chapters" if str(book["pricing_type"] or "") == "chapters" else "whole_book"
+
+
+def _chapter_access_label(chapter, mode: str) -> str:
+    if mode == "free" or int(chapter["is_free"] or 0) == 1:
+        return "Бесплатно"
+    if mode == "chapters" and int(chapter["price_stars"] or 0) > 0:
+        return f"{int(chapter['price_stars'])} Stars — покупка главы"
+    return "После покупки всей книги"
+
+
+def _chapter_access_keyboard(*, prefix: str, book_id: int, allow_chapter_price: bool, cancel_callback: str):
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🆓 Бесплатная глава", callback_data=f"{prefix}:free")
+    builder.button(text="📘 После покупки всей книги", callback_data=f"{prefix}:book")
+    if allow_chapter_price:
+        builder.button(text="⭐ Поставить рекомендованную цену", callback_data=f"{prefix}:recommended")
+    builder.button(text="❌ Отмена", callback_data=cancel_callback)
+    builder.adjust(1)
+    return builder.as_markup()
+
+
 def _large_book_upload_markup(book_id: int):
     builder = InlineKeyboardBuilder()
     web_url = settings.WEBAPP_URL.strip().rstrip("/")
@@ -135,6 +162,8 @@ class EditBookDetails(StatesGroup):
     title = State()
     description = State()
     price = State()
+    chapter_sales = State()
+    confirm_free = State()
 
 
 class EditChapterDetails(StatesGroup):
@@ -146,6 +175,11 @@ class EditChapterDetails(StatesGroup):
 class AddChapterManual(StatesGroup):
     title = State()
     text = State()
+    price = State()
+
+
+class BulkChapterPrice(StatesGroup):
+    target = State()
     price = State()
 
 
@@ -195,6 +229,7 @@ class AddBook(StatesGroup):
     allow_download = State()
     pricing_type = State()
     price = State()
+    chapter_sales = State()
     cover = State()
     confirm = State()
 
@@ -613,49 +648,68 @@ async def add_book_download(call: CallbackQuery, state: FSMContext) -> None:
     allow = call.data.endswith(":yes")
     await state.update_data(allow_download=allow)
     await state.set_state(AddBook.pricing_type)
-    await call.message.edit_text("Выберите способ продажи.", reply_markup=pricing_menu(cancel_callback="author:cancel_flow"))
+    await call.message.edit_text(
+        "<b>Условия доступа к книге</b>\n\n"
+        "Бесплатная книга полностью открывает все главы. Если книга платная, после указания цены бот спросит, разрешать ли отдельную покупку глав.",
+        reply_markup=pricing_menu(cancel_callback="author:cancel_flow"),
+    )
     await call.answer()
 
 
 @router.callback_query(AddBook.pricing_type, F.data.startswith("book:pricing:"))
 async def add_book_pricing(call: CallbackQuery, state: FSMContext) -> None:
-    pricing_type = call.data.split(":")[-1]
+    choice = call.data.split(":")[-1]
     data = await state.get_data()
-    recommended = recommend_book_price(description=data.get("description", ""), pricing_type=pricing_type)
-    await state.update_data(pricing_type=pricing_type, recommended_price=recommended)
-    if pricing_type == "free":
-        await state.update_data(price_stars=0)
+    if choice == "free":
+        await state.update_data(pricing_type="free", price_stars=0)
         await state.set_state(AddBook.cover)
         await call.message.edit_text(
-            "Книга будет бесплатной.\n\n"
+            "Книга будет полностью бесплатной. Все её главы тоже будут бесплатными, поэтому цены глав спрашиваться не будут.\n\n"
             "Теперь загрузите обложку изображением или нажмите «Пропустить».",
             reply_markup=cover_menu(cancel_callback="author:cancel_flow"),
         )
     else:
+        recommended = recommend_book_price(description=data.get("description", ""), pricing_type="whole_book")
+        await state.update_data(pricing_type="whole_book", recommended_price=recommended)
         await state.set_state(AddBook.price)
         await call.message.edit_text(
-            f"Рекомендуемая цена: <b>{recommended} Stars</b>.\n\n"
-            "Введите свою цену числом в Stars или используйте рекомендованную цену.",
-            reply_markup=skip_use_menu("book:price:free", "book:price:recommended", "✅ Поставить рекомендованную цену", cancel_callback="author:cancel_flow"),
+            f"Рекомендуемая цена всей книги: <b>{recommended} Stars</b>.\n\n"
+            "Введите цену числом. После этого бот отдельно спросит, разрешать ли покупку отдельных глав.",
+            reply_markup=skip_use_menu(
+                "book:price:free", "book:price:recommended",
+                "✅ Поставить рекомендованную цену", cancel_callback="author:cancel_flow",
+            ),
         )
     await call.answer()
+
+
+async def _ask_book_chapter_sales(message, state: FSMContext) -> None:
+    await state.set_state(AddBook.chapter_sales)
+    await message.answer(
+        "Разрешить читателю покупать отдельные главы?\n\n"
+        "• «Нет» — продаётся только вся книга; закрытые главы открываются после её покупки.\n"
+        "• «Да» — книга продаётся целиком, а выбранным главам можно назначить отдельную цену.",
+        reply_markup=yes_no_menu("book:chapter_sales", cancel_callback="author:cancel_flow"),
+    )
 
 
 @router.callback_query(AddBook.price, F.data == "book:price:recommended")
 async def add_book_price_recommended(call: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
-    await state.update_data(price_stars=int(data.get("recommended_price", 0)))
-    await state.set_state(AddBook.cover)
-    await call.message.edit_text("Цена сохранена. Загрузите обложку изображением или нажмите «Пропустить».", reply_markup=cover_menu(cancel_callback="author:cancel_flow"))
-    await call.answer("Сохранено")
+    await state.update_data(price_stars=max(1, int(data.get("recommended_price", 1))))
+    await _ask_book_chapter_sales(call.message, state)
+    await call.answer("Цена сохранена")
 
 
 @router.callback_query(AddBook.price, F.data == "book:price:free")
 async def add_book_price_free(call: CallbackQuery, state: FSMContext) -> None:
-    await state.update_data(price_stars=0)
+    await state.update_data(pricing_type="free", price_stars=0)
     await state.set_state(AddBook.cover)
-    await call.message.edit_text("Цена пропущена: книга будет бесплатной. Загрузите обложку или нажмите «Пропустить».", reply_markup=cover_menu(cancel_callback="author:cancel_flow"))
-    await call.answer("Пропущено")
+    await call.message.edit_text(
+        "Книга будет полностью бесплатной, включая все главы. Загрузите обложку или нажмите «Пропустить».",
+        reply_markup=cover_menu(cancel_callback="author:cancel_flow"),
+    )
+    await call.answer("Бесплатно")
 
 
 @router.message(AddBook.price)
@@ -666,11 +720,35 @@ async def add_book_price(message: Message, state: FSMContext) -> None:
         return
     price = int(raw)
     if price < 0 or price > 100000:
-        await message.answer("Цена выглядит неверно. Введите разумное число Stars.", reply_markup=navigation_menu(cancel_callback="author:cancel_flow"))
+        await message.answer("Цена должна быть от 0 до 100 000 Stars.", reply_markup=navigation_menu(cancel_callback="author:cancel_flow"))
+        return
+    if price <= 0:
+        await state.update_data(pricing_type="free", price_stars=0)
+        await state.set_state(AddBook.cover)
+        await message.answer(
+            "Книга будет полностью бесплатной, включая все главы. Загрузите обложку или нажмите «Пропустить».",
+            reply_markup=cover_menu(cancel_callback="author:cancel_flow"),
+        )
         return
     await state.update_data(price_stars=price)
+    await _ask_book_chapter_sales(message, state)
+
+
+@router.callback_query(AddBook.chapter_sales, F.data.startswith("book:chapter_sales:"))
+async def add_book_chapter_sales(call: CallbackQuery, state: FSMContext) -> None:
+    enabled = call.data.endswith(":yes")
+    await state.update_data(pricing_type="chapters" if enabled else "whole_book")
     await state.set_state(AddBook.cover)
-    await message.answer("Загрузите обложку изображением или нажмите «Пропустить».", reply_markup=cover_menu(cancel_callback="author:cancel_flow"))
+    result_text = (
+        "Продажа отдельных глав включена. Их цены можно будет назначить после создания книги."
+        if enabled else
+        "Будет продаваться только вся книга. Отдельные цены глав не запрашиваются."
+    )
+    await call.message.edit_text(
+        result_text + "\n\nЗагрузите обложку изображением или нажмите «Пропустить».",
+        reply_markup=cover_menu(cancel_callback="author:cancel_flow"),
+    )
+    await call.answer("Сохранено")
 
 
 @router.message(AddBook.cover, F.photo)
@@ -719,8 +797,8 @@ async def _show_book_confirm(message: Message, state: FSMContext) -> None:
         f"Возраст: <b>{data.get('age_limit', '16+')}</b>\n"
         f"Статус: <b>{STATUS_RU.get(data.get('writing_status', 'writing'), data.get('writing_status', 'writing'))}</b>\n"
         f"Скачивание: <b>{'разрешено' if data.get('allow_download') else 'запрещено'}</b>\n"
-        f"Продажа: <b>{PRICING_RU.get(data.get('pricing_type', 'free'), data.get('pricing_type', 'free'))}</b>\n"
-        f"Цена: <b>{data.get('price_stars', 0)} Stars</b>\n"
+        f"Цена всей книги: <b>{data.get('price_stars', 0)} Stars</b>\n"
+        "Цены отдельных глав задаются после создания книги.\n"
         f"Обложка: <b>{'загружена' if data.get('cover_file_id') else 'нет'}</b>\n\n"
         "Сохранить черновик?"
     )
@@ -816,7 +894,8 @@ async def author_book_card(call: CallbackQuery) -> None:
         f"Статус книги: <b>{STATUS_RU.get(book['writing_status'], book['writing_status'])}</b>\n"
         f"Публикация: <b>{PUBLICATION_RU.get(book['publication_status'], book['publication_status'])}</b>\n"
         f"Скачивание: <b>{'разрешено' if book['allow_download'] else 'запрещено'}</b>\n"
-        f"Цена: <b>{book['price_stars']} Stars</b>\n\n"
+        f"Цена всей книги: <b>{book['price_stars']} Stars</b>\n"
+        f"Цены отдельных глав задаются в разделе «Главы».\n\n"
         f"{book['description'] or ''}"
     )
     await call.message.edit_text(text[:4096], reply_markup=author_book_card_menu(book_id, book["publication_status"]))
@@ -866,7 +945,12 @@ async def book_edit_price_start(call: CallbackQuery, state: FSMContext) -> None:
         return
     await state.update_data(book_id=book_id)
     await state.set_state(EditBookDetails.price)
-    await call.message.edit_text("Введите новую цену книги в Stars. Чтобы сделать книгу бесплатной, нажмите «Бесплатно».", reply_markup=skip_back_menu("book:edit_price_free", f"author:book:{book_id}", "Бесплатно"))
+    await call.message.edit_text(
+        "<b>Цена всей книги</b>\n\n"
+        "Введите цену всей книги в Stars. Значение 0 сделает книгу и все главы полностью бесплатными. "
+        "При положительной цене бот отдельно спросит, разрешать ли покупку отдельных глав.",
+        reply_markup=skip_back_menu("book:edit_price_free", f"author:book:{book_id}", "Сделать всю книгу бесплатной"),
+    )
     await call.answer()
 
 
@@ -878,25 +962,76 @@ async def book_edit_price_save(message: Message, state: FSMContext) -> None:
         return
     price = int(raw)
     if price < 0 or price > 100000:
-        await message.answer("Цена выглядит неверно. Введите разумное число Stars.", reply_markup=navigation_menu(cancel_callback="author:cancel_flow"))
+        await message.answer("Цена должна быть от 0 до 100 000 Stars.", reply_markup=navigation_menu(cancel_callback="author:cancel_flow"))
         return
+    if price <= 0:
+        await state.set_state(EditBookDetails.confirm_free)
+        await message.answer(
+            "Сделать книгу полностью бесплатной?\n\n"
+            "Все существующие и будущие главы станут бесплатными. Продажа отдельных глав и текстовых пакетов будет отключена.",
+            reply_markup=yes_no_menu("book:confirm_free", cancel_callback="author:cancel_flow"),
+        )
+        return
+    await state.update_data(price_stars=price)
+    await state.set_state(EditBookDetails.chapter_sales)
+    await message.answer(
+        "Разрешить покупку отдельных глав?\n\n"
+        "«Нет» — только покупка всей книги.\n"
+        "«Да» — вся книга плюс выбранные главы по отдельности.",
+        reply_markup=yes_no_menu("book:edit_chapter_sales", cancel_callback="author:cancel_flow"),
+    )
+
+
+@router.callback_query(EditBookDetails.chapter_sales, F.data.startswith("book:edit_chapter_sales:"))
+async def book_edit_chapter_sales(call: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
     book_id = int(data["book_id"])
-    user = await upsert_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
-    ok = await update_book_price(book_id, user["id"], "whole_book", price)
+    price = int(data["price_stars"])
+    mode = "chapters" if call.data.endswith(":yes") else "whole_book"
+    user = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
+    ok = await update_book_price(book_id, user["id"], mode, price)
     await state.clear()
-    await message.answer("Цена книги обновлена." if ok else "Книга не найдена или недоступна.", reply_markup=author_menu(True))
+    text = (
+        f"Цена всей книги: <b>{price} Stars</b>. "
+        + ("Продажа отдельных глав включена." if mode == "chapters" else "Продаётся только вся книга.")
+    ) if ok else "Книга не найдена или недоступна."
+    await call.message.edit_text(text, reply_markup=author_book_card_menu(book_id, "draft"))
+    await call.answer("Сохранено" if ok else "Недоступно")
 
 
 @router.callback_query(EditBookDetails.price, F.data == "book:edit_price_free")
-async def book_edit_price_free(call: CallbackQuery, state: FSMContext) -> None:
+async def book_edit_price_free_ask(call: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(EditBookDetails.confirm_free)
+    await call.message.edit_text(
+        "Сделать книгу полностью бесплатной?\n\n"
+        "Все главы станут бесплатными. Продажа отдельных глав и текстовых пакетов отключится. "
+        "Старые цены сохранятся только как скрытый черновик и сами не вернутся.",
+        reply_markup=yes_no_menu("book:confirm_free", cancel_callback="author:cancel_flow"),
+    )
+    await call.answer()
+
+
+@router.callback_query(EditBookDetails.confirm_free, F.data == "book:confirm_free:no")
+async def book_edit_price_free_cancel(call: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    book_id = int(data["book_id"])
+    await state.clear()
+    await call.message.edit_text("Цена не изменена.", reply_markup=author_book_card_menu(book_id, "draft"))
+    await call.answer("Отменено")
+
+
+@router.callback_query(EditBookDetails.confirm_free, F.data == "book:confirm_free:yes")
+async def book_edit_price_free_confirm(call: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
     book_id = int(data["book_id"])
     user = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
     ok = await update_book_price(book_id, user["id"], "free", 0)
     await state.clear()
-    await call.message.edit_text("Книга теперь бесплатная." if ok else "Книга не найдена или недоступна.", reply_markup=author_book_card_menu(book_id, "draft"))
-    await call.answer("Готово")
+    await call.message.edit_text(
+        "Книга и все её главы теперь бесплатны. Продажа отдельных глав отключена." if ok else "Книга не найдена или недоступна.",
+        reply_markup=author_book_card_menu(book_id, "draft"),
+    )
+    await call.answer("Готово" if ok else "Недоступно")
 
 
 @router.callback_query(F.data.startswith("author:submit_book:"))
@@ -1094,13 +1229,20 @@ async def author_chapters_menu_handler(call: CallbackQuery) -> None:
         await call.answer("Книга не найдена или недоступна", show_alert=True)
         return
     book = await get_book(book_id)
+    mode = _book_text_pricing_mode(book)
     chapters_count = await count_chapters_for_book(book_id)
+    pricing_note = {
+        "free": "Книга бесплатная: все главы открыты, настройки цен скрыты.",
+        "whole_book": "Книга продаётся только целиком: главы могут быть бесплатными ознакомительными или открываться после покупки книги.",
+        "chapters": "Книга продаётся целиком и по главам: для одной главы или диапазона можно выбрать бесплатный доступ, доступ после покупки книги либо отдельную цену.",
+    }[mode]
     await call.message.edit_text(
         f"<b>Главы книги</b>\n\n"
         f"Книга: <b>{book['title'] if book else book_id}</b>\n"
         f"Сейчас глав: <b>{chapters_count}</b>\n\n"
+        f"{pricing_note}\n\n"
         "Можно вставить главу текстом или загрузить файл. Бот сам попробует разбить книгу на главы.",
-        reply_markup=author_chapters_menu(book_id),
+        reply_markup=author_chapters_menu(book_id, mode),
     )
     await call.answer()
 
@@ -1149,36 +1291,63 @@ async def chapter_add_manual_text(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     book_id = int(data["book_id"])
     book = await get_book(book_id)
-    pricing_type = book["pricing_type"] if book else "free"
-    if pricing_type == "free":
-        chapter_id = await add_manual_chapter(book_id, data["title"], text, is_free=True, price_stars=0)
-        if book and book["publication_status"] == "published":
-            await set_chapter_status(chapter_id, "published")
-        await state.clear()
-        user = await upsert_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
-        await add_audit(user["id"], "chapter_created_manual", "chapter", str(chapter_id))
-        await _notify_new_chapters(book_id, [chapter_id], int(user["id"]), message.bot)
-        await message.answer("Глава опубликована." if book and book["publication_status"] == "published" else "Глава сохранена.", reply_markup=author_chapters_menu(book_id))
+    mode = _book_text_pricing_mode(book)
+    recommended = 3
+    await state.update_data(text=text[:300000], recommended_price=recommended, pricing_mode=mode)
+
+    if mode == "free":
+        await _finish_manual_chapter(message, state, "free", 0)
         return
-    recommended = max(1, int(book["price_stars"] or 3)) if book else 3
-    await state.update_data(text=text[:300000], recommended_price=recommended)
+
     await state.set_state(AddChapterManual.price)
+    if mode == "whole_book":
+        await message.answer(
+            "Выберите доступ к новой главе. В этой книге отдельная продажа глав отключена.",
+            reply_markup=_chapter_access_keyboard(
+                prefix="chapter:add_access", book_id=book_id, allow_chapter_price=False,
+                cancel_callback="author:cancel_flow",
+            ),
+        )
+        return
+
     await message.answer(
-        f"Рекомендуемая цена главы: <b>{recommended} Stars</b>.\n\n"
-        "Введите цену главы числом, поставьте рекомендованную или сделайте главу бесплатной.",
-        reply_markup=skip_use_menu("chapter:price:free", "chapter:price:recommended", "✅ Поставить рекомендованную цену", cancel_callback="author:cancel_flow"),
+        f"Выберите доступ к новой главе. Если продавать её отдельно, рекомендуемая цена — <b>{recommended} Stars</b>.\n\n"
+        "Цена всей книги при этом не меняется. Можно также ввести другую цену числом.",
+        reply_markup=_chapter_access_keyboard(
+            prefix="chapter:add_access", book_id=book_id, allow_chapter_price=True,
+            cancel_callback="author:cancel_flow",
+        ),
     )
 
 
-async def _finish_manual_chapter(message_or_call, state: FSMContext, price: int) -> None:
+async def _finish_manual_chapter(message_or_call, state: FSMContext, access_mode: str, price: int = 0) -> None:
     data = await state.get_data()
     book_id = int(data["book_id"])
+    book = await get_book(book_id)
+    mode = _book_text_pricing_mode(book)
+    access = str(access_mode or "free")
+    active_price = max(0, int(price or 0))
+
+    if mode == "free":
+        access, active_price = "free", 0
+    elif access == "chapter" and mode != "chapters":
+        target_message = message_or_call.message if isinstance(message_or_call, CallbackQuery) else message_or_call
+        await target_message.answer("Отдельная продажа глав для этой книги выключена.", reply_markup=author_chapters_menu(book_id, mode))
+        await state.clear()
+        return
+    elif access == "chapter" and active_price <= 0:
+        target_message = message_or_call.message if isinstance(message_or_call, CallbackQuery) else message_or_call
+        await target_message.answer("Для отдельной продажи укажите цену больше 0 Stars.")
+        return
+    elif access not in {"free", "book", "chapter"}:
+        access, active_price = "free", 0
+
     chapter_id = await add_manual_chapter(
         book_id,
         data.get("title") or "Глава",
         data["text"],
-        is_free=price == 0,
-        price_stars=price,
+        is_free=access == "free",
+        price_stars=active_price if access == "chapter" else 0,
     )
     await state.clear()
     tg = message_or_call.from_user
@@ -1186,37 +1355,50 @@ async def _finish_manual_chapter(message_or_call, state: FSMContext, price: int)
     book = await get_book(book_id)
     if book and book["publication_status"] == "published":
         await set_chapter_status(chapter_id, "published")
-    await add_audit(user["id"], "chapter_created_manual", "chapter", str(chapter_id))
+    await add_audit(user["id"], "chapter_created_manual", "chapter", str(chapter_id), None, f"access={access}; price={active_price}")
     bot = message_or_call.bot
     await _notify_new_chapters(book_id, [chapter_id], int(user["id"]), bot)
-    target_message = message_or_call.message if hasattr(message_or_call, "message") else message_or_call
-    await target_message.answer("Глава опубликована." if book and book["publication_status"] == "published" else "Глава сохранена.", reply_markup=author_chapters_menu(book_id))
+    target_message = message_or_call.message if isinstance(message_or_call, CallbackQuery) else message_or_call
+    status_text = {
+        "free": "Глава сохранена как бесплатная.",
+        "book": "Глава сохранена с доступом после покупки всей книги.",
+        "chapter": f"Глава сохранена с отдельной ценой {active_price} Stars.",
+    }[access]
+    if book and book["publication_status"] == "published":
+        status_text = status_text.replace("сохранена", "опубликована", 1)
+    await target_message.answer(status_text, reply_markup=author_chapters_menu(book_id, _book_text_pricing_mode(book)))
 
 
-@router.callback_query(AddChapterManual.price, F.data == "chapter:price:recommended")
+@router.callback_query(AddChapterManual.price, F.data == "chapter:add_access:recommended")
 async def chapter_add_manual_price_recommended(call: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
-    await _finish_manual_chapter(call, state, int(data.get("recommended_price", 0)))
+    await _finish_manual_chapter(call, state, "chapter", int(data.get("recommended_price", 3)))
     await call.answer("Сохранено")
 
 
-@router.callback_query(AddChapterManual.price, F.data == "chapter:price:free")
+@router.callback_query(AddChapterManual.price, F.data == "chapter:add_access:free")
 async def chapter_add_manual_price_free(call: CallbackQuery, state: FSMContext) -> None:
-    await _finish_manual_chapter(call, state, 0)
-    await call.answer("Бесплатно")
+    await _finish_manual_chapter(call, state, "free", 0)
+    await call.answer("Бесплатная глава")
+
+
+@router.callback_query(AddChapterManual.price, F.data == "chapter:add_access:book")
+async def chapter_add_manual_access_book(call: CallbackQuery, state: FSMContext) -> None:
+    await _finish_manual_chapter(call, state, "book", 0)
+    await call.answer("Доступ после покупки книги")
 
 
 @router.message(AddChapterManual.price)
 async def chapter_add_manual_price(message: Message, state: FSMContext) -> None:
     raw = (message.text or "").strip()
     if not raw.isdigit():
-        await message.answer("Введите число. Например: 3", reply_markup=navigation_menu(cancel_callback="author:cancel_flow"))
+        await message.answer("Введите цену числом, например 3, либо выберите вариант кнопкой.", reply_markup=navigation_menu(cancel_callback="author:cancel_flow"))
         return
     price = int(raw)
-    if price > 100000:
-        await message.answer("Цена выглядит слишком большой.", reply_markup=navigation_menu(cancel_callback="author:cancel_flow"))
+    if price < 1 or price > 100000:
+        await message.answer("Для отдельной продажи цена должна быть от 1 до 100 000 Stars.", reply_markup=navigation_menu(cancel_callback="author:cancel_flow"))
         return
-    await _finish_manual_chapter(message, state, price)
+    await _finish_manual_chapter(message, state, "chapter", price)
 
 
 @router.callback_query(F.data.startswith("chapter:upload:"))
@@ -1355,9 +1537,22 @@ async def chapter_upload_file(message: Message, state: FSMContext, bot: Bot) -> 
     problems = "\n".join(f"⚠️ {p}" for p in report["problems"]) or "Явных проблем не найдено."
 
     book = await get_book(book_id)
-    first_free = 999999 if book and book["pricing_type"] == "free" else 3
-    default_price = 0 if book and book["pricing_type"] == "free" else int((book["price_stars"] if book else 3) or 3)
-    await state.update_data(first_free=first_free, default_price=default_price)
+    pricing_mode = _book_text_pricing_mode(book)
+    first_free = 999999 if pricing_mode == "free" else 3
+    default_price = 0
+    await state.update_data(first_free=first_free, default_price=default_price, pricing_mode=pricing_mode)
+    if pricing_mode == "free":
+        pricing_preview = "Все импортированные главы будут бесплатными. Цена глав не требуется."
+    elif pricing_mode == "chapters":
+        pricing_preview = (
+            "Первые 3 главы будут бесплатными ознакомительными, остальные — доступны после покупки всей книги. "
+            "Отдельные цены можно назначить затем одной главе или диапазону."
+        )
+    else:
+        pricing_preview = (
+            "Первые 3 главы будут бесплатными ознакомительными, остальные — доступны после покупки всей книги. "
+            "Отдельная продажа глав выключена."
+        )
 
     await add_audit(user_id, "book_file_parsed", "book", str(book_id), None, original_name)
     await message.answer(
@@ -1365,8 +1560,7 @@ async def chapter_upload_file(message: Message, state: FSMContext, bot: Bot) -> 
         f"Файл: <b>{original_name}</b>\n"
         f"Найдено глав: <b>{report['chapters_count']}</b>\n"
         f"Всего знаков: <b>{report['total_chars']}</b>\n"
-        f"Первые бесплатные главы: <b>{'все' if first_free > 1000 else first_free}</b>\n"
-        f"Цена остальных глав: <b>{default_price} Stars</b>\n\n"
+        f"{pricing_preview}\n\n"
         "<b>Первые главы:</b>\n"
         f"{chr(10).join(preview_lines) if preview_lines else 'нет'}\n\n"
         "<b>Проверка:</b>\n"
@@ -1443,7 +1637,8 @@ async def chapter_import_confirm(call: CallbackQuery, state: FSMContext) -> None
         actor_telegram_id=int(call.from_user.id),
         source="telegram_file_import",
     )
-    reply_markup = author_menu(True) if workflow.workflow_status in {"published", "review"} else author_chapters_menu(book_id)
+    current_book = await get_book(book_id)
+    reply_markup = author_menu(True) if workflow.workflow_status in {"published", "review"} else author_chapters_menu(book_id, _book_text_pricing_mode(current_book))
     if workflow.workflow_status == "published":
         publication_note = "<b>Книга опубликована.</b> Она появилась в каталоге."
         if workflow.channel_message:
@@ -1485,8 +1680,140 @@ async def chapter_import_cancel(call: CallbackQuery, state: FSMContext) -> None:
     delete_import_preview(data.get("preview_path"))
     book_id = int(call.data.split(":")[-1])
     await state.clear()
-    await call.message.edit_text("Импорт отменён. Файл не сохранён в книгу.", reply_markup=author_chapters_menu(book_id))
+    book = await get_book(book_id)
+    await call.message.edit_text("Импорт отменён. Файл не сохранён в книгу.", reply_markup=author_chapters_menu(book_id, _book_text_pricing_mode(book)))
     await call.answer()
+
+
+@router.callback_query(F.data.startswith("chapter:bulk_price:"))
+async def chapter_bulk_price_start(call: CallbackQuery, state: FSMContext) -> None:
+    book_id = int(call.data.split(":")[-1])
+    ok, _ = await _author_can_edit_book(call, book_id)
+    if not ok:
+        await call.answer("Книга не найдена или недоступна", show_alert=True)
+        return
+    book = await get_book(book_id)
+    mode = _book_text_pricing_mode(book)
+    if mode == "free":
+        await call.answer("Книга бесплатная: все главы уже открыты бесплатно.", show_alert=True)
+        return
+    await state.update_data(book_id=book_id, pricing_mode=mode)
+    await state.set_state(BulkChapterPrice.target)
+    title = "Доступ одной главы или диапазона" if mode == "whole_book" else "Доступ и цена одной главы или диапазона"
+    await call.message.edit_text(
+        f"<b>{title}</b>\n\n"
+        "Введите номер одной главы, например <b>7</b>, либо диапазон, например <b>7-25</b>.\n\n"
+        "Цена всей книги при этом не изменится.",
+        reply_markup=navigation_menu(back_callback=f"author:chapters:{book_id}", cancel_callback="author:cancel_flow"),
+    )
+    await call.answer()
+
+
+@router.message(BulkChapterPrice.target)
+async def chapter_bulk_price_target(message: Message, state: FSMContext) -> None:
+    raw = (message.text or "").strip().replace("—", "-").replace("–", "-").replace(" ", "")
+    parts = raw.split("-", 1)
+    if not parts[0].isdigit() or (len(parts) == 2 and not parts[1].isdigit()):
+        await message.answer("Введите номер главы, например 7, или диапазон, например 7-25.")
+        return
+    start_number = int(parts[0])
+    end_number = int(parts[1]) if len(parts) == 2 else start_number
+    if start_number < 1 or end_number < 1 or abs(end_number - start_number) > 100000:
+        await message.answer("Проверьте номера глав. Номера должны начинаться с 1.")
+        return
+    if start_number > end_number:
+        start_number, end_number = end_number, start_number
+    data = await state.get_data()
+    mode = str(data.get("pricing_mode") or "whole_book")
+    await state.update_data(start_number=start_number, end_number=end_number)
+    await state.set_state(BulkChapterPrice.price)
+    target = f"глав {start_number}–{end_number}" if start_number != end_number else f"главы {start_number}"
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🆓 Сделать бесплатными", callback_data="chapter:bulk_access:free")
+    builder.button(text="📘 После покупки всей книги", callback_data="chapter:bulk_access:book")
+    if mode == "chapters":
+        builder.button(text="❌ Отмена", callback_data="author:cancel_flow")
+        builder.adjust(1)
+        text = (
+            f"Выберите доступ для <b>{target}</b>.\n\n"
+            "Чтобы продавать выбранные главы отдельно, введите цену числом от 1 до 100 000 Stars. "
+            "Цена всей книги останется без изменений."
+        )
+    else:
+        builder.button(text="❌ Отмена", callback_data="author:cancel_flow")
+        builder.adjust(1)
+        text = (
+            f"Выберите доступ для <b>{target}</b>.\n\n"
+            "Отдельная продажа глав выключена: можно оставить бесплатный ознакомительный доступ либо открыть главы после покупки всей книги."
+        )
+    await message.answer(text, reply_markup=builder.as_markup())
+
+
+async def _apply_bulk_chapter_access(message_or_call, state: FSMContext, access_mode: str, price: int = 0) -> None:
+    data = await state.get_data()
+    book_id = int(data["book_id"])
+    start_number = int(data["start_number"])
+    end_number = int(data["end_number"])
+    tg = message_or_call.from_user
+    user = await upsert_user(tg.id, tg.username, tg.full_name)
+    result = await update_chapter_access_range(
+        book_id, user["id"], start_number, end_number, access_mode, price
+    )
+    await state.clear()
+    updated = int(result.get("updated") or 0)
+    reason = str(result.get("reason") or "")
+    if not updated:
+        text = {
+            "book_is_free": "Книга полностью бесплатна. Настройки доступа к главам не нужны.",
+            "chapter_sales_disabled": "Отдельная продажа глав для этой книги выключена.",
+            "price_required": "Для отдельной продажи укажите цену больше 0 Stars.",
+            "chapters_not_found": "В указанном диапазоне главы не найдены.",
+            "not_found": "Книга не найдена или недоступна.",
+        }.get(reason, "Доступ к главам не изменён.")
+    elif access_mode == "free":
+        text = f"Готово: <b>{updated}</b> глав открыты бесплатно. Цена всей книги не изменилась."
+    elif access_mode == "book":
+        text = f"Готово: <b>{updated}</b> глав доступны после покупки всей книги."
+    else:
+        text = f"Готово: для <b>{updated}</b> глав установлена отдельная цена <b>{price} Stars</b>. Цена всей книги не изменилась."
+    await add_audit(
+        user["id"], "chapter_access_range_updated", "book", str(book_id), None,
+        f"{start_number}-{end_number}:{access_mode}={price}; updated={updated}; reason={reason}",
+    )
+    book = await get_book(book_id)
+    markup = author_chapters_menu(book_id, _book_text_pricing_mode(book))
+    if isinstance(message_or_call, CallbackQuery):
+        await message_or_call.message.edit_text(text, reply_markup=markup)
+        await message_or_call.answer("Готово" if updated else "Не изменено")
+    else:
+        await message_or_call.answer(text, reply_markup=markup)
+
+
+@router.message(BulkChapterPrice.price)
+async def chapter_bulk_price_save(message: Message, state: FSMContext) -> None:
+    raw = (message.text or "").strip()
+    if not raw.isdigit():
+        await message.answer("Введите цену числом от 1 до 100 000 Stars или выберите вариант кнопкой.")
+        return
+    price = int(raw)
+    if price < 1 or price > 100000:
+        await message.answer("Для отдельной продажи цена должна быть от 1 до 100 000 Stars.")
+        return
+    data = await state.get_data()
+    if str(data.get("pricing_mode") or "") != "chapters":
+        await message.answer("Отдельная продажа глав для этой книги выключена. Выберите один из вариантов кнопкой.")
+        return
+    await _apply_bulk_chapter_access(message, state, "chapter", price)
+
+
+@router.callback_query(BulkChapterPrice.price, F.data == "chapter:bulk_access:free")
+async def chapter_bulk_access_free(call: CallbackQuery, state: FSMContext) -> None:
+    await _apply_bulk_chapter_access(call, state, "free", 0)
+
+
+@router.callback_query(BulkChapterPrice.price, F.data == "chapter:bulk_access:book")
+async def chapter_bulk_access_book(call: CallbackQuery, state: FSMContext) -> None:
+    await _apply_bulk_chapter_access(call, state, "book", 0)
 
 
 @router.callback_query(F.data.startswith("chapter:list:"))
@@ -1496,13 +1823,15 @@ async def chapter_list_handler(call: CallbackQuery) -> None:
     if not ok:
         await call.answer("Книга не найдена или недоступна", show_alert=True)
         return
+    book = await get_book(book_id)
+    mode = _book_text_pricing_mode(book)
     chapters = await list_chapters_for_book(book_id)
     if not chapters:
-        await call.message.edit_text("Глав пока нет.", reply_markup=author_chapters_menu(book_id))
+        await call.message.edit_text("Глав пока нет.", reply_markup=author_chapters_menu(book_id, mode))
     else:
         await call.message.edit_text(
             f"<b>Список глав</b>\n\nВсего: <b>{len(chapters)}</b>",
-            reply_markup=author_chapter_list_menu(book_id, chapters),
+            reply_markup=author_chapter_list_menu(book_id, chapters, mode),
         )
     await call.answer()
 
@@ -1519,13 +1848,14 @@ async def chapter_view_handler(call: CallbackQuery) -> None:
         await call.answer("Недоступно", show_alert=True)
         return
     text = chapter["text"] or ""
+    mode = _book_text_pricing_mode(chapter)
     await call.message.edit_text(
         f"<b>{chapter['number']}. {chapter['title']}</b>\n\n"
         f"Статус: <b>{chapter['status']}</b>\n"
-        f"Цена: <b>{0 if chapter['is_free'] else chapter['price_stars']} Stars</b>\n"
+        f"Доступ: <b>{_chapter_access_label(chapter, mode)}</b>\n"
         f"Знаков: <b>{len(text)}</b>\n\n"
         f"{text[:1600]}{'...' if len(text) > 1600 else ''}",
-        reply_markup=chapter_view_menu(int(chapter["book_id"]), chapter_id),
+        reply_markup=chapter_view_menu(int(chapter["book_id"]), chapter_id, mode),
     )
     await call.answer()
 
@@ -1565,7 +1895,8 @@ async def chapter_edit_title_save(message: Message, state: FSMContext) -> None:
     ok = await update_chapter_title(chapter_id, user["id"], title)
     await add_audit(user["id"], "chapter_title_updated", "chapter", str(chapter_id), None, title)
     await state.clear()
-    await message.answer("Название главы обновлено." if ok else "Глава не найдена или недоступна.", reply_markup=author_chapters_menu(book_id))
+    book = await get_book(book_id)
+    await message.answer("Название главы обновлено." if ok else "Глава не найдена или недоступна.", reply_markup=author_chapters_menu(book_id, _book_text_pricing_mode(book)))
 
 
 @router.callback_query(F.data.startswith("chapter:edit_text:"))
@@ -1601,7 +1932,8 @@ async def chapter_edit_text_save(message: Message, state: FSMContext) -> None:
     ok = await update_chapter_text(chapter_id, user["id"], text[:300000])
     await add_audit(user["id"], "chapter_text_updated", "chapter", str(chapter_id), None, f"{len(text)} chars")
     await state.clear()
-    await message.answer("Текст главы обновлён." if ok else "Глава не найдена или недоступна.", reply_markup=author_chapters_menu(book_id))
+    book = await get_book(book_id)
+    await message.answer("Текст главы обновлён." if ok else "Глава не найдена или недоступна.", reply_markup=author_chapters_menu(book_id, _book_text_pricing_mode(book)))
 
 
 @router.callback_query(F.data.startswith("chapter:edit_price:"))
@@ -1615,46 +1947,97 @@ async def chapter_edit_price_start(call: CallbackQuery, state: FSMContext) -> No
     if not ok:
         await call.answer("Недоступно", show_alert=True)
         return
-    await state.update_data(chapter_id=chapter_id, book_id=int(chapter["book_id"]))
+    mode = _book_text_pricing_mode(chapter)
+    if mode == "free":
+        await call.answer("Книга полностью бесплатна. Все главы уже открыты.", show_alert=True)
+        return
+    await state.update_data(chapter_id=chapter_id, book_id=int(chapter["book_id"]), pricing_mode=mode)
     await state.set_state(EditChapterDetails.price)
-    await call.message.edit_text(
-        "Введите новую цену главы числом в Stars или сделайте главу бесплатной.",
-        reply_markup=skip_back_menu("chapter:edit_price_free", f"chapter:view:{chapter_id}", "Бесплатно"),
-    )
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🆓 Бесплатная глава", callback_data="chapter:edit_access:free")
+    builder.button(text="📘 После покупки всей книги", callback_data="chapter:edit_access:book")
+    builder.button(text="❌ Отмена", callback_data=f"chapter:view:{chapter_id}")
+    builder.adjust(1)
+    if mode == "chapters":
+        prompt = (
+            "Выберите доступ для этой главы. Чтобы продавать её отдельно, введите цену числом от 1 до 100 000 Stars.\n\n"
+            "Цена всей книги не изменится."
+        )
+    else:
+        prompt = (
+            "Выберите доступ для этой главы. Отдельная продажа глав выключена: глава может быть бесплатной "
+            "либо открываться после покупки всей книги."
+        )
+    await call.message.edit_text(prompt, reply_markup=builder.as_markup())
     await call.answer()
+
+
+async def _apply_single_chapter_access(message_or_call, state: FSMContext, access_mode: str, price: int = 0) -> None:
+    data = await state.get_data()
+    chapter_id = int(data["chapter_id"])
+    book_id = int(data["book_id"])
+    chapter = await get_chapter(chapter_id)
+    if not chapter:
+        await state.clear()
+        target = message_or_call.message if isinstance(message_or_call, CallbackQuery) else message_or_call
+        await target.answer("Глава не найдена.")
+        return
+    user = await upsert_user(
+        message_or_call.from_user.id, message_or_call.from_user.username, message_or_call.from_user.full_name
+    )
+    result = await update_chapter_access_range(
+        book_id, user["id"], int(chapter["number"]), int(chapter["number"]), access_mode, price
+    )
+    await state.clear()
+    ok = bool(result.get("updated"))
+    reason = str(result.get("reason") or "")
+    if ok and access_mode == "free":
+        text = "Глава теперь бесплатная."
+    elif ok and access_mode == "book":
+        text = "Глава теперь открывается после покупки всей книги."
+    elif ok:
+        text = f"Для главы установлена отдельная цена {price} Stars."
+    else:
+        text = {
+            "book_is_free": "Книга полностью бесплатна. Все главы уже открыты.",
+            "chapter_sales_disabled": "Отдельная продажа глав для этой книги выключена.",
+            "price_required": "Укажите цену больше 0 Stars.",
+        }.get(reason, "Не удалось изменить доступ к главе.")
+    await add_audit(user["id"], "chapter_access_updated", "chapter", str(chapter_id), None, f"{access_mode}={price}; reason={reason}")
+    book = await get_book(book_id)
+    markup = author_chapters_menu(book_id, _book_text_pricing_mode(book))
+    if isinstance(message_or_call, CallbackQuery):
+        await message_or_call.message.edit_text(text, reply_markup=markup)
+        await message_or_call.answer("Готово" if ok else "Не изменено")
+    else:
+        await message_or_call.answer(text, reply_markup=markup)
 
 
 @router.message(EditChapterDetails.price)
 async def chapter_edit_price_save(message: Message, state: FSMContext) -> None:
     raw = (message.text or "").strip()
     if not raw.isdigit():
-        await message.answer("Введите цену числом. Например: 5")
+        await message.answer("Введите цену числом от 1 до 100 000 Stars либо выберите вариант кнопкой.")
         return
     price = int(raw)
-    if price < 0 or price > 100000:
-        await message.answer("Цена выглядит неверно. Введите разумное число Stars.", reply_markup=navigation_menu(cancel_callback="author:cancel_flow"))
+    if price < 1 or price > 100000:
+        await message.answer("Для отдельной продажи цена должна быть от 1 до 100 000 Stars.", reply_markup=navigation_menu(cancel_callback="author:cancel_flow"))
         return
     data = await state.get_data()
-    chapter_id = int(data["chapter_id"])
-    book_id = int(data["book_id"])
-    user = await upsert_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
-    ok = await update_chapter_price(chapter_id, user["id"], price == 0, price)
-    await add_audit(user["id"], "chapter_price_updated", "chapter", str(chapter_id), None, str(price))
-    await state.clear()
-    await message.answer("Цена главы обновлена." if ok else "Глава не найдена или недоступна.", reply_markup=author_chapters_menu(book_id))
+    if str(data.get("pricing_mode") or "") != "chapters":
+        await message.answer("Отдельная продажа глав для этой книги выключена. Выберите вариант кнопкой.")
+        return
+    await _apply_single_chapter_access(message, state, "chapter", price)
 
 
-@router.callback_query(EditChapterDetails.price, F.data == "chapter:edit_price_free")
-async def chapter_edit_price_free(call: CallbackQuery, state: FSMContext) -> None:
-    data = await state.get_data()
-    chapter_id = int(data["chapter_id"])
-    book_id = int(data["book_id"])
-    user = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
-    ok = await update_chapter_price(chapter_id, user["id"], True, 0)
-    await add_audit(user["id"], "chapter_price_updated", "chapter", str(chapter_id), None, "free")
-    await state.clear()
-    await call.message.edit_text("Глава теперь бесплатная." if ok else "Глава не найдена или недоступна.", reply_markup=author_chapters_menu(book_id))
-    await call.answer("Готово")
+@router.callback_query(EditChapterDetails.price, F.data == "chapter:edit_access:free")
+async def chapter_edit_access_free(call: CallbackQuery, state: FSMContext) -> None:
+    await _apply_single_chapter_access(call, state, "free", 0)
+
+
+@router.callback_query(EditChapterDetails.price, F.data == "chapter:edit_access:book")
+async def chapter_edit_access_book(call: CallbackQuery, state: FSMContext) -> None:
+    await _apply_single_chapter_access(call, state, "book", 0)
 
 
 @router.callback_query(F.data.startswith("chapter:edit_cancel:"))
@@ -1663,7 +2046,7 @@ async def chapter_edit_cancel(call: CallbackQuery, state: FSMContext) -> None:
     chapter = await get_chapter(chapter_id)
     book_id = int(chapter["book_id"]) if chapter else 0
     await state.clear()
-    await call.message.edit_text("Изменения не внесены.", reply_markup=chapter_view_menu(book_id, chapter_id))
+    await call.message.edit_text("Изменения не внесены.", reply_markup=chapter_view_menu(book_id, chapter_id, _book_text_pricing_mode(chapter)))
     await call.answer()
 
 

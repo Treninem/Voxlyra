@@ -61,7 +61,7 @@
       <p class="desc">{{ (book.description or 'Откройте произведение, чтобы увидеть описание и доступные главы.')[:120] }}{% if book.description and book.description|length > 120 %}…{% endif %}</p>
     {% endif %}
     <div class="book-price-line">
-      <strong>{% if book.price_stars|int > 0 %}{{ book.price_stars }} Stars <small>≈ {{ '%.2f'|format((book.price_stars|int * buyer_star_rate_minor|default(145)) / 100) }} ₽</small>{% else %}Бесплатно{% endif %}</strong>
+      <strong>{% if book.price_stars|int > 0 %}Вся книга: {{ book.price_stars }} Stars <small>≈ {{ '%.2f'|format((book.price_stars|int * buyer_star_rate_minor|default(145)) / 100) }} ₽</small>{% else %}Бесплатно{% endif %}</strong>
       {% if book.free_chapters_count|default(0)|int > 0 %}<span>{{ book.free_chapters_count }} глав бесплатно</span>{% endif %}
     </div>
     <div class="card-actions">

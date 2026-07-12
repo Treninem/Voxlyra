@@ -28,6 +28,24 @@
 
     <div class="author-stat-grid" id="authorStats"></div>
 
+    <section class="panel-card author-analytics-panel" id="authorAnalyticsPanel">
+      <div class="section-title split-title slim">
+        <div><span class="eyebrow">Поведение читателей</span><h2>Аналитика произведений</h2><p>Данные обезличены: видно, где начинают, дочитывают, сохраняют и покупают, но не личности читателей.</p></div>
+        <select id="authorAnalyticsPeriod" aria-label="Период аналитики"><option value="7">7 дней</option><option value="30" selected>30 дней</option><option value="90">90 дней</option><option value="365">Год</option></select>
+      </div>
+      <div class="author-analytics-summary" id="authorAnalyticsSummary"></div>
+      <div class="author-analytics-grid">
+        <section><h3>Произведения</h3><div id="authorAnalyticsBooks" class="author-analytics-list"></div></section>
+        <section><h3>Где теряется внимание</h3><div id="authorAnalyticsDropoff" class="author-analytics-list"></div></section>
+      </div>
+      <section class="author-activity-chart"><h3>Уникальные читатели по дням</h3><div id="authorAnalyticsDaily" class="analytics-bars" aria-label="Активность по дням"></div></section>
+    </section>
+
+    <section class="panel-card achievement-panel" id="authorAchievementPanel" hidden>
+      <div class="section-title slim"><span class="eyebrow">Награды</span><h2>Достижения автора</h2><p>Награды выдаются только за подтверждённые действия внутри VoxLyra.</p></div>
+      <div class="achievement-grid" id="authorAchievements"></div>
+    </section>
+
     <section class="panel-card author-finance-policy" id="authorFinancePolicy">
       <div class="section-title split-title slim">
         <div><span class="eyebrow">Прозрачные расчёты</span><h2>Комиссии и выплаты</h2><p>Цена задаётся в Telegram Stars. Покупателю показывается ориентировочная стоимость в рублях, а вознаграждение автора фиксируется по отдельному курсу.</p></div>
@@ -158,10 +176,19 @@
               <option value="vertical">Вертикальная лента</option><option value="single">Одна страница</option><option value="spread">Разворот</option>
             </select></label>
           </div>
-          <div class="form-grid two">
-            <label>Продажа<select id="bookPricingInput"><option value="free">Бесплатно</option><option value="chapters">По главам</option><option value="whole_book">Вся книга</option></select></label>
-            <label>Цена, Stars<input id="bookPriceInput" type="number" min="0" max="100000" value="0"></label>
-          </div>
+          <section class="pricing-separation-card">
+            <div><strong>Условия доступа и цена всей книги</strong><p class="muted">0 Stars означает полностью бесплатную книгу: все главы открываются бесплатно, а цены глав не настраиваются.</p></div>
+            <label>Вся книга, Stars<input id="bookPriceInput" type="number" min="0" max="100000" value="0"></label>
+            <div id="bookPaidPricingOptions" hidden>
+              <label>Как продавать платную книгу<select id="bookPricingModeInput">
+                <option value="whole_book">Только вся книга целиком</option>
+                <option value="chapters">Вся книга и выбранные главы отдельно</option>
+              </select></label>
+              <p class="muted" id="bookPricingModeHint"></p>
+              <button class="button-link secondary compact-button" id="restoreChapterPricesButton" type="button" hidden>Восстановить сохранённые цены глав</button>
+            </div>
+            <div class="package-rule-note" id="bookPricingSummary">Книга и все главы бесплатны.</div>
+          </section>
           <label class="switch-row"><input id="bookDownloadInput" type="checkbox"><span>Разрешить скачивание</span></label>
           <button class="button-link" type="submit">Сохранить книгу</button>
           <button class="button-link secondary" id="submitBookReview" type="button">Отправить на проверку</button>
@@ -176,9 +203,9 @@
             <strong>Выбрать TXT, DOCX, FB2, EPUB, PDF или ZIP</strong>
             <span id="bookFileName">Файл не выбран</span>
           </label>
-          <div class="form-grid two">
-            <label>Бесплатных глав<input id="importFirstFree" type="number" min="0" max="100000" value="3"></label>
-            <label>Цена остальных<input id="importPrice" type="number" min="0" max="100000" value="3"></label>
+          <div class="pricing-import-note" id="textImportPricingNote">
+            <strong id="textImportPricingTitle">После импорта главы получат доступ по режиму книги</strong>
+            <p class="muted" id="textImportPricingText">Для бесплатной книги все главы открываются бесплатно. Для платной первые главы можно оставить ознакомительными, остальные — открыть после покупки всей книги.</p>
           </div>
           <button class="button-link" id="startBookUpload" type="button">Загрузить и проверить</button>
           <div class="upload-progress" id="uploadProgress" hidden><i></i><span>0%</span></div>
@@ -329,14 +356,34 @@
 
       <section class="chapter-manager panel-card" id="textChapterManager">
         <div class="section-title split-title slim">
-          <div><h2>Главы</h2><p>Редактирование, цена и безопасное удаление.</p></div>
+          <div><h2>Главы</h2><p id="textChapterPricingDescription">Доступ к главам зависит от выбранного режима книги.</p></div>
           <button class="button-link compact-button" id="newChapterButton" type="button">Добавить главу</button>
         </div>
+        <div class="package-rule-note" id="freeBookChapterNotice" hidden>Книга полностью бесплатна. Все существующие и будущие главы открываются бесплатно, поэтому настройки цен скрыты.</div>
+        <form id="chapterBulkPriceForm" class="author-form chapter-bulk-price-form">
+          <div class="section-title slim"><span class="eyebrow">Массовая настройка</span><h3>Доступ одной главы или диапазона</h3><p>Укажите одинаковые номера для одной главы или диапазон включительно. Цена всей книги не изменится.</p></div>
+          <div class="form-grid three">
+            <label>С главы<input id="chapterBulkStartInput" type="number" min="1" max="100000" value="1" required></label>
+            <label>По главу<input id="chapterBulkEndInput" type="number" min="1" max="100000" value="1" required></label>
+            <label>Доступ<select id="chapterBulkAccessInput">
+              <option value="free">Бесплатная глава</option>
+              <option value="book">После покупки всей книги</option>
+              <option value="chapter">Продавать главу отдельно</option>
+            </select></label>
+          </div>
+          <label id="chapterBulkPriceLabel">Цена каждой выбранной главы, Stars<input id="chapterBulkPriceInput" type="number" min="1" max="100000" value="3"><small>Показывается только при отдельной продаже глав.</small></label>
+          <button class="button-link" type="submit">Применить доступ к выбранным главам</button>
+        </form>
         <form id="chapterForm" class="author-form chapter-form" hidden>
           <input id="chapterIdInput" type="hidden">
           <label>Название<input id="chapterTitleInput" maxlength="160" required></label>
           <label>Текст<textarea id="chapterTextInput" rows="12" required></textarea></label>
-          <label>Цена, Stars<input id="chapterPriceInput" type="number" min="0" max="100000" value="0"></label>
+          <label>Доступ к главе<select id="chapterAccessInput">
+            <option value="free">Бесплатная глава</option>
+            <option value="book">После покупки всей книги</option>
+            <option value="chapter">Продавать главу отдельно</option>
+          </select></label>
+          <label id="chapterPriceLabel">Цена только этой главы, Stars<input id="chapterPriceInput" type="number" min="1" max="100000" value="3"><small>Цена всей книги и других глав не изменится.</small></label>
           <div class="form-actions">
             <button class="button-link" type="submit">Сохранить главу</button>
             <button class="button-link secondary" id="cancelChapterEdit" type="button">Отмена</button>

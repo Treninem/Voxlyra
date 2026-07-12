@@ -79,12 +79,20 @@ async def build_pay_target(kind: str, target_id: int, user_id: int | None = None
         if not chapter:
             return None
         book_id = int(chapter["book_id"])
-        if int(chapter["is_free"] or 0) == 1 or int(chapter["price_stars"] or 0) <= 0:
+        book_price = int(chapter["book_price_stars"] or 0)
+        mode = "free" if book_price <= 0 else ("chapters" if str(chapter["pricing_type"] or "") == "chapters" else "whole_book")
+        if mode == "free" or int(chapter["is_free"] or 0) == 1:
             return PayTarget(kind, target_id, chapter["title"], "Глава бесплатная", 0, make_payload(kind, target_id))
         if user_id is not None and await has_purchase_access(user_id, chapter_id=target_id):
             return PayTarget(kind, target_id, chapter["title"], "Доступ уже открыт", 0, make_payload(kind, target_id))
+        if mode != "chapters" or int(chapter["price_stars"] or 0) <= 0:
+            return PayTarget(
+                kind, target_id, chapter["title"],
+                "Эта глава открывается после покупки всей книги и отдельно не продаётся.",
+                0, make_payload(kind, target_id),
+            )
         title = f"Глава: {chapter['title']}"
-        description = f"{chapter['book_title']} · доступ к текстовой главе"
+        description = f"{chapter['book_title']} · покупка только этой текстовой главы"
         base_amount = int(chapter["price_stars"])
 
     elif kind == "audio":
@@ -152,8 +160,8 @@ async def build_pay_target(kind: str, target_id: int, user_id: int | None = None
         if not book:
             return None
         book_id = int(book["id"])
-        if int(book["price_stars"] or 0) <= 0 or book["pricing_type"] == "free":
-            return PayTarget(kind, target_id, book["title"], "Книга бесплатная", 0, make_payload(kind, target_id))
+        if int(book["price_stars"] or 0) <= 0:
+            return PayTarget(kind, target_id, book["title"], "Покупка всей книги не включена", 0, make_payload(kind, target_id))
         if user_id is not None and await has_purchase_access(user_id, book_id=target_id):
             return PayTarget(kind, target_id, book["title"], "Доступ уже открыт", 0, make_payload(kind, target_id))
         title = f"Книга: {book['title']}"

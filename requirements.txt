@@ -17,6 +17,7 @@ python-multipart>=0.0.12,<1.0
 mutagen>=1.47,<2.0
 
 piper-tts==1.4.2
+vosk-tts>=0.3.61,<0.4.0
 
 Pillow>=11.0,<13.0
 

@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}VoxLyra Premium{% endblock %}
+{% block body_class %}premium-page illustrated-miniapp{% endblock %}
+{% block content %}
+<section class="hero compact premium-subscription-hero illustrated-hero">
+  <div class="illustrated-hero-backdrop" aria-hidden="true"></div>
+  <img src="/static/img/miniapp/icons/premium.webp?v=1.11.0" alt="" class="logo illustrated-logo">
+  <div class="hero-copy">
+    <span class="eyebrow">Дополнительный комфорт</span>
+    <h1>VoxLyra Premium</h1>
+    <p>Базовое чтение, библиотека, стандартная озвучка и покупки книг остаются доступными без подписки.</p>
+  </div>
+</section>
+
+<section class="premium-status-card" id="premiumPage">
+  <div id="premiumLoading" class="empty-card loading-card"><h2>Проверяем подписку</h2><p>Это займёт несколько секунд.</p></div>
+  <div id="premiumContent" hidden>
+    <article class="premium-plan-card">
+      <div class="premium-plan-head">
+        <div><span class="eyebrow">Ежемесячная подписка</span><h2 id="premiumPlanTitle">VoxLyra Premium</h2></div>
+        <div class="premium-price"><b id="premiumPrice">—</b><span>Stars / 30 дней</span></div>
+      </div>
+      <p id="premiumPlanDescription"></p>
+      <div class="premium-feature-grid" id="premiumFeatures"></div>
+      <div class="premium-actions">
+        <button type="button" id="premiumSubscribe">Оформить Premium</button>
+        <button type="button" id="premiumCancelRenew" class="secondary" hidden>Отключить автопродление</button>
+        <button type="button" id="premiumResumeRenew" class="secondary" hidden>Возобновить автопродление</button>
+      </div>
+      <p class="muted" id="premiumStatusText"></p>
+    </article>
+
+    <section class="premium-insights" id="premiumInsights" hidden>
+      <div class="section-title slim"><div><span class="eyebrow">Личная статистика</span><h2>Ваш ритм чтения</h2></div></div>
+      <div class="premium-insight-grid" id="premiumInsightGrid"></div>
+    </section>
+
+    <article class="setting-card premium-honesty-note">
+      <h3>Что не меняется</h3>
+      <p>Premium не открывает платные книги и главы бесплатно. Доход авторов, цены произведений и правила покупки остаются отдельными от подписки.</p>
+    </article>
+  </div>
+  <article id="premiumError" class="empty-card premium-empty" hidden><h2>Не удалось загрузить Premium</h2><p id="premiumErrorText">Откройте Mini App из бота и попробуйте снова.</p></article>
+</section>
+{% endblock %}

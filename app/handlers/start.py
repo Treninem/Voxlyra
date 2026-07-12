@@ -239,7 +239,10 @@ async def callback_user_notifications(call: CallbackQuery) -> None:
 async def callback_toggle_notification_category(call: CallbackQuery) -> None:
     _, _, _, user_id = await build_context(call)
     key = call.data.rsplit(":", 1)[-1]
-    allowed = {"notifications", "notifications_chapters", "notifications_audio", "notifications_discounts"}
+    allowed = {
+        "notifications", "notifications_chapters", "notifications_audio", "notifications_discounts",
+        "notifications_reminders", "notifications_achievements",
+    }
     if key not in allowed:
         await call.answer("Настройка не найдена", show_alert=True)
         return

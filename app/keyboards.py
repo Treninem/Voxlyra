@@ -202,9 +202,8 @@ def yes_no_menu(prefix: str, back_callback: str | None = None, cancel_callback: 
 
 def pricing_menu(back_callback: str | None = None, cancel_callback: str | None = None) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.button(text="Бесплатно", callback_data="book:pricing:free")
-    kb.button(text="Платные главы", callback_data="book:pricing:chapters")
-    kb.button(text="Вся книга", callback_data="book:pricing:whole_book")
+    kb.button(text="Бесплатная книга", callback_data="book:pricing:free")
+    kb.button(text="Платная книга", callback_data="book:pricing:whole_book")
     _append_navigation(kb, back_callback=back_callback, cancel_callback=cancel_callback)
     kb.adjust(1)
     return kb.as_markup()
@@ -260,7 +259,7 @@ def author_book_card_menu(book_id: int, publication_status: str) -> InlineKeyboa
     kb.button(text="🔞 Возраст", callback_data=f"book:edit_age:{book_id}")
     kb.button(text="📌 Статус", callback_data=f"book:edit_status:{book_id}")
     kb.button(text="📥 Скачивание", callback_data=f"book:edit_download:{book_id}")
-    kb.button(text="💰 Цена", callback_data=f"book:edit_price:{book_id}")
+    kb.button(text="💰 Цена всей книги", callback_data=f"book:edit_price:{book_id}")
     kb.button(text="🗑 Удалить книгу", callback_data=f"book:delete_ask:{book_id}")
     kb.button(text="⬅️ К моим книгам", callback_data="author:books")
     kb.button(text="🏠 Главное меню", callback_data="menu:main")
@@ -363,11 +362,15 @@ def back_to_main() -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-def author_chapters_menu(book_id: int) -> InlineKeyboardMarkup:
+def author_chapters_menu(book_id: int, pricing_mode: str | None = None) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="➕ Ввести главу вручную", callback_data=f"chapter:add_manual:{book_id}")
     kb.button(text="📄 Загрузить файл", callback_data=f"chapter:upload:{book_id}")
     kb.button(text="📚 Список глав", callback_data=f"chapter:list:{book_id}")
+    if pricing_mode == "whole_book":
+        kb.button(text="🔓 Доступ одной / диапазона", callback_data=f"chapter:bulk_price:{book_id}")
+    elif pricing_mode == "chapters" or pricing_mode is None:
+        kb.button(text="💰 Доступ и цена одной / диапазона", callback_data=f"chapter:bulk_price:{book_id}")
     kb.button(text="📤 На проверку", callback_data=f"author:submit_book:{book_id}")
     kb.button(text="⬅️ К книге", callback_data=f"author:book:{book_id}")
     kb.adjust(1)
@@ -383,11 +386,16 @@ def chapter_import_confirm_menu(book_id: int, duplicate_warning: bool = False) -
     return kb.as_markup()
 
 
-def author_chapter_list_menu(book_id: int, chapters) -> InlineKeyboardMarkup:
+def author_chapter_list_menu(book_id: int, chapters, pricing_mode: str | None = None) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     for chapter in chapters[:40]:
-        free_mark = "бесплатно" if chapter["is_free"] else f"{chapter['price_stars']} Stars"
-        kb.button(text=f"{chapter['number']}. {chapter['title']} · {free_mark}", callback_data=f"chapter:view:{chapter['id']}")
+        if pricing_mode == "free" or int(chapter["is_free"] or 0) == 1:
+            access_mark = "бесплатно"
+        elif pricing_mode == "chapters" and int(chapter["price_stars"] or 0) > 0:
+            access_mark = f"{int(chapter['price_stars'])} Stars"
+        else:
+            access_mark = "после покупки книги"
+        kb.button(text=f"{chapter['number']}. {chapter['title']} · {access_mark}", callback_data=f"chapter:view:{chapter['id']}")
     kb.button(text="➕ Добавить", callback_data=f"chapter:add_manual:{book_id}")
     kb.button(text="📄 Загрузить файл", callback_data=f"chapter:upload:{book_id}")
     kb.button(text="⬅️ Назад", callback_data=f"author:chapters:{book_id}")
@@ -395,11 +403,12 @@ def author_chapter_list_menu(book_id: int, chapters) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-def chapter_view_menu(book_id: int, chapter_id: int) -> InlineKeyboardMarkup:
+def chapter_view_menu(book_id: int, chapter_id: int, pricing_mode: str | None = None) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="✏️ Название", callback_data=f"chapter:edit_title:{chapter_id}")
     kb.button(text="📝 Текст", callback_data=f"chapter:edit_text:{chapter_id}")
-    kb.button(text="💰 Цена", callback_data=f"chapter:edit_price:{chapter_id}")
+    if pricing_mode != "free":
+        kb.button(text="🔐 Доступ этой главы", callback_data=f"chapter:edit_price:{chapter_id}")
     kb.button(text="🗑 Удалить главу", callback_data=f"chapter:delete_ask:{chapter_id}")
     kb.button(text="⬅️ К главам", callback_data=f"chapter:list:{book_id}")
     kb.adjust(1)
@@ -657,7 +666,13 @@ def moderation_comments_menu(comments) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     for row in comments[:30]:
         who = row["username"] or row["full_name"] or "читатель"
-        kb.button(text=f"💬 #{row['id']} · {who} · {row['book_title'][:22]}", callback_data=f"mod:comment:{row['id']}")
+        reports = int(row["report_count"] or 0) if "report_count" in row.keys() else 0
+        spoiler = " ⚠️" if ("is_spoiler" in row.keys() and int(row["is_spoiler"] or 0)) else ""
+        report_mark = f" · жалоб {reports}" if reports else ""
+        kb.button(
+            text=f"💬 #{row['id']}{spoiler} · {who}{report_mark} · {row['book_title'][:18]}",
+            callback_data=f"mod:comment:{row['id']}",
+        )
     kb.button(text="⬅️ Назад", callback_data="mod:comments")
     kb.adjust(1)
     return kb.as_markup()
@@ -798,8 +813,16 @@ def complaints_menu(rows, prefix: str = "complaint") -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-def complaint_card_menu(complaint_id: int, prefix: str = "complaint") -> InlineKeyboardMarkup:
+def complaint_card_menu(
+    complaint_id: int,
+    prefix: str = "complaint",
+    *,
+    target_type: str = "",
+    target_id: str = "",
+) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
+    if target_type == "comment" and str(target_id).isdigit():
+        kb.button(text="💬 Открыть комментарий", callback_data=f"mod:comment:{int(target_id)}")
     kb.button(text="✅ Закрыть", callback_data=f"{prefix}:close:{complaint_id}")
     kb.button(text="⏳ Оставить в работе", callback_data=f"{prefix}:pending:{complaint_id}")
     kb.button(text="⬅️ К жалобам", callback_data=f"{prefix}:list")
@@ -942,6 +965,8 @@ def user_notifications_menu(preferences: dict | None = None) -> InlineKeyboardMa
         ("notifications_chapters", "Новые главы"),
         ("notifications_audio", "Новые аудиоглавы"),
         ("notifications_discounts", "Скидки и промокоды"),
+        ("notifications_reminders", "Продолжить чтение"),
+        ("notifications_achievements", "Достижения"),
     ]
     kb = InlineKeyboardBuilder()
     for key, label in items:

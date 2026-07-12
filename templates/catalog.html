@@ -51,6 +51,15 @@
   <div id="continueShelf" class="horizontal-shelf"></div>
 </section>
 
+<section id="forYouSection" class="showcase-section personalized-showcase" hidden>
+  <div class="section-title shelf-title">
+    <div><span class="eyebrow">Личная подборка</span><h2>Для вас</h2><p id="forYouSubtitle">Истории по вашим жанрам, авторам и тому, что вы действительно читаете.</p></div>
+    <button class="quiet-button recommendation-refresh" id="refreshRecommendations" type="button">Обновить</button>
+  </div>
+  <div id="forYouShelf" class="horizontal-shelf recommendation-shelf" aria-live="polite"></div>
+  <p class="recommendation-privacy">Подборка учитывает только действия внутри VoxLyra и не влияет на публичные топы.</p>
+</section>
+
 {% if newest %}
 <section class="showcase-section">
   <div class="section-title shelf-title"><div><span class="eyebrow">Свежие публикации</span><h2>Новинки</h2></div><a href="#all-books">Смотреть все →</a></div>

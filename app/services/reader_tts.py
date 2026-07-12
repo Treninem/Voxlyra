@@ -21,7 +21,7 @@ from app.config import settings
 from app.services.audio_tools import probe_duration_seconds
 
 # Версия кэша повышена, чтобы старые ускоренные и искажённые MP3 не использовались.
-TTS_CACHE_VERSION = "4-segment-quality-v1105"
+TTS_CACHE_VERSION = "5-local-voices-v1110"
 TTS_VOICES: dict[str, dict[str, str]] = {
     "irina": {
         "label": "Ирина · женский",

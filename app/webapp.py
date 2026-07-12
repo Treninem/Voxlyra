@@ -12,10 +12,11 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from aiogram import Bot
+from aiogram.types import LabeledPrice
 
 from app.config import settings
 from app.build_info import OWNER_BUILD_VERSION
@@ -45,6 +46,7 @@ from app.db import (
     get_book,
     get_book_options,
     get_author_dashboard_stats,
+    get_author_analytics,
     get_author_finance_summary,
     get_author_financial_profile,
     get_author_rub_finance_summary,
@@ -71,8 +73,19 @@ from app.db import (
     get_graphic_reading_progress,
     get_reader_ad_settings,
     get_reading_progress,
+    get_book_assistant_cache,
+    save_book_assistant_cache,
+    list_book_assistant_chapters,
+    search_book_assistant_chapters,
     get_user_review,
     get_user_preferences,
+    get_user_premium_status,
+    list_premium_plans,
+    set_premium_auto_renew,
+    set_premium_plan_settings,
+    get_premium_owner_summary,
+    get_personal_reading_insights,
+    sync_user_achievements,
     get_user_by_id,
     get_tts_progress,
     has_purchase_access,
@@ -113,6 +126,7 @@ from app.db import (
     get_rub_control_summary,
     get_complaint,
     get_comment_for_moderation,
+    get_public_comment,
     get_review_for_moderation,
     finalize_refund,
     reject_refund_request,
@@ -126,14 +140,17 @@ from app.db import (
     list_moderation_comments,
     list_moderation_reviews,
     set_comment_status,
+    set_chapter_reaction,
     set_review_status,
     set_complaint_status,
     set_book_publication_status,
     resolve_book_moderation,
+    resolve_comment_complaints,
     publish_book_content,
     list_catalog_books,
     list_chapters_for_book,
     list_chapter_packages_for_book,
+    get_chapter_package,
     create_chapter_package_for_author,
     update_chapter_package_for_author,
     deactivate_chapter_package_for_author,
@@ -141,9 +158,13 @@ from app.db import (
     list_user_chapter_package_balances,
     redeem_chapter_package_credit,
     list_comments_for_chapter,
+    list_chapter_reactions,
     list_contextual_book_ads,
     list_reviews_for_book,
     list_similar_books,
+    list_personalized_books,
+    record_recommendation_event,
+    record_recommendation_events,
     list_user_bookmarks,
     list_user_continue_listening,
     list_user_continue_reading,
@@ -156,9 +177,14 @@ from app.db import (
     soft_delete_chapter_for_author,
     submit_book_for_review,
     update_author_book_fields,
+    update_book_price,
+    get_book_pricing_state,
+    restore_saved_chapter_prices,
     upsert_author_financial_profile,
     update_author_rub_payout_status,
     update_chapter_price,
+    update_chapter_price_range,
+    update_chapter_access_range,
     update_chapter_text,
     update_chapter_title,
     update_graphic_chapter_for_author,
@@ -176,6 +202,8 @@ from app.db import (
     set_user_preference,
     reset_user_preferences,
     upsert_review,
+    toggle_comment_like,
+    report_comment,
     user_can_access_audio,
     user_can_access_chapter,
     user_can_access_graphic,
@@ -184,6 +212,14 @@ from app.services.tma_auth import TMAAuthError, TMAUser, authenticate_init_data
 from app.permissions import PERMISSION_BY_CODE
 from app.keyboards import author_book_card_menu
 from app.services.diagnostics import diagnostics_summary
+from app.services.book_assistant import (
+    answer_question as answer_book_question,
+    build_chapter_analysis,
+    build_recap as build_book_recap,
+    question_keywords as book_question_keywords,
+    text_digest as book_text_digest,
+)
+from app.services.quote_cards import build_quote_card, normalize_quote, quote_belongs_to_text
 from app.services.book_parser import BookParseError, build_import_report, parse_book_file
 from app.services.duplicate_books import find_book_duplicates, sha256_file
 from app.services.graphic_import import (
@@ -240,7 +276,13 @@ from app.services.web_import_store import (
 from app.services.publication import finish_book_content_workflow, publish_book_and_channel
 from app.services.cover_storage import ensure_book_cover_file
 from app.services.moderation_alerts import notify_moderation_resolved
-from app.services.tts_providers import TTSProviderError, TTSProviderUnavailable
+from app.services.tts_providers import (
+    TTSProviderError,
+    TTSProviderUnavailable,
+    get_vosk_voice_profile,
+    set_vosk_voice_selection,
+    vosk_sample_path,
+)
 from app.services.tts_queue import build_default_generation_queue
 from app.services.tts_sessions import (
     TTSSessionManager,
@@ -474,6 +516,19 @@ def _row_to_dict(row: Any) -> dict[str, Any]:
     return {key: row[key] for key in row.keys()}
 
 
+async def _notify_new_achievements(user: TMAUser, payload: dict[str, Any]) -> None:
+    for item in list(payload.get("new") or [])[:3]:
+        await send_user_notification(
+            app_user_id=user.app_user_id,
+            telegram_id=user.telegram_id,
+            text=(
+                f"{item.get('icon', '✦')} Новое достижение\n\n"
+                f"{item.get('title', 'Награда')}\n{item.get('description', '')}"
+            ),
+            category="achievements",
+        )
+
+
 def _rows_to_dicts(rows) -> list[dict[str, Any]]:
     return [_row_to_dict(row) for row in rows]
 
@@ -536,6 +591,60 @@ async def _graphic_access(*, app_user_id: int, telegram_id: int, chapter: Any) -
         and str(chapter["publication_status"] or "") in {"published", "review"}
     )
     return moderation, moderation
+
+
+async def _book_assistant_accessible_rows(user_id: int, rows: list[Any]) -> list[dict[str, Any]]:
+    """Оставляет только главы, которые читатель действительно может открыть."""
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        chapter_id = int(row["id"])
+        if await user_can_access_chapter(int(user_id), chapter_id):
+            result.append(_row_to_dict(row))
+    return result
+
+
+async def _book_assistant_analyze_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Разбирает главы локально и использует кэш, привязанный к хэшу текста."""
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        text = str(row.get("text") or "")
+        digest = book_text_digest(text)
+        cached = await get_book_assistant_cache(int(row["id"]), digest)
+        if cached is None:
+            cached = build_chapter_analysis(text)
+            await save_book_assistant_cache(
+                int(row["id"]),
+                str(cached["digest"]),
+                str(cached["summary"]),
+                list(cached["characters"]),
+                list(cached["terms"]),
+            )
+        enriched = dict(row)
+        enriched.update({
+            "summary": str(cached.get("summary") or ""),
+            "characters": list(cached.get("characters") or []),
+            "terms": list(cached.get("terms") or []),
+        })
+        result.append(enriched)
+    return result
+
+
+def _book_assistant_merge_entities(rows: list[dict[str, Any]], key: str, label_key: str, limit: int = 14) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        for item in row.get(key) or []:
+            label = str(item.get(label_key) or "").strip()
+            if not label:
+                continue
+            normalized = label.lower().replace("ё", "е")
+            current = merged.setdefault(normalized, {label_key: label, "count": 0, "excerpt": "", "chapter_number": 0})
+            current["count"] += int(item.get("count") or 1)
+            if not current["excerpt"]:
+                current["excerpt"] = str(item.get("excerpt") or "")[:260]
+                current["chapter_number"] = int(row.get("number") or 0)
+    values = list(merged.values())
+    values.sort(key=lambda item: (-int(item.get("count") or 0), str(item.get(label_key) or "")))
+    return values[:max(1, int(limit))]
 
 
 async def _audit_moderation_reader_access(*, user_id: int, chapter_id: int, action: str) -> None:
@@ -670,6 +779,23 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=403, detail="Для этого действия не выдано право доступа.")
         return user, is_owner, permissions
 
+    async def premium_invoice_link(plan: dict[str, Any]) -> str:
+        if not settings.BOT_TOKEN.strip():
+            raise HTTPException(status_code=503, detail="Бот не настроен для оплаты Premium.")
+        bot = Bot(token=settings.BOT_TOKEN)
+        try:
+            return await bot.create_invoice_link(
+                title=str(plan.get("title") or "VoxLyra Premium")[:32],
+                description=str(plan.get("description") or "Дополнительные возможности VoxLyra")[:255],
+                payload=f"vox:premium:{plan.get('code') or 'monthly'}",
+                provider_token="",
+                currency="XTR",
+                prices=[LabeledPrice(label="Premium на 30 дней", amount=int(plan.get("price_stars") or 0))],
+                subscription_period=int(plan.get("subscription_period_seconds") or 2_592_000),
+            )
+        finally:
+            await bot.session.close()
+
     @app.get("/health")
     async def health():
         """Короткая проверка для Bothost и владельца. Не раскрывает токен и секреты."""
@@ -765,6 +891,53 @@ def create_app() -> FastAPI:
             "catalog.html",
             common_context({"books": books, **sections, **(await price_context())}),
         )
+
+    @app.get("/api/recommendations/for-you")
+    async def api_recommendations_for_you(
+        limit: int = 12,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        items = await list_personalized_books(user.app_user_id, limit=max(1, min(30, int(limit))))
+        if items:
+            items = await attach_rankings(items)
+        return {
+            "ok": True,
+            "items": items,
+            "personalized": bool(items and items[0].get("recommendation_personalized")),
+            "privacy_note": "Подборка строится только по действиям внутри VoxLyra и не влияет на публичные топы.",
+        }
+
+    @app.post("/api/recommendations/events")
+    async def api_recommendation_events(
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        event_type = str((payload or {}).get("event_type") or "").strip().lower()
+        if event_type == "impression":
+            raw_ids = (payload or {}).get("book_ids") or []
+            if not isinstance(raw_ids, list):
+                raise HTTPException(status_code=400, detail="Неверный список рекомендаций.")
+            saved = await record_recommendation_events(user.app_user_id, raw_ids, "impression")
+            return {"ok": True, "saved": saved}
+        if event_type not in {"open", "dismiss"}:
+            raise HTTPException(status_code=400, detail="Неизвестное действие с рекомендацией.")
+        try:
+            book_id = int((payload or {}).get("book_id") or 0)
+        except (TypeError, ValueError):
+            book_id = 0
+        if book_id <= 0:
+            raise HTTPException(status_code=400, detail="Книга не указана.")
+        saved = await record_recommendation_event(
+            user.app_user_id,
+            book_id,
+            event_type,
+            str((payload or {}).get("reason") or ""),
+        )
+        if not saved:
+            raise HTTPException(status_code=404, detail="Книга не найдена.")
+        return {"ok": True, "saved": 1}
 
     @app.get("/comics", response_class=HTMLResponse)
     async def comics_catalog(request: Request):
@@ -886,7 +1059,7 @@ def create_app() -> FastAPI:
         server_text_visible = bool(
             is_public
             and chapter
-            and (int(chapter["is_free"] or 0) == 1 or int(chapter["price_stars"] or 0) <= 0)
+            and (int(chapter["book_price_stars"] or 0) <= 0 or int(chapter["is_free"] or 0) == 1)
             and (not runtime_cfg.content_protection_enabled or int(chapter["allow_download"] or 0) == 1)
         )
         return templates.TemplateResponse(
@@ -939,6 +1112,101 @@ def create_app() -> FastAPI:
     @app.get("/library", response_class=HTMLResponse)
     async def library_page(request: Request):
         return templates.TemplateResponse(request, "library.html", common_context())
+
+    @app.get("/premium", response_class=HTMLResponse)
+    async def premium_page(request: Request):
+        return templates.TemplateResponse(request, "premium.html", common_context())
+
+    @app.get("/api/premium/status")
+    async def api_premium_status(x_telegram_init_data: str | None = Header(default=None)):
+        user = await _tma_user(x_telegram_init_data)
+        plans = await list_premium_plans()
+        status = await get_user_premium_status(user.app_user_id)
+        insights = await get_personal_reading_insights(user.app_user_id) if status.get("active") else None
+        return {"ok": True, "plans": plans, "subscription": status, "insights": insights}
+
+    @app.post("/api/premium/checkout")
+    async def api_premium_checkout(
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        missing = await get_missing_legal_documents(
+            user.app_user_id,
+            [(code, LEGAL_DOCS[code].version, LEGAL_DOCS[code].digest) for code in REQUIRED_ON_START],
+        )
+        if missing:
+            raise HTTPException(status_code=409, detail="Сначала откройте бота и примите актуальные документы.")
+        plan_code = str((payload or {}).get("plan_code") or "monthly").strip().lower()
+        plan = next((item for item in await list_premium_plans() if str(item.get("code")) == plan_code), None)
+        if not plan or int(plan.get("price_stars") or 0) <= 0:
+            raise HTTPException(status_code=404, detail="Тариф Premium недоступен.")
+        current = await get_user_premium_status(user.app_user_id)
+        if current.get("active") and current.get("auto_renew"):
+            raise HTTPException(status_code=409, detail="Автопродление Premium уже активно.")
+        link = await premium_invoice_link(plan)
+        await add_audit(user.app_user_id, "premium_checkout_created", "premium_plan", plan_code, None, str(plan.get("price_stars")))
+        return {"ok": True, "invoice_link": link, "plan": plan}
+
+    @app.post("/api/premium/auto-renew")
+    async def api_premium_auto_renew(
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        status = await get_user_premium_status(user.app_user_id)
+        if not status.get("active"):
+            raise HTTPException(status_code=404, detail="Активная подписка Premium не найдена.")
+        if not status.get("is_recurring"):
+            raise HTTPException(status_code=409, detail="У этой оплаты нет автопродления.")
+        raw_enabled = (payload or {}).get("enabled")
+        enabled = raw_enabled if isinstance(raw_enabled, bool) else str(raw_enabled).strip().lower() in {"1", "true", "yes", "on"}
+        charge_id = str(status.get("telegram_payment_charge_id") or "")
+        if not charge_id:
+            raise HTTPException(status_code=409, detail="Не найден идентификатор подписки Telegram.")
+        bot = Bot(token=settings.BOT_TOKEN)
+        try:
+            await bot.edit_user_star_subscription(
+                user_id=user.telegram_id,
+                telegram_payment_charge_id=charge_id,
+                is_canceled=not enabled,
+            )
+        finally:
+            await bot.session.close()
+        if not await set_premium_auto_renew(user.app_user_id, enabled=enabled):
+            raise HTTPException(status_code=409, detail="Подписка уже завершена.")
+        await add_audit(user.app_user_id, "premium_renew_enabled" if enabled else "premium_renew_canceled", "premium", str(status.get("subscription_id") or ""), None, "")
+        return {"ok": True, "subscription": await get_user_premium_status(user.app_user_id)}
+
+    @app.get("/api/control/premium")
+    async def api_control_premium(x_telegram_init_data: str | None = Header(default=None)):
+        _, is_owner, _ = await control_session(x_telegram_init_data)
+        if not is_owner:
+            raise HTTPException(status_code=403, detail="Настройки Premium доступны только владельцу.")
+        return {"ok": True, "plans": await list_premium_plans(include_inactive=True), "summary": await get_premium_owner_summary()}
+
+    @app.patch("/api/control/premium")
+    async def api_control_premium_update(
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user, is_owner, _ = await control_session(x_telegram_init_data)
+        if not is_owner:
+            raise HTTPException(status_code=403, detail="Настройки Premium доступны только владельцу.")
+        price = payload.get("price_stars") if "price_stars" in payload else None
+        raw_enabled = payload.get("enabled") if "enabled" in payload else None
+        enabled = None
+        if raw_enabled is not None:
+            enabled = raw_enabled if isinstance(raw_enabled, bool) else str(raw_enabled).strip().lower() in {"1", "true", "yes", "on"}
+        try:
+            plan = await set_premium_plan_settings(
+                price_stars=int(price) if price is not None else None,
+                enabled=enabled,
+            )
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="Цена Premium должна быть целым числом от 1 до 10000 Stars.") from exc
+        await add_audit(user.app_user_id, "premium_settings_updated", "premium_plan", str(plan.get("code")), None, json.dumps({"price": plan.get("price_stars"), "enabled": plan.get("is_active")}, ensure_ascii=False))
+        return {"ok": True, "plan": plan, "summary": await get_premium_owner_summary()}
 
     @app.get("/author", response_class=HTMLResponse)
     async def author_page(request: Request):
@@ -1009,6 +1277,8 @@ def create_app() -> FastAPI:
         is_owner = user.telegram_id in settings.owner_ids
         permissions = set(PERMISSION_BY_CODE) if is_owner else await get_admin_permissions(user.app_user_id)
         preferences = await get_user_preferences(user.app_user_id)
+        achievements = await sync_user_achievements(user.app_user_id)
+        premium = await get_user_premium_status(user.app_user_id)
         return {
             "ok": True,
             "user": {
@@ -1023,6 +1293,8 @@ def create_app() -> FastAPI:
             "purchases": _rows_to_dicts(purchases),
             "chapter_package_balances": _rows_to_dicts(chapter_package_balances),
             "preferences": preferences,
+            "achievements": achievements,
+            "premium": premium,
             "author": {
                 "enabled": bool(author_profile and author_profile["status"] in {"active", "approved"}),
             },
@@ -1049,6 +1321,7 @@ def create_app() -> FastAPI:
         allowed = {
             "theme", "font_size", "notifications",
             "notifications_chapters", "notifications_audio", "notifications_discounts",
+            "notifications_reminders", "notifications_achievements",
         }
         if key not in allowed:
             raise HTTPException(status_code=400, detail="Настройка не найдена.")
@@ -1088,7 +1361,9 @@ def create_app() -> FastAPI:
             return {"ok": True, "bookmark": None}
         await set_bookmark(user.app_user_id, book_id, status=status)
         bookmark = await get_bookmark(user.app_user_id, book_id)
-        return {"ok": True, "bookmark": _row_to_dict(bookmark) if bookmark else None}
+        achievements = await sync_user_achievements(user.app_user_id)
+        await _notify_new_achievements(user, achievements)
+        return {"ok": True, "bookmark": _row_to_dict(bookmark) if bookmark else None, "achievements": achievements}
 
     @app.post("/api/book/{book_id}/review")
     async def api_review(book_id: int, payload: dict[str, Any], x_telegram_init_data: str | None = Header(default=None)):
@@ -1102,7 +1377,9 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="Отзыв слишком длинный.")
         await upsert_review(user.app_user_id, book_id, rating, text)
         reviews = await list_reviews_for_book(book_id, limit=20)
-        return {"ok": True, "reviews": _rows_to_dicts(reviews)}
+        achievements = await sync_user_achievements(user.app_user_id)
+        await _notify_new_achievements(user, achievements)
+        return {"ok": True, "reviews": _rows_to_dicts(reviews), "achievements": achievements}
 
     @app.get("/api/book/{book_id}/chapter-number/{chapter_number}")
     async def api_chapter_by_number(
@@ -1164,8 +1441,13 @@ def create_app() -> FastAPI:
         is_public = chapter["publication_status"] == "published" and chapter["status"] == "published"
         if not is_public and not moderation_access:
             raise HTTPException(status_code=404, detail="Глава не найдена.")
-        purchase_url = "" if moderation_access else _bot_purchase_url("chapter", chapter_id)
-        comments = await list_comments_for_chapter(chapter_id, limit=50) if allowed and is_public and not moderation_access else []
+        book_price = int(chapter["book_price_stars"] or 0)
+        pricing_mode = "free" if book_price <= 0 else ("chapters" if str(chapter["pricing_type"] or "") == "chapters" else "whole_book")
+        can_buy_chapter = pricing_mode == "chapters" and int(chapter["is_free"] or 0) != 1 and int(chapter["price_stars"] or 0) > 0
+        purchase_url = "" if moderation_access or not can_buy_chapter else _bot_purchase_url("chapter", chapter_id)
+        book_purchase_url = "" if moderation_access or book_price <= 0 else _bot_purchase_url("book", int(chapter["book_id"]))
+        comments = await list_comments_for_chapter(chapter_id, limit=100, viewer_user_id=user.app_user_id) if allowed and is_public and not moderation_access else []
+        reactions = await list_chapter_reactions(chapter_id, user.app_user_id) if allowed and is_public and not moderation_access else {"counts": {}, "selected": None}
         progress = await get_reading_progress(user.app_user_id, chapter_id) if allowed and not moderation_access else 0
         if (
             allowed
@@ -1176,6 +1458,9 @@ def create_app() -> FastAPI:
             await mark_purchase_access_used(user.app_user_id, chapter_id=chapter_id)
         reader_ads = []
         ad_settings = await get_reader_ad_settings()
+        premium_status = await get_user_premium_status(user.app_user_id)
+        if premium_status.get("active"):
+            ad_settings = {**ad_settings, "enabled": False, "hidden_by_premium": True}
         if is_public and not moderation_access and ad_settings.get("enabled"):
             reader_ads = await list_contextual_book_ads(int(chapter["book_id"]), limit=4)
             for ad in reader_ads:
@@ -1218,7 +1503,10 @@ def create_app() -> FastAPI:
             "moderation_access": moderation_access,
             "access_mode": "moderation" if moderation_access else ("reader" if allowed else "locked"),
             "purchase_url": purchase_url,
-            "package_credits": package_credits,
+            "book_purchase_url": book_purchase_url,
+            "pricing_mode": pricing_mode,
+            "can_buy_chapter": can_buy_chapter,
+            "package_credits": package_credits if pricing_mode == "chapters" else {"remaining": 0},
             "package_unlock_url": f"/api/reader/{int(chapter_id)}/unlock-package",
             "progress_percent": progress,
             "protection": protection,
@@ -1230,10 +1518,12 @@ def create_app() -> FastAPI:
                 "number": int(chapter["number"]),
                 "is_free": int(chapter["is_free"] or 0) == 1,
                 "price_stars": int(chapter["price_stars"] or 0),
-                "buyer_estimate_minor": int(chapter["price_stars"] or 0) * (await load_runtime_payment_settings()).buyer_star_rate_minor,
+                "buyer_estimate_minor": (int(chapter["price_stars"] or 0) if can_buy_chapter else 0) * (await load_runtime_payment_settings()).buyer_star_rate_minor,
+                "book_price_stars": book_price,
                 "text": chapter["text"] if allowed else "",
             },
             "comments": _rows_to_dicts(comments),
+            "reactions": reactions,
             "reader_ads": _rows_to_dicts(reader_ads),
             "ad_settings": ad_settings,
             "chapter_bounds": chapter_bounds,
@@ -1258,7 +1548,8 @@ def create_app() -> FastAPI:
 
     @app.get("/api/reader/tts/voices")
     async def api_reader_tts_voices(x_telegram_init_data: str | None = Header(default=None)):
-        await _tma_user(x_telegram_init_data)
+        user = await _tma_user(x_telegram_init_data)
+        premium_status = await get_user_premium_status(user.app_user_id)
         legacy_status = tts_engine_status()
         manager: TTSSessionManager = app.state.tts_sessions
         provider_statuses = await manager.queue.registry.statuses()
@@ -1277,17 +1568,21 @@ def create_app() -> FastAPI:
             "ok": True,
             "enabled": enabled,
             "message": "Сегментное озвучивание готово" if enabled else legacy_status["message"],
-            "engine": "segmented-v1.10.5",
+            "engine": "segmented-v1.11.0-local-voices",
             "providers": providers,
             "voices": available_voices(),
             "styles": available_styles(),
             "rates": available_rates(),
             "playback_rate_in_player": True,
+            "premium": {
+                "active": bool(premium_status.get("active")),
+                "priority_queue": bool(premium_status.get("active")),
+            },
             "quality_control": {
                 "enabled": True,
                 "first_segment_wait_seconds": int(settings.TTS_FIRST_SEGMENT_WAIT_SECONDS),
                 "automatic_retries": int(settings.TTS_QUALITY_RETRIES),
-                "segment_cache_version": "v2-quality",
+                "segment_cache_version": "v3-local-voices",
             },
         }
 
@@ -1316,11 +1611,13 @@ def create_app() -> FastAPI:
         selected_style = validate_style(str(payload.get("style") or "natural"))
         selected_rate = validate_rate(payload.get("rate"))
         high_quality = bool(payload.get("high_quality", False))
+        premium_status = await get_user_premium_status(user.app_user_id)
         manager: TTSSessionManager = app.state.tts_sessions
         try:
             session = await manager.create_session(
                 user_id=user.app_user_id, chapter_id=chapter_id, text=str(chapter["text"] or ""),
-                voice=selected_voice, style=selected_style, high_quality=high_quality, reuse=True,
+                voice=selected_voice, style=selected_style, high_quality=high_quality,
+                priority_boost=bool(premium_status.get("active")), reuse=True,
             )
             await manager.await_first(session.id)
             manifest = await manager.manifest(
@@ -1337,6 +1634,7 @@ def create_app() -> FastAPI:
             "access_mode": "moderation" if moderation_access else "reader",
             "device_cache_allowed": not moderation_access,
             "playback_rate": selected_rate, "progress_seconds": int(progress or 0),
+            "premium_priority": bool(premium_status.get("active")),
             "chapter": {
                 "id": int(chapter["id"]), "book_id": int(chapter["book_id"]),
                 "book_title": chapter["book_title"], "pen_name": chapter["pen_name"] or "Автор не указан",
@@ -1363,6 +1661,29 @@ def create_app() -> FastAPI:
         except TTSSessionNotFound as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         return {"ok": True, **manifest}
+
+    @app.post("/api/reader/tts/session/{session_id}/event")
+    async def api_reader_tts_session_event(
+        session_id: str,
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        manager: TTSSessionManager = app.state.tts_sessions
+        try:
+            item = await manager.record_client_event(
+                session_id,
+                user_id=user.app_user_id,
+                event=str(payload.get("event") or ""),
+                segment_index=payload.get("segment_index"),
+                player_version=str(payload.get("player_version") or ""),
+                details=dict(payload.get("details") or {}),
+            )
+        except TTSSessionNotFound as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"ok": True, "event": item}
 
     @app.delete("/api/reader/tts/session/{session_id}")
     async def api_reader_tts_session_delete(
@@ -1638,12 +1959,141 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=403, detail="Нет доступа к главе.")
         percent = max(0, min(100, int(payload.get("position_percent") or 0)))
         # Служебное чтение не должно попадать в личную историю и рекомендации модератора.
+        achievements = {"new": [], "items": []}
         if not moderation_access:
             await save_reading_progress(user.app_user_id, chapter_id, percent)
+            if percent >= 90:
+                achievements = await sync_user_achievements(user.app_user_id)
+                await _notify_new_achievements(user, achievements)
         return {
             "ok": True,
             "position_percent": percent,
             "moderation_access": moderation_access,
+            "achievements": achievements,
+        }
+
+    @app.post("/api/reader/{chapter_id}/quote-card")
+    async def api_reader_quote_card(
+        chapter_id: int,
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        chapter = await get_chapter(chapter_id)
+        if not chapter or chapter["publication_status"] != "published" or chapter["status"] != "published":
+            raise HTTPException(status_code=404, detail="Глава не найдена.")
+        allowed, moderation_access = await _chapter_access(
+            app_user_id=user.app_user_id, telegram_id=user.telegram_id, chapter=chapter
+        )
+        if not allowed or moderation_access:
+            raise HTTPException(status_code=403, detail="Карточка цитаты недоступна в этом режиме.")
+        quote = normalize_quote(payload.get("quote"))
+        if not quote_belongs_to_text(quote, str(chapter["text"] or "")):
+            raise HTTPException(status_code=400, detail="Выберите фрагмент длиной от 20 символов из текущей главы.")
+        style = str(payload.get("style") or "standard").strip().lower()
+        if style not in {"standard", "aurora", "parchment"}:
+            style = "standard"
+        premium_status = await get_user_premium_status(user.app_user_id)
+        if style != "standard" and not premium_status.get("active"):
+            raise HTTPException(status_code=403, detail="Этот стиль карточки доступен в VoxLyra Premium.")
+        image = build_quote_card(
+            quote=quote,
+            book_title=str(chapter["book_title"] or "Книга"),
+            chapter_title=f"Глава {int(chapter['number'])}. {chapter['title']}",
+            author_name=str(chapter["pen_name"] or "Автор не указан"),
+            style=style,
+        )
+        filename = f"voxlyra_quote_{chapter_id}.png"
+        return StreamingResponse(
+            iter([image]),
+            media_type="image/png",
+            headers={
+                "Cache-Control": "private, no-store",
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
+    @app.get("/api/reader/{chapter_id}/assistant")
+    async def api_book_assistant_context(
+        chapter_id: int,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        chapter = await get_chapter(chapter_id)
+        if not chapter or chapter["publication_status"] != "published" or chapter["status"] != "published":
+            raise HTTPException(status_code=404, detail="Глава не найдена.")
+        allowed, moderation_access = await _chapter_access(
+            app_user_id=user.app_user_id, telegram_id=user.telegram_id, chapter=chapter
+        )
+        if not allowed:
+            raise HTTPException(status_code=403, detail="Помощник доступен после открытия главы.")
+        if moderation_access:
+            raise HTTPException(status_code=403, detail="Помощник отключён в служебном режиме проверки.")
+        rows = await list_book_assistant_chapters(
+            int(chapter["book_id"]), int(chapter["number"]), limit=18
+        )
+        accessible = await _book_assistant_accessible_rows(user.app_user_id, rows)
+        if not any(int(item["id"]) == int(chapter_id) for item in accessible):
+            accessible.append(_row_to_dict(chapter))
+            accessible.sort(key=lambda item: int(item.get("number") or 0))
+        analyzed = await _book_assistant_analyze_rows(accessible)
+        recap = build_book_recap(analyzed, current_number=int(chapter["number"]), limit=6)
+        current = next((item for item in analyzed if int(item["id"]) == int(chapter_id)), None)
+        return {
+            "ok": True,
+            "spoiler_limit": int(chapter["number"]),
+            "book_title": str(chapter["book_title"] or ""),
+            "chapter": {"id": int(chapter["id"]), "number": int(chapter["number"]), "title": str(chapter["title"] or "")},
+            "current_summary": str((current or {}).get("summary") or ""),
+            "recap": recap,
+            "characters": _book_assistant_merge_entities(analyzed, "characters", "name"),
+            "terms": _book_assistant_merge_entities(analyzed, "terms", "term"),
+            "notice": f"Ответы строятся только по доступным вам главам до главы {int(chapter['number'])} включительно.",
+        }
+
+    @app.post("/api/reader/{chapter_id}/assistant/ask")
+    async def api_book_assistant_ask(
+        chapter_id: int,
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        chapter = await get_chapter(chapter_id)
+        if not chapter or chapter["publication_status"] != "published" or chapter["status"] != "published":
+            raise HTTPException(status_code=404, detail="Глава не найдена.")
+        allowed, moderation_access = await _chapter_access(
+            app_user_id=user.app_user_id, telegram_id=user.telegram_id, chapter=chapter
+        )
+        if not allowed:
+            raise HTTPException(status_code=403, detail="Помощник доступен после открытия главы.")
+        if moderation_access:
+            raise HTTPException(status_code=403, detail="Помощник отключён в служебном режиме проверки.")
+        question = str(payload.get("question") or "").strip()
+        if len(question) < 3:
+            raise HTTPException(status_code=400, detail="Введите более точный вопрос.")
+        if len(question) > 400:
+            raise HTTPException(status_code=400, detail="Вопрос слишком длинный.")
+        keywords = book_question_keywords(question, limit=8)
+        found = await search_book_assistant_chapters(
+            int(chapter["book_id"]), int(chapter["number"]), keywords, limit=36
+        )
+        recent = await list_book_assistant_chapters(
+            int(chapter["book_id"]), int(chapter["number"]), limit=16
+        )
+        by_id: dict[int, Any] = {int(row["id"]): row for row in [*found, *recent]}
+        by_id[int(chapter_id)] = chapter
+        accessible = await _book_assistant_accessible_rows(
+            user.app_user_id, sorted(by_id.values(), key=lambda row: int(row["number"]))
+        )
+        response = answer_book_question(
+            question, accessible, current_number=int(chapter["number"])
+        )
+        return {
+            "ok": True,
+            "question": question,
+            **response,
+            "notice": f"Будущие главы после {int(chapter['number'])}-й не использовались.",
         }
 
     @app.get("/api/reader/{chapter_id}/comments")
@@ -1654,7 +2104,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="Глава не найдена.")
         if not await user_can_access_chapter(user.app_user_id, chapter_id):
             raise HTTPException(status_code=403, detail="Комментарии доступны после открытия главы.")
-        comments = await list_comments_for_chapter(chapter_id, limit=50)
+        comments = await list_comments_for_chapter(chapter_id, limit=100, viewer_user_id=user.app_user_id)
         return {"ok": True, "comments": _rows_to_dicts(comments)}
 
     @app.post("/api/reader/{chapter_id}/comments")
@@ -1670,9 +2120,86 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="Комментарий слишком короткий.")
         if len(text) > 2000:
             raise HTTPException(status_code=400, detail="Комментарий слишком длинный.")
-        await add_comment(user.app_user_id, chapter_id, text)
-        comments = await list_comments_for_chapter(chapter_id, limit=50)
+        parent_id = int(payload.get("parent_id") or 0) or None
+        try:
+            await add_comment(
+                user.app_user_id,
+                chapter_id,
+                text,
+                parent_id=parent_id,
+                is_spoiler=bool(payload.get("is_spoiler")),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        comments = await list_comments_for_chapter(chapter_id, limit=100, viewer_user_id=user.app_user_id)
         return {"ok": True, "comments": _rows_to_dicts(comments)}
+
+    @app.post("/api/comments/{comment_id}/like")
+    async def api_toggle_comment_like(comment_id: int, x_telegram_init_data: str | None = Header(default=None)):
+        user = await _tma_user(x_telegram_init_data)
+        comment = await get_public_comment(comment_id)
+        if not comment:
+            raise HTTPException(status_code=404, detail="Комментарий не найден.")
+        chapter = await get_chapter(int(comment["chapter_id"]))
+        if not chapter or chapter["publication_status"] != "published" or chapter["status"] != "published":
+            raise HTTPException(status_code=404, detail="Глава не найдена.")
+        if not await user_can_access_chapter(user.app_user_id, int(comment["chapter_id"])):
+            raise HTTPException(status_code=403, detail="Реакции доступны после открытия главы.")
+        try:
+            result = await toggle_comment_like(user.app_user_id, comment_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return {"ok": True, **result}
+
+    @app.post("/api/comments/{comment_id}/report")
+    async def api_report_comment(
+        comment_id: int,
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        comment = await get_public_comment(comment_id)
+        if not comment:
+            raise HTTPException(status_code=404, detail="Комментарий не найден.")
+        if not await user_can_access_chapter(user.app_user_id, int(comment["chapter_id"])):
+            raise HTTPException(status_code=403, detail="Жалоба недоступна.")
+        try:
+            result = await report_comment(user.app_user_id, comment_id, str(payload.get("reason") or ""))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "ok": True,
+            **result,
+            "message": "Жалоба отправлена модераторам." if result["created"] else "Эта жалоба уже находится на проверке.",
+        }
+
+    @app.get("/api/reader/{chapter_id}/reactions")
+    async def api_chapter_reactions(chapter_id: int, x_telegram_init_data: str | None = Header(default=None)):
+        user = await _tma_user(x_telegram_init_data)
+        chapter = await get_chapter(chapter_id)
+        if not chapter or chapter["publication_status"] != "published" or chapter["status"] != "published":
+            raise HTTPException(status_code=404, detail="Глава не найдена.")
+        if not await user_can_access_chapter(user.app_user_id, chapter_id):
+            raise HTTPException(status_code=403, detail="Реакции доступны после открытия главы.")
+        return {"ok": True, "reactions": await list_chapter_reactions(chapter_id, user.app_user_id)}
+
+    @app.post("/api/reader/{chapter_id}/reactions")
+    async def api_set_chapter_reaction(
+        chapter_id: int,
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        chapter = await get_chapter(chapter_id)
+        if not chapter or chapter["publication_status"] != "published" or chapter["status"] != "published":
+            raise HTTPException(status_code=404, detail="Глава не найдена.")
+        if not await user_can_access_chapter(user.app_user_id, chapter_id):
+            raise HTTPException(status_code=403, detail="Реакции доступны после открытия главы.")
+        try:
+            reactions = await set_chapter_reaction(user.app_user_id, chapter_id, str(payload.get("reaction") or ""))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"ok": True, "reactions": reactions}
 
     @app.post("/api/reader/ad-click")
     async def api_reader_ad_click(payload: dict[str, Any], x_telegram_init_data: str | None = Header(default=None)):
@@ -2164,6 +2691,8 @@ def create_app() -> FastAPI:
     async def api_author_dashboard(x_telegram_init_data: str | None = Header(default=None)):
         user, profile = await author_session(x_telegram_init_data)
         stats = await get_author_dashboard_stats(user.app_user_id)
+        analytics = await get_author_analytics(user.app_user_id, 30)
+        achievements = await sync_user_achievements(user.app_user_id)
         finance = await get_author_finance_summary(user.app_user_id)
         rub_finance = {
             "held_minor": int(finance.get("held_minor", 0)),
@@ -2193,6 +2722,8 @@ def create_app() -> FastAPI:
             "ok": True,
             "profile": _row_to_dict(profile),
             "stats": stats,
+            "analytics": analytics,
+            "achievements": achievements,
             "finance": finance,
             "rub_finance": rub_finance,
             "financial_profile": public_financial_profile,
@@ -2223,6 +2754,13 @@ def create_app() -> FastAPI:
                 "formats": ["PDF", "CBZ", "ZIP", "CBR", "RAR", "7Z", "EPUB fixed-layout", "JPG", "PNG", "WEBP", "AVIF", "GIF", "BMP", "TIFF"],
             },
         }
+
+    @app.get("/api/author/analytics")
+    async def api_author_analytics(days: int = 30, x_telegram_init_data: str | None = Header(default=None)):
+        user, _ = await author_session(x_telegram_init_data)
+        analytics = await get_author_analytics(user.app_user_id, days)
+        achievements = await sync_user_achievements(user.app_user_id)
+        return {"ok": True, "analytics": analytics, "achievements": achievements}
 
     @app.get("/api/author/sbp-banks")
     async def api_author_sbp_banks(x_telegram_init_data: str | None = Header(default=None)):
@@ -2416,6 +2954,7 @@ def create_app() -> FastAPI:
         return {
             "ok": True,
             "book": _row_to_dict(book_row),
+            "pricing": await get_book_pricing_state(book_id),
             "chapters": _rows_to_dicts(chapters),
             "graphic_chapters": _rows_to_dicts(graphic_chapters),
             "graphic_volumes": _rows_to_dicts(graphic_volumes),
@@ -2432,26 +2971,85 @@ def create_app() -> FastAPI:
         user, _ = await author_session(x_telegram_init_data)
         if not await book_belongs_to_author(book_id, user.app_user_id):
             raise HTTPException(status_code=404, detail="Книга не найдена.")
+
+        current = await get_book(book_id)
+        if not current:
+            raise HTTPException(status_code=404, detail="Книга не найдена.")
+
         values = {key: payload[key] for key in (
             "title", "description", "age_limit", "writing_status",
-            "allow_download", "pricing_type", "price_stars", "content_type", "reading_mode",
+            "allow_download", "content_type", "reading_mode",
         ) if key in payload}
         if "age_limit" in values and values["age_limit"] not in {"0+", "6+", "12+", "16+", "18+"}:
             raise HTTPException(status_code=400, detail="Выберите возрастное ограничение из списка.")
         if "writing_status" in values and values["writing_status"] not in {"writing", "finished", "frozen"}:
             raise HTTPException(status_code=400, detail="Выберите состояние книги из списка.")
-        if "pricing_type" in values and values["pricing_type"] not in {"free", "chapters", "whole_book"}:
-            raise HTTPException(status_code=400, detail="Выберите способ продажи из списка.")
         if "content_type" in values and values["content_type"] not in {"book", *GRAPHIC_CONTENT_TYPES}:
             raise HTTPException(status_code=400, detail="Выберите тип произведения из списка.")
         if "reading_mode" in values and values["reading_mode"] not in GRAPHIC_READING_MODES - {"inherit"}:
             raise HTTPException(status_code=400, detail="Выберите режим чтения из списка.")
-        ok = await update_author_book_fields(book_id, user.app_user_id, values)
-        if not ok:
+
+        commerce_changed = False
+        if "price_stars" in payload or "pricing_type" in payload:
+            try:
+                price = max(0, min(100000, int(payload.get("price_stars", current["price_stars"]) or 0)))
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="Цена всей книги должна быть числом.")
+            requested_mode = str(payload.get("pricing_type") or current["pricing_type"] or "whole_book")
+            if price > 0 and requested_mode not in {"whole_book", "chapters"}:
+                raise HTTPException(status_code=400, detail="Выберите: продавать только всю книгу или также отдельные главы.")
+            if price <= 0 and int(current["price_stars"] or 0) > 0 and not bool(payload.get("confirm_make_free")):
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "confirm_make_free",
+                        "message": "Подтвердите перевод книги в полностью бесплатный режим. Все главы станут бесплатными, а продажа отдельных глав и пакетов отключится.",
+                    },
+                )
+            commerce_changed = await update_book_price(
+                book_id,
+                user.app_user_id,
+                requested_mode,
+                price,
+                restore_saved_prices=bool(payload.get("restore_saved_prices")),
+            )
+
+        fields_changed = True
+        if values:
+            fields_changed = await update_author_book_fields(book_id, user.app_user_id, values)
+        if not commerce_changed and values and not fields_changed:
             raise HTTPException(status_code=400, detail="Не удалось сохранить изменения.")
-        await add_audit(user.app_user_id, "book_updated_web", "book", str(book_id), None, ",".join(values.keys()))
+        if not commerce_changed and not values and not ({"price_stars", "pricing_type"} & payload.keys()):
+            raise HTTPException(status_code=400, detail="Нет изменений для сохранения.")
+
+        await add_audit(
+            user.app_user_id,
+            "book_updated_web",
+            "book",
+            str(book_id),
+            None,
+            ",".join(sorted(set(values.keys()) | ({"pricing"} if commerce_changed else set()))),
+        )
         book_row = await get_book(book_id)
-        return {"ok": True, "book": _row_to_dict(book_row)}
+        return {
+            "ok": True,
+            "book": _row_to_dict(book_row),
+            "pricing": await get_book_pricing_state(book_id),
+        }
+
+    @app.post("/api/author/book/{book_id}/restore-chapter-prices")
+    async def api_author_restore_chapter_prices(
+        book_id: int,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user, _ = await author_session(x_telegram_init_data)
+        result = await restore_saved_chapter_prices(book_id, user.app_user_id)
+        if result.get("reason") == "not_found":
+            raise HTTPException(status_code=404, detail="Книга не найдена.")
+        if result.get("reason") == "chapter_sales_disabled":
+            raise HTTPException(status_code=400, detail="Сначала включите продажу отдельных глав.")
+        await add_audit(user.app_user_id, "chapter_prices_restored_web", "book", str(book_id), None, str(result.get("updated", 0)))
+        return result
 
     @app.post("/api/author/book/{book_id}/chapter-packages")
     async def api_author_create_chapter_package(
@@ -2471,6 +3069,11 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="Цена пакета должна быть от 1 до 1 000 000 Stars.")
         if scope not in {"text", "graphic", "all"}:
             raise HTTPException(status_code=400, detail="Выберите вид глав для пакета.")
+        book = await get_book(book_id)
+        is_graphic_book = bool(book and str(book["content_type"] or "book") in GRAPHIC_CONTENT_TYPES)
+        pricing_mode = "free" if not book or int(book["price_stars"] or 0) <= 0 else ("chapters" if str(book["pricing_type"] or "") == "chapters" else "whole_book")
+        if not is_graphic_book and scope in {"text", "all"} and pricing_mode != "chapters":
+            raise HTTPException(status_code=400, detail="Текстовые пакеты доступны только когда включена продажа отдельных глав.")
         package_id = await create_chapter_package_for_author(
             book_id, user.app_user_id,
             title=str(payload.get("title") or ""),
@@ -2494,6 +3097,13 @@ def create_app() -> FastAPI:
         scope = str(payload.get("content_scope") or "text")
         if count < 1 or count > 10000 or price < 1 or price > 1000000 or scope not in {"text", "graphic", "all"}:
             raise HTTPException(status_code=400, detail="Проверьте количество глав, цену и тип пакета.")
+        package = await get_chapter_package(package_id)
+        if not package or int(package["author_user_id"] or 0) != int(user.app_user_id):
+            raise HTTPException(status_code=404, detail="Пакет не найден.")
+        is_graphic_book = str(package["content_type"] or "book") in GRAPHIC_CONTENT_TYPES
+        pricing_mode = "free" if int(package["book_price_stars"] or 0) <= 0 else ("chapters" if str(package["pricing_type"] or "") == "chapters" else "whole_book")
+        if not is_graphic_book and scope in {"text", "all"} and pricing_mode != "chapters":
+            raise HTTPException(status_code=400, detail="Текстовые пакеты доступны только когда включена продажа отдельных глав.")
         ok = await update_chapter_package_for_author(
             package_id, user.app_user_id,
             title=str(payload.get("title") or ""),
@@ -2558,6 +3168,49 @@ def create_app() -> FastAPI:
         await add_audit(user.app_user_id, "book_deleted_web", "book", str(book_id))
         return {"ok": True}
 
+    @app.patch("/api/author/book/{book_id}/chapter-prices")
+    async def api_author_update_chapter_prices(
+        book_id: int,
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user, _ = await author_session(x_telegram_init_data)
+        if not await book_belongs_to_author(book_id, user.app_user_id):
+            raise HTTPException(status_code=404, detail="Книга не найдена.")
+        try:
+            start_number = int(payload.get("start_number") or payload.get("chapter_number") or 0)
+            end_number = int(payload.get("end_number") or start_number)
+            price = int(payload.get("price_stars") or 0)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="Номера глав и цена должны быть числами.")
+        if start_number < 1 or end_number < 1:
+            raise HTTPException(status_code=400, detail="Укажите номер главы или диапазон от 1.")
+        if price < 0 or price > 100000:
+            raise HTTPException(status_code=400, detail="Цена главы должна быть от 0 до 100 000 Stars.")
+        access_mode = str(payload.get("access_mode") or ("free" if price <= 0 else "chapter"))
+        result = await update_chapter_access_range(
+            book_id, user.app_user_id, start_number, end_number, access_mode, price
+        )
+        reason_messages = {
+            "book_is_free": "Книга полностью бесплатна. Настройка цен глав отключена.",
+            "chapter_sales_disabled": "Для этой книги выключена продажа отдельных глав.",
+            "price_required": "Для отдельной продажи укажите цену больше 0.",
+            "chapters_not_found": "В указанном диапазоне нет глав.",
+            "not_found": "Книга не найдена.",
+        }
+        if not result.get("updated"):
+            reason = str(result.get("reason") or "chapters_not_found")
+            raise HTTPException(status_code=400 if reason != "not_found" else 404, detail=reason_messages.get(reason, "Не удалось изменить доступ к главам."))
+        await add_audit(
+            user.app_user_id,
+            "chapter_access_range_updated_web",
+            "book",
+            str(book_id),
+            None,
+            f"{result['start_number']}-{result['end_number']}:{result['access_mode']}={result['price_stars']}; updated={result['updated']}",
+        )
+        return {"ok": True, **result}
+
     @app.post("/api/author/book/{book_id}/chapters")
     async def api_author_add_chapter(
         book_id: int,
@@ -2570,11 +3223,26 @@ def create_app() -> FastAPI:
         title = str(payload.get("title") or "").strip()
         text = str(payload.get("text") or "").strip()
         price = max(0, min(100000, int(payload.get("price_stars") or 0)))
+        access_mode = str(payload.get("access_mode") or ("free" if price <= 0 else "chapter"))
+        book = await get_book(book_id)
+        mode = "free" if not book or int(book["price_stars"] or 0) <= 0 else ("chapters" if str(book["pricing_type"] or "") == "chapters" else "whole_book")
+        if mode == "free":
+            access_mode, price = "free", 0
+        elif access_mode == "chapter" and mode != "chapters":
+            raise HTTPException(status_code=400, detail="Для этой книги выключена продажа отдельных глав.")
+        elif access_mode not in {"free", "book", "chapter"}:
+            raise HTTPException(status_code=400, detail="Выберите способ доступа к главе.")
+        elif access_mode == "chapter" and price <= 0:
+            raise HTTPException(status_code=400, detail="Для отдельной продажи укажите цену больше 0.")
         if len(title) < 2:
             raise HTTPException(status_code=400, detail="Введите название главы.")
         if len(text) < 100:
             raise HTTPException(status_code=400, detail="Текст главы слишком короткий.")
-        chapter_id = await add_manual_chapter(book_id, title[:160], text, is_free=price == 0, price_stars=price)
+        chapter_id = await add_manual_chapter(
+            book_id, title[:160], text,
+            is_free=access_mode == "free",
+            price_stars=price if access_mode == "chapter" else 0,
+        )
         book = await get_book(book_id)
         if book and book["publication_status"] == "published":
             await set_chapter_status(chapter_id, "published")
@@ -2631,9 +3299,21 @@ def create_app() -> FastAPI:
             if len(text) < 100:
                 raise HTTPException(status_code=400, detail="Текст главы слишком короткий.")
             changed = await update_chapter_text(chapter_id, user.app_user_id, text) or changed
-        if "price_stars" in payload:
+        if "price_stars" in payload or "access_mode" in payload:
             price = max(0, min(100000, int(payload.get("price_stars") or 0)))
-            changed = await update_chapter_price(chapter_id, user.app_user_id, price == 0, price) or changed
+            access_mode = str(payload.get("access_mode") or ("free" if price <= 0 else "chapter"))
+            result = await update_chapter_access_range(
+                int(chapter["book_id"]), user.app_user_id, int(chapter["number"]), int(chapter["number"]), access_mode, price
+            )
+            if not result.get("updated"):
+                reason = str(result.get("reason") or "")
+                detail = {
+                    "book_is_free": "Книга полностью бесплатна. Цена главы не требуется.",
+                    "chapter_sales_disabled": "Для этой книги выключена продажа отдельных глав.",
+                    "price_required": "Для отдельной продажи укажите цену больше 0.",
+                }.get(reason, "Не удалось изменить доступ к главе.")
+                raise HTTPException(status_code=400, detail=detail)
+            changed = True
         if not changed:
             raise HTTPException(status_code=400, detail="Нет изменений для сохранения.")
         await add_audit(user.app_user_id, "chapter_updated_web", "chapter", str(chapter_id))
@@ -3590,6 +4270,8 @@ def create_app() -> FastAPI:
         if is_owner or "stats" in permissions:
             result["platform"] = await get_platform_stats()
             result["today"] = await get_owner_today_stats()
+        if is_owner:
+            result["premium"] = await get_premium_owner_summary()
         if is_owner or permissions.intersection({"view_finance", "refunds", "payouts"}):
             result["finance"] = await get_platform_finance_summary()
             rub = await get_rub_control_summary()
@@ -3599,6 +4281,90 @@ def create_app() -> FastAPI:
                 result["queues"]["rub_payouts_new"] = rub.get("payouts_new", 0)
                 result["queues"]["rub_payouts_processing"] = rub.get("payouts_processing", 0)
         return result
+
+    @app.get("/api/control/tts-diagnostics")
+    async def api_control_tts_diagnostics(x_telegram_init_data: str | None = Header(default=None)):
+        _, is_owner, _ = await control_session(x_telegram_init_data)
+        if not is_owner:
+            raise HTTPException(status_code=403, detail="Диагностика озвучивания доступна только владельцу.")
+        manager: TTSSessionManager = app.state.tts_sessions
+        statuses = await manager.queue.registry.statuses()
+        snapshot = manager.queue.snapshot()
+        client = await manager.client_diagnostics()
+        return {
+            "ok": True,
+            "providers": [
+                {
+                    "name": item.name,
+                    "available": bool(item.available),
+                    "warmed": bool(item.warmed),
+                    "message": item.message,
+                    "details": dict(item.details),
+                }
+                for item in statuses
+            ],
+            "queue": {
+                "queued": snapshot.queued,
+                "running": snapshot.running,
+                "completed": snapshot.completed,
+                "failed": snapshot.failed,
+                "deduplicated": snapshot.deduplicated,
+                "workers": snapshot.workers,
+            },
+            "vosk_profile": get_vosk_voice_profile(),
+            "provider_order": {
+                "standard": [item.strip() for item in str(settings.TTS_PROVIDER_ORDER or "").split(",") if item.strip()],
+                "high_quality": [item.strip() for item in str(settings.TTS_PROVIDER_ORDER_HQ or "").split(",") if item.strip()],
+            },
+            "player_contract_version": "v1.11.0-stage3-continuity-1",
+            **client,
+        }
+
+    @app.post("/api/control/tts-vosk/benchmark")
+    async def api_control_tts_vosk_benchmark(x_telegram_init_data: str | None = Header(default=None)):
+        user, is_owner, _ = await control_session(x_telegram_init_data)
+        if not is_owner:
+            raise HTTPException(status_code=403, detail="Проверка голосов доступна только владельцу.")
+        manager: TTSSessionManager = app.state.tts_sessions
+        try:
+            profile = await manager.queue.registry.benchmark_vosk(force=True)
+        except TTSProviderUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        await add_audit(user.app_user_id, "tts_vosk_benchmark", "setting", "tts", None, str(profile.get("source") or "automatic"))
+        return {"ok": True, "profile": profile}
+
+    @app.patch("/api/control/tts-vosk/selection")
+    async def api_control_tts_vosk_selection(
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user, is_owner, _ = await control_session(x_telegram_init_data)
+        if not is_owner:
+            raise HTTPException(status_code=403, detail="Выбор голосов доступен только владельцу.")
+        try:
+            profile = set_vosk_voice_selection(str(payload.get("gender") or ""), int(payload.get("speaker_id")))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        await add_audit(
+            user.app_user_id, "tts_vosk_voice_selected", "setting", str(payload.get("gender") or ""),
+            None, str(payload.get("speaker_id")),
+        )
+        return {"ok": True, "profile": profile}
+
+    @app.get("/api/control/tts-vosk/sample/{speaker_id}")
+    async def api_control_tts_vosk_sample(
+        speaker_id: int,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        _, is_owner, _ = await control_session(x_telegram_init_data)
+        if not is_owner:
+            raise HTTPException(status_code=403, detail="Образцы голосов доступны только владельцу.")
+        sample = vosk_sample_path(speaker_id)
+        if sample is None:
+            raise HTTPException(status_code=404, detail="Образец ещё не создан. Запустите проверку голосов.")
+        response = FileResponse(sample, media_type="audio/mpeg", filename=f"voxlyra-vosk-speaker-{speaker_id}.mp3")
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
     @app.get("/api/control/payment-settings")
     async def api_control_payment_settings(x_telegram_init_data: str | None = Header(default=None)):
@@ -3856,6 +4622,7 @@ def create_app() -> FastAPI:
             if not item or item["status"] != "published":
                 raise HTTPException(status_code=409, detail="Комментарий уже обработан или не найден.")
             await set_comment_status(item_id, "hidden")
+            await resolve_comment_complaints(item_id, user.app_user_id)
             message = content_hidden_message("comment", item["book_title"], item["chapter_title"])
         elif kind == "review":
             item = await get_review_for_moderation(item_id)

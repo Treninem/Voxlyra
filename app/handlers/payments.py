@@ -47,6 +47,7 @@ from app.db import (
     get_user_by_telegram_id,
     get_refund_request,
     has_purchase_access,
+    user_can_access_chapter,
     list_refund_requests,
     list_user_purchases,
     mark_purchase_refunded,
@@ -55,6 +56,7 @@ from app.db import (
     reject_refund_request,
     set_setting,
     upsert_user,
+    activate_premium_subscription,
 )
 from app.keyboards import (
     access_granted_menu,
@@ -119,6 +121,8 @@ class PayoutSettingState(StatesGroup):
 
 
 def _target_label(row) -> str:
+    if "purchase_kind" in row.keys() and str(row["purchase_kind"] or "") == "premium":
+        return "VoxLyra Premium"
     if "chapter_package_title" in row.keys() and row["chapter_package_title"]:
         return f"Пакет глав: {row['chapter_package_title']}"
     if "graphic_volume_number" in row.keys() and row["graphic_volume_number"]:
@@ -444,6 +448,38 @@ async def pre_checkout_handler(query: PreCheckoutQuery) -> None:
 async def successful_payment_handler(message: Message) -> None:
     payment = message.successful_payment
     user = await upsert_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
+    target = await get_purchase_target(payment.invoice_payload)
+
+    # Premium — отдельный платёжный контур. Он не создаёт доход автора и
+    # сохраняет дату окончания/автопродление, которые передал Telegram.
+    if target and target.get("kind") == "premium":
+        try:
+            subscription_id = await activate_premium_subscription(
+                user_id=int(user["id"]),
+                plan_code=str(target.get("plan_code") or "monthly"),
+                amount_stars=int(payment.total_amount),
+                telegram_payment_charge_id=str(payment.telegram_payment_charge_id or ""),
+                subscription_expiration_date=getattr(payment, "subscription_expiration_date", None),
+                is_recurring=bool(getattr(payment, "is_recurring", False)),
+                is_first_recurring=bool(getattr(payment, "is_first_recurring", False)),
+                invoice_payload=str(payment.invoice_payload or ""),
+            )
+        except Exception as exc:
+            await add_audit(user["id"], "premium_payment_save_failed", "payment", payment.invoice_payload, None, str(exc))
+            await message.answer(
+                "Оплата Premium прошла, но подписка не активировалась автоматически. Напишите в поддержку — платёж сохранён в Telegram и будет проверен.",
+                reply_markup=back_to_main(),
+            )
+            return
+        await add_audit(user["id"], "premium_payment_success", "premium_subscription", str(subscription_id), None, payment.invoice_payload)
+        await message.answer(
+            "<b>VoxLyra Premium активирован.</b>\n\n"
+            "Открыты дополнительные стили карточек цитат, личная статистика, знак Premium и приоритет в очереди локальной озвучки. "
+            "Базовые функции VoxLyra по-прежнему доступны всем пользователям.",
+            reply_markup=back_to_main(),
+        )
+        return
+
     try:
         purchase_id = await create_paid_purchase(
             user_id=user["id"],
@@ -458,7 +494,6 @@ async def successful_payment_handler(message: Message) -> None:
             reply_markup=back_to_main(),
         )
         return
-    target = await get_purchase_target(payment.invoice_payload)
     await add_audit(user["id"], "payment_success", "purchase", str(purchase_id), None, payment.invoice_payload)
     if target:
         if target["kind"] == "ad_budget":
@@ -832,28 +867,51 @@ async def read_paid_or_free_chapter(call: CallbackQuery) -> None:
     if not chapter:
         await call.answer("Глава не найдена", show_alert=True)
         return
-    allowed = bool(chapter["is_free"]) or await has_purchase_access(user["id"], chapter_id=chapter_id)
+    allowed = await user_can_access_chapter(user["id"], chapter_id)
     if not allowed:
-        credits = await get_user_chapter_credit_summary(user["id"], int(chapter["book_id"]), "text")
-        if int(credits.get("remaining") or 0) > 0:
-            from aiogram.utils.keyboard import InlineKeyboardBuilder
-            kb = InlineKeyboardBuilder()
+        from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+        mode = "free" if int(chapter["book_price_stars"] or 0) <= 0 else (
+            "chapters" if str(chapter["pricing_type"] or "") == "chapters" else "whole_book"
+        )
+        can_buy_chapter = (
+            mode == "chapters"
+            and int(chapter["is_free"] or 0) == 0
+            and int(chapter["price_stars"] or 0) > 0
+        )
+        credits = await get_user_chapter_credit_summary(user["id"], int(chapter["book_id"]), "text") if can_buy_chapter else {"remaining": 0}
+        kb = InlineKeyboardBuilder()
+        if can_buy_chapter and int(credits.get("remaining") or 0) > 0:
             kb.button(
                 text=f"📖 Открыть из пакета · осталось {int(credits['remaining'])}",
                 callback_data=f"package:unlock:chapter:{chapter_id}",
             )
-            kb.button(text=f"⭐ Купить отдельно · {int(chapter['price_stars'] or 0)}", callback_data=f"buy:chapter:{chapter_id}")
-            kb.button(text="⬅️ В меню", callback_data="menu:main")
-            kb.adjust(1)
-            await call.message.edit_text(
-                f"<b>{chapter['book_title']}</b>\n{chapter['title']}\n\n"
-                "Можно списать одно открытие из купленного пакета. После этого глава останется доступной навсегда.",
-                reply_markup=kb.as_markup(),
+        if can_buy_chapter:
+            kb.button(
+                text=f"⭐ Купить эту главу · {int(chapter['price_stars'] or 0)} Stars",
+                callback_data=f"buy:chapter:{chapter_id}",
             )
-            await call.answer()
-            return
-        await call.answer("Сначала купите доступ", show_alert=True)
-        await _send_invoice(call, "chapter", chapter_id)
+        if int(chapter["book_price_stars"] or 0) > 0:
+            kb.button(
+                text=f"📚 Купить всю книгу · {int(chapter['book_price_stars'])} Stars",
+                callback_data=f"buy:book:{int(chapter['book_id'])}",
+            )
+        kb.button(text="⬅️ В меню", callback_data="menu:main")
+        kb.adjust(1)
+        if can_buy_chapter:
+            explanation = (
+                "Эту главу можно купить отдельно или открыть покупкой всей книги. "
+                "Цена главы относится только к этой главе."
+            )
+            if int(credits.get("remaining") or 0) > 0:
+                explanation += " Также доступно одно открытие из ранее купленного пакета."
+        else:
+            explanation = "Эта глава отдельно не продаётся. Она откроется после покупки всей книги."
+        await call.message.edit_text(
+            f"<b>{chapter['book_title']}</b>\n<b>{chapter['title']}</b>\n\n{explanation}",
+            reply_markup=kb.as_markup(),
+        )
+        await call.answer()
         return
     header = f"<b>{chapter['book_title']}</b>\n<b>{chapter['title']}</b>\n\n"
     chunks = _split_text(chapter["text"])

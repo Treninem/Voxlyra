@@ -42,10 +42,14 @@ class ReaderTTSSession:
     providers: tuple[str, ...]
     created_at: int
     expires_at: int
+    priority_boost: bool = False
     futures: dict[int, asyncio.Future[TTSSegmentAudio]] = field(default_factory=dict)
     errors: dict[int, str] = field(default_factory=dict)
     attempts: dict[int, int] = field(default_factory=dict)
     last_access_at: int = 0
+    client_events: list[dict[str, Any]] = field(default_factory=list)
+    client_counters: dict[str, int] = field(default_factory=dict)
+    player_version: str = ""
 
     @property
     def segment_count(self) -> int:
@@ -66,14 +70,14 @@ class TTSSessionManager:
     def _ttl(self) -> int:
         return max(900, min(86400, int(settings.TTS_SESSION_TTL_SECONDS or 7200)))
 
-    def _profile_key(self, *, user_id: int, chapter_id: int, voice: str, style: str, high_quality: bool, chapter_digest: str) -> str:
-        return ':'.join((str(user_id), str(chapter_id), validate_voice(voice), validate_style(style), 'hq' if high_quality else 'std', chapter_digest))
+    def _profile_key(self, *, user_id: int, chapter_id: int, voice: str, style: str, high_quality: bool, priority_boost: bool, chapter_digest: str) -> str:
+        return ':'.join((str(user_id), str(chapter_id), validate_voice(voice), validate_style(style), 'hq' if high_quality else 'std', 'priority' if priority_boost else 'normal', chapter_digest))
 
     async def start(self) -> None:
         cache_root = Path(settings.TTS_CACHE_DIR or 'storage/tts')
         await asyncio.to_thread(migrate_old_tts_cache_once, cache_root)
         await asyncio.to_thread(
-            cleanup_segment_cache, cache_root / 'segments-v1105',
+            cleanup_segment_cache, cache_root / 'segments-v1110',
             max_age_days=settings.TTS_CACHE_DAYS, max_megabytes=settings.TTS_MAX_CACHE_MB,
         )
         await self.queue.start()
@@ -99,7 +103,7 @@ class TTSSessionManager:
                         self._profile_index.pop(key, None)
             return len(stale)
 
-    async def create_session(self, *, user_id: int, chapter_id: int, text: str, voice: str, style: str, high_quality: bool = False, glossary: dict[str, str] | None = None, reuse: bool = True) -> ReaderTTSSession:
+    async def create_session(self, *, user_id: int, chapter_id: int, text: str, voice: str, style: str, high_quality: bool = False, priority_boost: bool = False, glossary: dict[str, str] | None = None, reuse: bool = True) -> ReaderTTSSession:
         await self.cleanup()
         prepared = prepare_tts_chapter(
             text, glossary=glossary,
@@ -110,7 +114,7 @@ class TTSSessionManager:
         selected_voice = validate_voice(voice)
         selected_style = validate_style(style)
         digest = hashlib.sha256(prepared.spoken_text.encode('utf-8')).hexdigest()
-        profile_key = self._profile_key(user_id=user_id, chapter_id=chapter_id, voice=selected_voice, style=selected_style, high_quality=high_quality, chapter_digest=digest)
+        profile_key = self._profile_key(user_id=user_id, chapter_id=chapter_id, voice=selected_voice, style=selected_style, high_quality=high_quality, priority_boost=priority_boost, chapter_digest=digest)
         now = int(time.time())
         async with self._lock:
             session = None
@@ -123,7 +127,7 @@ class TTSSessionManager:
             if session is None:
                 session = ReaderTTSSession(
                     id=uuid.uuid4().hex, user_id=int(user_id), chapter_id=int(chapter_id), voice=selected_voice,
-                    style=selected_style, high_quality=bool(high_quality), prepared=prepared,
+                    style=selected_style, high_quality=bool(high_quality), priority_boost=bool(priority_boost), prepared=prepared,
                     providers=configured_provider_order(high_quality=bool(high_quality)), created_at=now,
                     expires_at=now + self._ttl(), last_access_at=now,
                 )
@@ -145,12 +149,17 @@ class TTSSessionManager:
             session.expires_at = now + self._ttl()
             return session
 
-    def _priority(self, index: int, start_index: int) -> TTSJobPriority:
+    def _priority(self, session: ReaderTTSSession, index: int, start_index: int) -> int:
         if index == 0:
-            return TTSJobPriority.FIRST_CURRENT
-        if index <= max(2, start_index + 2):
-            return TTSJobPriority.BUFFER_CURRENT
-        return TTSJobPriority.REST_CURRENT
+            base = int(TTSJobPriority.FIRST_CURRENT)
+        elif index <= max(2, start_index + 2):
+            base = int(TTSJobPriority.BUFFER_CURRENT)
+        else:
+            base = int(TTSJobPriority.REST_CURRENT)
+        # Premium не меняет качество базового голоса, а только ставит его запросы
+        # немного выше фоновой очереди. Первый звук Premium получает отрицательный
+        # приоритет и не ждёт обычные фоновые части других глав.
+        return base - 5 if session.priority_boost else base
 
     def _capture(self, session: ReaderTTSSession, index: int, future: asyncio.Future[TTSSegmentAudio]) -> None:
         if future.cancelled():
@@ -193,12 +202,12 @@ class TTSSessionManager:
         start = max(0, min(int(start_index), max(0, session.segment_count - 1)))
         size = max(1, min(32, int(count if count is not None else settings.TTS_SESSION_WINDOW_SEGMENTS)))
         for index in range(start, min(session.segment_count, start + size)):
-            await self._schedule(session, index, self._priority(index, start))
+            await self._schedule(session, index, self._priority(session, index, start))
         return session
 
     async def await_segment(self, session_id: str, index: int, *, user_id: int | None = None, timeout: float | None = None) -> TTSSegmentAudio:
         session = await self.get(session_id, user_id=user_id)
-        future = await self._schedule(session, int(index), self._priority(int(index), int(index)))
+        future = await self._schedule(session, int(index), self._priority(session, int(index), int(index)))
         try:
             if timeout is None:
                 return await asyncio.shield(future)
@@ -261,7 +270,7 @@ class TTSSessionManager:
         snap = self.queue.snapshot()
         return {
             'session_id': session.id, 'chapter_id': session.chapter_id, 'chapter_digest': session.chapter_digest,
-            'voice': session.voice, 'style': session.style, 'high_quality': session.high_quality,
+            'voice': session.voice, 'style': session.style, 'high_quality': session.high_quality, 'priority_boost': session.priority_boost,
             'provider_order': list(session.providers), 'segment_count': session.segment_count,
             'window_start': start, 'window_end': end, 'ready_in_window': ready_count,
             'first_ready': first_ready, 'status': 'ready' if first_ready else 'preparing',
@@ -286,6 +295,86 @@ class TTSSessionManager:
                 if value == session.id:
                     self._profile_index.pop(key, None)
             return True
+
+    async def record_client_event(
+        self,
+        session_id: str,
+        *,
+        user_id: int,
+        event: str,
+        segment_index: int | None = None,
+        player_version: str = "",
+        details: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        session = await self.get(session_id, user_id=user_id)
+        allowed = {
+            'session_applied', 'first_audio_play', 'autoplay_blocked',
+            'segment_transition_start', 'segment_transition_complete',
+            'chapter_prefetch_start', 'chapter_prefetch_ready',
+            'chapter_transition_start', 'chapter_transition_complete',
+            'player_stalled', 'player_error', 'player_recovery_start',
+            'player_recovered', 'player_recovery_failed', 'network_online',
+            'visibility_restore', 'session_closed',
+        }
+        event_name = str(event or '').strip().lower()
+        if event_name not in allowed:
+            raise ValueError('Неизвестное событие плеера.')
+        safe_details: dict[str, Any] = {}
+        for key, value in dict(details or {}).items():
+            clean_key = str(key)[:40]
+            if isinstance(value, bool):
+                safe_details[clean_key] = value
+            elif isinstance(value, (int, float)):
+                safe_details[clean_key] = value
+            elif value is not None:
+                safe_details[clean_key] = str(value)[:240]
+            if len(safe_details) >= 12:
+                break
+        now_ms = int(time.time() * 1000)
+        item = {
+            'event': event_name,
+            'at_ms': now_ms,
+            'segment_index': None if segment_index is None else max(0, int(segment_index)),
+            'details': safe_details,
+        }
+        session.player_version = str(player_version or session.player_version)[:80]
+        session.client_events.append(item)
+        if len(session.client_events) > 60:
+            del session.client_events[:-60]
+        session.client_counters[event_name] = int(session.client_counters.get(event_name) or 0) + 1
+        return item
+
+    async def client_diagnostics(self, *, limit_sessions: int = 12, limit_events: int = 80) -> dict[str, Any]:
+        await self.cleanup()
+        async with self._lock:
+            sessions = sorted(self._sessions.values(), key=lambda item: item.last_access_at, reverse=True)[:max(1, limit_sessions)]
+            active: list[dict[str, Any]] = []
+            events: list[dict[str, Any]] = []
+            for session in sessions:
+                last = session.client_events[-1] if session.client_events else None
+                active.append({
+                    'session_id': session.id,
+                    'user_id': session.user_id,
+                    'chapter_id': session.chapter_id,
+                    'voice': session.voice,
+                    'style': session.style,
+                    'segment_count': session.segment_count,
+                    'player_version': session.player_version,
+                    'created_at': session.created_at,
+                    'last_access_at': session.last_access_at,
+                    'last_event': last,
+                    'counters': dict(session.client_counters),
+                })
+                for event in session.client_events:
+                    events.append({
+                        'session_id': session.id,
+                        'chapter_id': session.chapter_id,
+                        'user_id': session.user_id,
+                        'player_version': session.player_version,
+                        **event,
+                    })
+            events.sort(key=lambda item: int(item.get('at_ms') or 0), reverse=True)
+            return {'active_sessions': active, 'recent_events': events[:max(1, limit_events)]}
 
 
 def _secret() -> bytes:

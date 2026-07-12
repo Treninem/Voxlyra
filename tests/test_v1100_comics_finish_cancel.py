@@ -7,7 +7,7 @@ from pathlib import Path
 def test_v1100_release_assets_and_interfaces_exist():
     from app.build_info import OWNER_BUILD_NAME, OWNER_BUILD_VERSION
 
-    assert OWNER_BUILD_VERSION in {"v1.10.0", "v1.10.1", "v1.10.2", "v1.10.3", "v1.10.4", "v1.10.5"}
+    assert OWNER_BUILD_VERSION in {"v1.10.0", "v1.10.1", "v1.10.2", "v1.10.3", "v1.10.4", "v1.10.5", "v1.11.0"}
     assert "комикс" in OWNER_BUILD_NAME.lower()
     for relative in (
         "app/services/graphic_ocr.py",
@@ -64,7 +64,7 @@ def test_v1100_payment_intent_and_safe_cancel_flow(tmp_path, monkeypatch):
         profile = await get_author_profile(author["id"])
         book_id = await create_book(
             profile["id"], "Книга отмен", "Описание " * 20, "12+", "writing", False,
-            "chapters", 0,
+            "chapters", 70,
         )
         chapter_id = await add_manual_chapter(
             book_id, "Платная глава", "текст " * 100, is_free=False, price_stars=7

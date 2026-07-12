@@ -58,6 +58,7 @@ def main() -> int:
         "templates/comic_reader.html",
         "templates/author.html",
         "templates/control.html",
+        "templates/premium.html",
         "templates/legal.html",
         "static/js/author.js",
         "static/js/comic.js",
@@ -150,6 +151,12 @@ def main() -> int:
         "docs/STATUS_V1_10_5.md",
         "docs/RELEASE_CHECK_V1_10_5.md",
         "scripts/tts_provider_check.py",
+        "scripts/bootstrap_vosk_tts.py",
+        "docs/LOCAL_VOICE_STAGE2_V1_11_0.md",
+        "docs/PREMIUM_FINAL_STAGE8_V1_11_0.md",
+        "docs/STATUS_V1_11_0.md",
+        "docs/TRANSFER_TO_NEW_CHAT.md",
+        "docs/PROJECT_MEMORY_CURRENT.md",
         "storage/legal/.gitkeep",
     ]:
         ok, text = check_file(path)
@@ -173,6 +180,7 @@ def main() -> int:
 
     checks.extend([
         ("piper-tts==1.4.2" in requirements_text, "Piper закреплён в requirements.txt", "Добавьте piper-tts==1.4.2."),
+        ("vosk-tts" in requirements_text, "Локальный Vosk-TTS указан", "Добавьте vosk-tts для автономного русского голоса."),
         ("Pillow" in requirements_text, "Pillow для изображений указан", "Добавьте Pillow в requirements.txt."),
         ("PyMuPDF" in requirements_text, "PyMuPDF для PDF указан", "Добавьте PyMuPDF в requirements.txt."),
         ("libarchive-c" in requirements_text, "libarchive-c для CBR/RAR и 7Z указан", "Добавьте libarchive-c в requirements.txt."),
@@ -186,6 +194,8 @@ def main() -> int:
         ("fonts-dejavu-core" in docker_text, "Docker устанавливает кириллический шрифт для PDF", "Добавьте fonts-dejavu-core в Dockerfile."),
         ("piper.download_voices" in docker_text, "Docker загружает голосовые модели", "Добавьте загрузку моделей Piper при Redeploy."),
         ("ru_RU-irina-medium" in docker_text and "ru_RU-dmitri-medium" in docker_text, "Русские модели Ирина и Дмитрий указаны", "Проверьте названия голосовых моделей в Dockerfile."),
+        ("bootstrap_vosk_tts.py" in docker_text, "Docker автоматически готовит модель Vosk", "Подключите scripts/bootstrap_vosk_tts.py в Dockerfile."),
+        ("vosk-model-tts-ru-0.9-multi" in docker_text, "Русская многоголосая модель Vosk указана", "Укажите vosk-model-tts-ru-0.9-multi."),
         (bool(bot_token and bot_token != "PASTE_BOT_TOKEN_HERE"), "BOT_TOKEN указан", "Возьмите токен у @BotFather и вставьте в Bothost."),
         (bool(owner_ids.strip()), "OWNER_IDS указан", "Укажите свой Telegram ID. Можно несколько через запятую."),
         (is_https(webapp_url), "WEBAPP_URL похож на HTTPS-адрес", "После первого деплоя скопируйте публичный HTTPS URL из Bothost."),

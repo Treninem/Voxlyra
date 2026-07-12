@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import sqlite3
 from contextlib import asynccontextmanager
@@ -188,6 +189,8 @@ async def _init_db_impl() -> None:
                 text TEXT NOT NULL,
                 is_free INTEGER NOT NULL DEFAULT 1,
                 price_stars INTEGER NOT NULL DEFAULT 0,
+                saved_is_free INTEGER,
+                saved_price_stars INTEGER,
                 status TEXT NOT NULL DEFAULT 'draft',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
@@ -436,6 +439,7 @@ async def _init_db_impl() -> None:
             """
         )
         await _ensure_book_columns(db)
+        await _ensure_chapter_columns(db)
         await _ensure_audio_columns(db)
         await _ensure_defaults(db)
         await _ensure_stage9_schema(db)
@@ -452,6 +456,11 @@ async def _init_db_impl() -> None:
         await _ensure_v198_schema(db)
         await _ensure_v199_schema(db)
         await _ensure_v1100_schema(db)
+        await _ensure_v1110_recommendation_schema(db)
+        await _ensure_v1110_social_schema(db)
+        await _ensure_v1110_assistant_schema(db)
+        await _ensure_v1110_analytics_schema(db)
+        await _ensure_v1110_premium_schema(db)
         await db.commit()
 
 
@@ -513,6 +522,41 @@ async def _ensure_book_columns(db: aiosqlite.Connection) -> None:
     for column, sql in migrations.items():
         if column not in existing:
             await _execute_schema_ddl(db, sql)
+
+
+async def _ensure_chapter_columns(db: aiosqlite.Connection) -> None:
+    """Мягкая миграция правил продажи текстовых глав v1.11.0."""
+    cur = await db.execute("PRAGMA table_info(chapters)")
+    existing = {row[1] for row in await cur.fetchall()}
+    migrations = {
+        "saved_is_free": "ALTER TABLE chapters ADD COLUMN saved_is_free INTEGER",
+        "saved_price_stars": "ALTER TABLE chapters ADD COLUMN saved_price_stars INTEGER",
+    }
+    for column, sql in migrations.items():
+        if column not in existing:
+            await _execute_schema_ddl(db, sql)
+
+    # Новое строгое правило: книга с нулевой ценой полностью бесплатна.
+    # Старые цены сохраняются как черновик, чтобы автор мог восстановить их явно.
+    await db.execute(
+        """
+        UPDATE chapters
+        SET saved_is_free=COALESCE(saved_is_free, is_free),
+            saved_price_stars=CASE
+                WHEN COALESCE(saved_price_stars, 0) <= 0 AND price_stars > 0 THEN price_stars
+                ELSE saved_price_stars
+            END
+        WHERE book_id IN (SELECT id FROM books WHERE COALESCE(price_stars, 0) <= 0)
+          AND (is_free=0 OR price_stars>0)
+        """
+    )
+    await db.execute(
+        "UPDATE chapters SET is_free=1, price_stars=0 "
+        "WHERE book_id IN (SELECT id FROM books WHERE COALESCE(price_stars, 0) <= 0)"
+    )
+    await db.execute(
+        "UPDATE books SET pricing_type='free' WHERE COALESCE(price_stars, 0) <= 0"
+    )
 
 
 async def _ensure_audio_columns(db: aiosqlite.Connection) -> None:
@@ -705,6 +749,143 @@ async def _ensure_stage10_schema(db: aiosqlite.Connection) -> None:
             """,
             (key, value, now),
         )
+
+
+async def _ensure_v1110_recommendation_schema(db: aiosqlite.Connection) -> None:
+    """Персональная лента v1.11.0: события показа, открытия и скрытия рекомендаций."""
+    await db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS recommendation_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            book_id INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            reason TEXT NOT NULL DEFAULT '',
+            event_count INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(user_id, book_id, event_type),
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_recommendation_events_user_type
+            ON recommendation_events(user_id, event_type, updated_at);
+        CREATE INDEX IF NOT EXISTS idx_recommendation_events_book_type
+            ON recommendation_events(book_id, event_type, updated_at);
+        """
+    )
+
+
+async def _ensure_v1110_social_schema(db: aiosqlite.Connection) -> None:
+    """Обсуждения v1.11.0: ответы, спойлеры, лайки, реакции и жалобы."""
+    cur = await db.execute("PRAGMA table_info(comments)")
+    existing = {row[1] for row in await cur.fetchall()}
+    migrations = {
+        "parent_id": "ALTER TABLE comments ADD COLUMN parent_id INTEGER",
+        "is_spoiler": "ALTER TABLE comments ADD COLUMN is_spoiler INTEGER NOT NULL DEFAULT 0",
+    }
+    for column, sql in migrations.items():
+        if column not in existing:
+            await _execute_schema_ddl(db, sql)
+
+    await db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS comment_likes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            comment_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(comment_id, user_id),
+            FOREIGN KEY(comment_id) REFERENCES comments(id) ON DELETE CASCADE,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS chapter_reactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chapter_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            reaction_code TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(chapter_id, user_id),
+            FOREIGN KEY(chapter_id) REFERENCES chapters(id) ON DELETE CASCADE,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_comments_chapter_parent_status
+            ON comments(chapter_id, parent_id, status, id);
+        CREATE INDEX IF NOT EXISTS idx_comment_likes_comment
+            ON comment_likes(comment_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_chapter_reactions_chapter
+            ON chapter_reactions(chapter_id, reaction_code);
+        CREATE INDEX IF NOT EXISTS idx_complaints_comment_target
+            ON complaints(target_type, target_id, status);
+        """
+    )
+
+
+async def _ensure_v1110_assistant_schema(db: aiosqlite.Connection) -> None:
+    """Помощник по книге v1.11.0: безопасный локальный кэш разбора опубликованных глав."""
+    await db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS book_assistant_cache (
+            chapter_id INTEGER PRIMARY KEY,
+            text_digest TEXT NOT NULL,
+            summary TEXT NOT NULL DEFAULT '',
+            characters_json TEXT NOT NULL DEFAULT '[]',
+            terms_json TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(chapter_id) REFERENCES chapters(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_book_assistant_cache_digest
+            ON book_assistant_cache(text_digest, updated_at);
+        """
+    )
+
+
+async def _ensure_v1110_analytics_schema(db: aiosqlite.Connection) -> None:
+    """Этап 7 v1.11.0: аналитика, достижения и ненавязчивые умные напоминания."""
+    cur = await db.execute("PRAGMA table_info(user_preferences)")
+    existing = {row[1] for row in await cur.fetchall()}
+    migrations = {
+        "notifications_reminders": "ALTER TABLE user_preferences ADD COLUMN notifications_reminders INTEGER NOT NULL DEFAULT 1",
+        "notifications_achievements": "ALTER TABLE user_preferences ADD COLUMN notifications_achievements INTEGER NOT NULL DEFAULT 1",
+    }
+    for column, sql in migrations.items():
+        if column not in existing:
+            await _execute_schema_ddl(db, sql)
+
+    await db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS user_achievements (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            achievement_code TEXT NOT NULL,
+            progress_value INTEGER NOT NULL DEFAULT 0,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            awarded_at TEXT NOT NULL,
+            UNIQUE(user_id, achievement_code),
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS smart_notification_state (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            notification_code TEXT NOT NULL,
+            context_key TEXT NOT NULL DEFAULT '',
+            last_sent_at TEXT NOT NULL,
+            send_count INTEGER NOT NULL DEFAULT 1,
+            UNIQUE(user_id, notification_code, context_key),
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_user_achievements_user_awarded
+            ON user_achievements(user_id, awarded_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_smart_notifications_last_sent
+            ON smart_notification_state(notification_code, last_sent_at);
+        """
+    )
 
 
 async def upsert_user(telegram_id: int, username: str | None, full_name: str | None) -> aiosqlite.Row:
@@ -1015,9 +1196,12 @@ async def update_author_book_fields(book_id: int, author_user_id: int, values: d
     if "allow_download" in clean:
         clean["allow_download"] = 1 if bool(clean["allow_download"]) else 0
     if "pricing_type" in clean:
+        # Поле pricing_type оставлено только для обратной совместимости.
+        # Цена всей книги и цены отдельных глав теперь независимы.
         clean["pricing_type"] = str(clean["pricing_type"])
     if "price_stars" in clean:
         clean["price_stars"] = max(0, min(100000, int(clean["price_stars"] or 0)))
+        clean.pop("pricing_type", None)
     if "content_type" in clean:
         clean["content_type"] = str(clean["content_type"] or "book")
     if "reading_mode" in clean:
@@ -1040,8 +1224,11 @@ async def update_author_book_fields(book_id: int, author_user_id: int, values: d
             """,
             values_list,
         )
+        changed = cur.rowcount > 0
+        if changed and ("price_stars" in clean or "pricing_type" in values):
+            await _sync_book_pricing_type_conn(db, int(book_id))
         await db.commit()
-        return cur.rowcount > 0
+        return changed
 
 
 async def get_book(book_id: int) -> aiosqlite.Row | None:
@@ -1495,6 +1682,378 @@ async def list_similar_books(book_id: int, limit: int = 6) -> list[aiosqlite.Row
         return await cur.fetchall()
 
 
+_RECOMMENDATION_EVENT_TYPES = {"impression", "open", "dismiss"}
+_RECOMMENDATION_BOOKMARK_WEIGHTS = {
+    "favorite": 8.0,
+    "finished": 7.0,
+    "reading": 5.0,
+    "planned": 2.0,
+    "dropped": -8.0,
+}
+_RECOMMENDATION_OPTION_WEIGHTS = {
+    "genres": 1.15,
+    "tropes": 0.95,
+    "audience": 0.55,
+    "language": 0.25,
+    "content_type": 0.35,
+}
+
+
+async def record_recommendation_event(
+    user_id: int,
+    book_id: int,
+    event_type: str,
+    reason: str = "",
+) -> bool:
+    event_type = str(event_type or "").strip().lower()
+    if event_type not in _RECOMMENDATION_EVENT_TYPES:
+        raise ValueError("Неизвестное событие рекомендации")
+    now = utc_now()
+    async with connect() as db:
+        cur = await db.execute(
+            "SELECT 1 FROM books WHERE id=? AND publication_status='published'",
+            (int(book_id),),
+        )
+        if await cur.fetchone() is None:
+            return False
+        await db.execute(
+            """
+            INSERT INTO recommendation_events(
+                user_id, book_id, event_type, reason, event_count, created_at, updated_at
+            ) VALUES(?, ?, ?, ?, 1, ?, ?)
+            ON CONFLICT(user_id, book_id, event_type) DO UPDATE SET
+                reason=CASE WHEN excluded.reason!='' THEN excluded.reason ELSE recommendation_events.reason END,
+                event_count=recommendation_events.event_count + 1,
+                updated_at=excluded.updated_at
+            """,
+            (int(user_id), int(book_id), event_type, str(reason or "")[:240], now, now),
+        )
+        await db.commit()
+    return True
+
+
+async def record_recommendation_events(
+    user_id: int,
+    book_ids: list[int] | tuple[int, ...] | set[int],
+    event_type: str,
+) -> int:
+    unique_ids: list[int] = []
+    seen: set[int] = set()
+    for raw_id in book_ids or []:
+        try:
+            book_id = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+        if book_id <= 0 or book_id in seen:
+            continue
+        seen.add(book_id)
+        unique_ids.append(book_id)
+    saved = 0
+    for book_id in unique_ids[:50]:
+        if await record_recommendation_event(user_id, book_id, event_type):
+            saved += 1
+    return saved
+
+
+def _recommendation_catalog_dict(row: Any) -> dict[str, Any]:
+    if isinstance(row, dict):
+        return dict(row)
+    try:
+        return {key: row[key] for key in row.keys()}
+    except Exception:
+        return {}
+
+
+async def list_personalized_books(user_id: int, limit: int = 12) -> list[dict[str, Any]]:
+    """Возвращает прозрачную персональную подборку без влияния на публичные топы.
+
+    Сигналы пользователя используются только для его личной ленты: чтение,
+    прослушивание, покупки, библиотека и оценки. Общая популярность имеет
+    небольшой ограниченный вес, поэтому накрутка открытий не способна вытеснить
+    действительно похожие произведения.
+    """
+    limit = max(1, min(30, int(limit or 12)))
+    catalog = [_recommendation_catalog_dict(row) for row in await list_catalog_books(limit=300, include_drafts=False)]
+    catalog = [item for item in catalog if int(item.get("id") or 0) > 0]
+    if not catalog:
+        return []
+
+    source_scores: dict[int, float] = {}
+    seen_books: set[int] = set()
+    dismissed_books: set[int] = set()
+    own_books: set[int] = set()
+    source_titles: dict[int, str] = {}
+    source_authors: dict[int, int] = {}
+    author_preferences: dict[int, float] = {}
+
+    def add_signal(book_id: Any, value: float, *, mark_seen: bool = True) -> None:
+        try:
+            normalized = int(book_id)
+        except (TypeError, ValueError):
+            return
+        if normalized <= 0:
+            return
+        source_scores[normalized] = source_scores.get(normalized, 0.0) + float(value)
+        if mark_seen:
+            seen_books.add(normalized)
+
+    async with connect() as db:
+        cur = await db.execute(
+            "SELECT id FROM author_profiles WHERE user_id=?",
+            (int(user_id),),
+        )
+        author_profile = await cur.fetchone()
+        if author_profile:
+            cur = await db.execute("SELECT id FROM books WHERE author_id=?", (int(author_profile["id"]),))
+            own_books = {int(row["id"]) for row in await cur.fetchall()}
+
+        cur = await db.execute(
+            "SELECT book_id, status FROM bookmarks WHERE user_id=?",
+            (int(user_id),),
+        )
+        for row in await cur.fetchall():
+            add_signal(row["book_id"], _RECOMMENDATION_BOOKMARK_WEIGHTS.get(str(row["status"]), 3.0))
+
+        cur = await db.execute(
+            """
+            SELECT book_id, MAX(position_percent) AS max_percent
+            FROM reading_progress WHERE user_id=? GROUP BY book_id
+            """,
+            (int(user_id),),
+        )
+        for row in await cur.fetchall():
+            add_signal(row["book_id"], 2.0 + min(5.0, float(row["max_percent"] or 0) / 20.0))
+
+        cur = await db.execute(
+            """
+            SELECT c.book_id, MAX(tp.position_seconds) AS position_seconds
+            FROM tts_progress tp JOIN chapters c ON c.id=tp.chapter_id
+            WHERE tp.user_id=? GROUP BY c.book_id
+            """,
+            (int(user_id),),
+        )
+        for row in await cur.fetchall():
+            add_signal(row["book_id"], 3.5)
+
+        cur = await db.execute(
+            """
+            SELECT ac.book_id, MAX(lp.position_seconds) AS position_seconds
+            FROM listening_progress lp JOIN audio_chapters ac ON ac.id=lp.audio_chapter_id
+            WHERE lp.user_id=? GROUP BY ac.book_id
+            """,
+            (int(user_id),),
+        )
+        for row in await cur.fetchall():
+            add_signal(row["book_id"], 4.5)
+
+        cur = await db.execute(
+            """
+            SELECT gc.book_id, MAX(grp.page_number) AS page_number
+            FROM graphic_reading_progress grp
+            JOIN graphic_chapters gc ON gc.id=grp.graphic_chapter_id
+            WHERE grp.user_id=? GROUP BY gc.book_id
+            """,
+            (int(user_id),),
+        )
+        for row in await cur.fetchall():
+            add_signal(row["book_id"], 4.5)
+
+        cur = await db.execute(
+            """
+            SELECT COALESCE(p.book_id, c.book_id, ac.book_id, gc.book_id, cp.book_id) AS resolved_book_id,
+                   COUNT(*) AS purchases_count
+            FROM purchases p
+            LEFT JOIN chapters c ON c.id=p.chapter_id
+            LEFT JOIN audio_chapters ac ON ac.id=p.audio_chapter_id
+            LEFT JOIN graphic_chapters gc ON gc.id=p.graphic_chapter_id
+            LEFT JOIN chapter_packages cp ON cp.id=p.chapter_package_id
+            WHERE p.user_id=? AND p.status='paid'
+            GROUP BY resolved_book_id
+            """,
+            (int(user_id),),
+        )
+        for row in await cur.fetchall():
+            add_signal(row["resolved_book_id"], 8.0 + min(4.0, float(row["purchases_count"] or 0)))
+
+        cur = await db.execute(
+            "SELECT book_id, rating FROM reviews WHERE user_id=? AND status='published'",
+            (int(user_id),),
+        )
+        for row in await cur.fetchall():
+            rating = max(1, min(5, int(row["rating"] or 3)))
+            add_signal(row["book_id"], float((rating - 3) * 2), mark_seen=True)
+
+        cur = await db.execute(
+            "SELECT book_id FROM recommendation_events WHERE user_id=? AND event_type='dismiss'",
+            (int(user_id),),
+        )
+        dismissed_books = {int(row["book_id"]) for row in await cur.fetchall()}
+
+        all_source_ids = {book_id for book_id, score in source_scores.items() if score != 0}
+        all_option_book_ids = all_source_ids | {int(item["id"]) for item in catalog}
+        options_by_book: dict[int, list[tuple[str, str, str]]] = {}
+        if all_option_book_ids:
+            placeholders = ",".join("?" for _ in all_option_book_ids)
+            cur = await db.execute(
+                f"""
+                SELECT book_id, option_group, option_code, option_label
+                FROM book_option_values
+                WHERE book_id IN ({placeholders})
+                """,
+                tuple(sorted(all_option_book_ids)),
+            )
+            for row in await cur.fetchall():
+                options_by_book.setdefault(int(row["book_id"]), []).append(
+                    (str(row["option_group"]), str(row["option_code"]), str(row["option_label"]))
+                )
+
+        if all_source_ids:
+            placeholders = ",".join("?" for _ in all_source_ids)
+            cur = await db.execute(
+                f"SELECT id, title, author_id FROM books WHERE id IN ({placeholders})",
+                tuple(sorted(all_source_ids)),
+            )
+            for row in await cur.fetchall():
+                book_id = int(row["id"])
+                source_titles[book_id] = str(row["title"] or "")
+                if row["author_id"] is not None:
+                    source_authors[book_id] = int(row["author_id"])
+
+    preference_scores: dict[tuple[str, str], float] = {}
+    for book_id, signal in source_scores.items():
+        for group, code, _label in options_by_book.get(book_id, []):
+            preference_scores[(group, code)] = preference_scores.get((group, code), 0.0) + signal
+        author_id = source_authors.get(book_id)
+        if author_id:
+            author_preferences[author_id] = author_preferences.get(author_id, 0.0) + signal
+
+    positive_profile = any(value > 0.5 for value in preference_scores.values()) or any(
+        value > 0.5 for value in author_preferences.values()
+    )
+    newest_order = {int(item["id"]): index for index, item in enumerate(catalog)}
+    scored: list[dict[str, Any]] = []
+
+    for item in catalog:
+        book_id = int(item.get("id") or 0)
+        if book_id in seen_books or book_id in dismissed_books or book_id in own_books:
+            continue
+
+        score = 0.0
+        matched: list[tuple[float, str, str, str]] = []
+        candidate_options = options_by_book.get(book_id, [])
+        candidate_codes = {(group, code) for group, code, _ in candidate_options}
+        for group, code, label in candidate_options:
+            preference = preference_scores.get((group, code), 0.0)
+            if preference <= 0:
+                continue
+            contribution = min(12.0, preference) * _RECOMMENDATION_OPTION_WEIGHTS.get(group, 0.25)
+            score += contribution
+            matched.append((contribution, group, code, label))
+
+        author_id = int(item.get("author_id") or 0)
+        author_score = max(0.0, author_preferences.get(author_id, 0.0)) if author_id else 0.0
+        if author_score:
+            score += min(7.0, author_score * 0.7)
+
+        rating = float(item.get("rating") or 0)
+        reviews_count = int(item.get("reviews_count") or 0)
+        purchase_count = int(item.get("purchase_count") or 0)
+        if reviews_count >= 2 and rating > 3:
+            score += min(1.8, (rating - 3.0) * 0.9)
+        score += min(0.7, reviews_count * 0.035)
+        score += min(0.7, purchase_count * 0.035)
+        score += max(0.0, 0.8 - newest_order.get(book_id, 1000) * 0.01)
+        if int(item.get("price_stars") or 0) <= 0 or int(item.get("free_chapters_count") or 0) > 0:
+            score += 0.25
+
+        source_match_id = 0
+        source_match_count = 0
+        for source_id, source_signal in source_scores.items():
+            if source_signal <= 0:
+                continue
+            source_codes = {(group, code) for group, code, _ in options_by_book.get(source_id, [])}
+            overlap = len(candidate_codes & source_codes)
+            if overlap > source_match_count:
+                source_match_count = overlap
+                source_match_id = source_id
+
+        matched.sort(reverse=True)
+        if source_match_id and source_match_count >= 2 and source_titles.get(source_match_id):
+            reason = f"Похоже на «{source_titles[source_match_id]}»"
+            basis = "similar_book"
+        elif author_score >= 5.0 and str(item.get("pen_name") or "").strip():
+            reason = f"Новая история автора {str(item.get('pen_name')).strip()}"
+            basis = "author"
+        elif matched:
+            reason = f"Ваш интерес: {matched[0][3]}"
+            basis = matched[0][1]
+        elif rating >= 4.2 and reviews_count >= 2:
+            reason = "Высоко оценено читателями"
+            basis = "quality"
+        elif int(item.get("price_stars") or 0) <= 0 or int(item.get("free_chapters_count") or 0) > 0:
+            reason = "Можно начать бесплатно"
+            basis = "free"
+        else:
+            reason = "Новинка VoxLyra"
+            basis = "new"
+
+        if not positive_profile:
+            # Для нового читателя подборка остаётся полезной, но честно называется стартовой.
+            score = (
+                min(2.0, max(0.0, rating - 3.0))
+                + min(1.0, reviews_count * 0.05)
+                + min(1.0, purchase_count * 0.05)
+                + max(0.0, 1.5 - newest_order.get(book_id, 1000) * 0.02)
+                + (0.35 if int(item.get("price_stars") or 0) <= 0 else 0.0)
+            )
+            if reason.startswith("Ваш интерес") or reason.startswith("Похоже") or reason.startswith("Новая история автора"):
+                reason = "Подборка для первого знакомства"
+                basis = "starter"
+
+        decorated = dict(item)
+        decorated["recommendation_score"] = round(score, 3)
+        decorated["recommendation_reason"] = reason
+        decorated["recommendation_basis"] = basis
+        decorated["recommendation_personalized"] = bool(positive_profile)
+        scored.append(decorated)
+
+    scored.sort(
+        key=lambda item: (
+            float(item.get("recommendation_score") or 0),
+            float(item.get("rating") or 0),
+            int(item.get("id") or 0),
+        ),
+        reverse=True,
+    )
+
+    selected: list[dict[str, Any]] = []
+    per_author: dict[int, int] = {}
+    per_type: dict[str, int] = {}
+    for item in scored:
+        author_id = int(item.get("author_id") or 0)
+        content_type = str(item.get("content_type") or "book")
+        if author_id and per_author.get(author_id, 0) >= 2:
+            continue
+        if per_type.get(content_type, 0) >= max(4, limit // 2 + 1):
+            continue
+        selected.append(item)
+        if author_id:
+            per_author[author_id] = per_author.get(author_id, 0) + 1
+        per_type[content_type] = per_type.get(content_type, 0) + 1
+        if len(selected) >= limit:
+            break
+
+    if len(selected) < limit:
+        selected_ids = {int(item["id"]) for item in selected}
+        for item in scored:
+            if int(item["id"]) in selected_ids:
+                continue
+            selected.append(item)
+            if len(selected) >= limit:
+                break
+    return selected
+
+
 async def get_book_option_codes(book_id: int, option_group: str) -> list[str]:
     async with connect() as db:
         cur = await db.execute(
@@ -1848,8 +2407,10 @@ async def add_manual_chapter(book_id: int, title: str, text: str, is_free: bool 
             """,
             (book_id, number, title, text, 1 if is_free else 0, int(price_stars), now, now),
         )
+        chapter_id = int(cur.lastrowid)
+        await _sync_book_pricing_type_conn(db, int(book_id))
         await db.commit()
-        return int(cur.lastrowid)
+        return chapter_id
 
 
 async def upsert_imported_chapters(
@@ -1904,6 +2465,7 @@ async def upsert_imported_chapters(
                 if inserted:
                     published_ids.append(int(inserted["id"]))
             saved += 1
+        await _sync_book_pricing_type_conn(db, int(book_id))
         await db.commit()
     if return_published_ids:
         return {"saved": saved, "published_ids": published_ids}
@@ -2336,7 +2898,23 @@ async def list_book_notification_recipients(book_id: int, limit: int = 5000) -> 
     async with connect() as db:
         cur = await db.execute(
             """
-            SELECT DISTINCT u.id, u.telegram_id, u.username, u.full_name
+            SELECT DISTINCT u.id, u.telegram_id, u.username, u.full_name,
+                   (
+                       SELECT c.number
+                       FROM reading_progress rp
+                       JOIN chapters c ON c.id=rp.chapter_id
+                       WHERE rp.user_id=u.id AND rp.book_id=?
+                       ORDER BY rp.updated_at DESC, c.number DESC
+                       LIMIT 1
+                   ) AS last_chapter_number,
+                   (
+                       SELECT rp.position_percent
+                       FROM reading_progress rp
+                       WHERE rp.user_id=u.id AND rp.book_id=?
+                       ORDER BY rp.updated_at DESC
+                       LIMIT 1
+                   ) AS last_position_percent,
+                   (SELECT bm.status FROM bookmarks bm WHERE bm.user_id=u.id AND bm.book_id=? LIMIT 1) AS bookmark_status
             FROM users u
             WHERE u.is_blocked=0
               AND u.id != COALESCE((
@@ -2366,7 +2944,7 @@ async def list_book_notification_recipients(book_id: int, limit: int = 5000) -> 
             ORDER BY u.id
             LIMIT ?
             """,
-            (book_id, book_id, book_id, book_id, book_id, book_id, book_id, book_id, book_id, int(limit)),
+            (book_id, book_id, book_id, book_id, book_id, book_id, book_id, book_id, book_id, book_id, book_id, book_id, int(limit)),
         )
         return await cur.fetchall()
 
@@ -2827,38 +3405,236 @@ async def list_reviews_for_book(book_id: int, limit: int = 20) -> list[aiosqlite
         return await cur.fetchall()
 
 
-async def add_comment(user_id: int, chapter_id: int, text: str) -> int:
+COMMENT_REACTION_CODES = {"fire", "heart", "cry", "laugh", "shock", "epic"}
+
+
+async def add_comment(
+    user_id: int,
+    chapter_id: int,
+    text: str,
+    *,
+    parent_id: int | None = None,
+    is_spoiler: bool = False,
+) -> int:
+    """Publish a chapter comment or a one-level reply.
+
+    Replies are always attached to the root comment, so the interface cannot turn
+    into an unreadable chain of deeply nested messages.
+    """
     now = utc_now()
+    clean_text = str(text or "").strip()[:2000]
+    if len(clean_text) < 2:
+        raise ValueError("Comment is too short")
     async with connect() as db:
-        cur = await db.execute("SELECT book_id FROM chapters WHERE id=?", (chapter_id,))
+        cur = await db.execute("SELECT book_id FROM chapters WHERE id=?", (int(chapter_id),))
         chapter = await cur.fetchone()
         if not chapter:
             raise ValueError("Chapter not found")
+
+        root_parent_id: int | None = None
+        if parent_id:
+            cur = await db.execute(
+                "SELECT id, chapter_id, parent_id, status FROM comments WHERE id=?",
+                (int(parent_id),),
+            )
+            parent = await cur.fetchone()
+            if not parent or int(parent["chapter_id"]) != int(chapter_id) or parent["status"] != "published":
+                raise ValueError("Reply target not found")
+            root_parent_id = int(parent["parent_id"] or parent["id"])
+
         cur = await db.execute(
             """
-            INSERT INTO comments(user_id, book_id, chapter_id, text, status, created_at, updated_at)
-            VALUES(?, ?, ?, ?, 'published', ?, ?)
+            INSERT INTO comments(
+                user_id, book_id, chapter_id, text, status, parent_id, is_spoiler, created_at, updated_at
+            )
+            VALUES(?, ?, ?, ?, 'published', ?, ?, ?, ?)
             """,
-            (user_id, int(chapter["book_id"]), chapter_id, text[:2000], now, now),
+            (
+                int(user_id),
+                int(chapter["book_id"]),
+                int(chapter_id),
+                clean_text,
+                root_parent_id,
+                1 if is_spoiler else 0,
+                now,
+                now,
+            ),
         )
         await db.commit()
         return int(cur.lastrowid)
 
 
-async def list_comments_for_chapter(chapter_id: int, limit: int = 50) -> list[aiosqlite.Row]:
+async def list_comments_for_chapter(
+    chapter_id: int,
+    limit: int = 50,
+    viewer_user_id: int | None = None,
+) -> list[aiosqlite.Row]:
+    viewer_id = int(viewer_user_id or 0)
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT c.*, u.username, u.full_name,
+                   (SELECT COUNT(*) FROM comment_likes cl WHERE cl.comment_id=c.id) AS like_count,
+                   CASE WHEN ? > 0 AND EXISTS(
+                       SELECT 1 FROM comment_likes mine
+                       WHERE mine.comment_id=c.id AND mine.user_id=?
+                   ) THEN 1 ELSE 0 END AS viewer_liked,
+                   (SELECT COUNT(*) FROM complaints cp
+                    WHERE cp.target_type='comment' AND cp.target_id=CAST(c.id AS TEXT)
+                      AND cp.status IN ('new', 'pending')) AS report_count
+            FROM comments c
+            JOIN users u ON u.id = c.user_id
+            LEFT JOIN comments parent ON parent.id = c.parent_id
+            WHERE c.chapter_id=? AND c.status='published'
+              AND (c.parent_id IS NULL OR parent.status='published')
+            ORDER BY COALESCE(c.parent_id, c.id) DESC,
+                     CASE WHEN c.parent_id IS NULL THEN 0 ELSE 1 END,
+                     c.id ASC
+            LIMIT ?
+            """,
+            (viewer_id, viewer_id, int(chapter_id), max(1, min(200, int(limit)))),
+        )
+        return await cur.fetchall()
+
+
+async def get_public_comment(comment_id: int) -> aiosqlite.Row | None:
     async with connect() as db:
         cur = await db.execute(
             """
             SELECT c.*, u.username, u.full_name
             FROM comments c
-            JOIN users u ON u.id = c.user_id
-            WHERE c.chapter_id=? AND c.status='published'
-            ORDER BY c.id DESC
-            LIMIT ?
+            JOIN users u ON u.id=c.user_id
+            WHERE c.id=? AND c.status='published'
             """,
-            (chapter_id, limit),
+            (int(comment_id),),
         )
-        return await cur.fetchall()
+        return await cur.fetchone()
+
+
+async def toggle_comment_like(user_id: int, comment_id: int) -> dict[str, Any]:
+    now = utc_now()
+    async with connect() as db:
+        cur = await db.execute("SELECT id FROM comments WHERE id=? AND status='published'", (int(comment_id),))
+        if not await cur.fetchone():
+            raise ValueError("Comment not found")
+        cur = await db.execute(
+            "SELECT id FROM comment_likes WHERE comment_id=? AND user_id=?",
+            (int(comment_id), int(user_id)),
+        )
+        existing = await cur.fetchone()
+        liked = existing is None
+        if liked:
+            await db.execute(
+                "INSERT INTO comment_likes(comment_id, user_id, created_at) VALUES(?, ?, ?)",
+                (int(comment_id), int(user_id), now),
+            )
+        else:
+            await db.execute("DELETE FROM comment_likes WHERE id=?", (int(existing["id"]),))
+        cur = await db.execute("SELECT COUNT(*) AS cnt FROM comment_likes WHERE comment_id=?", (int(comment_id),))
+        count_row = await cur.fetchone()
+        await db.commit()
+        return {"liked": liked, "like_count": int(count_row["cnt"] or 0)}
+
+
+async def list_chapter_reactions(chapter_id: int, viewer_user_id: int | None = None) -> dict[str, Any]:
+    counts = {code: 0 for code in sorted(COMMENT_REACTION_CODES)}
+    selected: str | None = None
+    async with connect() as db:
+        cur = await db.execute(
+            "SELECT reaction_code, COUNT(*) AS cnt FROM chapter_reactions WHERE chapter_id=? GROUP BY reaction_code",
+            (int(chapter_id),),
+        )
+        for row in await cur.fetchall():
+            code = str(row["reaction_code"] or "")
+            if code in counts:
+                counts[code] = int(row["cnt"] or 0)
+        if viewer_user_id:
+            cur = await db.execute(
+                "SELECT reaction_code FROM chapter_reactions WHERE chapter_id=? AND user_id=?",
+                (int(chapter_id), int(viewer_user_id)),
+            )
+            row = await cur.fetchone()
+            if row and str(row["reaction_code"] or "") in COMMENT_REACTION_CODES:
+                selected = str(row["reaction_code"])
+    return {"counts": counts, "selected": selected}
+
+
+async def set_chapter_reaction(user_id: int, chapter_id: int, reaction_code: str) -> dict[str, Any]:
+    code = str(reaction_code or "").strip().lower()
+    if code not in COMMENT_REACTION_CODES:
+        raise ValueError("Unknown reaction")
+    now = utc_now()
+    async with connect() as db:
+        cur = await db.execute("SELECT reaction_code FROM chapter_reactions WHERE chapter_id=? AND user_id=?", (int(chapter_id), int(user_id)))
+        existing = await cur.fetchone()
+        if existing and str(existing["reaction_code"]) == code:
+            await db.execute("DELETE FROM chapter_reactions WHERE chapter_id=? AND user_id=?", (int(chapter_id), int(user_id)))
+        else:
+            await db.execute(
+                """
+                INSERT INTO chapter_reactions(chapter_id, user_id, reaction_code, created_at, updated_at)
+                VALUES(?, ?, ?, ?, ?)
+                ON CONFLICT(chapter_id, user_id) DO UPDATE SET
+                    reaction_code=excluded.reaction_code, updated_at=excluded.updated_at
+                """,
+                (int(chapter_id), int(user_id), code, now, now),
+            )
+        await db.commit()
+    return await list_chapter_reactions(int(chapter_id), int(user_id))
+
+
+async def report_comment(user_id: int, comment_id: int, reason: str) -> dict[str, Any]:
+    clean_reason = str(reason or "").strip()[:1200]
+    if len(clean_reason) < 3:
+        raise ValueError("Report reason is too short")
+    now = utc_now()
+    async with connect() as db:
+        cur = await db.execute(
+            "SELECT id, user_id, chapter_id FROM comments WHERE id=? AND status='published'",
+            (int(comment_id),),
+        )
+        comment = await cur.fetchone()
+        if not comment:
+            raise ValueError("Comment not found")
+        if int(comment["user_id"]) == int(user_id):
+            raise ValueError("Cannot report own comment")
+        cur = await db.execute(
+            """
+            SELECT id FROM complaints
+            WHERE user_id=? AND target_type='comment' AND target_id=?
+              AND status IN ('new', 'pending')
+            ORDER BY id DESC LIMIT 1
+            """,
+            (int(user_id), str(int(comment_id))),
+        )
+        existing = await cur.fetchone()
+        if existing:
+            return {"complaint_id": int(existing["id"]), "created": False}
+        cur = await db.execute(
+            """
+            INSERT INTO complaints(user_id, target_type, target_id, reason, status, created_at, updated_at)
+            VALUES(?, 'comment', ?, ?, 'new', ?, ?)
+            """,
+            (int(user_id), str(int(comment_id)), clean_reason, now, now),
+        )
+        await db.commit()
+        return {"complaint_id": int(cur.lastrowid), "created": True}
+
+
+async def resolve_comment_complaints(comment_id: int, handled_by_user_id: int | None = None) -> int:
+    """Close all active reports after the comment has been reviewed or hidden."""
+    now = utc_now()
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            UPDATE complaints
+            SET status='closed', handled_by_user_id=?, updated_at=?
+            WHERE target_type='comment' AND target_id=? AND status IN ('new', 'pending')
+            """,
+            (handled_by_user_id, now, str(int(comment_id))),
+        )
+        await db.commit()
+        return int(cur.rowcount or 0)
 
 
 async def user_can_access_chapter(user_id: int, chapter_id: int) -> bool:
@@ -3154,13 +3930,17 @@ async def list_moderation_comments(limit: int = 20) -> list[aiosqlite.Row]:
         cur = await db.execute(
             """
             SELECT c.*, u.telegram_id, u.username, u.full_name,
-                   b.title AS book_title, ch.title AS chapter_title
+                   b.title AS book_title, ch.title AS chapter_title,
+                   (SELECT COUNT(*) FROM comment_likes cl WHERE cl.comment_id=c.id) AS like_count,
+                   (SELECT COUNT(*) FROM complaints cp
+                    WHERE cp.target_type='comment' AND cp.target_id=CAST(c.id AS TEXT)
+                      AND cp.status IN ('new', 'pending')) AS report_count
             FROM comments c
             JOIN users u ON u.id = c.user_id
             JOIN books b ON b.id = c.book_id
             JOIN chapters ch ON ch.id = c.chapter_id
             WHERE c.status='published'
-            ORDER BY c.id DESC
+            ORDER BY report_count DESC, c.id DESC
             LIMIT ?
             """,
             (limit,),
@@ -3249,7 +4029,11 @@ async def get_comment_for_moderation(comment_id: int) -> aiosqlite.Row | None:
         cur = await db.execute(
             """
             SELECT c.*, u.telegram_id, u.username, u.full_name,
-                   b.title AS book_title, ch.title AS chapter_title
+                   b.title AS book_title, ch.title AS chapter_title,
+                   (SELECT COUNT(*) FROM comment_likes cl WHERE cl.comment_id=c.id) AS like_count,
+                   (SELECT COUNT(*) FROM complaints cp
+                    WHERE cp.target_type='comment' AND cp.target_id=CAST(c.id AS TEXT)
+                      AND cp.status IN ('new', 'pending')) AS report_count
             FROM comments c
             JOIN users u ON u.id = c.user_id
             JOIN books b ON b.id = c.book_id
@@ -4195,6 +4979,8 @@ DEFAULT_USER_PREFERENCES = {
     "notifications_chapters": "1",
     "notifications_audio": "1",
     "notifications_discounts": "1",
+    "notifications_reminders": "1",
+    "notifications_achievements": "1",
 }
 
 
@@ -4203,7 +4989,8 @@ async def get_user_preferences(user_id: int) -> dict[str, str]:
         cur = await db.execute(
             """
             SELECT theme, font_size, notifications, notifications_chapters,
-                   notifications_audio, notifications_discounts
+                   notifications_audio, notifications_discounts,
+                   notifications_reminders, notifications_achievements
             FROM user_preferences WHERE user_id=?
             """,
             (user_id,),
@@ -4224,9 +5011,10 @@ async def set_user_preference(user_id: int, key: str, value: str) -> dict[str, s
             """
             INSERT INTO user_preferences(
                 user_id, theme, font_size, notifications, notifications_chapters,
-                notifications_audio, notifications_discounts, updated_at
+                notifications_audio, notifications_discounts, notifications_reminders,
+                notifications_achievements, updated_at
             )
-            VALUES(?, 'system', 'normal', 1, 1, 1, 1, ?)
+            VALUES(?, 'system', 'normal', 1, 1, 1, 1, 1, 1, ?)
             ON CONFLICT(user_id) DO NOTHING
             """,
             (user_id, now),
@@ -6833,6 +7621,7 @@ async def list_chapter_packages_for_book(
         cur = await db.execute(
             f"""
             SELECT cp.*, b.title AS book_title, b.content_type, b.publication_status,
+                   b.price_stars AS book_price_stars, b.pricing_type,
                    ap.id AS author_id, ap.user_id AS author_user_id,
                    CASE WHEN cp.chapters_count>0
                         THEN CAST(cp.price_stars AS REAL)/cp.chapters_count ELSE 0 END AS stars_per_chapter
@@ -8392,3 +9181,1633 @@ async def get_graphic_chapter_statistics(graphic_chapter_id: int) -> dict[str, i
         )
         row = await cur.fetchone()
         return {key: int(row[key] or 0) for key in row.keys()} if row else {}
+
+
+# --- v1.11.0: независимая цена всей книги и отдельных текстовых глав ---
+async def _sync_book_pricing_type_conn(db: aiosqlite.Connection, book_id: int) -> str:
+    cur = await db.execute(
+        "SELECT price_stars FROM books WHERE id=? AND publication_status!='deleted'",
+        (int(book_id),),
+    )
+    book = await cur.fetchone()
+    if not book:
+        return "free"
+    cur = await db.execute(
+        "SELECT COUNT(*) AS paid_count FROM chapters WHERE book_id=? AND status!='deleted' AND is_free=0 AND price_stars>0",
+        (int(book_id),),
+    )
+    row = await cur.fetchone()
+    has_paid_chapters = bool(row and int(row["paid_count"] or 0) > 0)
+    mode = "whole_book" if int(book["price_stars"] or 0) > 0 else ("chapters" if has_paid_chapters else "free")
+    await db.execute(
+        "UPDATE books SET pricing_type=?, updated_at=? WHERE id=?",
+        (mode, utc_now(), int(book_id)),
+    )
+    return mode
+
+
+async def sync_book_pricing_type(book_id: int) -> str:
+    async with connect() as db:
+        mode = await _sync_book_pricing_type_conn(db, int(book_id))
+        await db.commit()
+        return mode
+
+
+async def update_book_price(book_id: int, author_user_id: int, pricing_type: str, price_stars: int) -> bool:
+    """Меняет только предложение "вся книга"; цены глав сохраняются."""
+    price = max(0, min(100000, int(price_stars or 0)))
+    now = utc_now()
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            UPDATE books
+            SET price_stars=?, publication_status=CASE WHEN publication_status='published' THEN 'review' ELSE publication_status END, updated_at=?
+            WHERE id=? AND publication_status!='deleted'
+              AND author_id=(SELECT id FROM author_profiles WHERE user_id=?)
+            """,
+            (price, now, int(book_id), int(author_user_id)),
+        )
+        changed = cur.rowcount > 0
+        if changed:
+            await _sync_book_pricing_type_conn(db, int(book_id))
+        await db.commit()
+        return changed
+
+
+async def update_chapter_price(chapter_id: int, author_user_id: int, is_free: bool, price_stars: int) -> bool:
+    """Меняет цену одной главы; цену всей книги не затрагивает."""
+    price = 0 if bool(is_free) else max(1, min(100000, int(price_stars or 0)))
+    now = utc_now()
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT c.book_id FROM chapters c
+            JOIN books b ON b.id=c.book_id
+            JOIN author_profiles a ON a.id=b.author_id
+            WHERE c.id=? AND c.status!='deleted' AND a.user_id=?
+            """,
+            (int(chapter_id), int(author_user_id)),
+        )
+        row = await cur.fetchone()
+        if not row:
+            return False
+        book_id = int(row["book_id"])
+        cur = await db.execute(
+            "UPDATE chapters SET is_free=?, price_stars=?, updated_at=? WHERE id=? AND status!='deleted'",
+            (1 if price == 0 else 0, price, now, int(chapter_id)),
+        )
+        changed = cur.rowcount > 0
+        if changed:
+            await _sync_book_pricing_type_conn(db, book_id)
+        await db.commit()
+        return changed
+
+
+async def update_chapter_price_range(
+    book_id: int, author_user_id: int, start_number: int, end_number: int, price_stars: int
+) -> dict[str, int | bool]:
+    """Назначает цену одной главе или диапазону по номеру включительно.
+
+    price_stars=0 делает главы бесплатными. Цена всей книги не меняется.
+    """
+    start = max(1, int(start_number))
+    end = max(1, int(end_number))
+    if start > end:
+        start, end = end, start
+    if end - start > 100000:
+        raise ValueError("Диапазон слишком большой")
+    price = max(0, min(100000, int(price_stars or 0)))
+    now = utc_now()
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT b.id FROM books b JOIN author_profiles a ON a.id=b.author_id
+            WHERE b.id=? AND b.publication_status!='deleted' AND a.user_id=?
+            """,
+            (int(book_id), int(author_user_id)),
+        )
+        if not await cur.fetchone():
+            return {"ok": False, "updated": 0, "start_number": start, "end_number": end, "price_stars": price}
+        cur = await db.execute(
+            """
+            UPDATE chapters SET is_free=?, price_stars=?, updated_at=?
+            WHERE book_id=? AND status!='deleted' AND number BETWEEN ? AND ?
+            """,
+            (1 if price == 0 else 0, price, now, int(book_id), start, end),
+        )
+        updated = int(cur.rowcount or 0)
+        if updated:
+            await _sync_book_pricing_type_conn(db, int(book_id))
+            await db.execute(
+                "UPDATE books SET publication_status=CASE WHEN publication_status='published' THEN 'review' ELSE publication_status END, updated_at=? WHERE id=?",
+                (now, int(book_id)),
+            )
+        await db.commit()
+        return {"ok": bool(updated), "updated": updated, "start_number": start, "end_number": end, "price_stars": price}
+
+# --- v1.11.0: строгие режимы продажи книги и текстовых глав ---
+# free       — вся книга и все текстовые главы бесплатны;
+# whole_book — продаётся только вся книга, отдельные главы не продаются;
+# chapters   — вся книга продаётся целиком, а выбранные главы можно купить отдельно.
+
+
+def _normalize_text_pricing_mode(price_stars: int, requested_mode: str | None) -> str:
+    price = max(0, int(price_stars or 0))
+    if price <= 0:
+        return "free"
+    return "chapters" if str(requested_mode or "").strip() == "chapters" else "whole_book"
+
+
+async def _sync_book_pricing_type_conn(db: aiosqlite.Connection, book_id: int) -> str:
+    """Нормализует режим, не выводя его из случайных цен глав.
+
+    Режим выбирает автор явно. Нулевая цена всегда означает полностью
+    бесплатную книгу; при положительной цене допустимы только whole_book и chapters.
+    """
+    cur = await db.execute(
+        "SELECT price_stars, pricing_type FROM books WHERE id=? AND publication_status!='deleted'",
+        (int(book_id),),
+    )
+    book = await cur.fetchone()
+    if not book:
+        return "free"
+    mode = _normalize_text_pricing_mode(int(book["price_stars"] or 0), str(book["pricing_type"] or ""))
+    if mode != str(book["pricing_type"] or ""):
+        await db.execute(
+            "UPDATE books SET pricing_type=?, updated_at=? WHERE id=?",
+            (mode, utc_now(), int(book_id)),
+        )
+    return mode
+
+
+async def sync_book_pricing_type(book_id: int) -> str:
+    async with connect() as db:
+        mode = await _sync_book_pricing_type_conn(db, int(book_id))
+        await db.commit()
+        return mode
+
+
+async def get_book_pricing_state(book_id: int) -> dict[str, Any]:
+    async with connect() as db:
+        cur = await db.execute(
+            "SELECT id, price_stars, pricing_type FROM books WHERE id=? AND publication_status!='deleted'",
+            (int(book_id),),
+        )
+        book = await cur.fetchone()
+        if not book:
+            return {"exists": False, "mode": "free", "price_stars": 0, "saved_prices_count": 0}
+        mode = _normalize_text_pricing_mode(int(book["price_stars"] or 0), str(book["pricing_type"] or ""))
+        cur = await db.execute(
+            "SELECT COUNT(*) AS count FROM chapters WHERE book_id=? AND status!='deleted' "
+            "AND COALESCE(saved_price_stars, 0)>0",
+            (int(book_id),),
+        )
+        row = await cur.fetchone()
+        return {
+            "exists": True,
+            "mode": mode,
+            "price_stars": int(book["price_stars"] or 0),
+            "saved_prices_count": int(row["count"] or 0) if row else 0,
+        }
+
+
+async def update_book_price(
+    book_id: int,
+    author_user_id: int,
+    pricing_type: str,
+    price_stars: int,
+    *,
+    restore_saved_prices: bool = False,
+) -> bool:
+    """Меняет единый режим продажи книги и приводит главы к непротиворечивому виду.
+
+    * 0 Stars -> free: все главы становятся бесплатными, продажа глав отключается;
+    * whole_book -> отдельные цены глав отключаются, закрытые главы доступны после
+      покупки всей книги;
+    * chapters -> отдельные цены разрешены, но старые черновые цены восстанавливаются
+      только по явному запросу restore_saved_prices=True.
+    """
+    price = max(0, min(100000, int(price_stars or 0)))
+    mode = _normalize_text_pricing_mode(price, pricing_type)
+    now = utc_now()
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT b.id, b.price_stars, b.pricing_type
+            FROM books b JOIN author_profiles a ON a.id=b.author_id
+            WHERE b.id=? AND b.publication_status!='deleted' AND a.user_id=?
+            """,
+            (int(book_id), int(author_user_id)),
+        )
+        old = await cur.fetchone()
+        if not old:
+            return False
+
+        if mode in {"free", "whole_book"}:
+            # Сохраняем действующие настройки перед их отключением.
+            await db.execute(
+                """
+                UPDATE chapters
+                SET saved_is_free=CASE
+                        WHEN is_free=0 OR price_stars>0 THEN is_free
+                        ELSE saved_is_free
+                    END,
+                    saved_price_stars=CASE
+                        WHEN price_stars>0 THEN price_stars
+                        ELSE saved_price_stars
+                    END
+                WHERE book_id=? AND status!='deleted'
+                """,
+                (int(book_id),),
+            )
+
+        if mode == "free":
+            await db.execute(
+                "UPDATE chapters SET is_free=1, price_stars=0, updated_at=? "
+                "WHERE book_id=? AND status!='deleted'",
+                (now, int(book_id)),
+            )
+            # Пакеты текстовых глав бессмысленны у полностью бесплатной книги.
+            await db.execute(
+                "UPDATE chapter_packages SET is_active=0, updated_at=? "
+                "WHERE book_id=? AND content_scope IN ('text','all')",
+                (now, int(book_id)),
+            )
+        elif mode == "whole_book":
+            # Бесплатные ознакомительные главы сохраняются, остальные открываются
+            # только покупкой всей книги. Отдельная цена у главы не отображается.
+            await db.execute(
+                "UPDATE chapters SET price_stars=0, updated_at=? "
+                "WHERE book_id=? AND status!='deleted'",
+                (now, int(book_id)),
+            )
+            await db.execute(
+                "UPDATE chapter_packages SET is_active=0, updated_at=? "
+                "WHERE book_id=? AND content_scope IN ('text','all')",
+                (now, int(book_id)),
+            )
+        elif restore_saved_prices:
+            await db.execute(
+                """
+                UPDATE chapters
+                SET is_free=CASE
+                        WHEN COALESCE(saved_price_stars, 0)>0 THEN 0
+                        WHEN saved_is_free IS NOT NULL THEN saved_is_free
+                        ELSE is_free
+                    END,
+                    price_stars=CASE
+                        WHEN COALESCE(saved_price_stars, 0)>0 THEN saved_price_stars
+                        ELSE 0
+                    END,
+                    updated_at=?
+                WHERE book_id=? AND status!='deleted'
+                  AND (saved_is_free IS NOT NULL OR saved_price_stars IS NOT NULL)
+                """,
+                (now, int(book_id)),
+            )
+
+        cur = await db.execute(
+            """
+            UPDATE books
+            SET pricing_type=?, price_stars=?,
+                publication_status=CASE WHEN publication_status='published' THEN 'review' ELSE publication_status END,
+                updated_at=?
+            WHERE id=?
+            """,
+            (mode, price, now, int(book_id)),
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def restore_saved_chapter_prices(book_id: int, author_user_id: int) -> dict[str, Any]:
+    """Явно восстанавливает сохранённые цены только в режиме продажи по главам."""
+    now = utc_now()
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT b.pricing_type, b.price_stars
+            FROM books b JOIN author_profiles a ON a.id=b.author_id
+            WHERE b.id=? AND b.publication_status!='deleted' AND a.user_id=?
+            """,
+            (int(book_id), int(author_user_id)),
+        )
+        book = await cur.fetchone()
+        if not book:
+            return {"ok": False, "updated": 0, "reason": "not_found"}
+        mode = _normalize_text_pricing_mode(int(book["price_stars"] or 0), str(book["pricing_type"] or ""))
+        if mode != "chapters":
+            return {"ok": False, "updated": 0, "reason": "chapter_sales_disabled"}
+        cur = await db.execute(
+            """
+            UPDATE chapters
+            SET is_free=CASE
+                    WHEN COALESCE(saved_price_stars, 0)>0 THEN 0
+                    WHEN saved_is_free IS NOT NULL THEN saved_is_free
+                    ELSE is_free
+                END,
+                price_stars=CASE
+                    WHEN COALESCE(saved_price_stars, 0)>0 THEN saved_price_stars
+                    ELSE 0
+                END,
+                updated_at=?
+            WHERE book_id=? AND status!='deleted'
+              AND (saved_is_free IS NOT NULL OR saved_price_stars IS NOT NULL)
+            """,
+            (now, int(book_id)),
+        )
+        updated = int(cur.rowcount or 0)
+        if updated:
+            await db.execute(
+                "UPDATE books SET publication_status=CASE WHEN publication_status='published' THEN 'review' ELSE publication_status END, updated_at=? WHERE id=?",
+                (now, int(book_id)),
+            )
+        await db.commit()
+        return {"ok": True, "updated": updated, "reason": ""}
+
+
+async def update_chapter_access_range(
+    book_id: int,
+    author_user_id: int,
+    start_number: int,
+    end_number: int,
+    access_mode: str,
+    price_stars: int = 0,
+) -> dict[str, Any]:
+    """Меняет доступ одной главы или диапазона в рамках режима книги.
+
+    access_mode:
+      free    — бесплатная ознакомительная глава;
+      book    — доступ только после покупки всей книги;
+      chapter — отдельная покупка главы (только при pricing_type='chapters').
+    """
+    start = max(1, int(start_number))
+    end = max(1, int(end_number))
+    if start > end:
+        start, end = end, start
+    if end - start > 100000:
+        raise ValueError("Диапазон слишком большой")
+    access = str(access_mode or "").strip().lower()
+    if access not in {"free", "book", "chapter"}:
+        raise ValueError("Неизвестный режим доступа")
+    price = max(0, min(100000, int(price_stars or 0)))
+    now = utc_now()
+
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT b.id, b.price_stars, b.pricing_type
+            FROM books b JOIN author_profiles a ON a.id=b.author_id
+            WHERE b.id=? AND b.publication_status!='deleted' AND a.user_id=?
+            """,
+            (int(book_id), int(author_user_id)),
+        )
+        book = await cur.fetchone()
+        if not book:
+            return {"ok": False, "updated": 0, "reason": "not_found", "start_number": start, "end_number": end}
+        mode = _normalize_text_pricing_mode(int(book["price_stars"] or 0), str(book["pricing_type"] or ""))
+        if mode == "free":
+            return {"ok": False, "updated": 0, "reason": "book_is_free", "start_number": start, "end_number": end}
+        if access == "chapter" and mode != "chapters":
+            return {"ok": False, "updated": 0, "reason": "chapter_sales_disabled", "start_number": start, "end_number": end}
+        if access == "chapter" and price <= 0:
+            return {"ok": False, "updated": 0, "reason": "price_required", "start_number": start, "end_number": end}
+
+        is_free = 1 if access == "free" else 0
+        active_price = price if access == "chapter" else 0
+        cur = await db.execute(
+            """
+            UPDATE chapters
+            SET saved_is_free=CASE
+                    WHEN ?='chapter' THEN 0
+                    WHEN ?='free' AND (price_stars>0 OR is_free=0) THEN COALESCE(saved_is_free, is_free)
+                    ELSE saved_is_free
+                END,
+                saved_price_stars=CASE
+                    WHEN ?='chapter' THEN ?
+                    WHEN price_stars>0 THEN price_stars
+                    ELSE saved_price_stars
+                END,
+                is_free=?, price_stars=?, updated_at=?
+            WHERE book_id=? AND status!='deleted' AND number BETWEEN ? AND ?
+            """,
+            (access, access, access, active_price, is_free, active_price, now, int(book_id), start, end),
+        )
+        updated = int(cur.rowcount or 0)
+        if updated:
+            await db.execute(
+                "UPDATE books SET publication_status=CASE WHEN publication_status='published' THEN 'review' ELSE publication_status END, updated_at=? WHERE id=?",
+                (now, int(book_id)),
+            )
+        await db.commit()
+        return {
+            "ok": bool(updated),
+            "updated": updated,
+            "reason": "" if updated else "chapters_not_found",
+            "mode": mode,
+            "access_mode": access,
+            "price_stars": active_price,
+            "start_number": start,
+            "end_number": end,
+        }
+
+
+async def update_chapter_price(chapter_id: int, author_user_id: int, is_free: bool, price_stars: int) -> bool:
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT c.book_id, c.number
+            FROM chapters c JOIN books b ON b.id=c.book_id JOIN author_profiles a ON a.id=b.author_id
+            WHERE c.id=? AND c.status!='deleted' AND a.user_id=?
+            """,
+            (int(chapter_id), int(author_user_id)),
+        )
+        row = await cur.fetchone()
+    if not row:
+        return False
+    access = "free" if bool(is_free) or int(price_stars or 0) <= 0 else "chapter"
+    result = await update_chapter_access_range(
+        int(row["book_id"]), int(author_user_id), int(row["number"]), int(row["number"]), access, int(price_stars or 0)
+    )
+    return bool(result.get("updated"))
+
+
+async def update_chapter_price_range(
+    book_id: int, author_user_id: int, start_number: int, end_number: int, price_stars: int
+) -> dict[str, Any]:
+    """Совместимый интерфейс: 0 делает главы бесплатными, цена >0 продаёт отдельно."""
+    price = max(0, min(100000, int(price_stars or 0)))
+    return await update_chapter_access_range(
+        int(book_id), int(author_user_id), int(start_number), int(end_number),
+        "free" if price <= 0 else "chapter", price,
+    )
+
+
+async def add_manual_chapter(book_id: int, title: str, text: str, is_free: bool = True, price_stars: int = 0) -> int:
+    """Добавляет главу, принудительно соблюдая выбранный режим продажи книги."""
+    now = utc_now()
+    async with connect() as db:
+        cur = await db.execute(
+            "SELECT price_stars, pricing_type FROM books WHERE id=? AND publication_status!='deleted'",
+            (int(book_id),),
+        )
+        book = await cur.fetchone()
+        if not book:
+            raise ValueError("Book not found")
+        mode = _normalize_text_pricing_mode(int(book["price_stars"] or 0), str(book["pricing_type"] or ""))
+        requested_price = max(0, min(100000, int(price_stars or 0)))
+        if mode == "free":
+            chapter_free, chapter_price = 1, 0
+        elif mode == "whole_book":
+            chapter_free, chapter_price = (1 if bool(is_free) else 0), 0
+        else:
+            chapter_free = 1 if bool(is_free) or requested_price <= 0 else 0
+            chapter_price = 0 if chapter_free else requested_price
+
+        cur = await db.execute(
+            "SELECT COALESCE(MAX(number), 0) + 1 AS next_number FROM chapters WHERE book_id=? AND status!='deleted'",
+            (int(book_id),),
+        )
+        row = await cur.fetchone()
+        number = int(row["next_number"] if row else 1)
+        cur = await db.execute(
+            """
+            INSERT INTO chapters(book_id, number, title, text, is_free, price_stars,
+                                 saved_is_free, saved_price_stars, status, created_at, updated_at)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?)
+            """,
+            (
+                int(book_id), number, str(title)[:160], str(text), chapter_free, chapter_price,
+                chapter_free if chapter_price > 0 else None,
+                chapter_price if chapter_price > 0 else None,
+                now, now,
+            ),
+        )
+        chapter_id = int(cur.lastrowid)
+        await db.commit()
+        return chapter_id
+
+
+async def upsert_imported_chapters(
+    book_id: int,
+    chapters: list[Any],
+    first_free: int = 3,
+    default_price_stars: int = 0,
+    *,
+    return_published_ids: bool = False,
+) -> int | dict[str, Any]:
+    """Импортирует главы с учётом режима книги.
+
+    Бесплатная книга игнорирует ценовые параметры и открывает всё. У платной книги
+    первые first_free глав являются ознакомительными, остальные доступны по книге;
+    в режиме chapters ненулевая default_price_stars может сразу включить продажу отдельно.
+    """
+    now = utc_now()
+    saved = 0
+    published_ids: list[int] = []
+    async with connect() as db:
+        cur = await db.execute(
+            "SELECT publication_status, price_stars, pricing_type FROM books WHERE id=?",
+            (int(book_id),),
+        )
+        book = await cur.fetchone()
+        if not book:
+            raise ValueError("Book not found")
+        target_status = "published" if book["publication_status"] == "published" else "draft"
+        mode = _normalize_text_pricing_mode(int(book["price_stars"] or 0), str(book["pricing_type"] or ""))
+        preview_count = max(0, int(first_free or 0))
+        default_price = max(0, min(100000, int(default_price_stars or 0)))
+        for chapter in chapters:
+            if isinstance(chapter, dict):
+                number = int(chapter["number"]); title = str(chapter["title"])[:160]; text = str(chapter["text"])
+            else:
+                number = int(chapter.number); title = str(chapter.title)[:160]; text = str(chapter.text)
+
+            if mode == "free":
+                chapter_free, chapter_price = 1, 0
+            else:
+                chapter_free = 1 if number <= preview_count else 0
+                chapter_price = default_price if mode == "chapters" and not chapter_free and default_price > 0 else 0
+
+            cur = await db.execute("SELECT id FROM chapters WHERE book_id=? AND number=?", (int(book_id), number))
+            existing = await cur.fetchone()
+            await db.execute(
+                """
+                INSERT INTO chapters(book_id, number, title, text, is_free, price_stars,
+                                     saved_is_free, saved_price_stars, status, created_at, updated_at)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(book_id, number) DO UPDATE SET
+                    title=excluded.title,
+                    text=excluded.text,
+                    is_free=excluded.is_free,
+                    price_stars=excluded.price_stars,
+                    saved_is_free=CASE
+                        WHEN chapters.price_stars>0 THEN chapters.is_free
+                        ELSE chapters.saved_is_free
+                    END,
+                    saved_price_stars=CASE
+                        WHEN chapters.price_stars>0 THEN chapters.price_stars
+                        ELSE chapters.saved_price_stars
+                    END,
+                    status=CASE WHEN chapters.status='published' THEN 'published' ELSE excluded.status END,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    int(book_id), number, title, text, chapter_free, chapter_price,
+                    chapter_free if chapter_price > 0 else None,
+                    chapter_price if chapter_price > 0 else None,
+                    target_status, now, now,
+                ),
+            )
+            if existing is None and target_status == "published":
+                cur = await db.execute("SELECT id FROM chapters WHERE book_id=? AND number=?", (int(book_id), number))
+                inserted = await cur.fetchone()
+                if inserted:
+                    published_ids.append(int(inserted["id"]))
+            saved += 1
+        await db.commit()
+    if return_published_ids:
+        return {"saved": saved, "published_ids": published_ids}
+    return saved
+
+
+async def get_book_assistant_cache(chapter_id: int, digest: str) -> dict[str, Any] | None:
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT chapter_id, text_digest, summary, characters_json, terms_json, updated_at
+            FROM book_assistant_cache
+            WHERE chapter_id=? AND text_digest=?
+            """,
+            (int(chapter_id), str(digest)),
+        )
+        row = await cur.fetchone()
+        if not row:
+            return None
+        try:
+            characters = json.loads(str(row["characters_json"] or "[]"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            characters = []
+        try:
+            terms = json.loads(str(row["terms_json"] or "[]"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            terms = []
+        return {
+            "chapter_id": int(row["chapter_id"]),
+            "digest": str(row["text_digest"]),
+            "summary": str(row["summary"] or ""),
+            "characters": characters if isinstance(characters, list) else [],
+            "terms": terms if isinstance(terms, list) else [],
+            "updated_at": str(row["updated_at"] or ""),
+        }
+
+
+async def save_book_assistant_cache(
+    chapter_id: int,
+    digest: str,
+    summary: str,
+    characters: list[dict[str, Any]],
+    terms: list[dict[str, Any]],
+) -> None:
+    now = utc_now()
+    async with connect() as db:
+        await db.execute(
+            """
+            INSERT INTO book_assistant_cache(
+                chapter_id, text_digest, summary, characters_json, terms_json, created_at, updated_at
+            ) VALUES(?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(chapter_id) DO UPDATE SET
+                text_digest=excluded.text_digest,
+                summary=excluded.summary,
+                characters_json=excluded.characters_json,
+                terms_json=excluded.terms_json,
+                updated_at=excluded.updated_at
+            """,
+            (
+                int(chapter_id),
+                str(digest),
+                str(summary or "")[:4000],
+                json.dumps(characters or [], ensure_ascii=False),
+                json.dumps(terms or [], ensure_ascii=False),
+                now,
+                now,
+            ),
+        )
+        await db.commit()
+
+
+async def list_book_assistant_chapters(
+    book_id: int,
+    max_number: int,
+    *,
+    limit: int = 24,
+) -> list[aiosqlite.Row]:
+    """Последние опубликованные текстовые главы до установленной границы спойлеров."""
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT id, book_id, number, title, text, is_free, price_stars, status
+            FROM chapters
+            WHERE book_id=? AND status='published' AND number<=?
+            ORDER BY number DESC, id DESC
+            LIMIT ?
+            """,
+            (int(book_id), max(1, int(max_number)), max(1, min(120, int(limit)))),
+        )
+        rows = list(await cur.fetchall())
+        rows.reverse()
+        return rows
+
+
+async def search_book_assistant_chapters(
+    book_id: int,
+    max_number: int,
+    keywords: list[str],
+    *,
+    limit: int = 30,
+) -> list[aiosqlite.Row]:
+    """Ищет главы по словам вопроса, никогда не выходя за номер текущей главы."""
+    clean: list[str] = []
+    for raw in keywords:
+        value = str(raw or "").strip()[:60]
+        if len(value) < 2:
+            continue
+        for variant in (value, value.lower(), value.capitalize(), value.upper()):
+            if variant not in clean:
+                clean.append(variant)
+        if len(clean) >= 24:
+            break
+    if not clean:
+        return await list_book_assistant_chapters(book_id, max_number, limit=min(24, limit))
+    clauses = []
+    params: list[Any] = [int(book_id), max(1, int(max_number))]
+    for value in clean:
+        clauses.append("(instr(c.text, ?) > 0 OR instr(c.title, ?) > 0)")
+        params.extend((value, value))
+    params.append(max(1, min(80, int(limit))))
+    async with connect() as db:
+        cur = await db.execute(
+            f"""
+            SELECT c.id, c.book_id, c.number, c.title, c.text, c.is_free, c.price_stars, c.status
+            FROM chapters c
+            WHERE c.book_id=? AND c.status='published' AND c.number<=?
+              AND ({' OR '.join(clauses)})
+            ORDER BY c.number DESC, c.id DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        )
+        rows = list(await cur.fetchall())
+        rows.reverse()
+        return rows
+
+
+async def user_can_access_chapter(user_id: int, chapter_id: int) -> bool:
+    chapter = await get_chapter(chapter_id)
+    if not chapter:
+        return False
+    mode = _normalize_text_pricing_mode(
+        int(chapter["book_price_stars"] or 0), str(chapter["pricing_type"] or "")
+    )
+    if mode == "free" or int(chapter["is_free"] or 0) == 1:
+        return True
+    return await has_purchase_access(int(user_id), chapter_id=int(chapter_id))
+
+
+_previous_get_purchase_target_v1110 = get_purchase_target
+
+
+async def get_purchase_target(payload: str) -> dict[str, Any] | None:
+    target = await _previous_get_purchase_target_v1110(payload)
+    parts = str(payload or "").split(":")
+    if target and len(parts) >= 3 and parts[0] == "vox" and parts[1] == "chapter":
+        try:
+            chapter = await get_chapter(int(parts[2]))
+        except (TypeError, ValueError):
+            return None
+        if not chapter:
+            return None
+        mode = _normalize_text_pricing_mode(
+            int(chapter["book_price_stars"] or 0), str(chapter["pricing_type"] or "")
+        )
+        if mode != "chapters" or int(chapter["is_free"] or 0) == 1 or int(chapter["price_stars"] or 0) <= 0:
+            return None
+    return target
+
+
+_ACHIEVEMENT_CATALOG: dict[str, dict[str, str]] = {
+    "first_chapter": {"title": "Первая глава", "description": "Прочитать первую главу до конца.", "icon": "📖", "group": "reader"},
+    "hundred_chapters": {"title": "100 глав", "description": "Прочитать сто глав до конца.", "icon": "💯", "group": "reader"},
+    "night_reader": {"title": "Ночной читатель", "description": "Читать поздним вечером или ночью.", "icon": "🌙", "group": "reader"},
+    "collector": {"title": "Коллекционер", "description": "Сохранить десять произведений в библиотеке.", "icon": "📚", "group": "reader"},
+    "first_review": {"title": "Первый отзыв", "description": "Оставить первый опубликованный отзыв.", "icon": "⭐", "group": "reader"},
+    "first_book": {"title": "Первая книга", "description": "Опубликовать первое произведение.", "icon": "✍️", "group": "author"},
+    "author_hundred_chapters": {"title": "Автор 100 глав", "description": "Опубликовать сто текстовых или графических глав.", "icon": "🏛", "group": "author"},
+    "thousand_readers": {"title": "1000 читателей", "description": "Собрать тысячу уникальных читателей.", "icon": "👥", "group": "author"},
+    "author_month": {"title": "Автор месяца", "description": "Стать первым по уникальным читателям месяца.", "icon": "🏆", "group": "author"},
+}
+
+
+async def get_author_analytics(author_user_id: int, days: int = 30) -> dict[str, Any]:
+    """Понятная авторская аналитика без раскрытия личных данных читателей."""
+    period_days = max(7, min(365, int(days or 30)))
+    since = (datetime.now(timezone.utc) - timedelta(days=period_days)).isoformat()
+    async with connect() as db:
+        cur = await db.execute("SELECT id FROM author_profiles WHERE user_id=?", (int(author_user_id),))
+        author = await cur.fetchone()
+        if not author:
+            return {"days": period_days, "summary": {}, "books": [], "dropoff": [], "daily": []}
+        author_id = int(author["id"])
+
+        # Независимые подзапросы не перемножают чтения, отзывы, комментарии и реакции.
+        # Это важно для точного среднего рейтинга и стабильной аналитики на активных книгах.
+        cur = await db.execute(
+            """
+            SELECT
+                (
+                    SELECT COUNT(DISTINCT rp.user_id)
+                    FROM reading_progress rp JOIN books rb ON rb.id=rp.book_id
+                    WHERE rb.author_id=? AND rb.publication_status!='deleted' AND rp.updated_at>=?
+                ) AS unique_readers,
+                (
+                    SELECT COUNT(*) FROM (
+                        SELECT rp.user_id, rp.chapter_id
+                        FROM reading_progress rp JOIN books rb ON rb.id=rp.book_id
+                        WHERE rb.author_id=? AND rb.publication_status!='deleted'
+                          AND rp.position_percent>=90 AND rp.updated_at>=?
+                        GROUP BY rp.user_id, rp.chapter_id
+                    )
+                ) AS completed_chapters,
+                (
+                    SELECT COUNT(*) FROM (
+                        SELECT bm.user_id, bm.book_id
+                        FROM bookmarks bm JOIN books rb ON rb.id=bm.book_id
+                        WHERE rb.author_id=? AND rb.publication_status!='deleted' AND bm.created_at>=?
+                        GROUP BY bm.user_id, bm.book_id
+                    )
+                ) AS library_additions,
+                (
+                    SELECT COUNT(*)
+                    FROM reviews r JOIN books rb ON rb.id=r.book_id
+                    WHERE rb.author_id=? AND rb.publication_status!='deleted'
+                      AND r.status='published' AND r.created_at>=?
+                ) AS reviews_count,
+                (
+                    SELECT ROUND(COALESCE(AVG(r.rating),0),2)
+                    FROM reviews r JOIN books rb ON rb.id=r.book_id
+                    WHERE rb.author_id=? AND rb.publication_status!='deleted'
+                      AND r.status='published' AND r.created_at>=?
+                ) AS average_rating,
+                (
+                    SELECT COUNT(*)
+                    FROM comments cm JOIN books rb ON rb.id=cm.book_id
+                    WHERE rb.author_id=? AND rb.publication_status!='deleted'
+                      AND cm.status='published' AND cm.created_at>=?
+                ) AS comments_count,
+                (
+                    SELECT COUNT(*)
+                    FROM chapter_reactions cr
+                    JOIN chapters c ON c.id=cr.chapter_id
+                    JOIN books rb ON rb.id=c.book_id
+                    WHERE rb.author_id=? AND rb.publication_status!='deleted' AND cr.created_at>=?
+                ) AS reactions_count
+            """,
+            (
+                author_id, since,
+                author_id, since,
+                author_id, since,
+                author_id, since,
+                author_id, since,
+                author_id, since,
+                author_id, since,
+            ),
+        )
+        engagement = await cur.fetchone()
+
+        cur = await db.execute(
+            """
+            SELECT COUNT(DISTINCT p.id) AS sales_count, COALESCE(SUM(p.amount_stars),0) AS revenue_stars
+            FROM purchases p
+            LEFT JOIN chapters c ON c.id=p.chapter_id
+            LEFT JOIN audio_chapters ac ON ac.id=p.audio_chapter_id
+            LEFT JOIN graphic_chapters gc ON gc.id=p.graphic_chapter_id
+            LEFT JOIN books b ON b.id=COALESCE(p.book_id, c.book_id, ac.book_id, gc.book_id)
+            WHERE b.author_id=? AND p.status='paid' AND p.created_at>=?
+            """,
+            (author_id, since),
+        )
+        sales = await cur.fetchone()
+
+        cur = await db.execute(
+            """
+            SELECT b.id, b.title, b.publication_status,
+                   COUNT(DISTINCT rp.user_id) AS readers,
+                   COUNT(DISTINCT bm.user_id) AS saved,
+                   ROUND(COALESCE(AVG(CASE WHEN r.status='published' THEN r.rating END),0),2) AS rating,
+                   (
+                     SELECT COUNT(*) FROM purchases p
+                     LEFT JOIN chapters pc ON pc.id=p.chapter_id
+                     LEFT JOIN audio_chapters pac ON pac.id=p.audio_chapter_id
+                     LEFT JOIN graphic_chapters pgc ON pgc.id=p.graphic_chapter_id
+                     WHERE p.status='paid' AND p.created_at>=? AND COALESCE(p.book_id,pc.book_id,pac.book_id,pgc.book_id)=b.id
+                   ) AS sales,
+                   (
+                     SELECT COALESCE(SUM(p.amount_stars),0) FROM purchases p
+                     LEFT JOIN chapters pc ON pc.id=p.chapter_id
+                     LEFT JOIN audio_chapters pac ON pac.id=p.audio_chapter_id
+                     LEFT JOIN graphic_chapters pgc ON pgc.id=p.graphic_chapter_id
+                     WHERE p.status='paid' AND p.created_at>=? AND COALESCE(p.book_id,pc.book_id,pac.book_id,pgc.book_id)=b.id
+                   ) AS revenue_stars
+            FROM books b
+            LEFT JOIN reading_progress rp ON rp.book_id=b.id AND rp.updated_at>=?
+            LEFT JOIN bookmarks bm ON bm.book_id=b.id AND bm.created_at>=?
+            LEFT JOIN reviews r ON r.book_id=b.id AND r.created_at>=?
+            WHERE b.author_id=? AND b.publication_status!='deleted'
+            GROUP BY b.id
+            ORDER BY readers DESC, sales DESC, b.updated_at DESC
+            LIMIT 20
+            """,
+            (since, since, since, since, since, author_id),
+        )
+        book_rows = await cur.fetchall()
+
+        cur = await db.execute(
+            """
+            SELECT b.id AS book_id, b.title AS book_title, c.id AS chapter_id, c.number, c.title,
+                   COUNT(DISTINCT CASE WHEN rp.position_percent>=5 THEN rp.user_id END) AS started,
+                   COUNT(DISTINCT CASE WHEN rp.position_percent>=90 THEN rp.user_id END) AS completed
+            FROM books b
+            JOIN chapters c ON c.book_id=b.id AND c.status='published'
+            LEFT JOIN reading_progress rp ON rp.chapter_id=c.id AND rp.updated_at>=?
+            WHERE b.author_id=? AND b.publication_status='published'
+            GROUP BY c.id
+            HAVING started > 0
+            ORDER BY started DESC, b.id, c.number
+            LIMIT 40
+            """,
+            (since, author_id),
+        )
+        drop_rows = await cur.fetchall()
+
+        cur = await db.execute(
+            """
+            WITH dates(day) AS (
+                SELECT date('now', '-' || (? - 1) || ' day')
+                UNION ALL SELECT date(day, '+1 day') FROM dates WHERE day < date('now')
+            ), activity AS (
+                SELECT substr(rp.updated_at,1,10) AS day, COUNT(DISTINCT rp.user_id) AS readers
+                FROM reading_progress rp JOIN books b ON b.id=rp.book_id
+                WHERE b.author_id=? AND rp.updated_at>=? GROUP BY substr(rp.updated_at,1,10)
+            )
+            SELECT dates.day, COALESCE(activity.readers,0) AS readers
+            FROM dates LEFT JOIN activity ON activity.day=dates.day ORDER BY dates.day
+            """,
+            (min(period_days, 31), author_id, since),
+        )
+        daily_rows = await cur.fetchall()
+
+        summary = {
+            "unique_readers": int(engagement["unique_readers"] or 0),
+            "completed_chapters": int(engagement["completed_chapters"] or 0),
+            "library_additions": int(engagement["library_additions"] or 0),
+            "reviews_count": int(engagement["reviews_count"] or 0),
+            "average_rating": float(engagement["average_rating"] or 0),
+            "comments_count": int(engagement["comments_count"] or 0),
+            "reactions_count": int(engagement["reactions_count"] or 0),
+            "sales_count": int(sales["sales_count"] or 0),
+            "revenue_stars": int(sales["revenue_stars"] or 0),
+        }
+        books = [{key: row[key] for key in row.keys()} for row in book_rows]
+        dropoff = []
+        for row in drop_rows:
+            started = int(row["started"] or 0)
+            completed = int(row["completed"] or 0)
+            dropoff.append({
+                "book_id": int(row["book_id"]), "book_title": row["book_title"],
+                "chapter_id": int(row["chapter_id"]), "number": int(row["number"]), "title": row["title"],
+                "started": started, "completed": completed,
+                "completion_rate": round((completed / started * 100) if started else 0, 1),
+            })
+        daily = [{"day": row["day"], "readers": int(row["readers"] or 0)} for row in daily_rows]
+        return {"days": period_days, "summary": summary, "books": books, "dropoff": dropoff, "daily": daily}
+
+
+async def sync_user_achievements(user_id: int) -> dict[str, list[dict[str, Any]]]:
+    """Начисляет только подтверждённые достижениями действия; уже выданные не отзываются."""
+    uid = int(user_id)
+    now = utc_now()
+    async with connect() as db:
+        cur = await db.execute(
+            "SELECT COUNT(*) AS completed FROM reading_progress WHERE user_id=? AND position_percent>=90", (uid,)
+        )
+        completed = int((await cur.fetchone())["completed"] or 0)
+        cur = await db.execute("SELECT COUNT(*) AS saved FROM bookmarks WHERE user_id=?", (uid,))
+        saved = int((await cur.fetchone())["saved"] or 0)
+        cur = await db.execute("SELECT COUNT(*) AS reviews FROM reviews WHERE user_id=? AND status='published'", (uid,))
+        reviews = int((await cur.fetchone())["reviews"] or 0)
+        cur = await db.execute(
+            "SELECT COUNT(*) AS night FROM reading_progress WHERE user_id=? AND (CAST(substr(updated_at,12,2) AS INTEGER)>=22 OR CAST(substr(updated_at,12,2) AS INTEGER)<5)",
+            (uid,),
+        )
+        night = int((await cur.fetchone())["night"] or 0)
+        cur = await db.execute("SELECT id FROM author_profiles WHERE user_id=?", (uid,))
+        author = await cur.fetchone()
+        published_books = published_chapters = author_readers = month_rank = 0
+        if author:
+            author_id = int(author["id"])
+            cur = await db.execute("SELECT COUNT(*) AS cnt FROM books WHERE author_id=? AND publication_status='published'", (author_id,))
+            published_books = int((await cur.fetchone())["cnt"] or 0)
+            cur = await db.execute(
+                "SELECT (SELECT COUNT(*) FROM chapters c JOIN books b ON b.id=c.book_id WHERE b.author_id=? AND b.publication_status='published' AND c.status='published') + "
+                "(SELECT COUNT(*) FROM graphic_chapters gc JOIN books b ON b.id=gc.book_id WHERE b.author_id=? AND b.publication_status='published' AND gc.status='published') AS cnt",
+                (author_id, author_id),
+            )
+            published_chapters = int((await cur.fetchone())["cnt"] or 0)
+            cur = await db.execute(
+                "SELECT COUNT(DISTINCT rp.user_id) AS cnt FROM reading_progress rp JOIN books b ON b.id=rp.book_id WHERE b.author_id=?",
+                (author_id,),
+            )
+            author_readers = int((await cur.fetchone())["cnt"] or 0)
+            month_start = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
+            cur = await db.execute(
+                """
+                WITH author_month AS (
+                    SELECT b.author_id, COUNT(DISTINCT rp.user_id) AS readers
+                    FROM books b LEFT JOIN reading_progress rp ON rp.book_id=b.id AND rp.updated_at>=?
+                    WHERE b.publication_status='published' GROUP BY b.author_id
+                )
+                SELECT 1 + COUNT(*) AS rank FROM author_month mine, author_month other
+                WHERE mine.author_id=? AND other.readers>mine.readers
+                """,
+                (month_start, author_id),
+            )
+            row = await cur.fetchone()
+            month_rank = int(row["rank"] or 0) if row else 0
+
+        candidates = {
+            "first_chapter": (completed >= 1, completed),
+            "hundred_chapters": (completed >= 100, completed),
+            "night_reader": (night >= 1, night),
+            "collector": (saved >= 10, saved),
+            "first_review": (reviews >= 1, reviews),
+            "first_book": (published_books >= 1, published_books),
+            "author_hundred_chapters": (published_chapters >= 100, published_chapters),
+            "thousand_readers": (author_readers >= 1000, author_readers),
+            "author_month": (month_rank == 1 and author_readers >= 20, author_readers),
+        }
+        awarded_codes: list[str] = []
+        for code, (eligible, value) in candidates.items():
+            if not eligible:
+                continue
+            cur = await db.execute(
+                "INSERT OR IGNORE INTO user_achievements(user_id, achievement_code, progress_value, metadata_json, awarded_at) VALUES(?, ?, ?, '{}', ?)",
+                (uid, code, int(value), now),
+            )
+            if cur.rowcount:
+                awarded_codes.append(code)
+        await db.commit()
+        cur = await db.execute(
+            "SELECT achievement_code, progress_value, metadata_json, awarded_at FROM user_achievements WHERE user_id=? ORDER BY awarded_at DESC, id DESC",
+            (uid,),
+        )
+        rows = await cur.fetchall()
+
+    def public(row: Any) -> dict[str, Any]:
+        code = str(row["achievement_code"])
+        info = _ACHIEVEMENT_CATALOG.get(code, {"title": code, "description": "", "icon": "✦", "group": "reader"})
+        return {"code": code, **info, "progress_value": int(row["progress_value"] or 0), "awarded_at": row["awarded_at"]}
+
+    all_items = [public(row) for row in rows]
+    new_items = [item for item in all_items if item["code"] in awarded_codes]
+    return {"new": new_items, "items": all_items}
+
+
+async def list_smart_reader_reminder_candidates(limit: int = 100) -> list[aiosqlite.Row]:
+    """Возвращает только давно не продолженные активные книги, не чаще одного раза в неделю."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=3)).isoformat()
+    recent = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
+    repeat_cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            WITH latest AS (
+                SELECT rp.user_id, rp.book_id, MAX(rp.updated_at) AS last_read_at
+                FROM reading_progress rp GROUP BY rp.user_id, rp.book_id
+            )
+            SELECT u.id AS user_id, u.telegram_id, u.full_name, b.id AS book_id, b.title AS book_title,
+                   c.number AS chapter_number, c.title AS chapter_title, latest.last_read_at
+            FROM latest
+            JOIN users u ON u.id=latest.user_id AND u.is_blocked=0
+            JOIN books b ON b.id=latest.book_id AND b.publication_status='published'
+            JOIN reading_progress rp ON rp.user_id=latest.user_id AND rp.book_id=latest.book_id AND rp.updated_at=latest.last_read_at
+            JOIN chapters c ON c.id=rp.chapter_id
+            LEFT JOIN bookmarks bm ON bm.user_id=u.id AND bm.book_id=b.id
+            LEFT JOIN user_preferences pref ON pref.user_id=u.id
+            LEFT JOIN smart_notification_state sns ON sns.user_id=u.id AND sns.notification_code='continue_reading' AND sns.context_key=CAST(b.id AS TEXT)
+            WHERE latest.last_read_at<=? AND latest.last_read_at>=?
+              AND COALESCE(pref.notifications,1)=1 AND COALESCE(pref.notifications_reminders,1)=1
+              AND COALESCE(bm.status,'reading') NOT IN ('finished','dropped')
+              AND (sns.last_sent_at IS NULL OR sns.last_sent_at<?)
+            ORDER BY latest.last_read_at ASC
+            LIMIT ?
+            """,
+            (cutoff, recent, repeat_cutoff, int(limit)),
+        )
+        return await cur.fetchall()
+
+
+async def mark_smart_notification_sent(user_id: int, code: str, context_key: str) -> None:
+    now = utc_now()
+    async with connect() as db:
+        await db.execute(
+            """
+            INSERT INTO smart_notification_state(user_id, notification_code, context_key, last_sent_at, send_count)
+            VALUES(?, ?, ?, ?, 1)
+            ON CONFLICT(user_id, notification_code, context_key) DO UPDATE SET
+                last_sent_at=excluded.last_sent_at, send_count=smart_notification_state.send_count+1
+            """,
+            (int(user_id), str(code)[:60], str(context_key)[:120], now),
+        )
+        await db.commit()
+
+
+# ---------------------------------------------------------------------------
+# VoxLyra v1.11.0 — этап 8: Premium без ограничения базового чтения
+# ---------------------------------------------------------------------------
+
+PREMIUM_PLAN_MONTHLY = "monthly"
+PREMIUM_SUBSCRIPTION_PERIOD_SECONDS = 2_592_000  # 30 суток — период Telegram Stars
+
+
+async def _ensure_v1110_premium_schema(db: aiosqlite.Connection) -> None:
+    """Мягкая миграция Premium.
+
+    Premium добавляет удобства и оформление, но не закрывает базовое чтение,
+    стандартную озвучку, библиотеку, комментарии или покупки книг.
+    """
+    now = utc_now()
+    await db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS premium_plans (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code TEXT NOT NULL UNIQUE,
+            title TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            price_stars INTEGER NOT NULL,
+            duration_days INTEGER NOT NULL DEFAULT 30,
+            subscription_period_seconds INTEGER NOT NULL DEFAULT 2592000,
+            is_recurring INTEGER NOT NULL DEFAULT 1,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            sort_order INTEGER NOT NULL DEFAULT 10,
+            features_json TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS premium_subscriptions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            plan_code TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'active',
+            started_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            telegram_payment_charge_id TEXT NOT NULL UNIQUE,
+            is_recurring INTEGER NOT NULL DEFAULT 0,
+            auto_renew INTEGER NOT NULL DEFAULT 0,
+            is_first_recurring INTEGER NOT NULL DEFAULT 0,
+            canceled_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS premium_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            plan_code TEXT NOT NULL DEFAULT '',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_premium_subscriptions_user_expiry
+            ON premium_subscriptions(user_id, expires_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_premium_subscriptions_status_expiry
+            ON premium_subscriptions(status, expires_at);
+        CREATE INDEX IF NOT EXISTS idx_premium_events_user_created
+            ON premium_events(user_id, created_at DESC);
+        """
+    )
+    features = json.dumps(
+        [
+            {"code": "no_promoted_blocks", "title": "Без рекламных рекомендаций в читалке"},
+            {"code": "priority_tts", "title": "Приоритет в очереди озвучивания"},
+            {"code": "premium_badge", "title": "Знак Premium в личной библиотеке"},
+            {"code": "quote_styles", "title": "Дополнительные стили карточек цитат"},
+            {"code": "reading_insights", "title": "Расширенная личная статистика"},
+        ],
+        ensure_ascii=False,
+    )
+    await db.execute(
+        """
+        INSERT INTO premium_plans(
+            code, title, description, price_stars, duration_days,
+            subscription_period_seconds, is_recurring, is_active, sort_order,
+            features_json, created_at, updated_at
+        ) VALUES(?, ?, ?, ?, 30, ?, 1, 1, 10, ?, ?, ?)
+        ON CONFLICT(code) DO UPDATE SET
+            title=excluded.title,
+            description=excluded.description,
+            duration_days=excluded.duration_days,
+            subscription_period_seconds=excluded.subscription_period_seconds,
+            is_recurring=excluded.is_recurring,
+            features_json=excluded.features_json,
+            updated_at=excluded.updated_at
+        """,
+        (
+            PREMIUM_PLAN_MONTHLY,
+            "VoxLyra Premium",
+            "Дополнительный комфорт, оформление и приоритетная локальная озвучка. Базовые функции остаются бесплатными.",
+            99,
+            PREMIUM_SUBSCRIPTION_PERIOD_SECONDS,
+            features,
+            now,
+            now,
+        ),
+    )
+    defaults = {
+        "premium_enabled": "1",
+        "premium_monthly_price_stars": "99",
+        "premium_free_tts_voice_limit": "2",
+        "premium_priority_tts": "1",
+    }
+    for key, value in defaults.items():
+        await db.execute(
+            "INSERT INTO settings(key, value, updated_at) VALUES(?, ?, ?) ON CONFLICT(key) DO NOTHING",
+            (key, value, now),
+        )
+    # Цена управляется настройкой владельца, но хранится и в плане для платежной проверки.
+    cur = await db.execute("SELECT value FROM settings WHERE key='premium_monthly_price_stars'")
+    row = await cur.fetchone()
+    try:
+        configured_price = max(1, min(10000, int(row["value"] if row else 99)))
+    except (TypeError, ValueError):
+        configured_price = 99
+    await db.execute(
+        "UPDATE premium_plans SET price_stars=?, updated_at=? WHERE code=?",
+        (configured_price, now, PREMIUM_PLAN_MONTHLY),
+    )
+
+
+def _premium_dt(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+async def list_premium_plans(*, include_inactive: bool = False) -> list[dict[str, Any]]:
+    async with connect() as db:
+        sql = "SELECT * FROM premium_plans"
+        params: tuple[Any, ...] = ()
+        if not include_inactive:
+            sql += " WHERE is_active=1"
+        sql += " ORDER BY sort_order, id"
+        cur = await db.execute(sql, params)
+        rows = await cur.fetchall()
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        item = {key: row[key] for key in row.keys()}
+        try:
+            item["features"] = json.loads(str(item.get("features_json") or "[]"))
+        except json.JSONDecodeError:
+            item["features"] = []
+        result.append(item)
+    return result
+
+
+async def get_premium_plan(code: str = PREMIUM_PLAN_MONTHLY) -> dict[str, Any] | None:
+    plans = await list_premium_plans(include_inactive=True)
+    for plan in plans:
+        if str(plan.get("code")) == str(code):
+            return plan
+    return None
+
+
+async def set_premium_plan_settings(
+    *,
+    price_stars: int | None = None,
+    enabled: bool | None = None,
+) -> dict[str, Any]:
+    now = utc_now()
+    async with connect() as db:
+        if price_stars is not None:
+            price = max(1, min(10000, int(price_stars)))
+            await db.execute(
+                "UPDATE premium_plans SET price_stars=?, updated_at=? WHERE code=?",
+                (price, now, PREMIUM_PLAN_MONTHLY),
+            )
+            await db.execute(
+                "INSERT INTO settings(key,value,updated_at) VALUES('premium_monthly_price_stars',?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                (str(price), now),
+            )
+        if enabled is not None:
+            flag = 1 if enabled else 0
+            await db.execute(
+                "UPDATE premium_plans SET is_active=?, updated_at=? WHERE code=?",
+                (flag, now, PREMIUM_PLAN_MONTHLY),
+            )
+            await db.execute(
+                "INSERT INTO settings(key,value,updated_at) VALUES('premium_enabled',?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                (str(flag), now),
+            )
+        await db.commit()
+    plan = await get_premium_plan(PREMIUM_PLAN_MONTHLY)
+    if not plan:
+        raise RuntimeError("Premium plan is missing")
+    return plan
+
+
+async def _expire_premium_subscriptions(db: aiosqlite.Connection, *, user_id: int | None = None) -> None:
+    now = utc_now()
+    if user_id is None:
+        await db.execute(
+            "UPDATE premium_subscriptions SET status='expired', updated_at=? "
+            "WHERE status IN ('active','canceled') AND expires_at<=?",
+            (now, now),
+        )
+    else:
+        await db.execute(
+            "UPDATE premium_subscriptions SET status='expired', updated_at=? "
+            "WHERE user_id=? AND status IN ('active','canceled') AND expires_at<=?",
+            (now, int(user_id), now),
+        )
+
+
+async def get_user_premium_status(user_id: int) -> dict[str, Any]:
+    now_dt = datetime.now(timezone.utc)
+    async with connect() as db:
+        await _expire_premium_subscriptions(db, user_id=int(user_id))
+        await db.commit()
+        cur = await db.execute(
+            """
+            SELECT ps.*, pp.title AS plan_title, pp.price_stars, pp.features_json,
+                   pp.duration_days, pp.subscription_period_seconds
+            FROM premium_subscriptions ps
+            LEFT JOIN premium_plans pp ON pp.code=ps.plan_code
+            WHERE ps.user_id=?
+            ORDER BY ps.expires_at DESC, ps.id DESC
+            LIMIT 1
+            """,
+            (int(user_id),),
+        )
+        row = await cur.fetchone()
+    if not row:
+        return {
+            "active": False,
+            "status": "none",
+            "plan_code": "",
+            "plan_title": "",
+            "expires_at": "",
+            "days_left": 0,
+            "is_recurring": False,
+            "auto_renew": False,
+            "features": [],
+        }
+    expires_dt = _premium_dt(str(row["expires_at"] or ""))
+    active = bool(expires_dt and expires_dt > now_dt and str(row["status"]) in {"active", "canceled"})
+    seconds_left = max(0, int((expires_dt - now_dt).total_seconds())) if active and expires_dt else 0
+    try:
+        features = json.loads(str(row["features_json"] or "[]"))
+    except json.JSONDecodeError:
+        features = []
+    return {
+        "active": active,
+        "status": str(row["status"] or "none"),
+        "subscription_id": int(row["id"]),
+        "plan_code": str(row["plan_code"] or ""),
+        "plan_title": str(row["plan_title"] or "VoxLyra Premium"),
+        "price_stars": int(row["price_stars"] or 0),
+        "started_at": str(row["started_at"] or ""),
+        "expires_at": str(row["expires_at"] or ""),
+        "days_left": (seconds_left + 86399) // 86400,
+        "is_recurring": bool(row["is_recurring"]),
+        "auto_renew": bool(row["auto_renew"]),
+        "is_first_recurring": bool(row["is_first_recurring"]),
+        "telegram_payment_charge_id": str(row["telegram_payment_charge_id"] or ""),
+        "features": features,
+    }
+
+
+async def user_has_premium(user_id: int) -> bool:
+    return bool((await get_user_premium_status(int(user_id))).get("active"))
+
+
+async def activate_premium_subscription(
+    *,
+    user_id: int,
+    plan_code: str,
+    amount_stars: int,
+    telegram_payment_charge_id: str,
+    subscription_expiration_date: int | None = None,
+    is_recurring: bool = False,
+    is_first_recurring: bool = False,
+    invoice_payload: str = "",
+) -> int:
+    plan = await get_premium_plan(plan_code)
+    if not plan or int(plan.get("is_active") or 0) != 1:
+        raise ValueError("Premium временно недоступен")
+    expected = int(plan.get("price_stars") or 0)
+    if expected <= 0 or int(amount_stars) != expected:
+        raise ValueError("Цена Premium изменилась. Откройте оплату заново")
+    charge_id = str(telegram_payment_charge_id or "").strip()
+    if not charge_id:
+        raise ValueError("Не указан идентификатор платежа")
+    now_dt = datetime.now(timezone.utc)
+    now = now_dt.isoformat()
+    if subscription_expiration_date:
+        expires_dt = datetime.fromtimestamp(int(subscription_expiration_date), tz=timezone.utc)
+        if expires_dt <= now_dt:
+            expires_dt = now_dt + timedelta(days=int(plan.get("duration_days") or 30))
+    else:
+        expires_dt = now_dt + timedelta(days=int(plan.get("duration_days") or 30))
+    async with connect() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        cur = await db.execute(
+            "SELECT id, user_id FROM premium_subscriptions WHERE telegram_payment_charge_id=?",
+            (charge_id,),
+        )
+        existing = await cur.fetchone()
+        if existing:
+            if int(existing["user_id"]) != int(user_id):
+                await db.rollback()
+                raise ValueError("Идентификатор платежа уже использован")
+            await db.commit()
+            return int(existing["id"])
+        # Если Telegram не передал дату (разовая резервная оплата), продлеваем от
+        # текущего окончания, а не обнуляем уже оплаченный остаток.
+        if not subscription_expiration_date:
+            cur = await db.execute(
+                "SELECT expires_at FROM premium_subscriptions WHERE user_id=? ORDER BY expires_at DESC LIMIT 1",
+                (int(user_id),),
+            )
+            current = await cur.fetchone()
+            current_expiry = _premium_dt(str(current["expires_at"])) if current else None
+            if current_expiry and current_expiry > now_dt:
+                expires_dt = current_expiry + timedelta(days=int(plan.get("duration_days") or 30))
+        cur = await db.execute(
+            """
+            INSERT INTO premium_subscriptions(
+                user_id, plan_code, status, started_at, expires_at,
+                telegram_payment_charge_id, is_recurring, auto_renew,
+                is_first_recurring, created_at, updated_at
+            ) VALUES(?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                int(user_id), str(plan_code), now, expires_dt.isoformat(), charge_id,
+                1 if is_recurring else 0, 1 if is_recurring else 0,
+                1 if is_first_recurring else 0, now, now,
+            ),
+        )
+        subscription_id = int(cur.lastrowid)
+        # Отдельная строка в общей истории покупок, чтобы пользователь и владелец
+        # видели платёж, но он не попадал в доход конкретного автора.
+        cur = await db.execute(
+            """
+            INSERT INTO purchases(
+                user_id, amount_stars, status, telegram_payment_charge_id,
+                created_at, payload, purchase_kind
+            ) VALUES(?, ?, 'paid', ?, ?, ?, 'premium')
+            """,
+            (int(user_id), expected, charge_id, now, str(invoice_payload or f"vox:premium:{plan_code}")),
+        )
+        purchase_id = int(cur.lastrowid)
+        await db.execute(
+            "INSERT INTO premium_events(user_id,event_type,plan_code,metadata_json,created_at) VALUES(?,?,?,?,?)",
+            (
+                int(user_id), "payment", str(plan_code),
+                json.dumps({"purchase_id": purchase_id, "subscription_id": subscription_id, "recurring": bool(is_recurring)}, ensure_ascii=False),
+                now,
+            ),
+        )
+        await db.commit()
+        return subscription_id
+
+
+async def set_premium_auto_renew(user_id: int, *, enabled: bool) -> bool:
+    now = utc_now()
+    async with connect() as db:
+        await _expire_premium_subscriptions(db, user_id=int(user_id))
+        cur = await db.execute(
+            "SELECT id FROM premium_subscriptions WHERE user_id=? AND status IN ('active','canceled') "
+            "AND expires_at>? ORDER BY expires_at DESC LIMIT 1",
+            (int(user_id), now),
+        )
+        row = await cur.fetchone()
+        if not row:
+            await db.commit()
+            return False
+        await db.execute(
+            """
+            UPDATE premium_subscriptions
+            SET auto_renew=?, status=?, canceled_at=?, updated_at=?
+            WHERE id=?
+            """,
+            (
+                1 if enabled else 0,
+                "active" if enabled else "canceled",
+                None if enabled else now,
+                now,
+                int(row["id"]),
+            ),
+        )
+        await db.execute(
+            "INSERT INTO premium_events(user_id,event_type,plan_code,metadata_json,created_at) VALUES(?,?,?,?,?)",
+            (int(user_id), "renew_enabled" if enabled else "renew_canceled", PREMIUM_PLAN_MONTHLY, "{}", now),
+        )
+        await db.commit()
+        return True
+
+
+async def get_premium_checkout_target(payload: str) -> dict[str, Any] | None:
+    value = str(payload or "")
+    if value.startswith("vox:intent:"):
+        intent = await get_payment_intent(value)
+        if not intent:
+            return None
+        value = str(intent["canonical_payload"] or "")
+    parts = value.split(":")
+    if len(parts) != 3 or parts[0] != "vox" or parts[1] != "premium":
+        return None
+    plan = await get_premium_plan(parts[2])
+    if not plan or int(plan.get("is_active") or 0) != 1:
+        return None
+    return {
+        "kind": "premium",
+        "target_id": int(plan["id"]),
+        "plan_code": str(plan["code"]),
+        "title": str(plan["title"]),
+        "description": str(plan["description"]),
+        "amount_stars": int(plan["price_stars"]),
+        "author_id": None,
+        "book_id": None,
+        "features": list(plan.get("features") or []),
+    }
+
+
+_previous_get_purchase_target_v1110_premium = get_purchase_target
+
+
+async def get_purchase_target(payload: str) -> dict[str, Any] | None:
+    premium = await get_premium_checkout_target(payload)
+    if premium:
+        return premium
+    return await _previous_get_purchase_target_v1110_premium(payload)
+
+
+async def get_premium_owner_summary() -> dict[str, Any]:
+    now = utc_now()
+    async with connect() as db:
+        await _expire_premium_subscriptions(db)
+        await db.commit()
+        cur = await db.execute(
+            """
+            SELECT
+                COUNT(DISTINCT CASE WHEN status IN ('active','canceled') AND expires_at>? THEN user_id END) AS active_users,
+                COUNT(CASE WHEN auto_renew=1 AND status='active' AND expires_at>? THEN 1 END) AS auto_renew,
+                COUNT(*) AS payments
+            FROM premium_subscriptions
+            """,
+            (now, now),
+        )
+        counts = await cur.fetchone()
+        cur = await db.execute(
+            "SELECT COALESCE(SUM(amount_stars),0) AS gross FROM purchases WHERE purchase_kind='premium' AND status='paid'"
+        )
+        gross = await cur.fetchone()
+    return {
+        "active_users": int(counts["active_users"] or 0) if counts else 0,
+        "auto_renew": int(counts["auto_renew"] or 0) if counts else 0,
+        "payments": int(counts["payments"] or 0) if counts else 0,
+        "gross_stars": int(gross["gross"] or 0) if gross else 0,
+    }
+
+async def get_personal_reading_insights(user_id: int) -> dict[str, Any]:
+    """Личная агрегированная статистика Premium без передачи истории третьим лицам."""
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT
+                COUNT(DISTINCT rp.book_id) AS books_started,
+                COUNT(DISTINCT CASE WHEN rp.position_percent>=90 THEN rp.chapter_id END) AS chapters_finished,
+                COALESCE(AVG(rp.position_percent), 0) AS average_progress
+            FROM reading_progress rp
+            WHERE rp.user_id=?
+            """,
+            (int(user_id),),
+        )
+        reading = await cur.fetchone()
+        cur = await db.execute(
+            "SELECT COALESCE(SUM(position_seconds),0) AS seconds FROM listening_progress WHERE user_id=?",
+            (int(user_id),),
+        )
+        listening = await cur.fetchone()
+        cur = await db.execute("SELECT COUNT(*) AS count FROM bookmarks WHERE user_id=?", (int(user_id),))
+        bookmarks = await cur.fetchone()
+        cur = await db.execute(
+            """
+            SELECT substr(updated_at,1,10) AS day
+            FROM reading_progress
+            WHERE user_id=? AND updated_at!=''
+            GROUP BY substr(updated_at,1,10)
+            ORDER BY day DESC
+            LIMIT 120
+            """,
+            (int(user_id),),
+        )
+        days = [str(row["day"]) for row in await cur.fetchall() if row["day"]]
+        cur = await db.execute(
+            """
+            SELECT CAST(substr(updated_at,12,2) AS INTEGER) AS hour, COUNT(*) AS amount
+            FROM reading_progress
+            WHERE user_id=? AND length(updated_at)>=13
+            GROUP BY hour ORDER BY amount DESC, hour LIMIT 1
+            """,
+            (int(user_id),),
+        )
+        hour_row = await cur.fetchone()
+    streak = 0
+    expected = datetime.now(timezone.utc).date()
+    available = set(days)
+    # Сегодня может не быть активности — серия считается живой, если была вчера.
+    if expected.isoformat() not in available:
+        expected -= timedelta(days=1)
+    while expected.isoformat() in available:
+        streak += 1
+        expected -= timedelta(days=1)
+    hour = int(hour_row["hour"] or 0) if hour_row else 0
+    if 5 <= hour < 12:
+        favorite_period = "Утро"
+    elif 12 <= hour < 18:
+        favorite_period = "День"
+    elif 18 <= hour < 24:
+        favorite_period = "Вечер"
+    else:
+        favorite_period = "Ночь"
+    return {
+        "books_started": int(reading["books_started"] or 0) if reading else 0,
+        "chapters_finished": int(reading["chapters_finished"] or 0) if reading else 0,
+        "average_progress": round(float(reading["average_progress"] or 0), 1) if reading else 0.0,
+        "listening_minutes": int((listening["seconds"] or 0) // 60) if listening else 0,
+        "saved_books": int(bookmarks["count"] or 0) if bookmarks else 0,
+        "reading_streak_days": streak,
+        "favorite_period": favorite_period,
+    }

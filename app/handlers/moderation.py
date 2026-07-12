@@ -26,6 +26,7 @@ from app.db import (
     set_comment_status,
     set_review_status,
     resolve_book_moderation,
+    resolve_comment_complaints,
     upsert_user,
 )
 from app.keyboards import ad_moderation_card_menu, back_to_main, complaint_card_menu, complaints_menu, moderation_ads_menu, moderation_book_card_menu, moderation_books_menu, moderation_comments_menu, moderation_content_menu, moderation_hide_menu, moderation_menu, moderation_reviews_menu
@@ -301,11 +302,18 @@ async def moderation_comment_card(call: CallbackQuery) -> None:
         await call.answer("Комментарий не найден", show_alert=True)
         return
     who = row["username"] or row["full_name"] or "читатель"
+    reports = int(row["report_count"] or 0) if "report_count" in row.keys() else 0
+    likes = int(row["like_count"] or 0) if "like_count" in row.keys() else 0
+    comment_type = "ответ" if ("parent_id" in row.keys() and row["parent_id"]) else "основной комментарий"
+    spoiler = "да" if ("is_spoiler" in row.keys() and int(row["is_spoiler"] or 0)) else "нет"
     await call.message.edit_text(
         f"<b>Комментарий #{row['id']}</b>\n\n"
         f"Книга: <b>{row['book_title']}</b>\n"
         f"Глава: <b>{row['chapter_title']}</b>\n"
         f"Автор комментария: <b>{who}</b>\n"
+        f"Тип: <b>{comment_type}</b>\n"
+        f"Спойлер: <b>{spoiler}</b>\n"
+        f"Лайков: <b>{likes}</b> · Активных жалоб: <b>{reports}</b>\n"
         f"Статус: <b>{row['status']}</b>\n\n"
         f"{row['text'][:3000]}",
         reply_markup=moderation_hide_menu("comment", comment_id),
@@ -324,6 +332,7 @@ async def moderation_comment_hide(call: CallbackQuery) -> None:
         return
     await set_comment_status(comment_id, "hidden")
     user = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
+    await resolve_comment_complaints(comment_id, int(user["id"]))
     await add_audit(user["id"], "comment_hidden", "comment", str(comment_id))
     await _notify(
         call,
@@ -487,7 +496,7 @@ async def moderation_complaint_card(call: CallbackQuery) -> None:
         f"От: <b>{who}</b>\n"
         f"Цель: <b>{row['target_type']} #{row['target_id']}</b>\n"
         f"Причина:\n{row['reason']}",
-        reply_markup=complaint_card_menu(complaint_id, "modcomplaint"),
+        reply_markup=complaint_card_menu(complaint_id, "modcomplaint", target_type=str(row["target_type"]), target_id=str(row["target_id"])),
     )
     await call.answer()
 

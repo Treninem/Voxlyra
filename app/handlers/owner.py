@@ -567,7 +567,7 @@ async def owner_complaint_card(call: CallbackQuery) -> None:
         f"От: <b>{who}</b>\n"
         f"Цель: <b>{row['target_type']} #{row['target_id']}</b>\n"
         f"Причина:\n{row['reason']}",
-        reply_markup=complaint_card_menu(complaint_id, "ownercomplaint"),
+        reply_markup=complaint_card_menu(complaint_id, "ownercomplaint", target_type=str(row["target_type"]), target_id=str(row["target_id"])),
     )
     await call.answer()
 

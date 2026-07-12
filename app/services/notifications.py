@@ -145,7 +145,7 @@ async def send_user_notification(
     telegram_id: int | None,
     text: str,
     bot: Bot | None = None,
-    category: Literal["chapters", "audio", "discounts"] | None = None,
+    category: Literal["chapters", "audio", "discounts", "reminders", "achievements"] | None = None,
     reply_markup: InlineKeyboardMarkup | None = None,
 ) -> NotificationStatus:
     if not settings.BOT_TOKEN or not telegram_id:
@@ -199,10 +199,19 @@ async def notify_book_followers(
             if not claimed:
                 totals["duplicate"] += 1
                 continue
+            delivery_text = text
+            if category == "chapters" and recipient["last_chapter_number"] is not None:
+                last_number = int(recipient["last_chapter_number"] or 0)
+                last_percent = int(recipient["last_position_percent"] or 0)
+                if last_number > 0:
+                    state = f"Вы остановились на главе {last_number}"
+                    if 0 < last_percent < 90:
+                        state += f" ({last_percent}%)"
+                    delivery_text = f"{text}\n\n{state}. Продолжение уже доступно."
             status = await send_user_notification(
                 app_user_id=user_id,
                 telegram_id=int(recipient["telegram_id"]),
-                text=text,
+                text=delivery_text,
                 bot=delivery_bot,
                 category=category,
             )

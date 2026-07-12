@@ -40,7 +40,7 @@ class TTSQueueSnapshot:
 def configured_provider_order(*, high_quality: bool = False) -> tuple[str, ...]:
     raw = settings.TTS_PROVIDER_ORDER_HQ if high_quality else settings.TTS_PROVIDER_ORDER
     order = tuple(item.strip().lower() for item in str(raw or '').split(',') if item.strip())
-    return order or (('qwen', 'moss', 'piper') if high_quality else ('moss', 'qwen', 'piper'))
+    return order or (('moss', 'qwen', 'vosk', 'piper') if high_quality else ('vosk', 'moss', 'qwen', 'piper'))
 
 
 def segment_job_key(request: TTSSynthesisRequest) -> str:

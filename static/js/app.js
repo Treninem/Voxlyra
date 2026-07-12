@@ -15,6 +15,7 @@ const DEFAULTS = {
   audioRate: 1, rewindStep: 15, autoplayNext: false, saveOnPause: true,
   ttsVoice: 'irina', ttsStyle: 'natural', ttsRate: 1, ttsAutoNext: true,
   notifications: true, notificationChapters: true, notificationAudio: true, notificationDiscounts: true,
+  notificationReminders: true, notificationAchievements: true,
   contrast: 'normal', focusMode: false, showReaderAds: true,
   profileFrame: 'standard', seasonalDecor: true,
 };
@@ -30,15 +31,21 @@ let readerTtsPrefetch = null;
 let readerTtsObjectUrl = '';
 let readerTtsCacheTimer = null;
 let readerTtsCacheListener = null;
-const TTS_DEVICE_CACHE_NAME = 'voxlyra-reader-tts-v2-quality';
+let readerTtsLifecycleBound = false;
+const TTS_DEVICE_CACHE_NAME = 'voxlyra-reader-tts-v3-continuity';
+const TTS_LEGACY_DEVICE_CACHE_NAMES = ['voxlyra-reader-tts-v2-quality'];
 const TTS_DEVICE_CACHE_PREFIX = `${window.location.origin}/__voxlyra_tts_cache__/`;
+const READER_TTS_PLAYER_VERSION = 'v1.11.0-stage3-continuity-1';
+const READER_TTS_TRANSITION_LEAD_SECONDS = 0.22;
+const READER_TTS_CROSSFADE_MS = 90;
+const READER_TTS_STALL_TIMEOUT_MS = 7000;
 
 async function migrateReaderTtsDeviceCache() {
   if (!('caches' in window)) return;
   try {
     const names = await caches.keys();
     await Promise.all(names
-      .filter((name) => name.startsWith('voxlyra-reader-tts-') && name !== TTS_DEVICE_CACHE_NAME)
+      .filter((name) => (name.startsWith('voxlyra-reader-tts-') || TTS_LEGACY_DEVICE_CACHE_NAMES.includes(name)) && name !== TTS_DEVICE_CACHE_NAME)
       .map((name) => caches.delete(name)));
   } catch (_) {}
 }
@@ -75,6 +82,8 @@ function getPrefs() {
     notificationChapters: getStoredBool('voxNotificationChapters', DEFAULTS.notificationChapters),
     notificationAudio: getStoredBool('voxNotificationAudio', DEFAULTS.notificationAudio),
     notificationDiscounts: getStoredBool('voxNotificationDiscounts', DEFAULTS.notificationDiscounts),
+    notificationReminders: getStoredBool('voxNotificationReminders', DEFAULTS.notificationReminders),
+    notificationAchievements: getStoredBool('voxNotificationAchievements', DEFAULTS.notificationAchievements),
     contrast: localStorage.getItem('voxContrast') || DEFAULTS.contrast,
     focusMode: getStoredBool('voxFocusMode', DEFAULTS.focusMode),
     showReaderAds: getStoredBool('voxShowReaderAds', DEFAULTS.showReaderAds),
@@ -91,6 +100,7 @@ function setPref(key, value) {
     autoplayNext: 'voxAutoplayNext', saveOnPause: 'voxSaveOnPause',
     notifications: 'voxNotifications', notificationChapters: 'voxNotificationChapters',
     notificationAudio: 'voxNotificationAudio', notificationDiscounts: 'voxNotificationDiscounts',
+    notificationReminders: 'voxNotificationReminders', notificationAchievements: 'voxNotificationAchievements',
     contrast: 'voxContrast', focusMode: 'voxFocusMode',
     showReaderAds: 'voxShowReaderAds', profileFrame: 'voxProfileFrame', seasonalDecor: 'voxSeasonalDecor',
   };
@@ -279,7 +289,7 @@ function changeFont(delta) {
 }
 
 async function resetSettings() {
-  ['voxTheme','readerFontSize','readerLineHeight','readerWidth','voxAudioRate','voxRewindStep','voxAutoplayNext','voxSaveOnPause','voxTtsVoice','voxTtsStyle','voxTtsRate','voxTtsAutoNext','voxNotifications','voxNotificationChapters','voxNotificationAudio','voxNotificationDiscounts','voxContrast','voxFocusMode','voxShowReaderAds','voxProfileFrame','voxSeasonalDecor'].forEach((key) => localStorage.removeItem(key));
+  ['voxTheme','readerFontSize','readerLineHeight','readerWidth','voxAudioRate','voxRewindStep','voxAutoplayNext','voxSaveOnPause','voxTtsVoice','voxTtsStyle','voxTtsRate','voxTtsAutoNext','voxNotifications','voxNotificationChapters','voxNotificationAudio','voxNotificationDiscounts','voxNotificationReminders','voxNotificationAchievements','voxContrast','voxFocusMode','voxShowReaderAds','voxProfileFrame','voxSeasonalDecor'].forEach((key) => localStorage.removeItem(key));
   applySettings();
   if (tgInitData()) {
     try { await apiFetch('/api/preferences', { method: 'DELETE' }); }
@@ -310,6 +320,8 @@ const SERVER_NOTIFICATION_KEYS = {
   notificationChapters: 'notifications_chapters',
   notificationAudio: 'notifications_audio',
   notificationDiscounts: 'notifications_discounts',
+  notificationReminders: 'notifications_reminders',
+  notificationAchievements: 'notifications_achievements',
 };
 
 async function saveNotificationPreference(key, enabled) {
@@ -331,11 +343,15 @@ async function syncNotificationPreferences() {
       notificationChapters: prefs.notifications_chapters !== '0',
       notificationAudio: prefs.notifications_audio !== '0',
       notificationDiscounts: prefs.notifications_discounts !== '0',
+      notificationReminders: prefs.notifications_reminders !== '0',
+      notificationAchievements: prefs.notifications_achievements !== '0',
     };
     Object.entries(values).forEach(([key, value]) => {
       const storageKey = {
         notifications: 'voxNotifications', notificationChapters: 'voxNotificationChapters',
         notificationAudio: 'voxNotificationAudio', notificationDiscounts: 'voxNotificationDiscounts',
+        notificationReminders: 'voxNotificationReminders', notificationAchievements: 'voxNotificationAchievements',
+    notificationReminders: 'voxNotificationReminders', notificationAchievements: 'voxNotificationAchievements',
       }[key];
       localStorage.setItem(storageKey, value ? '1' : '0');
     });
@@ -386,13 +402,80 @@ function continueCard(item, kind = 'reading') {
   return `<a class="continue-card" href="${href}">${dynamicCover(item, isAudio ? 'audio' : 'book')}<div><span>${isAudio ? 'Слушаете' : 'Читаете'}</span><h3>${escapeHtml(item.title || 'Книга')}</h3><p>${escapeHtml(subtitle)}</p><div class="mini-progress"><i style="width:${progress}%"></i></div></div></a>`;
 }
 
+const CHAPTER_REACTION_META = {
+  fire: { icon: '🔥', title: 'Захватывающе' },
+  heart: { icon: '💜', title: 'Понравилось' },
+  cry: { icon: '😢', title: 'Тронуло' },
+  laugh: { icon: '😂', title: 'Смешно' },
+  shock: { icon: '🤯', title: 'Неожиданно' },
+  epic: { icon: '⚔️', title: 'Эпично' },
+};
+
+function renderChapterReactions(reactions) {
+  const list = document.getElementById('chapterReactionList');
+  if (!list) return;
+  const counts = reactions?.counts || {};
+  const selected = String(reactions?.selected || '');
+  list.querySelectorAll('[data-chapter-reaction]').forEach((button) => {
+    const code = String(button.dataset.chapterReaction || '');
+    const count = Math.max(0, Number(counts[code] || 0));
+    button.classList.toggle('selected', code === selected);
+    button.setAttribute('aria-pressed', code === selected ? 'true' : 'false');
+    const counter = button.querySelector('small');
+    if (counter) counter.textContent = String(count);
+  });
+}
+
+function commentDisplayName(item) {
+  return item?.username ? `@${item.username}` : (item?.full_name || 'Читатель');
+}
+
+function commentCardMarkup(item, isReply = false) {
+  const id = Number(item.id || 0);
+  const name = commentDisplayName(item);
+  const liked = Boolean(Number(item.viewer_liked || 0));
+  const likeCount = Math.max(0, Number(item.like_count || 0));
+  const spoiler = Boolean(Number(item.is_spoiler || 0));
+  const replyClass = isReply ? ' comment-reply' : '';
+  const spoilerMarkup = spoiler
+    ? `<button type="button" class="comment-spoiler-cover" data-comment-spoiler-reveal="${id}">Спойлер скрыт · показать</button><p class="comment-spoiler-text" hidden>${escapeHtml(item.text || '')}</p>`
+    : `<p>${escapeHtml(item.text || '')}</p>`;
+  return `<article class="comment-card${replyClass}" data-comment-id="${id}">
+    <header><b>${escapeHtml(name)}</b>${spoiler ? '<span class="comment-badge">Спойлер</span>' : ''}${isReply ? '<span class="comment-badge subtle">Ответ</span>' : ''}</header>
+    ${spoilerMarkup}
+    <footer class="comment-actions">
+      <button type="button" class="quiet-link comment-like${liked ? ' selected' : ''}" data-comment-like="${id}" aria-pressed="${liked ? 'true' : 'false'}">♥ <span>${likeCount}</span></button>
+      <button type="button" class="quiet-link" data-comment-reply="${id}" data-comment-name="${escapeHtml(name)}">Ответить</button>
+      <button type="button" class="quiet-link danger" data-comment-report="${id}">Пожаловаться</button>
+    </footer>
+  </article>`;
+}
+
 function renderComments(comments) {
   const box = document.getElementById('commentsList');
   if (!box) return;
-  box.innerHTML = comments?.length ? comments.map((item) => {
-    const name = item.username ? `@${item.username}` : (item.full_name || 'Читатель');
-    return `<article class="comment-card"><b>${escapeHtml(name)}</b><p>${escapeHtml(item.text)}</p></article>`;
-  }).join('') : '<p class="muted">Комментариев пока нет. Можно начать обсуждение.</p>';
+  const items = Array.isArray(comments) ? comments : [];
+  if (!items.length) {
+    box.innerHTML = '<p class="muted">Комментариев пока нет. Можно начать обсуждение.</p>';
+    return;
+  }
+  const roots = [];
+  const replies = new Map();
+  items.forEach((item) => {
+    const parentId = Number(item.parent_id || 0);
+    if (!parentId) roots.push(item);
+    else {
+      if (!replies.has(parentId)) replies.set(parentId, []);
+      replies.get(parentId).push(item);
+    }
+  });
+  const knownRootIds = new Set(roots.map((item) => Number(item.id || 0)));
+  items.filter((item) => Number(item.parent_id || 0) && !knownRootIds.has(Number(item.parent_id || 0))).forEach((item) => roots.push({ ...item, parent_id: null }));
+  box.innerHTML = roots.map((root) => {
+    const rootId = Number(root.id || 0);
+    const children = (replies.get(rootId) || []).map((item) => commentCardMarkup(item, true)).join('');
+    return `<div class="comment-thread">${commentCardMarkup(root, false)}${children ? `<div class="comment-replies">${children}</div>` : ''}</div>`;
+  }).join('');
 }
 
 function renderReviews(reviews) {
@@ -458,7 +541,8 @@ async function saveReaderProgress(forcedPercent = null) {
   const reader = document.getElementById('readerText');
   if (!reader || !tgInitData()) return;
   const percent = forcedPercent === null ? calcReadingPercent() : Number(forcedPercent);
-  await apiFetch(`/api/reader/${reader.dataset.chapterId}/progress`, { method: 'POST', body: JSON.stringify({ position_percent: percent }) });
+  const result = await apiFetch(`/api/reader/${reader.dataset.chapterId}/progress`, { method: 'POST', body: JSON.stringify({ position_percent: percent }) });
+  (result.achievements?.new || []).forEach((item) => notify(`Новое достижение: ${item.title}`));
   const label = document.getElementById('progressLabel');
   if (label) label.textContent = `Сохранено ${Math.max(0, Math.min(100, percent))}%`;
 }
@@ -468,6 +552,7 @@ async function initReader() {
   if (!reader) return;
   const status = document.getElementById('readerStatus');
   const paragraphs = document.getElementById('readerParagraphs');
+  bindReaderQuoteCards();
   updateReaderProgressBar();
   window.addEventListener('scroll', updateReaderProgressBar, { passive: true });
   window.addEventListener('resize', updateReaderProgressBar, { passive: true });
@@ -478,13 +563,23 @@ async function initReader() {
   try {
     const data = await apiFetch(`/api/reader/${reader.dataset.chapterId}`);
     if (!data.allowed) {
-      const packageRemaining = Number(data.package_credits?.remaining || 0);
-      if (status) status.textContent = packageRemaining > 0 ? `Можно открыть из пакета · осталось ${packageRemaining}` : 'Для этой главы нужен доступ.';
+      const canBuyChapter = Boolean(data.can_buy_chapter);
+      const packageRemaining = canBuyChapter ? Number(data.package_credits?.remaining || 0) : 0;
+      if (status) status.textContent = packageRemaining > 0
+        ? `Можно открыть из пакета · осталось ${packageRemaining}`
+        : (canBuyChapter ? 'Эту главу можно купить отдельно или открыть покупкой всей книги.' : 'Глава доступна после покупки всей книги.');
       if (paragraphs) {
         const packageButton = packageRemaining > 0
           ? `<button class="button-link gold-button" id="unlockChapterWithPackage" type="button">Открыть за 1 главу из пакета · осталось ${packageRemaining}</button>`
           : '';
-        paragraphs.innerHTML = `<section class="empty-card paywall-card"><div class="empty-icon">◇</div><h3>Глава закрыта</h3><p><b>${Number(data.chapter.price_stars || 0)} Stars</b> · ≈ ${(Number(data.chapter.buyer_estimate_minor || 0) / 100).toFixed(2)} ₽</p>${packageButton}${data.purchase_url ? `<a class="button-link secondary" href="${escapeHtml(data.purchase_url)}">Купить только эту главу</a>` : ''}<a class="quiet-link" href="/book/${Number(data.chapter.book_id)}#chapterPackages">Посмотреть пакеты глав</a></section>`;
+        const chapterOffer = canBuyChapter
+          ? `<p><b>Эта глава: ${Number(data.chapter.price_stars || 0)} Stars</b> · ≈ ${(Number(data.chapter.buyer_estimate_minor || 0) / 100).toFixed(2)} ₽</p>${data.purchase_url ? `<a class="button-link secondary" href="${escapeHtml(data.purchase_url)}">Купить только эту главу</a>` : ''}`
+          : '<p>Отдельная покупка этой главы не предусмотрена.</p>';
+        const bookOffer = data.book_purchase_url
+          ? `<a class="button-link gold-button" href="${escapeHtml(data.book_purchase_url)}">Купить всю книгу · ${Number(data.chapter.book_price_stars || 0)} Stars</a>`
+          : '';
+        const packagesLink = canBuyChapter ? `<a class="quiet-link" href="/book/${Number(data.chapter.book_id)}#chapterPackages">Посмотреть пакеты глав</a>` : '';
+        paragraphs.innerHTML = `<section class="empty-card paywall-card"><div class="empty-icon">◇</div><h3>Глава закрыта</h3>${chapterOffer}${packageButton}${bookOffer}${packagesLink}</section>`;
         const unlockButton = document.getElementById('unlockChapterWithPackage');
         if (unlockButton) {
           unlockButton.addEventListener('click', async () => {
@@ -507,14 +602,24 @@ async function initReader() {
     }
     const moderationNotice = document.getElementById('readerModerationNotice');
     const commentsBox = document.getElementById('commentsBox');
+    const reactionsBox = document.getElementById('chapterReactions');
     const saveProgressButton = document.getElementById('saveReadingProgress');
     if (data.moderation_access) {
       if (moderationNotice) moderationNotice.hidden = false;
       if (commentsBox) commentsBox.hidden = true;
+      if (reactionsBox) reactionsBox.hidden = true;
+      const assistantPanel = document.getElementById('readerAssistantPanel');
+      if (assistantPanel) assistantPanel.hidden = true;
       if (saveProgressButton) saveProgressButton.hidden = true;
+      const quoteButton = document.getElementById('readerQuoteStart');
+      if (quoteButton) quoteButton.hidden = true;
       if (status) status.textContent = 'Открыто в служебном режиме проверки';
     } else {
       if (moderationNotice) moderationNotice.hidden = true;
+      if (commentsBox) commentsBox.hidden = false;
+      if (reactionsBox) reactionsBox.hidden = false;
+      const assistantPanel = document.getElementById('readerAssistantPanel');
+      if (assistantPanel) { assistantPanel.hidden = false; assistantPanel.dataset.chapterId = String(data.chapter.id); }
       if (status) status.textContent = data.progress_percent ? `Продолжаем с отметки ${data.progress_percent}%` : 'Глава открыта';
     }
     applyContentProtection(data.protection, reader);
@@ -545,6 +650,7 @@ async function initReader() {
       }, 250);
     }
     renderComments(data.comments);
+    renderChapterReactions(data.reactions);
   } catch (error) {
     if (status) status.textContent = 'Не удалось открыть главу. Попробуйте ещё раз.';
   }
@@ -595,11 +701,82 @@ const readerTtsStream = {
   prefetchedChapter: null,
   nextPrepared: null,
   segmentRetries: new Map(),
+  transitionKey: '',
+  transitionPromise: null,
+  watchdogTimer: null,
+  lastProgressAt: 0,
+  lastProgressPosition: 0,
+  lastRecoveryAt: 0,
+  firstAudioReported: false,
 };
 
 function updateReaderTtsStatus(text) {
   const status = document.getElementById('readerTtsStatus');
   if (status) status.textContent = text;
+}
+
+function reportReaderTtsEvent(event, details = {}, sessionId = readerTtsStream.sessionId) {
+  if (!sessionId || !tgInitData()) return Promise.resolve(null);
+  return apiFetch(`/api/reader/tts/session/${encodeURIComponent(sessionId)}/event`, {
+    method: 'POST',
+    body: JSON.stringify({
+      event,
+      segment_index: readerTtsStream.currentIndex,
+      player_version: READER_TTS_PLAYER_VERSION,
+      details,
+    }),
+  }).catch(() => null);
+}
+
+function resetReaderTtsPlayerVolume(player) {
+  if (!player) return;
+  player.volume = 1;
+}
+
+function fadeReaderTtsVolume(player, from, to, durationMs = READER_TTS_CROSSFADE_MS) {
+  if (!player) return Promise.resolve();
+  const started = performance.now();
+  player.volume = Math.max(0, Math.min(1, Number(from)));
+  return new Promise((resolve) => {
+    const step = (now) => {
+      const progress = Math.min(1, Math.max(0, (now - started) / Math.max(1, durationMs)));
+      player.volume = Math.max(0, Math.min(1, Number(from) + (Number(to) - Number(from)) * progress));
+      if (progress >= 1) resolve();
+      else requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  });
+}
+
+async function crossfadeReaderTtsPlayers(oldPlayer, nextPlayer, { shouldPlay = true } = {}) {
+  if (!nextPlayer) return;
+  nextPlayer.currentTime = 0;
+  nextPlayer.playbackRate = Number(readerTtsMeta?.playback_rate || getPrefs().ttsRate || 1);
+  if (!shouldPlay) {
+    oldPlayer?.pause();
+    resetReaderTtsPlayerVolume(oldPlayer);
+    resetReaderTtsPlayerVolume(nextPlayer);
+    return;
+  }
+  nextPlayer.volume = 0;
+  try {
+    await nextPlayer.play();
+  } catch (error) {
+    oldPlayer?.pause();
+    resetReaderTtsPlayerVolume(nextPlayer);
+    try { await nextPlayer.play(); }
+    catch (_) {
+      reportReaderTtsEvent('autoplay_blocked', { reason: String(error?.message || 'play_failed') });
+      throw new Error('Telegram остановил автоматическое продолжение. Нажмите воспроизведение один раз.');
+    }
+  }
+  await Promise.all([
+    fadeReaderTtsVolume(nextPlayer, 0, 1),
+    oldPlayer && !oldPlayer.paused ? fadeReaderTtsVolume(oldPlayer, oldPlayer.volume, 0) : Promise.resolve(),
+  ]);
+  oldPlayer?.pause();
+  resetReaderTtsPlayerVolume(oldPlayer);
+  resetReaderTtsPlayerVolume(nextPlayer);
 }
 
 function setReaderTtsOptionsExpanded(expanded) {
@@ -895,7 +1072,21 @@ function updateReaderPageForTts(meta) {
   const moderationNotice = document.getElementById('readerModerationNotice');
   if (moderationNotice) moderationNotice.hidden = !meta.moderation_access;
   const commentsBox = document.getElementById('commentsBox');
-  if (commentsBox && meta.moderation_access) commentsBox.hidden = true;
+  const reactionsBox = document.getElementById('chapterReactions');
+  if (commentsBox) commentsBox.hidden = Boolean(meta.moderation_access);
+  if (reactionsBox) reactionsBox.hidden = Boolean(meta.moderation_access);
+  const assistantPanel = document.getElementById('readerAssistantPanel');
+  if (assistantPanel) {
+    assistantPanel.hidden = Boolean(meta.moderation_access);
+    assistantPanel.dataset.chapterId = String(chapter.id);
+    delete assistantPanel.dataset.loaded;
+    const assistantBody = document.getElementById('readerAssistantBody');
+    const assistantAnswer = document.getElementById('readerAssistantAnswer');
+    if (assistantBody) assistantBody.hidden = true;
+    if (assistantAnswer) assistantAnswer.hidden = true;
+    const assistantToggle = document.getElementById('readerAssistantToggle');
+    if (assistantToggle) { assistantToggle.textContent = 'Открыть'; assistantToggle.setAttribute('aria-expanded', 'false'); }
+  }
   const saveProgressButton = document.getElementById('saveReadingProgress');
   if (saveProgressButton && meta.moderation_access) saveProgressButton.hidden = true;
   document.querySelector('.reader-toolbar-title small')?.replaceChildren(document.createTextNode(chapter.book_title || 'Книга'));
@@ -949,9 +1140,17 @@ async function readerTtsTogglePlay(forcePlay = null) {
   readerTtsStream.requestedPlay = shouldPlay;
   if (shouldPlay) {
     readerTtsPlayers().forEach((player) => { player.playbackRate = Number(readerTtsMeta?.playback_rate || getPrefs().ttsRate || 1); });
-    try { await active.play(); }
-    catch (_) { updateReaderTtsStatus('Нажмите кнопку воспроизведения ещё раз.'); }
-  } else active.pause();
+    try {
+      await active.play();
+      startReaderTtsWatchdog();
+    } catch (error) {
+      updateReaderTtsStatus('Нажмите кнопку воспроизведения ещё раз.');
+      reportReaderTtsEvent('autoplay_blocked', { reason: String(error?.message || error) });
+    }
+  } else {
+    active.pause();
+    stopReaderTtsWatchdog();
+  }
   updateReaderTtsProgressUi();
 }
 
@@ -981,85 +1180,163 @@ async function preloadReaderTtsNextSegment(operation = readerTtsStream.operation
   } catch (_) { return null; }
 }
 
-async function startNextReaderTtsPrefetch(meta) {
-  const nextId = Number(meta?.navigation?.next?.id || 0);
-  if (!getPrefs().ttsAutoNext || !nextId || readerTtsStream.prefetchedChapter?.chapterId === nextId) return;
-  const remaining = readerTtsStream.segmentCount - readerTtsStream.currentIndex - 1;
-  if (remaining > 3 && readerTtsStream.currentIndex < Math.floor(readerTtsStream.segmentCount * 0.65)) return;
-  const profile = { voice: meta.voice, rate: Number(meta.playback_rate || getPrefs().ttsRate), style: meta.style };
-  const promise = apiFetchWithRetry(`/api/reader/${nextId}/tts/session`, {
-    method: 'POST', body: JSON.stringify({ voice: profile.voice, style: profile.style, rate: profile.rate, high_quality: true }),
-  }, 2, 90000).catch(() => null);
-  readerTtsStream.prefetchedChapter = { chapterId: nextId, profileKey: readerTtsProfileKey(profile), promise };
-  if (remaining <= 1) {
-    const nextMeta = await promise;
-    if (nextMeta?.segments?.[0]?.status === 'ready') {
-      readerTtsStream.nextPrepared = nextMeta;
-      if (remaining === 0) {
-        const standby = readerTtsStandbyPlayer();
-        const first = nextMeta.segments[0];
-        if (standby && first?.url && standby.dataset.nextChapterId !== String(nextId)) {
-          try {
-            await loadAudioElement(standby, first, readerTtsStream.operation);
-            standby.dataset.nextChapterId = String(nextId);
-            standby.dataset.nextSessionId = String(nextMeta.session_id || '');
-          } catch (_) {}
-        }
-      }
-    }
-  }
+function mergePrefetchedReaderTtsManifest(meta, update) {
+  if (!meta || !update) return meta;
+  const byIndex = new Map((meta.segments || []).map((item) => [Number(item.index), item]));
+  (update.segments || []).forEach((item) => {
+    const previous = byIndex.get(Number(item.index)) || {};
+    byIndex.set(Number(item.index), Object.assign({}, previous, item));
+  });
+  return Object.assign({}, meta, update, {
+    chapter: meta.chapter,
+    navigation: meta.navigation,
+    moderation_access: meta.moderation_access,
+    access_mode: meta.access_mode,
+    device_cache_allowed: meta.device_cache_allowed,
+    playback_rate: meta.playback_rate,
+    segments: Array.from(byIndex.values()).sort((a, b) => Number(a.index) - Number(b.index)),
+  });
 }
 
-async function switchReaderTtsSegment() {
-  if (readerTtsStream.switching) return;
-  readerTtsStream.switching = true;
+async function waitForPrefetchedReaderTtsFirst(meta, operation, timeoutMs = 120000) {
+  let prepared = meta;
+  const started = Date.now();
+  while (operation === readerTtsStream.operation && Date.now() - started < timeoutMs) {
+    const first = (prepared?.segments || []).find((item) => Number(item.index) === 0);
+    if (first?.status === 'ready' && first.url) return prepared;
+    if (first?.status === 'failed') throw new Error(first.error || 'Не удалось подготовить следующую главу.');
+    const update = await apiFetchWithRetry(
+      `/api/reader/tts/session/${encodeURIComponent(prepared.session_id)}?start=0&count=3`, {}, 3, 45000,
+    );
+    prepared = mergePrefetchedReaderTtsManifest(prepared, update);
+    await wait(450);
+  }
+  if (operation !== readerTtsStream.operation) return null;
+  throw new Error('Следующая глава не успела подготовиться.');
+}
+
+async function primePrefetchedReaderTtsChapter(nextMeta, operation = readerTtsStream.operation) {
+  if (!nextMeta?.chapter || operation !== readerTtsStream.operation) return false;
+  if (readerTtsStream.currentIndex < readerTtsStream.segmentCount - 1) return false;
+  const standby = readerTtsStandbyPlayer();
+  const first = (nextMeta.segments || []).find((item) => Number(item.index) === 0);
+  if (!standby || !first?.url) return false;
+  if (standby.dataset.nextChapterId === String(nextMeta.chapter.id) && standby.readyState >= 2) return true;
+  await loadAudioElement(standby, first, operation);
+  standby.dataset.nextChapterId = String(nextMeta.chapter.id);
+  standby.dataset.nextSessionId = String(nextMeta.session_id || '');
+  return true;
+}
+
+async function startNextReaderTtsPrefetch(meta) {
+  const nextId = Number(meta?.navigation?.next?.id || 0);
+  if (!getPrefs().ttsAutoNext || !nextId) return null;
+  const existing = readerTtsStream.prefetchedChapter;
+  if (existing?.chapterId === nextId) {
+    if (readerTtsStream.nextPrepared) primePrefetchedReaderTtsChapter(readerTtsStream.nextPrepared).catch(() => {});
+    return existing.readyPromise || existing.promise || null;
+  }
+  const remaining = readerTtsStream.segmentCount - readerTtsStream.currentIndex - 1;
+  const threshold = Math.max(1, Math.floor(readerTtsStream.segmentCount * 0.45));
+  if (remaining > 6 && readerTtsStream.currentIndex < threshold) return null;
   const operation = readerTtsStream.operation;
-  const oldPlayer = readerTtsPlayer();
-  const completedDuration = readerTtsKnownDuration(readerTtsStream.currentIndex) || Number(oldPlayer?.duration || 0);
-  readerTtsStream.accumulatedSeconds += completedDuration;
+  const currentSession = readerTtsStream.sessionId;
+  const profile = { voice: meta.voice, rate: Number(meta.playback_rate || getPrefs().ttsRate), style: meta.style };
+  reportReaderTtsEvent('chapter_prefetch_start', { next_chapter_id: nextId, remaining }, currentSession);
+  const promise = apiFetchWithRetry(`/api/reader/${nextId}/tts/session`, {
+    method: 'POST', body: JSON.stringify({ voice: profile.voice, style: profile.style, rate: profile.rate, high_quality: true }),
+  }, 3, 120000);
+  const holder = {
+    chapterId: nextId,
+    profileKey: readerTtsProfileKey(profile),
+    promise,
+    readyPromise: null,
+    sessionId: '',
+  };
+  readerTtsStream.prefetchedChapter = holder;
+  holder.readyPromise = promise.then(async (created) => {
+    if (!created || operation !== readerTtsStream.operation) return null;
+    holder.sessionId = String(created.session_id || '');
+    const ready = await waitForPrefetchedReaderTtsFirst(created, operation);
+    if (!ready || operation !== readerTtsStream.operation) return null;
+    readerTtsStream.nextPrepared = ready;
+    reportReaderTtsEvent('chapter_prefetch_ready', {
+      next_chapter_id: nextId,
+      first_provider: ready.segments?.[0]?.provider || '',
+    }, currentSession);
+    await primePrefetchedReaderTtsChapter(ready, operation).catch(() => false);
+    return ready;
+  }).catch((error) => {
+    if (readerTtsStream.prefetchedChapter === holder) {
+      holder.error = String(error?.message || error || 'prefetch_failed');
+    }
+    return null;
+  });
+  return holder.readyPromise;
+}
+
+async function switchReaderTtsSegment({ seamless = false, reason = 'ended' } = {}) {
+  if (readerTtsStream.switching) return false;
+  const operation = readerTtsStream.operation;
   const nextIndex = readerTtsStream.currentIndex + 1;
+  const transitionKey = `${readerTtsStream.sessionId}:segment:${nextIndex}`;
+  if (readerTtsStream.transitionKey === transitionKey) return false;
+  readerTtsStream.switching = true;
+  readerTtsStream.transitionKey = transitionKey;
+  const oldPlayer = readerTtsPlayer();
   try {
     if (nextIndex >= readerTtsStream.segmentCount) {
-      await finishReaderTtsChapter(operation);
-      return;
+      return await finishReaderTtsChapter(operation, { seamless, reason });
     }
     let nextPlayer = readerTtsStandbyPlayer();
     if (!nextPlayer || Number(nextPlayer.dataset.segmentIndex) !== nextIndex || nextPlayer.readyState < 2) {
+      if (seamless) return false;
       updateReaderTtsStatus('Подгружаем следующий фрагмент…');
       nextPlayer = readerTtsStandbyPlayer();
       await prepareReaderTtsSegment(nextIndex, nextPlayer, operation);
     }
-    if (operation !== readerTtsStream.operation) return;
-    oldPlayer?.pause();
+    if (operation !== readerTtsStream.operation) return false;
+    reportReaderTtsEvent('segment_transition_start', { from: readerTtsStream.currentIndex, to: nextIndex, seamless, reason });
+    const completedDuration = readerTtsKnownDuration(readerTtsStream.currentIndex) || Number(oldPlayer?.duration || 0);
+    await crossfadeReaderTtsPlayers(oldPlayer, nextPlayer, { shouldPlay: readerTtsStream.requestedPlay });
+    if (operation !== readerTtsStream.operation) return false;
+    readerTtsStream.accumulatedSeconds += completedDuration;
     readerTtsStream.activeSlot = readerTtsStream.activeSlot === 0 ? 1 : 0;
     readerTtsStream.currentIndex = nextIndex;
-    nextPlayer.currentTime = 0;
-    nextPlayer.playbackRate = Number(readerTtsMeta?.playback_rate || getPrefs().ttsRate || 1);
-    if (readerTtsStream.requestedPlay) await nextPlayer.play();
+    readerTtsStream.lastProgressAt = Date.now();
+    readerTtsStream.lastProgressPosition = 0;
     updateReaderTtsStatus(`Глава ${readerTtsMeta.chapter.number} · фрагмент ${nextIndex + 1} из ${readerTtsStream.segmentCount}`);
+    reportReaderTtsEvent('segment_transition_complete', { index: nextIndex, seamless, reason });
     preloadReaderTtsNextSegment(operation).catch(() => {});
-    requestReaderTtsWindow(nextIndex + 1, 10, operation).catch(() => {});
+    requestReaderTtsWindow(nextIndex + 1, 12, operation).catch(() => {});
     startNextReaderTtsPrefetch(readerTtsMeta).catch(() => {});
+    return true;
   } catch (error) {
     updateReaderTtsStatus(error.message || 'Не удалось продолжить озвучивание.');
+    reportReaderTtsEvent('player_error', { scope: 'segment_transition', reason: String(error?.message || error) });
+    return false;
   } finally {
     readerTtsStream.switching = false;
+    readerTtsStream.transitionKey = '';
     updateReaderTtsProgressUi();
   }
 }
 
-async function activatePrefetchedReaderTtsChapter(nextMeta, operation) {
+async function activatePrefetchedReaderTtsChapter(nextMeta, operation, { seamless = false, reason = 'ended' } = {}) {
   if (!nextMeta?.chapter || !nextMeta?.session_id || operation !== readerTtsStream.operation) return false;
   const nextId = Number(nextMeta.chapter.id);
+  await primePrefetchedReaderTtsChapter(nextMeta, operation);
   const standby = readerTtsStandbyPlayer();
-  const first = nextMeta.segments?.find((item) => Number(item.index) === 0);
+  const first = (nextMeta.segments || []).find((item) => Number(item.index) === 0);
   if (!standby || standby.dataset.nextChapterId !== String(nextId) || standby.readyState < 2) {
-    if (!first?.url) return false;
+    if (!first?.url || seamless) return false;
     await loadAudioElement(standby, first, operation);
   }
   const oldSession = readerTtsStream.sessionId;
   const oldPlayer = readerTtsPlayer();
-  oldPlayer?.pause();
+  reportReaderTtsEvent('chapter_transition_start', { next_chapter_id: nextId, seamless, reason }, oldSession);
+  await crossfadeReaderTtsPlayers(oldPlayer, standby, { shouldPlay: readerTtsStream.requestedPlay });
+  if (operation !== readerTtsStream.operation) return false;
   readerTtsMeta = nextMeta;
   readerTtsStream.activeSlot = readerTtsStream.activeSlot === 0 ? 1 : 0;
   readerTtsStream.sessionId = nextMeta.session_id;
@@ -1069,39 +1346,150 @@ async function activatePrefetchedReaderTtsChapter(nextMeta, operation) {
   readerTtsStream.accumulatedSeconds = 0;
   readerTtsStream.prefetchedChapter = null;
   readerTtsStream.nextPrepared = null;
+  readerTtsStream.transitionKey = '';
+  readerTtsStream.firstAudioReported = true;
   mergeReaderTtsManifest(nextMeta);
   updateReaderPageForTts(nextMeta);
   updateReaderTtsMediaSession(nextMeta);
   standby.dataset.nextChapterId = '';
   standby.dataset.nextSessionId = '';
-  standby.currentTime = 0;
+  standby.dataset.segmentIndex = '0';
+  standby.currentTime = Math.max(0, Number(standby.currentTime || 0));
   standby.playbackRate = Number(nextMeta.playback_rate || getPrefs().ttsRate || 1);
-  if (readerTtsStream.requestedPlay) await standby.play();
   updateReaderTtsStatus(`Глава ${nextMeta.chapter.number} · продолжаем без остановки`);
+  reportReaderTtsEvent('chapter_transition_complete', { previous_session_id: oldSession, seamless, reason }, nextMeta.session_id);
   preloadReaderTtsNextSegment(operation).catch(() => {});
-  requestReaderTtsWindow(1, 10, operation).catch(() => {});
+  requestReaderTtsWindow(1, 12, operation).catch(() => {});
+  startNextReaderTtsPrefetch(nextMeta).catch(() => {});
   if (oldSession && oldSession !== nextMeta.session_id) apiFetch(`/api/reader/tts/session/${encodeURIComponent(oldSession)}`, { method: 'DELETE' }).catch(() => {});
   return true;
 }
 
-async function finishReaderTtsChapter(operation) {
-  try { await saveReaderProgress(100); } catch (_) {}
-  try { await saveReaderTtsProgress(); } catch (_) {}
+async function finishReaderTtsChapter(operation, { seamless = false, reason = 'ended' } = {}) {
   const nextId = Number(readerTtsMeta?.navigation?.next?.id || 0);
   if (!getPrefs().ttsAutoNext || !nextId) {
+    if (seamless) return false;
+    try { await saveReaderProgress(100); } catch (_) {}
+    try { await saveReaderTtsProgress(); } catch (_) {}
     readerTtsStream.requestedPlay = false;
     updateReaderTtsStatus(nextId ? 'Глава закончена' : 'Книга закончена');
-    return;
+    return true;
   }
-  updateReaderTtsStatus('Переключаем на следующую главу…');
   let nextMeta = readerTtsStream.nextPrepared;
   const profileKey = readerTtsProfileKey({ voice: readerTtsMeta.voice, rate: readerTtsMeta.playback_rate, style: readerTtsMeta.style });
-  if (!nextMeta && readerTtsStream.prefetchedChapter?.chapterId === nextId && readerTtsStream.prefetchedChapter?.profileKey === profileKey) {
-    nextMeta = await readerTtsStream.prefetchedChapter.promise;
+  const holder = readerTtsStream.prefetchedChapter;
+  if (!nextMeta && holder?.chapterId === nextId && holder?.profileKey === profileKey) {
+    if (seamless) return false;
+    updateReaderTtsStatus('Подготавливаем продолжение…');
+    nextMeta = await (holder.readyPromise || holder.promise);
   }
-  if (operation !== readerTtsStream.operation) return;
-  if (nextMeta && await activatePrefetchedReaderTtsChapter(nextMeta, operation)) return;
-  await loadReaderTtsChapter(nextId, true, nextMeta || null);
+  if (!nextMeta && !seamless) {
+    const started = await startNextReaderTtsPrefetch(readerTtsMeta);
+    nextMeta = await started;
+  }
+  if (operation !== readerTtsStream.operation || !nextMeta) {
+    if (!seamless) updateReaderTtsStatus('Продолжение ещё готовится. Нажмите воспроизведение через несколько секунд.');
+    return false;
+  }
+  const activated = await activatePrefetchedReaderTtsChapter(nextMeta, operation, { seamless, reason });
+  if (activated) {
+    try { await saveReaderProgress(100); } catch (_) {}
+    return true;
+  }
+  if (seamless) return false;
+  updateReaderTtsStatus('Переключаем на следующую главу…');
+  await loadReaderTtsChapter(nextId, true, nextMeta);
+  return true;
+}
+
+function maybeStartReaderTtsBoundaryTransition(player) {
+  if (!player || player !== readerTtsPlayer() || readerTtsStream.switching || !readerTtsStream.requestedPlay) return;
+  const duration = Number(player.duration || 0);
+  const current = Number(player.currentTime || 0);
+  if (!duration || !Number.isFinite(duration)) return;
+  const remaining = duration - current;
+  if (remaining > READER_TTS_TRANSITION_LEAD_SECONDS) return;
+  const lastSegment = readerTtsStream.currentIndex >= readerTtsStream.segmentCount - 1;
+  if (!lastSegment) {
+    const standby = readerTtsStandbyPlayer();
+    const nextIndex = readerTtsStream.currentIndex + 1;
+    if (standby && Number(standby.dataset.segmentIndex) === nextIndex && standby.readyState >= 2) {
+      switchReaderTtsSegment({ seamless: true, reason: 'lead_time' }).catch(() => {});
+    }
+    return;
+  }
+  const nextMeta = readerTtsStream.nextPrepared;
+  const standby = readerTtsStandbyPlayer();
+  if (nextMeta && standby?.dataset.nextChapterId === String(nextMeta.chapter?.id || '') && standby.readyState >= 2) {
+    switchReaderTtsSegment({ seamless: true, reason: 'lead_time' }).catch(() => {});
+  }
+}
+
+async function recoverReaderTtsPlayback(reason = 'watchdog') {
+  if (!readerTtsStream.sessionId || !readerTtsStream.requestedPlay || readerTtsStream.switching) return false;
+  const now = Date.now();
+  if (now - Number(readerTtsStream.lastRecoveryAt || 0) < 6000) return false;
+  readerTtsStream.lastRecoveryAt = now;
+  const operation = readerTtsStream.operation;
+  const index = readerTtsStream.currentIndex;
+  const player = readerTtsPlayer();
+  const currentTime = Math.max(0, Number(player?.currentTime || 0));
+  reportReaderTtsEvent('player_recovery_start', { reason, current_time: currentTime, ready_state: player?.readyState || 0 });
+  updateReaderTtsStatus('Восстанавливаем непрерывное воспроизведение…');
+  try {
+    const duration = Number(player?.duration || 0);
+    if (duration > 0 && duration - currentTime <= 1.0) {
+      const switched = await switchReaderTtsSegment({ seamless: false, reason: `recovery_${reason}` });
+      if (switched) {
+        reportReaderTtsEvent('player_recovered', { reason, method: 'advance' });
+        return true;
+      }
+    }
+    await requestReaderTtsWindow(Math.max(0, index - 1), 6, operation);
+    const segment = await waitForReaderTtsSegment(index, operation, 60000);
+    await deleteCachedReaderTtsAudio(segment);
+    await loadAudioElement(player, Object.assign({}, segment, { url: `${segment.url}&recover=${Date.now()}` }), operation);
+    player.currentTime = Math.min(currentTime, Math.max(0, Number(player.duration || currentTime) - 0.05));
+    resetReaderTtsPlayerVolume(player);
+    if (readerTtsStream.requestedPlay) await player.play();
+    readerTtsStream.lastProgressAt = Date.now();
+    readerTtsStream.lastProgressPosition = Number(player.currentTime || 0);
+    preloadReaderTtsNextSegment(operation).catch(() => {});
+    updateReaderTtsStatus(`Глава ${readerTtsMeta?.chapter?.number || ''} · воспроизведение восстановлено`);
+    reportReaderTtsEvent('player_recovered', { reason, method: 'reload_segment', current_time: player.currentTime });
+    return true;
+  } catch (error) {
+    updateReaderTtsStatus('Не удалось восстановить звук автоматически. Нажмите ▶ один раз.');
+    reportReaderTtsEvent('player_recovery_failed', { reason, error: String(error?.message || error) });
+    return false;
+  }
+}
+
+function startReaderTtsWatchdog() {
+  if (readerTtsStream.watchdogTimer) return;
+  readerTtsStream.lastProgressAt = Date.now();
+  readerTtsStream.lastProgressPosition = Number(readerTtsPlayer()?.currentTime || 0);
+  readerTtsStream.watchdogTimer = setInterval(() => {
+    if (!readerTtsStream.sessionId || !readerTtsStream.requestedPlay || readerTtsStream.switching) return;
+    const player = readerTtsPlayer();
+    if (!player?.src) return;
+    const current = Number(player.currentTime || 0);
+    if (Math.abs(current - Number(readerTtsStream.lastProgressPosition || 0)) > 0.04) {
+      readerTtsStream.lastProgressPosition = current;
+      readerTtsStream.lastProgressAt = Date.now();
+      return;
+    }
+    if (Date.now() - Number(readerTtsStream.lastProgressAt || 0) < READER_TTS_STALL_TIMEOUT_MS) return;
+    reportReaderTtsEvent('player_stalled', {
+      reason: 'watchdog_no_progress', current_time: current, ready_state: player.readyState, network_state: player.networkState,
+    });
+    recoverReaderTtsPlayback('watchdog_no_progress').catch(() => {});
+  }, 2000);
+}
+
+function stopReaderTtsWatchdog() {
+  clearInterval(readerTtsStream.watchdogTimer);
+  readerTtsStream.watchdogTimer = null;
 }
 
 async function seekReaderTtsTo(targetSeconds) {
@@ -1141,15 +1529,21 @@ function seekReaderTts(seconds) {
 
 async function closeReaderTtsSession() {
   const sessionId = readerTtsStream.sessionId;
+  const prefetchedSessionId = String(readerTtsStream.prefetchedChapter?.sessionId || readerTtsStream.nextPrepared?.session_id || '');
+  if (sessionId) await reportReaderTtsEvent('session_closed', {}, sessionId);
   readerTtsStream.operation += 1;
+  stopReaderTtsWatchdog();
   clearTimeout(readerTtsStream.pollTimer);
   readerTtsStream.pollTimer = null;
   readerTtsPlayers().forEach((player) => {
     player.pause();
+    resetReaderTtsPlayerVolume(player);
     releaseReaderTtsObjectUrl(player);
     player.removeAttribute('src');
     player.load();
     player.dataset.segmentIndex = '';
+    player.dataset.nextChapterId = '';
+    player.dataset.nextSessionId = '';
   });
   readerTtsStream.sessionId = '';
   readerTtsStream.segments = new Map();
@@ -1159,7 +1553,15 @@ async function closeReaderTtsSession() {
   readerTtsStream.estimatedTotalSeconds = 0;
   readerTtsStream.prefetchedChapter = null;
   readerTtsStream.nextPrepared = null;
+  readerTtsStream.transitionKey = '';
+  readerTtsStream.transitionPromise = null;
+  readerTtsStream.lastProgressAt = 0;
+  readerTtsStream.lastProgressPosition = 0;
+  readerTtsStream.firstAudioReported = false;
   if (sessionId && tgInitData()) apiFetch(`/api/reader/tts/session/${encodeURIComponent(sessionId)}`, { method: 'DELETE' }).catch(() => {});
+  if (prefetchedSessionId && prefetchedSessionId !== sessionId && tgInitData()) {
+    apiFetch(`/api/reader/tts/session/${encodeURIComponent(prefetchedSessionId)}`, { method: 'DELETE' }).catch(() => {});
+  }
 }
 
 async function applyReaderTtsSession(meta, autoPlay = false) {
@@ -1176,6 +1578,18 @@ async function applyReaderTtsSession(meta, autoPlay = false) {
   readerTtsStream.requestedPlay = Boolean(autoPlay);
   readerTtsStream.prefetchedChapter = null;
   readerTtsStream.nextPrepared = null;
+  readerTtsStream.transitionKey = '';
+  readerTtsStream.transitionPromise = null;
+  readerTtsStream.lastProgressAt = Date.now();
+  readerTtsStream.lastProgressPosition = 0;
+  readerTtsStream.firstAudioReported = false;
+  readerTtsStream.segmentRetries = new Map();
+  readerTtsPlayers().forEach((player, index) => {
+    resetReaderTtsPlayerVolume(player);
+    player.dataset.nextChapterId = '';
+    player.dataset.nextSessionId = '';
+    if (index !== 0) player.dataset.segmentIndex = '';
+  });
   mergeReaderTtsManifest(meta);
   updateReaderPageForTts(meta);
   updateReaderTtsMediaSession(meta);
@@ -1188,6 +1602,12 @@ async function applyReaderTtsSession(meta, autoPlay = false) {
   updateReaderTtsStatus('Первый фрагмент готовится…');
   const first = await prepareReaderTtsSegment(0, readerTtsPlayers()[0], operation);
   if (!first || operation !== readerTtsStream.operation) return;
+  reportReaderTtsEvent('session_applied', {
+    chapter_id: meta.chapter.id,
+    segment_count: readerTtsStream.segmentCount,
+    first_provider: first.provider || '',
+    player_version: READER_TTS_PLAYER_VERSION,
+  });
   const profile = { voice: meta.voice, rate: Number(meta.playback_rate || 1), style: meta.style };
   const local = getLocalReaderTtsProgress(meta.chapter.id, profile);
   if (local.segmentIndex > 0 && local.segmentIndex < readerTtsStream.segmentCount) {
@@ -1200,7 +1620,7 @@ async function applyReaderTtsSession(meta, autoPlay = false) {
   readerTtsPlayers().forEach((player) => { player.playbackRate = Number(meta.playback_rate || 1); });
   updateReaderTtsStatus(`Глава ${meta.chapter.number} · озвучивание запущено`);
   preloadReaderTtsNextSegment(operation).catch(() => {});
-  requestReaderTtsWindow(readerTtsStream.currentIndex + 1, 10, operation).catch(() => {});
+  requestReaderTtsWindow(readerTtsStream.currentIndex + 1, 12, operation).catch(() => {});
   if (autoPlay) await readerTtsTogglePlay(true);
   updateReaderTtsProgressUi();
 }
@@ -1215,10 +1635,15 @@ async function loadReaderTtsChapter(chapterId, autoPlay = false, preparedMeta = 
   if (startButton) startButton.textContent = 'Подготавливаем…';
   updateReaderTtsStatus(navigator.onLine ? 'Запускаем первый фрагмент…' : 'Нет соединения с сервером…');
   const oldSession = readerTtsStream.sessionId;
+  const oldPrefetchedSession = String(readerTtsStream.prefetchedChapter?.sessionId || readerTtsStream.nextPrepared?.session_id || '');
   const oldOperation = readerTtsStream.operation;
   readerTtsStream.operation += 1;
   const operation = readerTtsStream.operation;
-  readerTtsPlayers().forEach((player) => player.pause());
+  stopReaderTtsWatchdog();
+  readerTtsPlayers().forEach((player) => {
+    player.pause();
+    resetReaderTtsPlayerVolume(player);
+  });
   try {
     const profile = readerTtsCurrentProfile();
     const meta = preparedMeta || await apiFetchWithRetry(`/api/reader/${Number(chapterId)}/tts/session`, {
@@ -1229,6 +1654,9 @@ async function loadReaderTtsChapter(chapterId, autoPlay = false, preparedMeta = 
     readerTtsStream.segments = new Map();
     await applyReaderTtsSession(meta, autoPlay);
     if (oldSession && oldSession !== meta.session_id) apiFetch(`/api/reader/tts/session/${encodeURIComponent(oldSession)}`, { method: 'DELETE' }).catch(() => {});
+    if (oldPrefetchedSession && oldPrefetchedSession !== meta.session_id && oldPrefetchedSession !== oldSession) {
+      apiFetch(`/api/reader/tts/session/${encodeURIComponent(oldPrefetchedSession)}`, { method: 'DELETE' }).catch(() => {});
+    }
   } catch (error) {
     if (operation === readerTtsStream.operation) {
       updateReaderTtsStatus(error.message || 'Не удалось подготовить озвучивание');
@@ -1247,50 +1675,95 @@ function bindReaderTtsPlayerEvents(player) {
   player.addEventListener('play', () => {
     document.getElementById('readerTtsPanel')?.classList.add('is-playing');
     readerTtsStream.requestedPlay = true;
+    readerTtsStream.lastProgressAt = Date.now();
+    readerTtsStream.lastProgressPosition = Number(player.currentTime || 0);
+    startReaderTtsWatchdog();
+    if (!readerTtsStream.firstAudioReported && player === readerTtsPlayer()) {
+      readerTtsStream.firstAudioReported = true;
+      reportReaderTtsEvent('first_audio_play', {
+        provider: readerTtsStream.segments.get(readerTtsStream.currentIndex)?.provider || '',
+        chapter_id: readerTtsMeta?.chapter?.id || 0,
+      });
+    }
     try { navigator.mediaSession.playbackState = 'playing'; } catch (_) {}
     updateReaderTtsProgressUi();
   });
   player.addEventListener('pause', () => {
-    if (readerTtsPlayers().every((item) => item.paused)) document.getElementById('readerTtsPanel')?.classList.remove('is-playing');
+    if (readerTtsPlayers().every((item) => item.paused)) {
+      document.getElementById('readerTtsPanel')?.classList.remove('is-playing');
+      if (!readerTtsStream.switching) stopReaderTtsWatchdog();
+    }
     try { navigator.mediaSession.playbackState = 'paused'; } catch (_) {}
     updateReaderTtsProgressUi();
   });
   player.addEventListener('timeupdate', () => {
     if (player !== readerTtsPlayer()) return;
+    const current = Number(player.currentTime || 0);
+    if (Math.abs(current - Number(readerTtsStream.lastProgressPosition || 0)) > 0.03) {
+      readerTtsStream.lastProgressPosition = current;
+      readerTtsStream.lastProgressAt = Date.now();
+    }
     updateReaderTtsProgressUi();
     updateReaderTtsPositionState();
     clearTimeout(readerTtsProgressTimer);
     readerTtsProgressTimer = setTimeout(() => saveReaderTtsProgress().catch(() => {}), 4000);
-    const remaining = Number(player.duration || 0) - Number(player.currentTime || 0);
+    const remaining = Number(player.duration || 0) - current;
     if (remaining < 18) preloadReaderTtsNextSegment().catch(() => {});
     startNextReaderTtsPrefetch(readerTtsMeta).catch(() => {});
+    maybeStartReaderTtsBoundaryTransition(player);
   });
   player.addEventListener('ended', () => {
     if (player !== readerTtsPlayer()) return;
-    switchReaderTtsSegment().catch(() => {});
+    switchReaderTtsSegment({ seamless: false, reason: 'ended' }).catch(() => {});
   });
   player.addEventListener('stalled', () => {
-    if (player === readerTtsPlayer() && !player.paused) updateReaderTtsStatus('Связь нестабильна, удерживаем очередь…');
+    if (player === readerTtsPlayer() && !player.paused) {
+      updateReaderTtsStatus('Связь нестабильна, удерживаем очередь…');
+      reportReaderTtsEvent('player_stalled', {
+        reason: 'media_stalled', current_time: player.currentTime, ready_state: player.readyState, network_state: player.networkState,
+      });
+    }
+  });
+  player.addEventListener('waiting', () => {
+    if (player === readerTtsPlayer() && readerTtsStream.requestedPlay) {
+      reportReaderTtsEvent('player_stalled', {
+        reason: 'media_waiting', current_time: player.currentTime, ready_state: player.readyState, network_state: player.networkState,
+      });
+    }
   });
   player.addEventListener('error', async () => {
     if (player !== readerTtsPlayer() || !readerTtsStream.sessionId) return;
     const index = readerTtsStream.currentIndex;
     const retries = Number(readerTtsStream.segmentRetries.get(index) || 0);
+    reportReaderTtsEvent('player_error', {
+      scope: 'audio_element', retries, code: player.error?.code || 0, message: player.error?.message || '',
+    });
     if (retries >= 2) {
       updateReaderTtsStatus('Не удалось загрузить фрагмент. Нажмите воспроизведение для повтора.');
       return;
     }
     readerTtsStream.segmentRetries.set(index, retries + 1);
-    updateReaderTtsStatus('Восстанавливаем фрагмент…');
-    try {
-      await requestReaderTtsWindow(index, 4);
-      const segment = await waitForReaderTtsSegment(index);
-      await deleteCachedReaderTtsAudio(segment);
-      const time = Number(player.currentTime || 0);
-      await loadAudioElement(player, Object.assign({}, segment, { url: `${segment.url}&retry=${Date.now()}` }));
-      player.currentTime = time;
-      if (readerTtsStream.requestedPlay) await player.play();
-    } catch (_) { updateReaderTtsStatus('Связь прервалась. Попробуйте продолжить.'); }
+    await recoverReaderTtsPlayback('audio_error');
+  });
+}
+
+function bindReaderTtsLifecycleEvents() {
+  if (readerTtsLifecycleBound) return;
+  readerTtsLifecycleBound = true;
+  window.addEventListener('online', () => {
+    if (!readerTtsStream.sessionId) return;
+    reportReaderTtsEvent('network_online', { requested_play: readerTtsStream.requestedPlay });
+    if (readerTtsStream.requestedPlay) recoverReaderTtsPlayback('network_online').catch(() => {});
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible' || !readerTtsStream.sessionId) return;
+    reportReaderTtsEvent('visibility_restore', { requested_play: readerTtsStream.requestedPlay });
+    if (readerTtsStream.requestedPlay && readerTtsPlayer()?.paused) {
+      readerTtsTogglePlay(true).catch(() => recoverReaderTtsPlayback('visibility_restore'));
+    }
+  });
+  window.addEventListener('pagehide', () => {
+    saveReaderTtsProgress().catch(() => {});
   });
 }
 
@@ -1301,6 +1774,7 @@ async function initReaderTts() {
   migrateReaderTtsDeviceCache().catch(() => {});
   setReaderTtsOptionsExpanded(false);
   bindReaderTtsMediaActions();
+  bindReaderTtsLifecycleEvents();
   readerTtsPlayers().forEach(bindReaderTtsPlayerEvents);
   if (!tgInitData()) {
     updateReaderTtsStatus('Откройте книгу внутри Telegram, чтобы включить озвучивание.');
@@ -1455,6 +1929,102 @@ function normalizeCatalogText(value) {
     .replace(/\s+/g, ' ');
 }
 
+
+function assistantChapterLink(source) {
+  const number = Number(source?.chapter_number || 0);
+  const title = escapeHtml(source?.chapter_title || `Глава ${number}`);
+  const href = Number(source?.chapter_id || 0) ? `/reader/${Number(source.chapter_id)}` : '#';
+  return `<a class="reader-assistant-source" href="${href}">Глава ${number} · ${title}</a>`;
+}
+
+function renderBookAssistantContext(data) {
+  const recapView = document.querySelector('[data-assistant-view="recap"]');
+  const charactersView = document.querySelector('[data-assistant-view="characters"]');
+  const termsView = document.querySelector('[data-assistant-view="terms"]');
+  const notice = document.getElementById('readerAssistantNotice');
+  if (notice) notice.textContent = data?.notice || 'Помощник использует только доступные вам главы до текущей включительно.';
+
+  const recap = Array.isArray(data?.recap) ? data.recap : [];
+  if (recapView) {
+    const currentSummary = String(data?.current_summary || '').trim();
+    const currentBlock = currentSummary
+      ? `<article class="reader-assistant-current"><strong>Текущая глава</strong><p>${escapeHtml(currentSummary)}</p></article>`
+      : '';
+    const previous = recap.length
+      ? `<div class="reader-assistant-list">${recap.map((item) => `<article><header>${assistantChapterLink(item)}</header><p>${escapeHtml(item.summary || '')}</p></article>`).join('')}</div>`
+      : '<p class="muted">До текущей главы пока нет доступных глав для напоминания.</p>';
+    recapView.innerHTML = `${currentBlock}<h3>Ранее</h3>${previous}`;
+  }
+
+  const characters = Array.isArray(data?.characters) ? data.characters : [];
+  if (charactersView) {
+    charactersView.innerHTML = characters.length
+      ? `<div class="reader-assistant-entity-grid">${characters.map((item) => `<article><strong>${escapeHtml(item.name || '')}</strong><small>Упоминаний: ${Number(item.count || 0)} · впервые в доступном контексте: глава ${Number(item.chapter_number || 0)}</small><p>${escapeHtml(item.excerpt || '')}</p></article>`).join('')}</div>`
+      : '<p class="muted">Персонажи пока не определены. Можно задать вопрос по имени вручную.</p>';
+  }
+
+  const terms = Array.isArray(data?.terms) ? data.terms : [];
+  if (termsView) {
+    termsView.innerHTML = terms.length
+      ? `<div class="reader-assistant-entity-grid">${terms.map((item) => `<article><strong>${escapeHtml(item.term || '')}</strong><small>Упоминаний: ${Number(item.count || 0)} · глава ${Number(item.chapter_number || 0)}</small><p>${escapeHtml(item.excerpt || '')}</p></article>`).join('')}</div>`
+      : '<p class="muted">Необычные термины в доступных главах пока не найдены.</p>';
+  }
+}
+
+async function loadBookAssistantContext(force = false) {
+  const panel = document.getElementById('readerAssistantPanel');
+  if (!panel || !tgInitData()) return null;
+  if (panel.dataset.loaded === '1' && !force) return null;
+  const body = document.getElementById('readerAssistantBody');
+  const notice = document.getElementById('readerAssistantNotice');
+  if (notice) notice.textContent = 'Собираем события, персонажей и термины…';
+  try {
+    const data = await apiFetch(`/api/reader/${Number(panel.dataset.chapterId || 0)}/assistant`);
+    renderBookAssistantContext(data);
+    panel.dataset.loaded = '1';
+    return data;
+  } catch (error) {
+    if (notice) notice.textContent = error.message || 'Не удалось открыть помощника.';
+    if (body) body.hidden = false;
+    return null;
+  }
+}
+
+function renderBookAssistantAnswer(data) {
+  const box = document.getElementById('readerAssistantAnswer');
+  if (!box) return;
+  const answer = String(data?.answer || '').trim();
+  const paragraphs = answer.split(/\n{2,}/).filter(Boolean).map((part) => `<p>${escapeHtml(part)}</p>`).join('');
+  const sources = Array.isArray(data?.sources) ? data.sources : [];
+  const sourceMarkup = sources.length
+    ? `<div class="reader-assistant-sources"><span>Основано на:</span>${sources.map(assistantChapterLink).join('')}</div>`
+    : '';
+  box.innerHTML = `${paragraphs || '<p>Надёжный ответ не найден.</p>'}${sourceMarkup}<small>${escapeHtml(data?.notice || '')}</small>`;
+  box.hidden = false;
+  box.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+async function askBookAssistant(questionOverride = '') {
+  const panel = document.getElementById('readerAssistantPanel');
+  const field = document.getElementById('readerAssistantQuestion');
+  const button = document.getElementById('readerAssistantAsk');
+  const question = String(questionOverride || field?.value || '').trim();
+  if (!panel || question.length < 3) { notify('Введите более точный вопрос'); return; }
+  if (field && questionOverride) field.value = questionOverride;
+  if (button) { button.disabled = true; button.textContent = 'Ищем в прочитанном…'; }
+  try {
+    const data = await apiFetch(`/api/reader/${Number(panel.dataset.chapterId || 0)}/assistant/ask`, {
+      method: 'POST',
+      body: JSON.stringify({ question }),
+    });
+    renderBookAssistantAnswer(data);
+  } catch (error) {
+    notify(error.message || 'Помощник не смог ответить');
+  } finally {
+    if (button) { button.disabled = false; button.textContent = 'Спросить'; }
+  }
+}
+
 function catalogEditDistance(left, right) {
   const a = String(left || '');
   const b = String(right || '');
@@ -1561,6 +2131,89 @@ function applyCatalogFilter() {
   if (empty) empty.hidden = visible !== 0;
 }
 
+
+function recommendationCard(item) {
+  const bookId = Number(item.id || 0);
+  const title = escapeHtml(item.title || 'Книга');
+  const author = escapeHtml(item.pen_name || 'Автор не указан');
+  const reason = escapeHtml(item.recommendation_reason || 'Подобрано для вас');
+  const updated = encodeURIComponent(String(item.updated_at || bookId));
+  const contentType = String(item.content_type || 'book');
+  const isGraphic = contentType !== 'book';
+  const firstTarget = Number(item.first_graphic_chapter_id || 0)
+    ? `/comic/${Number(item.first_graphic_chapter_id)}`
+    : Number(item.first_chapter_id || 0)
+      ? `/reader/${Number(item.first_chapter_id)}`
+      : `/book/${bookId}`;
+  const actionText = isGraphic ? 'Смотреть' : 'Читать';
+  const price = Number(item.price_stars || 0) > 0 ? `Вся книга: ${Number(item.price_stars)} Stars` : 'Бесплатно';
+  const rating = Number(item.rating || 0) > 0 ? `<span>★ ${Number(item.rating).toFixed(1)}</span>` : '';
+  const chapters = isGraphic ? `${Number(item.graphic_pages_count || 0)} стр.` : `${Number(item.chapters_count || 0)} глав`;
+  return `<article class="book-card premium-book-card shelf recommendation-card" data-recommendation-card="${bookId}">
+    <a class="book-cover-link" href="/book/${bookId}" data-recommendation-open="${bookId}" data-recommendation-reason="${reason}">
+      <img class="cover-image cover-mini" src="/media/cover/${bookId}?v=${updated}" alt="Обложка произведения ${title}" loading="lazy" onerror="this.hidden=true;this.nextElementSibling.hidden=false">
+      <div class="cover-mini" aria-hidden="true" hidden>${title.slice(0, 1)}</div>
+      <span class="recommendation-reason">${reason}</span>
+    </a>
+    <div class="book-info">
+      <div class="book-meta-line"><span>${escapeHtml(item.age_limit || '16+')}</span>${rating}<span>${chapters}</span></div>
+      <a class="book-title-link" href="/book/${bookId}" data-recommendation-open="${bookId}" data-recommendation-reason="${reason}"><h3>${title}</h3></a>
+      <p class="book-author">${author}</p>
+      <div class="book-price-line"><strong>${price}</strong></div>
+      <div class="card-actions">
+        <a class="card-action primary" href="${firstTarget}" data-recommendation-open="${bookId}" data-recommendation-reason="${reason}">${actionText}</a>
+        <button class="card-action save" type="button" data-card-bookmark="${bookId}">В библиотеку</button>
+        <button class="card-action recommendation-dismiss" type="button" data-recommendation-dismiss="${bookId}" aria-label="Не показывать эту рекомендацию">Не интересно</button>
+      </div>
+    </div>
+  </article>`;
+}
+
+async function loadForYouRecommendations() {
+  const section = document.getElementById('forYouSection');
+  const shelf = document.getElementById('forYouShelf');
+  if (!section || !shelf || !tgInitData()) return;
+  section.classList.add('loading');
+  try {
+    const data = await apiFetch('/api/recommendations/for-you?limit=12');
+    const items = Array.isArray(data.items) ? data.items : [];
+    if (!items.length) {
+      section.hidden = true;
+      return;
+    }
+    shelf.innerHTML = items.map(recommendationCard).join('');
+    const subtitle = document.getElementById('forYouSubtitle');
+    if (subtitle) subtitle.textContent = data.personalized
+      ? 'Подобрано по вашим жанрам, авторам, чтению и оценкам.'
+      : 'Стартовая подборка, пока VoxLyra знакомится с вашими интересами.';
+    section.hidden = false;
+    apiFetch('/api/recommendations/events', {
+      method: 'POST',
+      body: JSON.stringify({ event_type: 'impression', book_ids: items.map((item) => Number(item.id || 0)).filter(Boolean) }),
+    }).catch(() => {});
+  } catch (_) {
+    section.hidden = true;
+  } finally {
+    section.classList.remove('loading');
+  }
+}
+
+async function dismissRecommendation(bookId) {
+  const card = document.querySelector(`[data-recommendation-card="${Number(bookId)}"]`);
+  if (card) {
+    card.classList.add('recommendation-removing');
+    setTimeout(() => card.remove(), 180);
+  }
+  try {
+    await apiFetch('/api/recommendations/events', {
+      method: 'POST',
+      body: JSON.stringify({ event_type: 'dismiss', book_id: Number(bookId) }),
+    });
+  } catch (_) {}
+  const shelf = document.getElementById('forYouShelf');
+  if (shelf && !shelf.querySelector('[data-recommendation-card]')) document.getElementById('forYouSection').hidden = true;
+}
+
 async function initContinueShelves() {
   const readingSection = document.getElementById('continueSection');
   const audioSection = document.getElementById('continueAudioSection');
@@ -1586,11 +2239,12 @@ function bookmarkCard(item) {
 function purchaseCard(item) {
   const refunded = item.status === 'refunded';
   const isPackage = item.purchase_kind === 'chapter_package';
+  const isPremium = item.purchase_kind === 'premium';
   const packageTotal = Number(item.chapter_package_total ?? item.chapter_package_count ?? 0);
-  let title = isPackage ? (item.chapter_package_title || `Пакет на ${packageTotal} глав`) : (item.book_title || item.chapter_title || item.audio_title || 'Покупка');
-  let href = item.audio_chapter_id ? `/audio/${Number(item.audio_chapter_id)}` : item.chapter_id ? `/reader/${Number(item.chapter_id)}` : item.book_id ? `/book/${Number(item.book_id)}` : '#';
-  let type = isPackage ? 'Пакет глав' : item.audio_chapter_id ? 'Аудиоглава' : item.chapter_id ? 'Глава' : 'Книга';
-  const stateText = refunded ? 'Возврат оформлен' : isPackage ? `Осталось открытий: ${Number(item.chapter_package_remaining || 0)} из ${packageTotal}` : 'Доступ открыт';
+  let title = isPremium ? 'VoxLyra Premium' : isPackage ? (item.chapter_package_title || `Пакет на ${packageTotal} глав`) : (item.book_title || item.chapter_title || item.audio_title || 'Покупка');
+  let href = isPremium ? '/premium' : item.audio_chapter_id ? `/audio/${Number(item.audio_chapter_id)}` : item.chapter_id ? `/reader/${Number(item.chapter_id)}` : item.book_id ? `/book/${Number(item.book_id)}` : '#';
+  let type = isPremium ? 'Подписка' : isPackage ? 'Пакет глав' : item.audio_chapter_id ? 'Аудиоглава' : item.chapter_id ? 'Глава' : 'Книга';
+  const stateText = refunded ? 'Возврат оформлен' : isPremium ? 'Управление подпиской' : isPackage ? `Осталось открытий: ${Number(item.chapter_package_remaining || 0)} из ${packageTotal}` : 'Доступ открыт';
   return `<a class="purchase-card${refunded ? ' refunded' : ''}" href="${href}"><div><span>${type}</span><h3>${escapeHtml(title)}</h3><p>${escapeHtml(stateText)}</p></div><b>${Number(item.amount_stars || 0)} Stars</b></a>`;
 }
 
@@ -1618,6 +2272,137 @@ function renderLibraryTab(tab, data) {
   content.innerHTML = packageBlock + (purchases.length ? `<div class="purchase-list">${purchases.map(purchaseCard).join('')}</div>` : emptyStateMarkup('no-books', 'Покупок пока нет', 'После покупки книги, главы, пакета или аудио доступ появится здесь.'));
 }
 
+function renderLibraryAchievements(payload, expanded = false) {
+  const panel = document.getElementById('libraryAchievementPanel');
+  const grid = document.getElementById('libraryAchievements');
+  const toggle = document.getElementById('toggleAllAchievements');
+  if (!panel || !grid) return;
+  const items = payload?.items || [];
+  panel.hidden = !items.length;
+  const visible = expanded ? items : items.slice(0, 4);
+  grid.innerHTML = visible.map((item) => `<article class="achievement-card"><span class="achievement-icon">${escapeHtml(item.icon || '✦')}</span><div><strong>${escapeHtml(item.title || 'Достижение')}</strong><p>${escapeHtml(item.description || '')}</p></div></article>`).join('');
+  if (toggle) {
+    toggle.hidden = items.length <= 4;
+    toggle.textContent = expanded ? 'Свернуть' : 'Показать все';
+    toggle.dataset.expanded = expanded ? '1' : '0';
+  }
+  (payload?.new || []).forEach((item) => notify(`Новое достижение: ${item.title}`));
+}
+
+
+function premiumDateLabel(value) {
+  if (!value) return '';
+  try { return new Date(value).toLocaleDateString('ru-RU', { day: '2-digit', month: 'long', year: 'numeric' }); }
+  catch (_) { return String(value); }
+}
+
+function renderPremiumInsights(insights) {
+  const section = document.getElementById('premiumInsights');
+  const grid = document.getElementById('premiumInsightGrid');
+  if (!section || !grid || !insights) return;
+  const items = [
+    ['📖', 'Завершено глав', Number(insights.chapters_finished || 0)],
+    ['📚', 'Начато книг', Number(insights.books_started || 0)],
+    ['🎧', 'Минут прослушано', Number(insights.listening_minutes || 0)],
+    ['🔥', 'Серия чтения', `${Number(insights.reading_streak_days || 0)} дн.`],
+    ['🔖', 'В библиотеке', Number(insights.saved_books || 0)],
+    ['🕰', 'Любимое время', escapeHtml(insights.favorite_period || '—')],
+  ];
+  grid.innerHTML = items.map(([icon, label, value]) => `<article class="premium-insight-card"><span>${icon}</span><div><strong>${value}</strong><small>${label}</small></div></article>`).join('');
+  section.hidden = false;
+}
+
+async function refreshPremiumPage() {
+  const page = document.getElementById('premiumPage');
+  if (!page) return;
+  const loading = document.getElementById('premiumLoading');
+  const content = document.getElementById('premiumContent');
+  const error = document.getElementById('premiumError');
+  if (!tgInitData()) {
+    if (loading) loading.hidden = true;
+    if (error) error.hidden = false;
+    return;
+  }
+  try {
+    const data = await apiFetch('/api/premium/status');
+    const plan = (data.plans || [])[0] || {};
+    const sub = data.subscription || {};
+    document.getElementById('premiumPlanTitle').textContent = plan.title || 'VoxLyra Premium';
+    document.getElementById('premiumPrice').textContent = Number(plan.price_stars || 0);
+    document.getElementById('premiumPlanDescription').textContent = plan.description || '';
+    const features = document.getElementById('premiumFeatures');
+    if (features) features.innerHTML = (plan.features || []).map((item) => `<article><span>✦</span><b>${escapeHtml(item.title || '')}</b></article>`).join('');
+    const subscribe = document.getElementById('premiumSubscribe');
+    const cancel = document.getElementById('premiumCancelRenew');
+    const resume = document.getElementById('premiumResumeRenew');
+    const statusText = document.getElementById('premiumStatusText');
+    if (sub.active) {
+      if (subscribe) {
+        subscribe.hidden = Boolean(sub.is_recurring);
+        subscribe.textContent = 'Продлить ещё на 30 дней';
+      }
+      if (cancel) cancel.hidden = !(sub.is_recurring && sub.auto_renew);
+      if (resume) resume.hidden = !(sub.is_recurring && !sub.auto_renew);
+      if (statusText) statusText.textContent = `Premium активен до ${premiumDateLabel(sub.expires_at)}${sub.auto_renew ? ' · автопродление включено' : ' · без автопродления'}.`;
+      renderPremiumInsights(data.insights);
+    } else {
+      if (subscribe) { subscribe.hidden = false; subscribe.textContent = 'Оформить Premium'; }
+      if (cancel) cancel.hidden = true;
+      if (resume) resume.hidden = true;
+      if (statusText) statusText.textContent = 'Подписка не активна. Базовые функции VoxLyra продолжают работать.';
+    }
+    if (loading) loading.hidden = true;
+    if (content) content.hidden = false;
+    if (error) error.hidden = true;
+  } catch (err) {
+    if (loading) loading.hidden = true;
+    if (content) content.hidden = true;
+    if (error) error.hidden = false;
+    const text = document.getElementById('premiumErrorText');
+    if (text) text.textContent = err.message || 'Не удалось загрузить Premium.';
+  }
+}
+
+async function openPremiumCheckout() {
+  const button = document.getElementById('premiumSubscribe');
+  if (button) button.disabled = true;
+  try {
+    const data = await apiFetch('/api/premium/checkout', { method: 'POST', body: JSON.stringify({ plan_code: 'monthly' }) });
+    const tg = window.Telegram?.WebApp;
+    if (tg?.openInvoice) {
+      tg.openInvoice(data.invoice_link, (status) => {
+        if (status === 'paid') {
+          notify('Premium активирован');
+          setTimeout(() => refreshPremiumPage(), 800);
+        } else if (status === 'cancelled') notify('Оплата отменена');
+        else if (status === 'failed') notify('Telegram не завершил оплату');
+      });
+    } else {
+      window.location.assign(data.invoice_link);
+    }
+  } catch (err) { notify(err.message || 'Не удалось открыть оплату'); }
+  finally { if (button) button.disabled = false; }
+}
+
+async function changePremiumRenew(enabled) {
+  const button = document.getElementById(enabled ? 'premiumResumeRenew' : 'premiumCancelRenew');
+  if (button) button.disabled = true;
+  try {
+    await apiFetch('/api/premium/auto-renew', { method: 'POST', body: JSON.stringify({ enabled }) });
+    notify(enabled ? 'Автопродление включено' : 'Автопродление отключено');
+    await refreshPremiumPage();
+  } catch (err) { notify(err.message || 'Не удалось изменить подписку'); }
+  finally { if (button) button.disabled = false; }
+}
+
+function initPremiumPage() {
+  if (!document.getElementById('premiumPage')) return;
+  document.getElementById('premiumSubscribe')?.addEventListener('click', openPremiumCheckout);
+  document.getElementById('premiumCancelRenew')?.addEventListener('click', () => changePremiumRenew(false));
+  document.getElementById('premiumResumeRenew')?.addEventListener('click', () => changePremiumRenew(true));
+  refreshPremiumPage();
+}
+
 async function initLibrary() {
   const page = document.getElementById('libraryPage');
   if (!page) return;
@@ -1638,6 +2423,9 @@ async function initLibrary() {
     if (profileFallback) profileFallback.hidden = true;
     if (profileHeading && profileName) profileHeading.textContent = `Моё · ${profileName.split(/\s+/)[0]}`;
     applyProfileFrame();
+    renderLibraryAchievements(data.achievements);
+    const premiumBadge = document.getElementById('libraryPremiumBadge');
+    if (premiumBadge) premiumBadge.hidden = !Boolean(data.premium?.active);
     const authorEntry = document.getElementById('authorStudioEntry');
     if (authorEntry && data.author?.enabled) authorEntry.hidden = false;
     const controlEntry = document.getElementById('controlCenterEntry');
@@ -1650,6 +2438,102 @@ async function initLibrary() {
   } catch (_) {
     if (content) content.innerHTML = emptyStateMarkup('nothing-found', 'Не удалось открыть полку', 'Закройте Mini App и откройте его снова из бота.');
   }
+}
+
+let readerQuoteObjectUrl = '';
+
+function setReaderQuoteMode(enabled) {
+  const panel = document.getElementById('readerQuotePanel');
+  const reader = document.getElementById('readerParagraphs');
+  if (panel) panel.hidden = !enabled;
+  reader?.classList.toggle('quote-selection-mode', Boolean(enabled));
+  if (enabled) panel?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+function clearReaderQuotePreview() {
+  if (readerQuoteObjectUrl) URL.revokeObjectURL(readerQuoteObjectUrl);
+  readerQuoteObjectUrl = '';
+  const preview = document.getElementById('readerQuotePreview');
+  const image = document.getElementById('readerQuoteImage');
+  if (preview) preview.hidden = true;
+  if (image) image.removeAttribute('src');
+}
+
+async function createReaderQuoteCard() {
+  const chapterId = Number(document.getElementById('readerText')?.dataset.chapterId || 0);
+  const quote = String(document.getElementById('readerQuoteText')?.value || '').trim();
+  if (!chapterId || quote.length < 20) { notify('Выберите цитату длиной не менее 20 символов'); return; }
+  const button = document.getElementById('readerQuoteCreate');
+  if (button) { button.disabled = true; button.textContent = 'Создаём…'; }
+  clearReaderQuotePreview();
+  try {
+    const response = await fetch(`/api/reader/${chapterId}/quote-card`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': tgInitData() },
+      body: JSON.stringify({ quote, style: document.getElementById('readerQuoteStyle')?.value || 'standard' }),
+    });
+    if (!response.ok) {
+      let message = 'Не удалось создать карточку';
+      try { message = (await response.json()).detail || message; } catch (_) {}
+      throw new Error(message);
+    }
+    const blob = await response.blob();
+    readerQuoteObjectUrl = URL.createObjectURL(blob);
+    const image = document.getElementById('readerQuoteImage');
+    const preview = document.getElementById('readerQuotePreview');
+    const download = document.getElementById('readerQuoteDownload');
+    if (image) image.src = readerQuoteObjectUrl;
+    if (download) download.href = readerQuoteObjectUrl;
+    if (preview) preview.hidden = false;
+  } catch (error) { notify(error.message || 'Не удалось создать карточку'); }
+  finally { if (button) { button.disabled = false; button.textContent = 'Создать изображение'; } }
+}
+
+async function shareReaderQuoteCard() {
+  if (!readerQuoteObjectUrl) return;
+  try {
+    const blob = await fetch(readerQuoteObjectUrl).then((response) => response.blob());
+    const file = new File([blob], 'voxlyra_quote.png', { type: 'image/png' });
+    if (navigator.canShare?.({ files: [file] })) {
+      await navigator.share({ files: [file], title: 'Цитата из VoxLyra' });
+      return;
+    }
+  } catch (_) {}
+  document.getElementById('readerQuoteDownload')?.click();
+}
+
+function bindReaderQuoteCards() {
+  const start = document.getElementById('readerQuoteStart');
+  if (!start) return;
+  const styleSelect = document.getElementById('readerQuoteStyle');
+  if (styleSelect && tgInitData()) {
+    apiFetch('/api/premium/status').then((data) => {
+      const active = Boolean(data.subscription?.active);
+      styleSelect.querySelectorAll('option').forEach((option) => {
+        if (option.value !== 'standard') option.disabled = !active;
+      });
+      if (!active) styleSelect.value = 'standard';
+    }).catch(() => {});
+  }
+  start.addEventListener('click', () => setReaderQuoteMode(true));
+  document.getElementById('readerQuoteClose')?.addEventListener('click', () => { setReaderQuoteMode(false); clearReaderQuotePreview(); });
+  document.getElementById('readerQuoteCancelMode')?.addEventListener('click', () => {
+    document.getElementById('readerQuoteText').value = '';
+    clearReaderQuotePreview();
+    setReaderQuoteMode(false);
+  });
+  document.getElementById('readerQuoteCreate')?.addEventListener('click', createReaderQuoteCard);
+  document.getElementById('readerQuoteShare')?.addEventListener('click', shareReaderQuoteCard);
+  document.getElementById('readerParagraphs')?.addEventListener('click', (event) => {
+    if (!event.currentTarget.classList.contains('quote-selection-mode')) return;
+    const paragraph = event.target.closest('p');
+    if (!paragraph) return;
+    const textarea = document.getElementById('readerQuoteText');
+    if (textarea) textarea.value = String(paragraph.textContent || '').trim().slice(0, 480);
+    event.currentTarget.querySelectorAll('p.quote-selected').forEach((item) => item.classList.remove('quote-selected'));
+    paragraph.classList.add('quote-selected');
+    document.getElementById('readerQuotePanel')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  });
 }
 
 function markActiveNav() {
@@ -1724,6 +2608,23 @@ function bindEvents() {
     const target = event.target.closest('button, a');
     if (!target) return;
 
+    if (target.id === 'refreshRecommendations') { event.preventDefault(); await loadForYouRecommendations(); return; }
+    if (target.matches('[data-recommendation-dismiss]')) {
+      event.preventDefault();
+      await dismissRecommendation(Number(target.dataset.recommendationDismiss || 0));
+      return;
+    }
+    if (target.matches('[data-recommendation-open]')) {
+      apiFetch('/api/recommendations/events', {
+        method: 'POST',
+        body: JSON.stringify({
+          event_type: 'open',
+          book_id: Number(target.dataset.recommendationOpen || 0),
+          reason: target.dataset.recommendationReason || '',
+        }),
+      }).catch(() => {});
+    }
+
     if (target.matches('[data-profile-frame]')) { event.preventDefault(); setPref('profileFrame', target.dataset.profileFrame); notify('Рамка профиля сохранена'); return; }
     if (target.matches('[data-theme]')) { event.preventDefault(); setPref('theme', target.dataset.theme); return; }
     if (target.id === 'fontPlus') { event.preventDefault(); changeFont(1); return; }
@@ -1773,6 +2674,12 @@ function bindEvents() {
       }
       return;
     }
+    if (target.id === 'toggleAllAchievements') {
+      const page = document.getElementById('libraryPage');
+      const expanded = target.dataset.expanded !== '1';
+      if (page?._libraryData) renderLibraryAchievements(page._libraryData.achievements, expanded);
+      return;
+    }
     if (target.matches('[data-library-tab]')) { event.preventDefault(); document.querySelectorAll('[data-library-tab]').forEach((btn) => btn.classList.remove('active')); target.classList.add('active'); const page = document.getElementById('libraryPage'); if (page?._libraryData) renderLibraryTab(target.dataset.libraryTab, page._libraryData); return; }
 
     if (target.matches('[data-card-bookmark]')) {
@@ -1812,15 +2719,163 @@ function bindEvents() {
       return;
     }
 
+    if (target.matches('[data-chapter-reaction]')) {
+      event.preventDefault();
+      const reader = document.getElementById('readerText');
+      if (!reader) return;
+      target.disabled = true;
+      try {
+        const data = await apiFetch(`/api/reader/${reader.dataset.chapterId}/reactions`, {
+          method: 'POST',
+          body: JSON.stringify({ reaction: target.dataset.chapterReaction || '' }),
+        });
+        renderChapterReactions(data.reactions);
+      } catch (error) {
+        notify(error.message || 'Не удалось сохранить реакцию');
+      } finally {
+        target.disabled = false;
+      }
+      return;
+    }
+
+    if (target.matches('[data-comment-spoiler-reveal]')) {
+      event.preventDefault();
+      const card = target.closest('.comment-card');
+      const textNode = card?.querySelector('.comment-spoiler-text');
+      if (!textNode) return;
+      const willShow = Boolean(textNode.hidden);
+      textNode.hidden = !willShow;
+      target.textContent = willShow ? 'Скрыть спойлер' : 'Спойлер скрыт · показать';
+      return;
+    }
+
+    if (target.matches('[data-comment-reply]')) {
+      event.preventDefault();
+      const commentsBox = document.getElementById('commentsBox');
+      const replyBar = document.getElementById('commentReplyBar');
+      const replyLabel = document.getElementById('commentReplyLabel');
+      const field = document.getElementById('commentText');
+      if (!commentsBox || !replyBar || !replyLabel || !field) return;
+      commentsBox.dataset.replyTo = String(target.dataset.commentReply || '');
+      replyLabel.textContent = `Ответ для ${target.dataset.commentName || 'читателя'}`;
+      replyBar.hidden = false;
+      field.focus();
+      return;
+    }
+
+    if (target.id === 'cancelCommentReply') {
+      event.preventDefault();
+      const commentsBox = document.getElementById('commentsBox');
+      const replyBar = document.getElementById('commentReplyBar');
+      if (commentsBox) delete commentsBox.dataset.replyTo;
+      if (replyBar) replyBar.hidden = true;
+      return;
+    }
+
+    if (target.matches('[data-comment-like]')) {
+      event.preventDefault();
+      const commentId = Number(target.dataset.commentLike || 0);
+      if (!commentId) return;
+      target.disabled = true;
+      try {
+        const data = await apiFetch(`/api/comments/${commentId}/like`, { method: 'POST' });
+        target.classList.toggle('selected', Boolean(data.liked));
+        target.setAttribute('aria-pressed', data.liked ? 'true' : 'false');
+        const count = target.querySelector('span');
+        if (count) count.textContent = String(Number(data.like_count || 0));
+      } catch (error) {
+        notify(error.message || 'Не удалось поставить отметку');
+      } finally {
+        target.disabled = false;
+      }
+      return;
+    }
+
+    if (target.matches('[data-comment-report]')) {
+      event.preventDefault();
+      const commentId = Number(target.dataset.commentReport || 0);
+      if (!commentId) return;
+      const reason = window.prompt('Почему этот комментарий нужно проверить?');
+      if (reason === null) return;
+      if (reason.trim().length < 3) { notify('Опишите причину подробнее'); return; }
+      target.disabled = true;
+      try {
+        const data = await apiFetch(`/api/comments/${commentId}/report`, {
+          method: 'POST',
+          body: JSON.stringify({ reason: reason.trim() }),
+        });
+        notify(data.message || 'Жалоба отправлена');
+      } catch (error) {
+        notify(error.message || 'Не удалось отправить жалобу');
+      } finally {
+        target.disabled = false;
+      }
+      return;
+    }
+
+    if (target.id === 'readerAssistantToggle') {
+      event.preventDefault();
+      const body = document.getElementById('readerAssistantBody');
+      if (!body) return;
+      const open = body.hidden;
+      body.hidden = !open;
+      target.textContent = open ? 'Свернуть' : 'Открыть';
+      target.setAttribute('aria-expanded', open ? 'true' : 'false');
+      if (open) loadBookAssistantContext().catch(() => {});
+      return;
+    }
+
+    if (target.matches('[data-assistant-tab]')) {
+      event.preventDefault();
+      const tab = String(target.dataset.assistantTab || 'recap');
+      document.querySelectorAll('[data-assistant-tab]').forEach((button) => button.classList.toggle('active', button === target));
+      document.querySelectorAll('[data-assistant-view]').forEach((view) => { view.hidden = view.dataset.assistantView !== tab; });
+      return;
+    }
+
+    if (target.matches('[data-assistant-question]')) {
+      event.preventDefault();
+      askBookAssistant(String(target.dataset.assistantQuestion || '')).catch(() => {});
+      return;
+    }
+
+    if (target.id === 'readerAssistantAsk') {
+      event.preventDefault();
+      askBookAssistant().catch(() => {});
+      return;
+    }
+
     if (target.id === 'sendComment') {
       event.preventDefault();
       const reader = document.getElementById('readerText');
       const field = document.getElementById('commentText');
+      const commentsBox = document.getElementById('commentsBox');
+      const spoiler = document.getElementById('commentSpoiler');
       if (!reader || !field) return;
+      const textValue = String(field.value || '').trim();
+      if (textValue.length < 2) { notify('Комментарий слишком короткий'); return; }
+      target.disabled = true;
       try {
-        const data = await apiFetch(`/api/reader/${reader.dataset.chapterId}/comments`, { method: 'POST', body: JSON.stringify({ text: field.value }) });
-        field.value = ''; renderComments(data.comments); notify('Комментарий опубликован');
-      } catch (error) { notify(error.message || 'Комментарий не отправлен'); }
+        const data = await apiFetch(`/api/reader/${reader.dataset.chapterId}/comments`, {
+          method: 'POST',
+          body: JSON.stringify({
+            text: textValue,
+            parent_id: Number(commentsBox?.dataset.replyTo || 0) || null,
+            is_spoiler: Boolean(spoiler?.checked),
+          }),
+        });
+        field.value = '';
+        if (spoiler) spoiler.checked = false;
+        if (commentsBox) delete commentsBox.dataset.replyTo;
+        const replyBar = document.getElementById('commentReplyBar');
+        if (replyBar) replyBar.hidden = true;
+        renderComments(data.comments);
+        notify('Комментарий опубликован');
+      } catch (error) {
+        notify(error.message || 'Комментарий не отправлен');
+      } finally {
+        target.disabled = false;
+      }
       return;
     }
   });
@@ -1850,11 +2905,13 @@ document.addEventListener('DOMContentLoaded', () => {
   bindEvents();
   applyCatalogFilter();
   initContinueShelves();
+  loadForYouRecommendations();
   initReader();
   initReaderTts();
   initAudioPage();
   initBookPage();
   initLibrary();
+  initPremiumPage();
 });
 
 // v1.9.8 — единый возврат: экранная кнопка, Telegram BackButton и безопасный запасной маршрут.
@@ -1871,7 +2928,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const explicit = document.querySelector('[data-reader-book-url], .quiet-back[href^="/book/"]');
       return explicit?.getAttribute('data-reader-book-url') || explicit?.getAttribute('href') || '/library';
     }
-    if (['/catalog', '/comics', '/library', '/settings', '/author', '/control', '/audio'].some((prefix) => path === prefix || path.startsWith(`${prefix}/`))) return '/';
+    if (['/catalog', '/comics', '/library', '/settings', '/premium', '/author', '/control', '/audio'].some((prefix) => path === prefix || path.startsWith(`${prefix}/`))) return '/';
     return '/';
   }
 

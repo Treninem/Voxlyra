@@ -22,6 +22,17 @@ def _is_https_url(value: str) -> bool:
     return parsed.scheme == "https" and bool(parsed.netloc)
 
 
+def _local_tts_ready() -> bool:
+    model_root = Path(settings.TTS_VOSK_MODEL_DIR or "/opt/voxlyra-voices/vosk")
+    model = model_root / str(settings.TTS_VOSK_MODEL_NAME or "vosk-model-tts-ru-0.9-multi")
+    vosk_ready = bool(
+        settings.TTS_ENABLED
+        and settings.TTS_VOSK_ENABLED
+        and all((model / name).is_file() for name in ("model.onnx", "config.json", "dictionary"))
+    )
+    return vosk_ready or bool(tts_engine_status()["enabled"])
+
+
 def collect_diagnostics() -> list[DiagnosticItem]:
     """Проверки, которые владелец видит в скрытом меню.
 
@@ -85,8 +96,8 @@ def collect_diagnostics() -> list[DiagnosticItem]:
         DiagnosticItem(
             "reader_tts",
             "Локальное озвучивание готово",
-            bool(tts_engine_status()["enabled"]),
-            "Проверьте Dockerfile: должны устанавливаться Piper, ffmpeg и две русские модели голосов.",
+            _local_tts_ready(),
+            "После Redeploy должна быть загружена русская модель Vosk; Piper остаётся только резервом.",
         ),
     ]
 

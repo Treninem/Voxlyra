@@ -54,7 +54,7 @@ def test_v199_flexible_chapter_package_flow(tmp_path, monkeypatch):
         profile = await get_author_profile(author["id"])
         book_id = await create_book(
             profile["id"], "Книга с пакетами", "Описание " * 20, "16+", "writing", False,
-            "chapters", 0,
+            "chapters", 120,
         )
         chapters = []
         for number in range(1, 7):

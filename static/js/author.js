@@ -33,6 +33,112 @@ function defaultReadingMode(contentType) {
   return 'ltr';
 }
 
+function currentTextPricingMode(data = authorState.book) {
+  const book = data?.book || {};
+  if (Number(book.price_stars || 0) <= 0) return 'free';
+  const declared = String(data?.pricing?.mode || book.pricing_type || 'whole_book');
+  return declared === 'chapters' ? 'chapters' : 'whole_book';
+}
+
+function chapterAccessMode(chapter, mode = currentTextPricingMode()) {
+  if (mode === 'free' || Number(chapter?.is_free || 0) === 1) return 'free';
+  if (mode === 'chapters' && Number(chapter?.price_stars || 0) > 0) return 'chapter';
+  return 'book';
+}
+
+function syncChapterAccessInputs() {
+  const mode = currentTextPricingMode();
+  const bulkAccess = document.getElementById('chapterBulkAccessInput');
+  const singleAccess = document.getElementById('chapterAccessInput');
+  [bulkAccess, singleAccess].forEach((select) => {
+    if (!select) return;
+    const option = select.querySelector('option[value="chapter"]');
+    if (option) option.disabled = mode !== 'chapters';
+    if (mode !== 'chapters' && select.value === 'chapter') select.value = 'book';
+  });
+  const bulkPrice = document.getElementById('chapterBulkPriceLabel');
+  const singlePrice = document.getElementById('chapterPriceLabel');
+  if (bulkPrice) bulkPrice.hidden = !bulkAccess || bulkAccess.value !== 'chapter' || mode !== 'chapters';
+  if (singlePrice) singlePrice.hidden = !singleAccess || singleAccess.value !== 'chapter' || mode !== 'chapters';
+}
+
+function syncTextPricingControls() {
+  const data = authorState.book || {};
+  const book = data.book || {};
+  const type = String(book.content_type || 'book');
+  const graphic = isGraphicType(type);
+  const price = Math.max(0, Number(book.price_stars || 0));
+  const mode = currentTextPricingMode(data);
+  const paidOptions = document.getElementById('bookPaidPricingOptions');
+  const modeInput = document.getElementById('bookPricingModeInput');
+  const summary = document.getElementById('bookPricingSummary');
+  const hint = document.getElementById('bookPricingModeHint');
+  const restore = document.getElementById('restoreChapterPricesButton');
+  if (paidOptions) paidOptions.hidden = price <= 0 || graphic;
+  if (modeInput) modeInput.value = mode === 'chapters' ? 'chapters' : 'whole_book';
+  if (hint) hint.textContent = mode === 'chapters'
+    ? 'На карточке остаётся цена всей книги, а отдельная цена показывается только возле конкретной главы.'
+    : 'Закрытые главы открываются после покупки всей книги и не продаются отдельно.';
+  if (summary) {
+    summary.textContent = price <= 0
+      ? 'Книга и все главы бесплатны.'
+      : mode === 'chapters'
+        ? `Вся книга: ${formatStars(price)}. Выбранные главы можно продавать отдельно.`
+        : `Вся книга: ${formatStars(price)}. Отдельная продажа глав выключена.`;
+  }
+  if (restore) restore.hidden = graphic || mode !== 'chapters' || Number(data.pricing?.saved_prices_count || 0) <= 0;
+
+  const freeNotice = document.getElementById('freeBookChapterNotice');
+  const bulkForm = document.getElementById('chapterBulkPriceForm');
+  const description = document.getElementById('textChapterPricingDescription');
+  if (freeNotice) freeNotice.hidden = graphic || mode !== 'free';
+  if (bulkForm) bulkForm.hidden = graphic || mode === 'free';
+  if (description) description.textContent = mode === 'free'
+    ? 'Все главы бесплатны. Настройки цен не требуются.'
+    : mode === 'chapters'
+      ? 'Главы можно открыть бесплатно, после покупки всей книги или продавать отдельно.'
+      : 'Главы можно открыть бесплатно для ознакомления либо после покупки всей книги.';
+
+  const importTitle = document.getElementById('textImportPricingTitle');
+  const importText = document.getElementById('textImportPricingText');
+  if (importTitle && importText) {
+    if (mode === 'free') {
+      importTitle.textContent = 'После импорта все главы будут бесплатными';
+      importText.textContent = 'Цена глав не спрашивается, пока вся книга бесплатна.';
+    } else {
+      importTitle.textContent = 'После импорта первые 3 главы будут ознакомительными';
+      importText.textContent = mode === 'chapters'
+        ? 'Остальные главы сначала откроются после покупки всей книги. Отдельные цены назначаются затем для одной главы или диапазона.'
+        : 'Остальные главы будут доступны после покупки всей книги и не станут продаваться отдельно.';
+    }
+  }
+
+  const packageManager = document.getElementById('chapterPackageManager');
+  if (packageManager) packageManager.hidden = graphic ? false : mode !== 'chapters';
+  syncChapterAccessInputs();
+}
+
+function syncBookPricingDraftControls() {
+  const priceInput = document.getElementById('bookPriceInput');
+  const modeInput = document.getElementById('bookPricingModeInput');
+  const paidOptions = document.getElementById('bookPaidPricingOptions');
+  const summary = document.getElementById('bookPricingSummary');
+  const hint = document.getElementById('bookPricingModeHint');
+  if (!priceInput || !modeInput) return;
+  const price = Math.max(0, Number(priceInput.value || 0));
+  const graphic = isGraphicType(document.getElementById('bookContentTypeInput')?.value || authorState.book?.book?.content_type);
+  const mode = price <= 0 ? 'free' : modeInput.value;
+  if (paidOptions) paidOptions.hidden = price <= 0 || graphic;
+  if (summary) summary.textContent = price <= 0
+    ? 'Книга и все главы будут бесплатны.'
+    : mode === 'chapters'
+      ? `Вся книга: ${formatStars(price)}. Можно назначить отдельные цены выбранным главам.`
+      : `Вся книга: ${formatStars(price)}. Главы отдельно не продаются.`;
+  if (hint) hint.textContent = mode === 'chapters'
+    ? 'Цена всей книги показывается на карточке, цена главы — только возле этой главы.'
+    : 'Закрытые главы открываются только после покупки всей книги.';
+}
+
 const financeStatusLabels = {
   pending: 'На проверке', verified: 'Проверен', rejected: 'Нужны исправления', blocked: 'Заблокирован', missing: 'Не заполнен',
 };
@@ -156,6 +262,64 @@ function showAuthorError(message) {
   if (box) box.hidden = false;
 }
 
+
+function achievementCard(item) {
+  return `<article class="achievement-card"><span class="achievement-icon">${escapeHtml(item.icon || '✦')}</span><div><strong>${escapeHtml(item.title || 'Достижение')}</strong><p>${escapeHtml(item.description || '')}</p></div></article>`;
+}
+
+function renderAuthorAchievements(payload) {
+  const panel = document.getElementById('authorAchievementPanel');
+  const grid = document.getElementById('authorAchievements');
+  if (!panel || !grid) return;
+  const items = (payload?.items || []).filter((item) => item.group === 'author');
+  panel.hidden = !items.length;
+  grid.innerHTML = items.map(achievementCard).join('');
+  (payload?.new || []).filter((item) => item.group === 'author').forEach((item) => notify(`Новое достижение: ${item.title}`));
+}
+
+function renderAuthorAnalytics(analytics) {
+  const data = analytics || {};
+  const summary = data.summary || {};
+  const summaryBox = document.getElementById('authorAnalyticsSummary');
+  if (summaryBox) {
+    const cards = [
+      ['Уникальные читатели', summary.unique_readers || 0],
+      ['Дочитано глав', summary.completed_chapters || 0],
+      ['Добавили в библиотеку', summary.library_additions || 0],
+      ['Средняя оценка', Number(summary.average_rating || 0).toFixed(1)],
+      ['Продажи', summary.sales_count || 0],
+      ['Доход', formatStars(summary.revenue_stars || 0)],
+      ['Комментарии', summary.comments_count || 0],
+      ['Реакции', summary.reactions_count || 0],
+    ];
+    summaryBox.innerHTML = cards.map(([label, value]) => `<article><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></article>`).join('');
+  }
+  const booksBox = document.getElementById('authorAnalyticsBooks');
+  const books = data.books || [];
+  if (booksBox) booksBox.innerHTML = books.length ? books.slice(0, 8).map((item) => `
+    <article class="analytics-row"><div><strong>${escapeHtml(item.title || 'Книга')}</strong><span>${Number(item.readers || 0)} читателей · ${Number(item.saved || 0)} сохранили · рейтинг ${Number(item.rating || 0).toFixed(1)}</span></div><b>${Number(item.sales || 0)} продаж</b></article>`).join('') : '<p class="muted">Данных пока недостаточно.</p>';
+  const dropBox = document.getElementById('authorAnalyticsDropoff');
+  const dropoff = [...(data.dropoff || [])].sort((a, b) => Number(a.completion_rate || 0) - Number(b.completion_rate || 0)).slice(0, 8);
+  if (dropBox) dropBox.innerHTML = dropoff.length ? dropoff.map((item) => `
+    <article class="analytics-row ${Number(item.completion_rate || 0) < 45 ? 'attention' : ''}"><div><strong>${escapeHtml(item.book_title || 'Книга')} · глава ${Number(item.number || 0)}</strong><span>${escapeHtml(item.title || '')} · начали ${Number(item.started || 0)}, дочитали ${Number(item.completed || 0)}</span></div><b>${Number(item.completion_rate || 0).toFixed(0)}%</b></article>`).join('') : '<p class="muted">Появится после чтения опубликованных глав.</p>';
+  const dailyBox = document.getElementById('authorAnalyticsDaily');
+  const daily = data.daily || [];
+  if (dailyBox) {
+    const max = Math.max(1, ...daily.map((item) => Number(item.readers || 0)));
+    dailyBox.innerHTML = daily.map((item) => `<span class="analytics-bar" style="--bar:${Math.max(5, Math.round(Number(item.readers || 0) / max * 100))}%" title="${escapeHtml(item.day)} · ${Number(item.readers || 0)}"><i></i><small>${escapeHtml(String(item.day || '').slice(5))}</small></span>`).join('');
+  }
+}
+
+async function loadAuthorAnalytics(days) {
+  try {
+    const result = await apiFetch(`/api/author/analytics?days=${Math.max(7, Number(days || 30))}`);
+    renderAuthorAnalytics(result.analytics);
+    renderAuthorAchievements(result.achievements);
+  } catch (error) {
+    notify(error.message || 'Не удалось обновить аналитику');
+  }
+}
+
 function renderAuthorDashboard(data) {
   authorState.dashboard = data;
   setAuthorLoading(false);
@@ -178,6 +342,8 @@ function renderAuthorDashboard(data) {
     ['В удержании', formatStars(finance.held)],
   ];
   document.getElementById('authorStats').innerHTML = cards.map(([label, value]) => `<article><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></article>`).join('');
+  renderAuthorAnalytics(data.analytics);
+  renderAuthorAchievements(data.achievements);
   const rubFinance = data.rub_finance || {};
   const policy = data.pricing_policy || {};
   document.getElementById('authorCommissionPercent').textContent = `${Number(policy.commission_percent || 20)}%`;
@@ -309,13 +475,15 @@ function fillBookEditor(data) {
   document.getElementById('bookDescriptionInput').value = book.description || '';
   document.getElementById('bookAgeInput').value = book.age_limit || '16+';
   document.getElementById('bookWritingInput').value = book.writing_status || 'writing';
-  document.getElementById('bookPricingInput').value = book.pricing_type || 'free';
   document.getElementById('bookPriceInput').value = Number(book.price_stars || 0);
+  const pricingModeInput = document.getElementById('bookPricingModeInput');
+  if (pricingModeInput) pricingModeInput.value = currentTextPricingMode(data) === 'chapters' ? 'chapters' : 'whole_book';
   document.getElementById('bookDownloadInput').checked = Boolean(Number(book.allow_download || 0));
   document.getElementById('bookContentTypeInput').value = type;
   document.getElementById('bookReadingModeInput').value = book.reading_mode || defaultReadingMode(type);
   const splitLongInput = document.getElementById('graphicSplitLongInput');
   if (splitLongInput) splitLongInput.checked = type === 'webtoon' || type === 'manhwa';
+  syncTextPricingControls();
   renderAuthorChapters(data.chapters || []);
   renderChapterPackages(data.chapter_packages || []);
   renderGraphicVolumes(data.graphic_volumes || []);
@@ -339,9 +507,18 @@ function renderAuthorChapters(chapters) {
     box.innerHTML = '<article class="empty-card"><h3>Текстовых глав пока нет</h3><p>Добавьте главу вручную или импортируйте файл книги.</p></article>';
     return;
   }
-  box.innerHTML = chapters.map((chapter) => `<button class="author-chapter-row" type="button" data-edit-chapter="${chapter.id}">
-    <div><span>Глава ${chapter.number}</span><strong>${escapeHtml(chapter.title)}</strong><small>${chapter.is_free ? 'Бесплатно' : formatStars(chapter.price_stars)} · ${escapeHtml(statusLabels[chapter.status] || chapter.status)}</small></div><b>Изменить</b>
-  </button>`).join('');
+  const mode = currentTextPricingMode();
+  box.innerHTML = chapters.map((chapter) => {
+    const access = chapterAccessMode(chapter, mode);
+    const accessText = access === 'free'
+      ? 'Бесплатная глава'
+      : access === 'chapter'
+        ? `Цена этой главы: ${formatStars(chapter.price_stars)}`
+        : 'Доступ после покупки всей книги';
+    return `<button class="author-chapter-row" type="button" data-edit-chapter="${chapter.id}">
+      <div><span>Глава ${chapter.number}</span><strong>${escapeHtml(chapter.title)}</strong><small>${accessText} · ${escapeHtml(statusLabels[chapter.status] || chapter.status)}</small></div><b>Изменить</b>
+    </button>`;
+  }).join('');
 }
 
 function chapterPackageScopeLabel(scope) {
@@ -476,9 +653,12 @@ function resetChapterForm() {
   document.getElementById('chapterIdInput').value = '';
   document.getElementById('chapterTitleInput').value = '';
   document.getElementById('chapterTextInput').value = '';
-  document.getElementById('chapterPriceInput').value = '0';
+  const mode = currentTextPricingMode();
+  document.getElementById('chapterAccessInput').value = mode === 'free' ? 'free' : 'book';
+  document.getElementById('chapterPriceInput').value = '3';
   document.getElementById('deleteChapterButton').hidden = true;
   document.getElementById('deleteChapterButton').dataset.confirm = '';
+  syncChapterAccessInputs();
 }
 
 function editChapter(chapterId) {
@@ -489,8 +669,11 @@ function editChapter(chapterId) {
   document.getElementById('chapterIdInput').value = chapter.id;
   document.getElementById('chapterTitleInput').value = chapter.title || '';
   document.getElementById('chapterTextInput').value = chapter.text || '';
-  document.getElementById('chapterPriceInput').value = chapter.is_free ? 0 : Number(chapter.price_stars || 0);
+  const access = chapterAccessMode(chapter);
+  document.getElementById('chapterAccessInput').value = access;
+  document.getElementById('chapterPriceInput').value = access === 'chapter' ? Number(chapter.price_stars || 3) : 3;
   document.getElementById('deleteChapterButton').hidden = false;
+  syncChapterAccessInputs();
   form.scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
 
@@ -870,10 +1053,11 @@ async function confirmBookImport() {
       document.getElementById('allowDuplicateImport')?.focus();
       return;
     }
+    const pricingMode = currentTextPricingMode();
     const result = await apiFetch(`/api/author/book/${bookId}/import-confirm`, { method: 'POST', body: JSON.stringify({
       preview_token: authorState.previewToken,
-      first_free: Number(document.getElementById('importFirstFree').value || 0),
-      default_price_stars: Number(document.getElementById('importPrice').value || 0),
+      first_free: pricingMode === 'free' ? 100000 : 3,
+      default_price_stars: 0,
       allow_duplicate: allowDuplicate,
     }) });
     const workflow = result.workflow || {};
@@ -1297,21 +1481,49 @@ function bindAuthorEvents() {
     event.preventDefault();
     const bookId = authorState.book?.book?.id;
     if (!bookId) return;
+    const oldPrice = Number(authorState.book?.book?.price_stars || 0);
+    const price = Math.max(0, Number(document.getElementById('bookPriceInput').value || 0));
+    const pricingType = price <= 0 ? 'free' : document.getElementById('bookPricingModeInput').value;
+    let confirmMakeFree = false;
+    if (oldPrice > 0 && price <= 0) {
+      confirmMakeFree = window.confirm(
+        'Сделать книгу полностью бесплатной? Все существующие и будущие главы станут бесплатными, а отдельная продажа глав и текстовых пакетов отключится.'
+      );
+      if (!confirmMakeFree) return;
+    }
     try {
       await apiFetch(`/api/author/book/${bookId}`, { method: 'PATCH', body: JSON.stringify({
         title: document.getElementById('bookTitleInput').value,
         description: document.getElementById('bookDescriptionInput').value,
         age_limit: document.getElementById('bookAgeInput').value,
         writing_status: document.getElementById('bookWritingInput').value,
-        pricing_type: document.getElementById('bookPricingInput').value,
-        price_stars: Number(document.getElementById('bookPriceInput').value || 0),
+        price_stars: price,
+        pricing_type: pricingType,
+        confirm_make_free: confirmMakeFree,
         allow_download: document.getElementById('bookDownloadInput').checked,
         content_type: document.getElementById('bookContentTypeInput').value,
         reading_mode: document.getElementById('bookReadingModeInput').value,
       }) });
-      notify('Произведение сохранено');
+      notify(price <= 0 ? 'Книга и все главы теперь бесплатны' : 'Произведение сохранено');
       await refreshAuthorDashboard();
-    } catch (error) { notify(error.message || 'Не удалось сохранить произведение'); }
+    } catch (error) { notify(typeof error.message === 'string' ? error.message : 'Не удалось сохранить произведение'); }
+  });
+
+  ['bookPriceInput', 'bookPricingModeInput', 'bookContentTypeInput'].forEach((id) => {
+    document.getElementById(id)?.addEventListener('input', syncBookPricingDraftControls);
+    document.getElementById(id)?.addEventListener('change', syncBookPricingDraftControls);
+  });
+  document.getElementById('chapterBulkAccessInput')?.addEventListener('change', syncChapterAccessInputs);
+  document.getElementById('chapterAccessInput')?.addEventListener('change', syncChapterAccessInputs);
+  document.getElementById('restoreChapterPricesButton')?.addEventListener('click', async () => {
+    const bookId = authorState.book?.book?.id;
+    if (!bookId) return;
+    if (!window.confirm('Восстановить сохранённые ранее цены глав? Бесплатные главы останутся бесплатными, а сохранённые платные цены снова начнут действовать.')) return;
+    try {
+      const result = await apiFetch(`/api/author/book/${bookId}/restore-chapter-prices`, { method: 'POST' });
+      notify(`Восстановлено цен глав: ${Number(result.updated || 0)}`);
+      await openAuthorBook(bookId);
+    } catch (error) { notify(error.message || 'Не удалось восстановить цены глав'); }
   });
 
   ['chapterPackageCountInput', 'chapterPackagePriceInput'].forEach((id) => {
@@ -1341,14 +1553,49 @@ function bindAuthorEvents() {
     } catch (error) { notify(error.message || 'Не удалось сохранить пакет'); }
   });
 
+  document.getElementById('chapterBulkPriceForm')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const bookId = authorState.book?.book?.id;
+    if (!bookId) return;
+    let startNumber = Number(document.getElementById('chapterBulkStartInput').value || 0);
+    let endNumber = Number(document.getElementById('chapterBulkEndInput').value || 0);
+    const accessMode = document.getElementById('chapterBulkAccessInput').value;
+    const priceStars = accessMode === 'chapter' ? Number(document.getElementById('chapterBulkPriceInput').value || 0) : 0;
+    if (!Number.isInteger(startNumber) || !Number.isInteger(endNumber) || startNumber < 1 || endNumber < 1) {
+      notify('Укажите корректные номера глав');
+      return;
+    }
+    if (startNumber > endNumber) [startNumber, endNumber] = [endNumber, startNumber];
+    if (accessMode === 'chapter' && (!Number.isInteger(priceStars) || priceStars < 1 || priceStars > 100000)) {
+      notify('Для отдельной продажи укажите цену от 1 до 100 000 Stars');
+      return;
+    }
+    try {
+      const result = await apiFetch(`/api/author/book/${bookId}/chapter-prices`, {
+        method: 'PATCH',
+        body: JSON.stringify({ start_number: startNumber, end_number: endNumber, access_mode: accessMode, price_stars: priceStars }),
+      });
+      const updated = Number(result.updated || 0);
+      const message = accessMode === 'free'
+        ? `${updated} глав открыты бесплатно`
+        : accessMode === 'book'
+          ? `${updated} глав открываются после покупки всей книги`
+          : `Для ${updated} глав установлена отдельная цена ${priceStars} Stars`;
+      notify(message);
+      await openAuthorBook(bookId);
+    } catch (error) { notify(error.message || 'Не удалось изменить доступ к главам'); }
+  });
+
   document.getElementById('chapterForm')?.addEventListener('submit', async (event) => {
     event.preventDefault();
     const bookId = authorState.book?.book?.id;
     const chapterId = document.getElementById('chapterIdInput').value;
+    const accessMode = document.getElementById('chapterAccessInput').value;
     const payload = {
       title: document.getElementById('chapterTitleInput').value,
       text: document.getElementById('chapterTextInput').value,
-      price_stars: Number(document.getElementById('chapterPriceInput').value || 0),
+      access_mode: accessMode,
+      price_stars: accessMode === 'chapter' ? Number(document.getElementById('chapterPriceInput').value || 0) : 0,
     };
     try {
       if (chapterId) await apiFetch(`/api/author/chapter/${chapterId}`, { method: 'PATCH', body: JSON.stringify(payload) });
@@ -1383,6 +1630,7 @@ document.addEventListener('DOMContentLoaded', () => {
   if (!document.getElementById('authorStudio')) return;
   document.querySelector('[data-close-moderation]')?.addEventListener('click', () => setModerationSuccessVisible(false));
   bindAuthorEvents();
+  document.getElementById('authorAnalyticsPeriod')?.addEventListener('change', (event) => loadAuthorAnalytics(event.target.value));
   setGraphicUploadTab('file');
   loadAuthorDashboard();
   const newKind = new URLSearchParams(window.location.search).get('new');
