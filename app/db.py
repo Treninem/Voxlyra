@@ -6458,10 +6458,10 @@ async def _ensure_v193_schema(db: aiosqlite.Connection) -> None:
         await _execute_schema_ddl(db, "ALTER TABLE author_financial_profiles ADD COLUMN rejection_reason TEXT")
 
     for key, value in {
-        "legal_terms_version": "2026-07-10",
-        "legal_personal_data_version": "2026-07-10",
-        "legal_author_license_version": "2026-07-10",
-        "legal_author_data_version": "2026-07-10",
+        "legal_terms_version": "2026-07-13",
+        "legal_personal_data_version": "2026-07-13",
+        "legal_author_license_version": "2026-07-13",
+        "legal_author_data_version": "2026-07-13",
         "commission_rub_percent": "20",
         "rub_hold_days": "14",
         "rub_payout_min_minor": "10000",

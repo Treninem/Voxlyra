@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, FSInputFile, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -22,6 +23,8 @@ from app.legal_texts import (
     LEGAL_DOCS,
     REQUIRED_FOR_AUTHOR,
     REQUIRED_ON_START,
+    OPERATOR_EMAIL,
+    OPERATOR_TELEGRAM,
     get_doc,
 )
 from app.services.legal_documents import ensure_legal_pdf
@@ -99,9 +102,27 @@ async def _completion_markup(author: bool = False):
     return kb.as_markup()
 
 
+async def _edit_text_or_send(message: Message, text: str, *, reply_markup=None) -> Message | None:
+    """Безопасно показывает текстовое меню из любого сообщения.
+
+    Telegram не разрешает ``edit_text`` для сообщения с PDF, фото, аудио или
+    иным вложением. Такие кнопки отвечают новым текстовым сообщением. Для
+    обычного текстового сообщения сохраняется аккуратное редактирование на
+    месте. Ошибка ``message is not modified`` не ломает обработчик.
+    """
+    if message.text is not None:
+        try:
+            return await message.edit_text(text, reply_markup=reply_markup)
+        except TelegramBadRequest as exc:
+            if "message is not modified" in str(exc).lower():
+                return message
+            # Структура сообщения могла измениться между нажатием и запросом.
+    return await message.answer(text, reply_markup=reply_markup)
+
+
 @router.callback_query(F.data == "main:legal")
 async def legal_menu_handler(call: CallbackQuery) -> None:
-    await call.message.edit_text(_legal_menu_text(), reply_markup=legal_menu())
+    await _edit_text_or_send(call.message, _legal_menu_text(), reply_markup=legal_menu())
     await call.answer()
 
 
@@ -216,7 +237,7 @@ async def legal_my_acceptances(call: CallbackQuery) -> None:
             lines.append(f"• {title} · {row['doc_version']} · {row['accepted_at'][:10]}{verified}")
         lines.append("\nОтозвать отдельное согласие можно через поддержку. Акцепт исполненного договора не удаляется задним числом.")
         text = "\n".join(lines)
-    await call.message.edit_text(text, reply_markup=legal_menu())
+    await _edit_text_or_send(call.message, text, reply_markup=legal_menu())
     await call.answer()
 
 
@@ -246,10 +267,10 @@ async def cmd_copyright(message: Message) -> None:
 
 @router.message(Command("support"))
 async def cmd_support(message: Message) -> None:
-    contact = settings.LEGAL_SUPPORT_CONTACT.strip() or "поддержка внутри Вокслиры"
+    contact = OPERATOR_TELEGRAM
     await message.answer(
         "<b>🛟 Поддержка</b>\n\n"
         "Опишите проблему одним сообщением. Для оплаты укажите произведение, главу, дату, способ оплаты и примерную сумму. "
         "Для обращения о правах укажите материал и подтверждающие документы.\n\n"
-        f"Канал обращений: <b>{contact}</b>."
+        f"Канал обращений: <b>{contact}</b>. Электронная почта: <b>{OPERATOR_EMAIL}</b>."
     )

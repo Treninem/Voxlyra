@@ -17,7 +17,7 @@ from app.legal_texts import LEGAL_DOCS, LegalDoc, get_doc
 
 
 LEGAL_STORAGE_ROOT = Path("storage/legal")
-LEGAL_PDF_LAYOUT_VERSION = "2"
+LEGAL_PDF_LAYOUT_VERSION = "3"
 _FONT_REGULAR = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 _FONT_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 
@@ -110,7 +110,7 @@ def _build_story(doc: LegalDoc):
         Paragraph(doc.title, title),
         Paragraph(
             f"Редакция от {doc.version}<br/>"
-            "Документ сформирован платформой Вокслира. Сохраните файл для ознакомления.",
+            "Официальный документ платформы VoxLyra. Электронная версия опубликована в боте и Mini App.",
             meta,
         ),
     ]
