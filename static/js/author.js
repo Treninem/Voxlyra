@@ -35,13 +35,16 @@ function defaultReadingMode(contentType) {
 
 function currentTextPricingMode(data = authorState.book) {
   const book = data?.book || {};
-  if (Number(book.price_stars || 0) <= 0) return 'free';
-  const declared = String(data?.pricing?.mode || book.pricing_type || 'whole_book');
-  return declared === 'chapters' ? 'chapters' : 'whole_book';
+  const declared = String(data?.pricing?.mode || book.pricing_type || 'free');
+  if (declared === 'premium') return 'premium';
+  if (declared === 'chapters' && Number(book.price_stars || 0) > 0) return 'chapters';
+  if (declared === 'whole_book' && Number(book.price_stars || 0) > 0) return 'whole_book';
+  return 'free';
 }
 
 function chapterAccessMode(chapter, mode = currentTextPricingMode()) {
   if (mode === 'free' || Number(chapter?.is_free || 0) === 1) return 'free';
+  if (mode === 'premium') return 'premium';
   if (mode === 'chapters' && Number(chapter?.price_stars || 0) > 0) return 'chapter';
   return 'book';
 }
@@ -52,9 +55,16 @@ function syncChapterAccessInputs() {
   const singleAccess = document.getElementById('chapterAccessInput');
   [bulkAccess, singleAccess].forEach((select) => {
     if (!select) return;
-    const option = select.querySelector('option[value="chapter"]');
-    if (option) option.disabled = mode !== 'chapters';
-    if (mode !== 'chapters' && select.value === 'chapter') select.value = 'book';
+    const bookOption = select.querySelector('option[value="book"]');
+    const chapterOption = select.querySelector('option[value="chapter"]');
+    const premiumOption = select.querySelector('option[value="premium"]');
+    if (bookOption) bookOption.disabled = !['whole_book', 'chapters'].includes(mode);
+    if (chapterOption) chapterOption.disabled = mode !== 'chapters';
+    if (premiumOption) premiumOption.disabled = mode !== 'premium';
+    if (mode === 'premium' && !['free', 'premium'].includes(select.value)) select.value = 'premium';
+    if (mode === 'whole_book' && !['free', 'book'].includes(select.value)) select.value = 'book';
+    if (mode === 'chapters' && !['free', 'book', 'chapter'].includes(select.value)) select.value = 'book';
+    if (mode === 'free') select.value = 'free';
   });
   const bulkPrice = document.getElementById('chapterBulkPriceLabel');
   const singlePrice = document.getElementById('chapterPriceLabel');
@@ -65,27 +75,32 @@ function syncChapterAccessInputs() {
 function syncTextPricingControls() {
   const data = authorState.book || {};
   const book = data.book || {};
-  const type = String(book.content_type || 'book');
-  const graphic = isGraphicType(type);
+  const graphic = isGraphicType(String(book.content_type || 'book'));
   const price = Math.max(0, Number(book.price_stars || 0));
   const mode = currentTextPricingMode(data);
-  const paidOptions = document.getElementById('bookPaidPricingOptions');
   const modeInput = document.getElementById('bookPricingModeInput');
+  const priceLabel = document.getElementById('bookPriceLabel');
+  const paidOptions = document.getElementById('bookPaidPricingOptions');
   const summary = document.getElementById('bookPricingSummary');
   const hint = document.getElementById('bookPricingModeHint');
   const restore = document.getElementById('restoreChapterPricesButton');
-  if (paidOptions) paidOptions.hidden = price <= 0 || graphic;
-  if (modeInput) modeInput.value = mode === 'chapters' ? 'chapters' : 'whole_book';
-  if (hint) hint.textContent = mode === 'chapters'
-    ? 'На карточке остаётся цена всей книги, а отдельная цена показывается только возле конкретной главы.'
-    : 'Закрытые главы открываются после покупки всей книги и не продаются отдельно.';
-  if (summary) {
-    summary.textContent = price <= 0
-      ? 'Книга и все главы бесплатны.'
-      : mode === 'chapters'
-        ? `Вся книга: ${formatStars(price)}. Выбранные главы можно продавать отдельно.`
-        : `Вся книга: ${formatStars(price)}. Отдельная продажа глав выключена.`;
-  }
+  if (modeInput) modeInput.value = mode;
+  if (priceLabel) priceLabel.hidden = graphic || !['whole_book', 'chapters'].includes(mode);
+  if (paidOptions) paidOptions.hidden = graphic;
+  if (hint) hint.textContent = mode === 'premium'
+    ? 'Первые ознакомительные главы можно оставить бесплатными. Остальные откроются только при активной подписке Premium; отдельной покупки нет.'
+    : mode === 'chapters'
+      ? 'На карточке показывается цена всей книги, а цена отдельной главы — только возле этой главы.'
+      : mode === 'whole_book'
+        ? 'Закрытые главы открываются после покупки всей книги и не продаются отдельно.'
+        : 'Вся книга и все её главы открыты без оплаты.';
+  if (summary) summary.textContent = mode === 'premium'
+    ? 'Книга доступна по VoxLyra Premium. Бесплатные ознакомительные главы отмечаются отдельно.'
+    : mode === 'chapters'
+      ? `Вся книга: ${formatStars(price)}. Выбранные главы можно продавать отдельно.`
+      : mode === 'whole_book'
+        ? `Вся книга: ${formatStars(price)}. Отдельная продажа глав выключена.`
+        : 'Книга и все главы бесплатны.';
   if (restore) restore.hidden = graphic || mode !== 'chapters' || Number(data.pricing?.saved_prices_count || 0) <= 0;
 
   const freeNotice = document.getElementById('freeBookChapterNotice');
@@ -93,18 +108,23 @@ function syncTextPricingControls() {
   const description = document.getElementById('textChapterPricingDescription');
   if (freeNotice) freeNotice.hidden = graphic || mode !== 'free';
   if (bulkForm) bulkForm.hidden = graphic || mode === 'free';
-  if (description) description.textContent = mode === 'free'
-    ? 'Все главы бесплатны. Настройки цен не требуются.'
-    : mode === 'chapters'
-      ? 'Главы можно открыть бесплатно, после покупки всей книги или продавать отдельно.'
-      : 'Главы можно открыть бесплатно для ознакомления либо после покупки всей книги.';
+  if (description) description.textContent = mode === 'premium'
+    ? 'Главы можно оставить ознакомительными или открыть по активной подписке Premium.'
+    : mode === 'free'
+      ? 'Все главы бесплатны. Настройки доступа не требуются.'
+      : mode === 'chapters'
+        ? 'Главы можно открыть бесплатно, после покупки всей книги или продавать отдельно.'
+        : 'Главы можно открыть бесплатно для ознакомления либо после покупки всей книги.';
 
   const importTitle = document.getElementById('textImportPricingTitle');
   const importText = document.getElementById('textImportPricingText');
   if (importTitle && importText) {
     if (mode === 'free') {
       importTitle.textContent = 'После импорта все главы будут бесплатными';
-      importText.textContent = 'Цена глав не спрашивается, пока вся книга бесплатна.';
+      importText.textContent = 'Дополнительные настройки доступа не требуются.';
+    } else if (mode === 'premium') {
+      importTitle.textContent = 'После импорта первые 3 главы будут ознакомительными';
+      importText.textContent = 'Остальные главы будут доступны читателям с активной подпиской VoxLyra Premium.';
     } else {
       importTitle.textContent = 'После импорта первые 3 главы будут ознакомительными';
       importText.textContent = mode === 'chapters'
@@ -121,22 +141,28 @@ function syncTextPricingControls() {
 function syncBookPricingDraftControls() {
   const priceInput = document.getElementById('bookPriceInput');
   const modeInput = document.getElementById('bookPricingModeInput');
-  const paidOptions = document.getElementById('bookPaidPricingOptions');
+  const priceLabel = document.getElementById('bookPriceLabel');
   const summary = document.getElementById('bookPricingSummary');
   const hint = document.getElementById('bookPricingModeHint');
   if (!priceInput || !modeInput) return;
-  const price = Math.max(0, Number(priceInput.value || 0));
+  const mode = modeInput.value || 'free';
+  const price = Math.max(1, Number(priceInput.value || 1));
   const graphic = isGraphicType(document.getElementById('bookContentTypeInput')?.value || authorState.book?.book?.content_type);
-  const mode = price <= 0 ? 'free' : modeInput.value;
-  if (paidOptions) paidOptions.hidden = price <= 0 || graphic;
-  if (summary) summary.textContent = price <= 0
-    ? 'Книга и все главы будут бесплатны.'
+  if (priceLabel) priceLabel.hidden = graphic || !['whole_book', 'chapters'].includes(mode);
+  if (summary) summary.textContent = mode === 'premium'
+    ? 'Книга будет доступна по VoxLyra Premium без отдельной покупки.'
+    : mode === 'free'
+      ? 'Книга и все главы будут бесплатны.'
+      : mode === 'chapters'
+        ? `Вся книга: ${formatStars(price)}. Можно назначить отдельные цены выбранным главам.`
+        : `Вся книга: ${formatStars(price)}. Главы отдельно не продаются.`;
+  if (hint) hint.textContent = mode === 'premium'
+    ? 'Ознакомительные главы можно оставить бесплатными, остальные будут отмечены значком Premium.'
     : mode === 'chapters'
-      ? `Вся книга: ${formatStars(price)}. Можно назначить отдельные цены выбранным главам.`
-      : `Вся книга: ${formatStars(price)}. Главы отдельно не продаются.`;
-  if (hint) hint.textContent = mode === 'chapters'
-    ? 'Цена всей книги показывается на карточке, цена главы — только возле этой главы.'
-    : 'Закрытые главы открываются только после покупки всей книги.';
+      ? 'Цена всей книги показывается на карточке, цена главы — только возле этой главы.'
+      : mode === 'whole_book'
+        ? 'Закрытые главы открываются только после покупки всей книги.'
+        : 'Никаких платёжных кнопок у книги и глав не будет.';
 }
 
 const financeStatusLabels = {
@@ -289,6 +315,8 @@ function renderAuthorAnalytics(analytics) {
       ['Средняя оценка', Number(summary.average_rating || 0).toFixed(1)],
       ['Продажи', summary.sales_count || 0],
       ['Доход', formatStars(summary.revenue_stars || 0)],
+      ['Premium-читатели', summary.premium_readers || 0],
+      ['Premium-дочитывания', summary.premium_completions || 0],
       ['Комментарии', summary.comments_count || 0],
       ['Реакции', summary.reactions_count || 0],
     ];
@@ -475,9 +503,9 @@ function fillBookEditor(data) {
   document.getElementById('bookDescriptionInput').value = book.description || '';
   document.getElementById('bookAgeInput').value = book.age_limit || '16+';
   document.getElementById('bookWritingInput').value = book.writing_status || 'writing';
-  document.getElementById('bookPriceInput').value = Number(book.price_stars || 0);
+  document.getElementById('bookPriceInput').value = Number(book.price_stars || 0) > 0 ? Number(book.price_stars) : 10;
   const pricingModeInput = document.getElementById('bookPricingModeInput');
-  if (pricingModeInput) pricingModeInput.value = currentTextPricingMode(data) === 'chapters' ? 'chapters' : 'whole_book';
+  if (pricingModeInput) pricingModeInput.value = currentTextPricingMode(data);
   document.getElementById('bookDownloadInput').checked = Boolean(Number(book.allow_download || 0));
   document.getElementById('bookContentTypeInput').value = type;
   document.getElementById('bookReadingModeInput').value = book.reading_mode || defaultReadingMode(type);
@@ -514,7 +542,9 @@ function renderAuthorChapters(chapters) {
       ? 'Бесплатная глава'
       : access === 'chapter'
         ? `Цена этой главы: ${formatStars(chapter.price_stars)}`
-        : 'Доступ после покупки всей книги';
+        : access === 'premium'
+          ? 'Доступ по VoxLyra Premium'
+          : 'Доступ после покупки всей книги';
     return `<button class="author-chapter-row" type="button" data-edit-chapter="${chapter.id}">
       <div><span>Глава ${chapter.number}</span><strong>${escapeHtml(chapter.title)}</strong><small>${accessText} · ${escapeHtml(statusLabels[chapter.status] || chapter.status)}</small></div><b>Изменить</b>
     </button>`;
@@ -654,7 +684,7 @@ function resetChapterForm() {
   document.getElementById('chapterTitleInput').value = '';
   document.getElementById('chapterTextInput').value = '';
   const mode = currentTextPricingMode();
-  document.getElementById('chapterAccessInput').value = mode === 'free' ? 'free' : 'book';
+  document.getElementById('chapterAccessInput').value = mode === 'free' ? 'free' : mode === 'premium' ? 'premium' : 'book';
   document.getElementById('chapterPriceInput').value = '3';
   document.getElementById('deleteChapterButton').hidden = true;
   document.getElementById('deleteChapterButton').dataset.confirm = '';
@@ -1481,13 +1511,15 @@ function bindAuthorEvents() {
     event.preventDefault();
     const bookId = authorState.book?.book?.id;
     if (!bookId) return;
-    const oldPrice = Number(authorState.book?.book?.price_stars || 0);
-    const price = Math.max(0, Number(document.getElementById('bookPriceInput').value || 0));
-    const pricingType = price <= 0 ? 'free' : document.getElementById('bookPricingModeInput').value;
+    const oldMode = currentTextPricingMode();
+    const pricingType = document.getElementById('bookPricingModeInput').value || 'free';
+    const price = ['whole_book', 'chapters'].includes(pricingType)
+      ? Math.max(1, Number(document.getElementById('bookPriceInput').value || 1))
+      : 0;
     let confirmMakeFree = false;
-    if (oldPrice > 0 && price <= 0) {
+    if (oldMode !== 'free' && pricingType === 'free') {
       confirmMakeFree = window.confirm(
-        'Сделать книгу полностью бесплатной? Все существующие и будущие главы станут бесплатными, а отдельная продажа глав и текстовых пакетов отключится.'
+        'Сделать книгу полностью бесплатной? Все существующие и будущие главы станут бесплатными, а продажа и доступ по Premium отключатся.'
       );
       if (!confirmMakeFree) return;
     }
@@ -1504,7 +1536,7 @@ function bindAuthorEvents() {
         content_type: document.getElementById('bookContentTypeInput').value,
         reading_mode: document.getElementById('bookReadingModeInput').value,
       }) });
-      notify(price <= 0 ? 'Книга и все главы теперь бесплатны' : 'Произведение сохранено');
+      notify(pricingType === 'free' ? 'Книга и все главы теперь бесплатны' : pricingType === 'premium' ? 'Книга доступна по VoxLyra Premium' : 'Произведение сохранено');
       await refreshAuthorDashboard();
     } catch (error) { notify(typeof error.message === 'string' ? error.message : 'Не удалось сохранить произведение'); }
   });
@@ -1578,9 +1610,11 @@ function bindAuthorEvents() {
       const updated = Number(result.updated || 0);
       const message = accessMode === 'free'
         ? `${updated} глав открыты бесплатно`
-        : accessMode === 'book'
-          ? `${updated} глав открываются после покупки всей книги`
-          : `Для ${updated} глав установлена отдельная цена ${priceStars} Stars`;
+        : accessMode === 'premium'
+          ? `${updated} глав доступны по VoxLyra Premium`
+          : accessMode === 'book'
+            ? `${updated} глав открываются после покупки всей книги`
+            : `Для ${updated} глав установлена отдельная цена ${priceStars} Stars`;
       notify(message);
       await openAuthorBook(bookId);
     } catch (error) { notify(error.message || 'Не удалось изменить доступ к главам'); }

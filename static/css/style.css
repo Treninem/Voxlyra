@@ -3271,3 +3271,245 @@ body.sepia-theme .personalized-showcase {
   .premium-price { width:100%; }
   .premium-feature-grid,.premium-insight-grid { grid-template-columns:1fr; }
 }
+
+/* VoxLyra v1.11.4 · Premium-книги, ручная выдача доступа и мобильная компоновка */
+.premium-access-label,
+.premium-mini-badge {
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
+  width:max-content;
+  max-width:100%;
+  padding:6px 10px;
+  border:1px solid rgba(238,198,102,.36);
+  border-radius:999px;
+  color:#f3d58b;
+  background:linear-gradient(135deg,rgba(111,68,188,.25),rgba(226,178,75,.12));
+  font-size:.78rem;
+  font-weight:850;
+  line-height:1.2;
+}
+.premium-subscription-button {
+  border:1px solid rgba(237,196,95,.42);
+  background:linear-gradient(135deg,#7449d7,#a750d7 54%,#dcae55);
+  box-shadow:0 14px 34px rgba(113,72,204,.28),inset 0 1px rgba(255,255,255,.12);
+}
+.premium-paywall-card {
+  position:relative;
+  overflow:hidden;
+  text-align:center;
+  border-color:rgba(234,190,88,.32);
+  background:
+    radial-gradient(circle at 50% 0%,rgba(151,92,235,.24),transparent 46%),
+    linear-gradient(155deg,rgba(26,22,63,.97),rgba(12,15,36,.98));
+}
+.premium-paywall-card::after {
+  content:"";
+  position:absolute;
+  width:180px;
+  height:180px;
+  right:-75px;
+  bottom:-95px;
+  border-radius:50%;
+  background:radial-gradient(circle,rgba(228,183,80,.18),transparent 68%);
+  pointer-events:none;
+}
+.premium-paywall-card .empty-icon { color:#f0cc76; }
+
+.access-control-shell { display:grid; gap:14px; }
+.access-control-intro {
+  padding:18px;
+  border:1px solid rgba(231,190,93,.24);
+  border-radius:22px;
+  background:linear-gradient(145deg,rgba(75,47,135,.24),rgba(19,22,48,.76));
+}
+.access-control-intro h2 { margin:0 0 7px; }
+.access-control-intro p { margin:0; color:var(--muted); line-height:1.5; }
+.access-step-card {
+  min-width:0;
+  padding:18px;
+  border:1px solid rgba(255,255,255,.09);
+  border-radius:22px;
+  background:linear-gradient(180deg,rgba(255,255,255,.055),rgba(255,255,255,.025));
+  box-shadow:inset 0 1px rgba(255,255,255,.04),0 14px 32px rgba(0,0,0,.15);
+}
+.access-step-heading { display:flex; align-items:flex-start; gap:12px; margin-bottom:14px; }
+.access-step-heading h3 { margin:1px 0 4px; }
+.access-step-heading p { margin:0; color:var(--muted); font-size:.88rem; line-height:1.45; }
+.access-step-number {
+  display:grid;
+  place-items:center;
+  flex:0 0 38px;
+  width:38px;
+  height:38px;
+  border-radius:13px;
+  color:#f4d184;
+  font-weight:900;
+  background:linear-gradient(145deg,rgba(137,83,221,.48),rgba(222,171,74,.22));
+  border:1px solid rgba(234,190,91,.32);
+}
+.access-search-row { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:9px; align-items:end; }
+.access-search-row input { min-width:0; width:100%; }
+.access-user-results { display:grid; gap:8px; margin-top:10px; max-height:330px; overflow:auto; }
+.access-user-result {
+  width:100%;
+  min-width:0;
+  display:grid;
+  grid-template-columns:42px minmax(0,1fr) auto;
+  align-items:center;
+  gap:10px;
+  padding:10px 12px;
+  text-align:left;
+  color:var(--text);
+  background:rgba(255,255,255,.045);
+  border:1px solid rgba(255,255,255,.075);
+  box-shadow:none;
+}
+.access-user-result:hover,.access-user-result.selected { border-color:rgba(210,169,80,.48); background:rgba(121,75,195,.18); }
+.access-user-avatar {
+  display:grid;
+  place-items:center;
+  width:42px;
+  height:42px;
+  border-radius:14px;
+  background:linear-gradient(145deg,#6745b8,#31255e);
+  color:#f5d688;
+  font-weight:900;
+}
+.access-user-result strong,.access-user-result small { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.access-user-result small { margin-top:3px; color:var(--muted); font-size:.76rem; }
+.access-selected-user {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:12px;
+  min-width:0;
+  margin-top:10px;
+  padding:12px 14px;
+  border-radius:17px;
+  border:1px solid rgba(115,202,159,.26);
+  background:rgba(61,154,111,.09);
+}
+.access-selected-user > div { min-width:0; }
+.access-selected-user strong,.access-selected-user span { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.access-selected-user span { color:var(--muted); font-size:.8rem; margin-top:3px; }
+.access-grant-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
+.access-grant-card {
+  min-width:0;
+  padding:16px;
+  border-radius:20px;
+  border:1px solid rgba(255,255,255,.09);
+  background:rgba(10,13,32,.46);
+}
+.access-grant-card.premium { border-color:rgba(232,188,88,.3); background:linear-gradient(150deg,rgba(100,63,169,.18),rgba(215,169,69,.07)); }
+.access-grant-card h3 { margin:0 0 5px; }
+.access-grant-card > p { margin:0 0 13px; color:var(--muted); font-size:.85rem; line-height:1.45; }
+.access-grant-card label { display:grid; gap:6px; margin-top:10px; color:var(--muted); font-size:.8rem; font-weight:750; }
+.access-grant-card input,.access-grant-card select,.access-grant-card textarea { width:100%; min-width:0; max-width:100%; }
+.access-grant-card textarea { min-height:76px; }
+.access-grant-card button { width:100%; margin-top:12px; }
+.access-chapter-preview {
+  min-height:48px;
+  margin-top:10px;
+  padding:11px 12px;
+  border-radius:15px;
+  color:var(--muted);
+  background:rgba(255,255,255,.035);
+  border:1px dashed rgba(255,255,255,.12);
+  font-size:.82rem;
+  line-height:1.48;
+}
+.access-chapter-preview.ready { color:#ccefdc; border-style:solid; border-color:rgba(92,204,143,.28); background:rgba(54,152,105,.08); }
+.access-current-premium { margin-top:10px; padding:11px 12px; border-radius:15px; color:#f1d391; background:rgba(229,184,78,.08); border:1px solid rgba(229,184,78,.2); font-size:.82rem; }
+.access-history-group { display:grid; gap:8px; margin-top:12px; }
+.access-history-group h4 { margin:8px 0 0; color:#f1d082; }
+.access-grant-row {
+  display:grid;
+  grid-template-columns:minmax(0,1fr) auto;
+  gap:10px;
+  align-items:center;
+  min-width:0;
+  padding:11px 12px;
+  border-radius:16px;
+  background:rgba(255,255,255,.035);
+  border:1px solid rgba(255,255,255,.075);
+}
+.access-grant-row > div { min-width:0; }
+.access-grant-row strong,.access-grant-row small { display:block; overflow:hidden; text-overflow:ellipsis; }
+.access-grant-row small { margin-top:4px; color:var(--muted); line-height:1.4; }
+.access-grant-row button { min-height:36px; padding:7px 10px; font-size:.78rem; }
+.control-access-security { margin-top:12px; padding:12px 14px; border-radius:16px; border:1px solid rgba(229,184,78,.18); background:rgba(229,184,78,.055); color:var(--muted); font-size:.82rem; line-height:1.5; }
+.compact-empty { padding:13px; border-radius:15px; color:var(--muted); background:rgba(255,255,255,.035); text-align:center; }
+
+/* Жёсткая мобильная адаптация Mini App: без широкого полотна и горизонтальной прокрутки. */
+html, body { width:100%; max-width:100%; overflow-x:hidden; }
+img, video, canvas, svg { max-width:100%; }
+input, select, textarea, button { max-width:100%; }
+
+@media (max-width: 700px) {
+  body { width:100%; min-width:0; }
+  .app-shell,
+  .control-page .app-shell,
+  .legal-page .app-shell,
+  body.reader-wide .app-shell,
+  body.graphic-reader-page .app-shell {
+    width:100%;
+    max-width:100%;
+    min-width:0;
+    margin:0;
+    padding-left:12px;
+    padding-right:12px;
+  }
+  .hero { align-items:flex-start; gap:12px; padding:15px; border-radius:22px; }
+  .hero .logo { width:64px; height:64px; }
+  .hero h1 { font-size:clamp(25px,8vw,34px); overflow-wrap:anywhere; }
+  .hero p { font-size:.9rem; line-height:1.45; }
+  .section-title h2 { font-size:24px; }
+  .book-card { grid-template-columns:58px minmax(0,1fr); gap:11px; padding:11px; }
+  .cover-mini { width:58px; height:79px; border-radius:14px; }
+  .book-info,.book-info h3,.book-info p { min-width:0; overflow-wrap:anywhere; }
+  .book-hero-card,.author-editor-grid,.author-payment-grid,.form-grid.two,.form-grid.three,
+  .action-grid,.control-section-grid,.access-grant-grid,.premium-feature-grid,.premium-insight-grid {
+    grid-template-columns:1fr !important;
+  }
+  .control-stat-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .control-item,.control-user-card,.control-book-card { min-width:0; }
+  .control-actions { width:100%; max-width:none; justify-content:stretch; }
+  .control-actions button,.control-actions a { flex:1 1 140px; min-width:0; }
+  .access-search-row { grid-template-columns:1fr; }
+  .access-search-row button { width:100%; }
+  .access-user-result { grid-template-columns:38px minmax(0,1fr); }
+  .access-user-result > :last-child { grid-column:2; justify-self:start; }
+  .access-selected-user { align-items:flex-start; flex-direction:column; }
+  .access-selected-user button { width:100%; }
+  .access-grant-row { grid-template-columns:1fr; }
+  .access-grant-row button { width:100%; }
+  .chapter-row { align-items:flex-start; flex-direction:column; padding:12px 13px; }
+  .chapter-row b { white-space:normal; }
+  .reader { padding:16px; border-radius:20px; }
+  .reader h1 { font-size:27px; overflow-wrap:anywhere; }
+  .reader-toolbar { overflow-x:auto; scrollbar-width:none; }
+  .reader-toolbar::-webkit-scrollbar { display:none; }
+  .reader-toolbar > * { flex:0 0 auto; }
+  .bottom-nav { left:8px; right:8px; width:auto; max-width:calc(100% - 16px); overflow:hidden; }
+  .bottom-nav a { min-width:0; padding-inline:2px; }
+  .bottom-nav span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .panel-card,.access-step-card,.access-grant-card { padding:14px; border-radius:18px; }
+  table { display:block; max-width:100%; overflow-x:auto; }
+}
+
+@media (max-width: 430px) {
+  .app-shell,.control-page .app-shell,.legal-page .app-shell { padding-left:9px; padding-right:9px; }
+  .hero { padding:13px; gap:10px; }
+  .hero .logo { width:54px; height:54px; }
+  .hero h1 { font-size:24px; }
+  .control-stat-grid { grid-template-columns:1fr 1fr; gap:8px; }
+  .control-stat { padding:11px; }
+  .action-grid { gap:8px; }
+  button,.button-link { min-height:44px; padding:11px 12px; font-size:14px; }
+  .access-step-heading { gap:9px; }
+  .access-step-number { width:34px; height:34px; flex-basis:34px; }
+  .premium-plan-card,.premium-status-card { padding:14px; border-radius:19px; }
+  .reader { padding:14px 12px; }
+  .reader p { overflow-wrap:anywhere; }
+}

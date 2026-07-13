@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import sqlite3
+import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -462,6 +463,7 @@ async def _init_db_impl() -> None:
         await _ensure_v1110_analytics_schema(db)
         await _ensure_v1110_premium_schema(db)
         await _ensure_v1111_final_schema(db)
+        await _ensure_v1114_access_schema(db)
         await db.commit()
 
 
@@ -493,7 +495,7 @@ async def _ensure_v1111_final_schema(db: aiosqlite.Connection) -> None:
             updated_at=?
         WHERE status!='deleted' AND book_id IN (
             SELECT id FROM books
-            WHERE publication_status!='deleted' AND COALESCE(price_stars, 0)<=0
+            WHERE publication_status!='deleted' AND COALESCE(price_stars, 0)<=0 AND COALESCE(pricing_type,'free')!='premium'
         )
         """,
         (now,),
@@ -502,7 +504,7 @@ async def _ensure_v1111_final_schema(db: aiosqlite.Connection) -> None:
         """
         UPDATE books
         SET price_stars=0, pricing_type='free', updated_at=?
-        WHERE publication_status!='deleted' AND COALESCE(price_stars, 0)<=0
+        WHERE publication_status!='deleted' AND COALESCE(price_stars, 0)<=0 AND COALESCE(pricing_type,'free')!='premium'
           AND (pricing_type!='free' OR price_stars!=0)
         """,
         (now,),
@@ -514,7 +516,7 @@ async def _ensure_v1111_final_schema(db: aiosqlite.Connection) -> None:
         SET is_active=0, updated_at=?
         WHERE content_scope IN ('text','all') AND book_id IN (
             SELECT id FROM books
-            WHERE publication_status!='deleted' AND COALESCE(price_stars, 0)<=0
+            WHERE publication_status!='deleted' AND COALESCE(price_stars, 0)<=0 AND COALESCE(pricing_type,'free')!='premium'
         )
         """,
         (now,),
@@ -613,16 +615,16 @@ async def _ensure_chapter_columns(db: aiosqlite.Connection) -> None:
                 WHEN COALESCE(saved_price_stars, 0) <= 0 AND price_stars > 0 THEN price_stars
                 ELSE saved_price_stars
             END
-        WHERE book_id IN (SELECT id FROM books WHERE COALESCE(price_stars, 0) <= 0)
+        WHERE book_id IN (SELECT id FROM books WHERE COALESCE(price_stars, 0) <= 0 AND COALESCE(pricing_type,'free')!='premium')
           AND (is_free=0 OR price_stars>0)
         """
     )
     await db.execute(
         "UPDATE chapters SET is_free=1, price_stars=0 "
-        "WHERE book_id IN (SELECT id FROM books WHERE COALESCE(price_stars, 0) <= 0)"
+        "WHERE book_id IN (SELECT id FROM books WHERE COALESCE(price_stars, 0) <= 0 AND COALESCE(pricing_type,'free')!='premium')"
     )
     await db.execute(
-        "UPDATE books SET pricing_type='free' WHERE COALESCE(price_stars, 0) <= 0"
+        "UPDATE books SET pricing_type='free' WHERE COALESCE(price_stars, 0) <= 0 AND COALESCE(pricing_type,'free')!='premium'"
     )
 
 
@@ -9409,13 +9411,17 @@ async def update_chapter_price_range(
 # free       — вся книга и все текстовые главы бесплатны;
 # whole_book — продаётся только вся книга, отдельные главы не продаются;
 # chapters   — вся книга продаётся целиком, а выбранные главы можно купить отдельно.
+# premium    — прямой покупки нет; закрытые главы доступны по активной подписке Premium.
 
 
 def _normalize_text_pricing_mode(price_stars: int, requested_mode: str | None) -> str:
+    requested = str(requested_mode or "").strip().lower()
+    if requested == "premium":
+        return "premium"
     price = max(0, int(price_stars or 0))
     if price <= 0:
         return "free"
-    return "chapters" if str(requested_mode or "").strip() == "chapters" else "whole_book"
+    return "chapters" if requested == "chapters" else "whole_book"
 
 
 async def _sync_book_pricing_type_conn(db: aiosqlite.Connection, book_id: int) -> str:
@@ -9479,16 +9485,16 @@ async def update_book_price(
     *,
     restore_saved_prices: bool = False,
 ) -> bool:
-    """Меняет единый режим продажи книги и приводит главы к непротиворечивому виду.
+    """Меняет режим доступа к текстовой книге без смешивания разных оплат.
 
-    * 0 Stars -> free: все главы становятся бесплатными, продажа глав отключается;
-    * whole_book -> отдельные цены глав отключаются, закрытые главы доступны после
-      покупки всей книги;
-    * chapters -> отдельные цены разрешены, но старые черновые цены восстанавливаются
-      только по явному запросу restore_saved_prices=True.
+    * free — вся книга и все главы бесплатны;
+    * whole_book — покупка только всей книги;
+    * chapters — покупка всей книги или выбранных глав;
+    * premium — прямой покупки нет, закрытые главы читает активный подписчик.
     """
-    price = max(0, min(100000, int(price_stars or 0)))
-    mode = _normalize_text_pricing_mode(price, pricing_type)
+    requested = str(pricing_type or "").strip().lower()
+    mode = _normalize_text_pricing_mode(price_stars, requested)
+    price = 0 if mode in {"free", "premium"} else max(1, min(100000, int(price_stars or 0)))
     now = utc_now()
     async with connect() as db:
         cur = await db.execute(
@@ -9502,9 +9508,9 @@ async def update_book_price(
         old = await cur.fetchone()
         if not old:
             return False
+        old_mode = _normalize_text_pricing_mode(int(old["price_stars"] or 0), str(old["pricing_type"] or ""))
 
-        if mode in {"free", "whole_book"}:
-            # Сохраняем действующие настройки перед их отключением.
+        if mode in {"free", "whole_book", "premium"}:
             await db.execute(
                 """
                 UPDATE chapters
@@ -9523,27 +9529,39 @@ async def update_book_price(
 
         if mode == "free":
             await db.execute(
-                "UPDATE chapters SET is_free=1, price_stars=0, updated_at=? "
-                "WHERE book_id=? AND status!='deleted'",
+                "UPDATE chapters SET is_free=1, price_stars=0, updated_at=? WHERE book_id=? AND status!='deleted'",
                 (now, int(book_id)),
             )
-            # Пакеты текстовых глав бессмысленны у полностью бесплатной книги.
             await db.execute(
-                "UPDATE chapter_packages SET is_active=0, updated_at=? "
-                "WHERE book_id=? AND content_scope IN ('text','all')",
+                "UPDATE chapter_packages SET is_active=0, updated_at=? WHERE book_id=? AND content_scope IN ('text','all')",
                 (now, int(book_id)),
             )
         elif mode == "whole_book":
-            # Бесплатные ознакомительные главы сохраняются, остальные открываются
-            # только покупкой всей книги. Отдельная цена у главы не отображается.
             await db.execute(
-                "UPDATE chapters SET price_stars=0, updated_at=? "
-                "WHERE book_id=? AND status!='deleted'",
+                "UPDATE chapters SET price_stars=0, updated_at=? WHERE book_id=? AND status!='deleted'",
                 (now, int(book_id)),
             )
             await db.execute(
-                "UPDATE chapter_packages SET is_active=0, updated_at=? "
-                "WHERE book_id=? AND content_scope IN ('text','all')",
+                "UPDATE chapter_packages SET is_active=0, updated_at=? WHERE book_id=? AND content_scope IN ('text','all')",
+                (now, int(book_id)),
+            )
+        elif mode == "premium":
+            # При переходе с полностью бесплатной книги оставляем первые три главы
+            # ознакомительными, остальные делаем доступными по подписке. В других
+            # режимах сохраняем уже выбранные бесплатные ознакомительные главы.
+            if old_mode == "free":
+                await db.execute(
+                    "UPDATE chapters SET is_free=CASE WHEN number<=3 THEN 1 ELSE 0 END, price_stars=0, updated_at=? "
+                    "WHERE book_id=? AND status!='deleted'",
+                    (now, int(book_id)),
+                )
+            else:
+                await db.execute(
+                    "UPDATE chapters SET price_stars=0, updated_at=? WHERE book_id=? AND status!='deleted'",
+                    (now, int(book_id)),
+                )
+            await db.execute(
+                "UPDATE chapter_packages SET is_active=0, updated_at=? WHERE book_id=? AND content_scope IN ('text','all')",
                 (now, int(book_id)),
             )
         elif restore_saved_prices:
@@ -9634,13 +9652,7 @@ async def update_chapter_access_range(
     access_mode: str,
     price_stars: int = 0,
 ) -> dict[str, Any]:
-    """Меняет доступ одной главы или диапазона в рамках режима книги.
-
-    access_mode:
-      free    — бесплатная ознакомительная глава;
-      book    — доступ только после покупки всей книги;
-      chapter — отдельная покупка главы (только при pricing_type='chapters').
-    """
+    """Меняет доступ одной главы или диапазона в рамках выбранного режима книги."""
     start = max(1, int(start_number))
     end = max(1, int(end_number))
     if start > end:
@@ -9648,7 +9660,7 @@ async def update_chapter_access_range(
     if end - start > 100000:
         raise ValueError("Диапазон слишком большой")
     access = str(access_mode or "").strip().lower()
-    if access not in {"free", "book", "chapter"}:
+    if access not in {"free", "book", "chapter", "premium"}:
         raise ValueError("Неизвестный режим доступа")
     price = max(0, min(100000, int(price_stars or 0)))
     now = utc_now()
@@ -9668,6 +9680,10 @@ async def update_chapter_access_range(
         mode = _normalize_text_pricing_mode(int(book["price_stars"] or 0), str(book["pricing_type"] or ""))
         if mode == "free":
             return {"ok": False, "updated": 0, "reason": "book_is_free", "start_number": start, "end_number": end}
+        if mode == "premium" and access not in {"free", "premium"}:
+            return {"ok": False, "updated": 0, "reason": "premium_mode_only", "start_number": start, "end_number": end}
+        if mode != "premium" and access == "premium":
+            return {"ok": False, "updated": 0, "reason": "premium_mode_required", "start_number": start, "end_number": end}
         if access == "chapter" and mode != "chapters":
             return {"ok": False, "updated": 0, "reason": "chapter_sales_disabled", "start_number": start, "end_number": end}
         if access == "chapter" and price <= 0:
@@ -9759,6 +9775,11 @@ async def add_manual_chapter(book_id: int, title: str, text: str, is_free: bool 
         if mode == "free":
             chapter_free, chapter_price = 1, 0
         elif mode == "whole_book":
+            chapter_free, chapter_price = (1 if bool(is_free) else 0), 0
+        elif mode == "premium":
+            # В Premium нулевая цена не означает бесплатную главу: доступ
+            # определяется флагом is_free. Так новые главы автора могут сразу
+            # публиковаться для подписчиков, не превращаясь в бесплатные.
             chapter_free, chapter_price = (1 if bool(is_free) else 0), 0
         else:
             chapter_free = 1 if bool(is_free) or requested_price <= 0 else 0
@@ -10011,6 +10032,10 @@ async def user_can_access_chapter(user_id: int, chapter_id: int) -> bool:
     )
     if mode == "free" or int(chapter["is_free"] or 0) == 1:
         return True
+    if await has_manual_chapter_access(int(user_id), int(chapter_id)):
+        return True
+    if mode == "premium":
+        return await user_has_premium(int(user_id))
     return await has_purchase_access(int(user_id), chapter_id=int(chapter_id))
 
 
@@ -10020,7 +10045,9 @@ _previous_get_purchase_target_v1110 = get_purchase_target
 async def get_purchase_target(payload: str) -> dict[str, Any] | None:
     target = await _previous_get_purchase_target_v1110(payload)
     parts = str(payload or "").split(":")
-    if target and len(parts) >= 3 and parts[0] == "vox" and parts[1] == "chapter":
+    if not target or len(parts) < 3 or parts[0] != "vox":
+        return target
+    if parts[1] == "chapter":
         try:
             chapter = await get_chapter(int(parts[2]))
         except (TypeError, ValueError):
@@ -10031,6 +10058,16 @@ async def get_purchase_target(payload: str) -> dict[str, Any] | None:
             int(chapter["book_price_stars"] or 0), str(chapter["pricing_type"] or "")
         )
         if mode != "chapters" or int(chapter["is_free"] or 0) == 1 or int(chapter["price_stars"] or 0) <= 0:
+            return None
+    elif parts[1] == "book":
+        try:
+            book = await get_book(int(parts[2]))
+        except (TypeError, ValueError):
+            return None
+        if not book:
+            return None
+        mode = _normalize_text_pricing_mode(int(book["price_stars"] or 0), str(book["pricing_type"] or ""))
+        if mode in {"free", "premium"}:
             return None
     return target
 
@@ -10140,6 +10177,20 @@ async def get_author_analytics(author_user_id: int, days: int = 30) -> dict[str,
 
         cur = await db.execute(
             """
+            SELECT
+                COUNT(DISTINCT CASE WHEN pce.event_type='open' THEN pce.user_id END) AS premium_readers,
+                COUNT(CASE WHEN pce.event_type='open' THEN 1 END) AS premium_opens,
+                COUNT(CASE WHEN pce.event_type='complete' THEN 1 END) AS premium_completions
+            FROM premium_content_events pce
+            JOIN books pb ON pb.id=pce.book_id
+            WHERE pb.author_id=? AND pb.publication_status!='deleted' AND pce.created_at>=?
+            """,
+            (author_id, since),
+        )
+        premium_activity = await cur.fetchone()
+
+        cur = await db.execute(
+            """
             SELECT b.id, b.title, b.publication_status,
                    COUNT(DISTINCT rp.user_id) AS readers,
                    COUNT(DISTINCT bm.user_id) AS saved,
@@ -10214,6 +10265,9 @@ async def get_author_analytics(author_user_id: int, days: int = 30) -> dict[str,
             "average_rating": float(engagement["average_rating"] or 0),
             "comments_count": int(engagement["comments_count"] or 0),
             "reactions_count": int(engagement["reactions_count"] or 0),
+            "premium_readers": int(premium_activity["premium_readers"] or 0),
+            "premium_opens": int(premium_activity["premium_opens"] or 0),
+            "premium_completions": int(premium_activity["premium_completions"] or 0),
             "sales_count": int(sales["sales_count"] or 0),
             "revenue_stars": int(sales["revenue_stars"] or 0),
         }
@@ -10382,8 +10436,9 @@ PREMIUM_SUBSCRIPTION_PERIOD_SECONDS = 2_592_000  # 30 суток — перио�
 async def _ensure_v1110_premium_schema(db: aiosqlite.Connection) -> None:
     """Мягкая миграция Premium.
 
-    Premium добавляет удобства и оформление, но не закрывает базовое чтение,
-    стандартную озвучку, библиотеку, комментарии или покупки книг.
+    Premium добавляет удобства, оформление и доступ к произведениям, которые
+    авторы добровольно включили в подписку. Бесплатные функции и разовые
+    покупки других книг остаются отдельными.
     """
     now = utc_now()
     await db.executescript(
@@ -10441,6 +10496,7 @@ async def _ensure_v1110_premium_schema(db: aiosqlite.Connection) -> None:
     )
     features = json.dumps(
         [
+            {"code": "premium_books", "title": "Чтение книг и глав, которые авторы включили в Premium"},
             {"code": "no_promoted_blocks", "title": "Без рекламных рекомендаций в читалке"},
             {"code": "priority_tts", "title": "Приоритет в очереди озвучивания"},
             {"code": "premium_badge", "title": "Знак Premium в личной библиотеке"},
@@ -10468,7 +10524,7 @@ async def _ensure_v1110_premium_schema(db: aiosqlite.Connection) -> None:
         (
             PREMIUM_PLAN_MONTHLY,
             "VoxLyra Premium",
-            "Дополнительный комфорт, оформление и приоритетная локальная озвучка. Базовые функции остаются бесплатными.",
+            "Книги авторов по подписке, дополнительный комфорт, оформление и приоритетная локальная озвучка. Бесплатные функции и разовые покупки остаются отдельными.",
             99,
             PREMIUM_SUBSCRIPTION_PERIOD_SECONDS,
             features,
@@ -10643,6 +10699,8 @@ async def get_user_premium_status(user_id: int) -> dict[str, Any]:
         "auto_renew": bool(row["auto_renew"]),
         "is_first_recurring": bool(row["is_first_recurring"]),
         "telegram_payment_charge_id": str(row["telegram_payment_charge_id"] or ""),
+        "source": str(row["source"] or "payment") if "source" in row.keys() else "payment",
+        "grant_note": str(row["grant_note"] or "") if "grant_note" in row.keys() else "",
         "features": features,
     }
 
@@ -10823,7 +10881,8 @@ async def get_premium_owner_summary() -> dict[str, Any]:
             SELECT
                 COUNT(DISTINCT CASE WHEN status IN ('active','canceled') AND expires_at>? THEN user_id END) AS active_users,
                 COUNT(CASE WHEN auto_renew=1 AND status='active' AND expires_at>? THEN 1 END) AS auto_renew,
-                COUNT(*) AS payments
+                COUNT(CASE WHEN COALESCE(source,'payment')='payment' THEN 1 END) AS payments,
+                COUNT(CASE WHEN COALESCE(source,'payment')='manual' THEN 1 END) AS manual_grants
             FROM premium_subscriptions
             """,
             (now, now),
@@ -10837,6 +10896,7 @@ async def get_premium_owner_summary() -> dict[str, Any]:
         "active_users": int(counts["active_users"] or 0) if counts else 0,
         "auto_renew": int(counts["auto_renew"] or 0) if counts else 0,
         "payments": int(counts["payments"] or 0) if counts else 0,
+        "manual_grants": int(counts["manual_grants"] or 0) if counts and "manual_grants" in counts.keys() else 0,
         "gross_stars": int(gross["gross"] or 0) if gross else 0,
     }
 
@@ -10911,3 +10971,347 @@ async def get_personal_reading_insights(user_id: int) -> dict[str, Any]:
         "reading_streak_days": streak,
         "favorite_period": favorite_period,
     }
+
+
+# ---------------------------------------------------------------------------
+# VoxLyra v1.11.4 — чтение по Premium и служебная выдача доступа
+# ---------------------------------------------------------------------------
+
+async def _ensure_v1114_access_schema(db: aiosqlite.Connection) -> None:
+    now = utc_now()
+    cur = await db.execute("PRAGMA table_info(premium_subscriptions)")
+    columns = {str(row["name"]) for row in await cur.fetchall()}
+    additions = {
+        "source": "ALTER TABLE premium_subscriptions ADD COLUMN source TEXT NOT NULL DEFAULT 'payment'",
+        "granted_by_user_id": "ALTER TABLE premium_subscriptions ADD COLUMN granted_by_user_id INTEGER",
+        "grant_note": "ALTER TABLE premium_subscriptions ADD COLUMN grant_note TEXT NOT NULL DEFAULT ''",
+        "revoked_at": "ALTER TABLE premium_subscriptions ADD COLUMN revoked_at TEXT",
+    }
+    for name, sql in additions.items():
+        if name not in columns:
+            await _execute_schema_ddl(db, sql)
+    await db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS manual_chapter_grants (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            book_id INTEGER NOT NULL,
+            chapter_id INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'active',
+            expires_at TEXT,
+            note TEXT NOT NULL DEFAULT '',
+            granted_by_user_id INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            revoked_at TEXT,
+            UNIQUE(user_id, chapter_id),
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE,
+            FOREIGN KEY(chapter_id) REFERENCES chapters(id) ON DELETE CASCADE,
+            FOREIGN KEY(granted_by_user_id) REFERENCES users(id) ON DELETE RESTRICT
+        );
+        CREATE INDEX IF NOT EXISTS idx_manual_chapter_grants_active
+            ON manual_chapter_grants(user_id, chapter_id, status, expires_at);
+        CREATE INDEX IF NOT EXISTS idx_manual_chapter_grants_actor
+            ON manual_chapter_grants(granted_by_user_id, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS premium_content_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            book_id INTEGER NOT NULL,
+            chapter_id INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            period_key TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(user_id, chapter_id, event_type, period_key),
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE,
+            FOREIGN KEY(chapter_id) REFERENCES chapters(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_premium_content_events_book_period
+            ON premium_content_events(book_id, period_key, event_type);
+        """
+    )
+    await db.execute(
+        "INSERT INTO settings(key,value,updated_at) VALUES('premium_content_access_enabled','1',?) ON CONFLICT(key) DO NOTHING",
+        (now,),
+    )
+
+
+async def list_grantable_books(query: str = "", limit: int = 50) -> list[aiosqlite.Row]:
+    clean = str(query or "").strip()
+    params: list[Any] = []
+    where = "b.publication_status!='deleted'"
+    if clean:
+        like = f"%{clean}%"
+        where += " AND (b.title LIKE ? OR CAST(b.id AS TEXT)=? OR ap.pen_name LIKE ?)"
+        params.extend((like, clean, like))
+    params.append(max(1, min(100, int(limit))))
+    async with connect() as db:
+        cur = await db.execute(
+            f"""
+            SELECT b.id, b.title, b.publication_status, b.pricing_type, b.price_stars,
+                   ap.pen_name,
+                   COUNT(CASE WHEN c.status!='deleted' THEN 1 END) AS chapters_count
+            FROM books b
+            LEFT JOIN author_profiles ap ON ap.id=b.author_id
+            LEFT JOIN chapters c ON c.book_id=b.id
+            WHERE {where}
+            GROUP BY b.id
+            ORDER BY CASE WHEN b.publication_status='published' THEN 0 ELSE 1 END, b.title COLLATE NOCASE
+            LIMIT ?
+            """,
+            tuple(params),
+        )
+        return await cur.fetchall()
+
+
+async def resolve_chapters_by_numbers(book_id: int, numbers: list[int] | tuple[int, ...]) -> dict[str, Any]:
+    requested = sorted({int(value) for value in numbers if int(value) > 0})
+    if not requested:
+        return {"book": None, "chapters": [], "missing": []}
+    placeholders = ",".join("?" for _ in requested)
+    async with connect() as db:
+        cur = await db.execute(
+            "SELECT id, title, publication_status FROM books WHERE id=? AND publication_status!='deleted'",
+            (int(book_id),),
+        )
+        book = await cur.fetchone()
+        if not book:
+            return {"book": None, "chapters": [], "missing": requested}
+        cur = await db.execute(
+            f"SELECT id, book_id, number, title, status FROM chapters "
+            f"WHERE book_id=? AND status!='deleted' AND number IN ({placeholders}) ORDER BY number",
+            (int(book_id), *requested),
+        )
+        chapters = list(await cur.fetchall())
+    found = {int(row["number"]) for row in chapters}
+    return {"book": book, "chapters": chapters, "missing": [value for value in requested if value not in found]}
+
+
+def _grant_expiry(days: int | None) -> str | None:
+    if days is None or int(days) <= 0:
+        return None
+    safe_days = max(1, min(3650, int(days)))
+    return (datetime.now(timezone.utc) + timedelta(days=safe_days)).isoformat()
+
+
+async def grant_manual_chapter_access(
+    *,
+    user_id: int,
+    book_id: int,
+    chapter_ids: list[int] | tuple[int, ...],
+    granted_by_user_id: int,
+    duration_days: int | None = None,
+    note: str = "",
+) -> dict[str, Any]:
+    ids = sorted({int(value) for value in chapter_ids if int(value) > 0})
+    if not ids:
+        return {"granted": 0, "expires_at": None}
+    now = utc_now()
+    expires_at = _grant_expiry(duration_days)
+    clean_note = str(note or "").strip()[:500]
+    async with connect() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        granted = 0
+        for chapter_id in ids:
+            cur = await db.execute(
+                "SELECT book_id FROM chapters WHERE id=? AND book_id=? AND status!='deleted'",
+                (chapter_id, int(book_id)),
+            )
+            if not await cur.fetchone():
+                continue
+            await db.execute(
+                """
+                INSERT INTO manual_chapter_grants(
+                    user_id, book_id, chapter_id, status, expires_at, note,
+                    granted_by_user_id, created_at, updated_at, revoked_at
+                ) VALUES(?, ?, ?, 'active', ?, ?, ?, ?, ?, NULL)
+                ON CONFLICT(user_id, chapter_id) DO UPDATE SET
+                    book_id=excluded.book_id,
+                    status='active',
+                    expires_at=excluded.expires_at,
+                    note=excluded.note,
+                    granted_by_user_id=excluded.granted_by_user_id,
+                    updated_at=excluded.updated_at,
+                    revoked_at=NULL
+                """,
+                (int(user_id), int(book_id), chapter_id, expires_at, clean_note,
+                 int(granted_by_user_id), now, now),
+            )
+            granted += 1
+        await db.commit()
+    return {"granted": granted, "expires_at": expires_at}
+
+
+async def has_manual_chapter_access(user_id: int, chapter_id: int) -> bool:
+    now = utc_now()
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT 1 FROM manual_chapter_grants
+            WHERE user_id=? AND chapter_id=? AND status='active'
+              AND (expires_at IS NULL OR expires_at>?)
+            LIMIT 1
+            """,
+            (int(user_id), int(chapter_id), now),
+        )
+        return await cur.fetchone() is not None
+
+
+async def grant_premium_manually(
+    *,
+    user_id: int,
+    duration_days: int,
+    granted_by_user_id: int,
+    note: str = "",
+) -> dict[str, Any]:
+    days = max(1, min(3650, int(duration_days)))
+    now_dt = datetime.now(timezone.utc)
+    now = now_dt.isoformat()
+    async with connect() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        await _expire_premium_subscriptions(db, user_id=int(user_id))
+        cur = await db.execute(
+            "SELECT MAX(expires_at) AS expires_at FROM premium_subscriptions "
+            "WHERE user_id=? AND status IN ('active','canceled') AND expires_at>?",
+            (int(user_id), now),
+        )
+        row = await cur.fetchone()
+        current = _premium_dt(str(row["expires_at"] or "")) if row and row["expires_at"] else None
+        starts_from = current if current and current > now_dt else now_dt
+        expires_at = (starts_from + timedelta(days=days)).isoformat()
+        charge_id = f"manual:{uuid.uuid4().hex}"
+        cur = await db.execute(
+            """
+            INSERT INTO premium_subscriptions(
+                user_id, plan_code, status, started_at, expires_at,
+                telegram_payment_charge_id, is_recurring, auto_renew,
+                is_first_recurring, created_at, updated_at, source,
+                granted_by_user_id, grant_note
+            ) VALUES(?, ?, 'active', ?, ?, ?, 0, 0, 0, ?, ?, 'manual', ?, ?)
+            """,
+            (int(user_id), PREMIUM_PLAN_MONTHLY, now, expires_at, charge_id,
+             now, now, int(granted_by_user_id), str(note or "").strip()[:500]),
+        )
+        subscription_id = int(cur.lastrowid)
+        await db.execute(
+            "INSERT INTO premium_events(user_id,event_type,plan_code,metadata_json,created_at) VALUES(?,?,?,?,?)",
+            (int(user_id), "manual_grant", PREMIUM_PLAN_MONTHLY,
+             json.dumps({"subscription_id": subscription_id, "days": days, "granted_by": int(granted_by_user_id)}, ensure_ascii=False), now),
+        )
+        await db.commit()
+    return {"subscription_id": subscription_id, "expires_at": expires_at, "days": days}
+
+
+async def list_manual_access_grants(user_id: int, limit: int = 100) -> dict[str, list[dict[str, Any]]]:
+    now = utc_now()
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT mg.id, mg.book_id, mg.chapter_id, mg.status, mg.expires_at, mg.note,
+                   mg.created_at, mg.updated_at, mg.revoked_at,
+                   b.title AS book_title, c.number AS chapter_number, c.title AS chapter_title,
+                   actor.full_name AS granted_by_name, actor.username AS granted_by_username
+            FROM manual_chapter_grants mg
+            JOIN books b ON b.id=mg.book_id
+            JOIN chapters c ON c.id=mg.chapter_id
+            LEFT JOIN users actor ON actor.id=mg.granted_by_user_id
+            WHERE mg.user_id=?
+            ORDER BY CASE WHEN mg.status='active' AND (mg.expires_at IS NULL OR mg.expires_at>?) THEN 0 ELSE 1 END,
+                     mg.updated_at DESC
+            LIMIT ?
+            """,
+            (int(user_id), now, max(1, min(500, int(limit)))),
+        )
+        chapter_rows = await cur.fetchall()
+        cur = await db.execute(
+            """
+            SELECT ps.id, ps.status, ps.started_at, ps.expires_at, ps.grant_note,
+                   ps.created_at, ps.updated_at, ps.revoked_at,
+                   actor.full_name AS granted_by_name, actor.username AS granted_by_username
+            FROM premium_subscriptions ps
+            LEFT JOIN users actor ON actor.id=ps.granted_by_user_id
+            WHERE ps.user_id=? AND COALESCE(ps.source,'payment')='manual'
+            ORDER BY ps.expires_at DESC, ps.id DESC
+            LIMIT ?
+            """,
+            (int(user_id), max(1, min(100, int(limit)))),
+        )
+        premium_rows = await cur.fetchall()
+    return {
+        "chapters": [dict(row) for row in chapter_rows],
+        "premium": [dict(row) for row in premium_rows],
+    }
+
+
+async def revoke_manual_access_grant(*, grant_type: str, grant_id: int, revoked_by_user_id: int) -> bool:
+    now = utc_now()
+    kind = str(grant_type or "").strip().lower()
+    async with connect() as db:
+        if kind == "chapter":
+            cur = await db.execute(
+                "UPDATE manual_chapter_grants SET status='revoked', revoked_at=?, updated_at=? "
+                "WHERE id=? AND status='active'",
+                (now, now, int(grant_id)),
+            )
+        elif kind == "premium":
+            cur = await db.execute(
+                "UPDATE premium_subscriptions SET status='revoked', revoked_at=?, updated_at=? "
+                "WHERE id=? AND COALESCE(source,'payment')='manual' AND status IN ('active','canceled')",
+                (now, now, int(grant_id)),
+            )
+            if cur.rowcount:
+                await db.execute(
+                    "INSERT INTO premium_events(user_id,event_type,plan_code,metadata_json,created_at) "
+                    "SELECT user_id,'manual_revoke',plan_code,?,? FROM premium_subscriptions WHERE id=?",
+                    (json.dumps({"revoked_by": int(revoked_by_user_id)}, ensure_ascii=False), now, int(grant_id)),
+                )
+        else:
+            return False
+        changed = cur.rowcount > 0
+        await db.commit()
+        return changed
+
+
+async def record_premium_content_event(user_id: int, chapter_id: int, event_type: str) -> bool:
+    if str(event_type) not in {"open", "complete"}:
+        return False
+    chapter = await get_chapter(int(chapter_id))
+    if not chapter:
+        return False
+    mode = _normalize_text_pricing_mode(int(chapter["book_price_stars"] or 0), str(chapter["pricing_type"] or ""))
+    if mode != "premium" or int(chapter["is_free"] or 0) == 1 or not await user_has_premium(int(user_id)):
+        return False
+    now_dt = datetime.now(timezone.utc)
+    period = now_dt.strftime("%Y-%m")
+    async with connect() as db:
+        cur = await db.execute(
+            "INSERT OR IGNORE INTO premium_content_events(user_id,book_id,chapter_id,event_type,period_key,created_at) "
+            "VALUES(?,?,?,?,?,?)",
+            (int(user_id), int(chapter["book_id"]), int(chapter_id), str(event_type), period, now_dt.isoformat()),
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
+_previous_has_purchase_access_v1114 = has_purchase_access
+
+
+async def has_purchase_access(
+    user_id: int,
+    *,
+    book_id: int | None = None,
+    chapter_id: int | None = None,
+    audio_chapter_id: int | None = None,
+    graphic_chapter_id: int | None = None,
+) -> bool:
+    if chapter_id is not None and await has_manual_chapter_access(int(user_id), int(chapter_id)):
+        return True
+    return await _previous_has_purchase_access_v1114(
+        int(user_id),
+        book_id=book_id,
+        chapter_id=chapter_id,
+        audio_chapter_id=audio_chapter_id,
+        graphic_chapter_id=graphic_chapter_id,
+    )

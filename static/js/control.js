@@ -1,5 +1,5 @@
 (() => {
-  const state = { permissions: new Set(), role: '', dashboard: null, active: '' };
+  const state = { permissions: new Set(), role: '', dashboard: null, active: '', accessUser: null, accessBooks: [] };
   const $ = (id) => document.getElementById(id);
   const can = (code) => state.role === 'owner' || state.permissions.has(code);
   const esc = (value) => escapeHtml(value ?? '');
@@ -69,6 +69,7 @@
     if (can('payouts')) {
       sections.push(sectionButton('payouts', 'Выплаты авторам', 'Stars и точная сумма в рублях', (q.payouts_new || 0) + (q.payouts_approved || 0)));
     }
+    if (can('grant_access')) sections.push(sectionButton('access', 'Выдать доступ', 'Главы и Premium по ID или username', 0));
     if (data.role === 'owner') {
       sections.push(sectionButton('tts', 'Озвучивание', 'Движки, голоса и очередь', 0));
       sections.push(sectionButton('payments', 'Stars и курсы', 'Оплата, расчёты автора и защита', 0));
@@ -403,6 +404,173 @@
     });
   }
 
+
+  function accessUserTitle(user) {
+    if (!user) return 'Пользователь не выбран';
+    const name = user.full_name || user.pen_name || (user.username ? `@${user.username}` : `ID ${user.telegram_id}`);
+    return `${name}${user.username && name !== `@${user.username}` ? ` · @${user.username}` : ''}`;
+  }
+
+  function accessExpiryLabel(value) {
+    if (!value) return 'без срока';
+    return `до ${dateText(value)} UTC`;
+  }
+
+  async function renderAccessHistory() {
+    const box = $('accessHistory');
+    const user = state.accessUser;
+    if (!box || !user) return;
+    box.innerHTML = '<p class="muted">Загружаем выданные доступы…</p>';
+    const data = await apiFetch(`/api/control/access/grants?user_id=${Number(user.id)}`);
+    const chapters = data.grants?.chapters || [];
+    const premium = data.grants?.premium || [];
+    const activePremium = data.premium?.active ? `<div class="access-current-premium"><b>Premium активен</b><span>${accessExpiryLabel(data.premium.expires_at)}${data.premium.source === 'manual' ? ' · выдан вручную' : ' · оплачен пользователем'}</span></div>` : '<div class="access-current-premium inactive"><b>Premium не активен</b></div>';
+    const chapterHtml = chapters.length ? chapters.map((item) => {
+      const active = item.status === 'active' && (!item.expires_at || new Date(item.expires_at).getTime() > Date.now());
+      return `<article class="access-grant-row${active ? '' : ' inactive'}"><div><span>${esc(item.book_title)}</span><b>Глава ${Number(item.chapter_number)} · ${esc(item.chapter_title)}</b><small>${active ? accessExpiryLabel(item.expires_at) : 'доступ завершён'}${item.note ? ` · ${esc(item.note)}` : ''}</small></div>${active ? `<button type="button" class="danger control-action" data-access-revoke="chapter:${Number(item.id)}">Отозвать</button>` : ''}</article>`;
+    }).join('') : '<p class="muted">Ручных доступов к главам пока нет.</p>';
+    const premiumHtml = premium.length ? premium.map((item) => {
+      const active = ['active', 'canceled'].includes(item.status) && (!item.expires_at || new Date(item.expires_at).getTime() > Date.now());
+      return `<article class="access-grant-row${active ? '' : ' inactive'}"><div><span>VoxLyra Premium</span><b>${active ? 'Действует' : 'Завершён'}</b><small>${accessExpiryLabel(item.expires_at)}${item.grant_note ? ` · ${esc(item.grant_note)}` : ''}</small></div>${active ? `<button type="button" class="danger control-action" data-access-revoke="premium:${Number(item.id)}">Отозвать</button>` : ''}</article>`;
+    }).join('') : '<p class="muted">Premium вручную этому пользователю не выдавался.</p>';
+    box.innerHTML = `${activePremium}<div class="access-history-group"><h4>Открытые главы</h4>${chapterHtml}</div><div class="access-history-group"><h4>Выданный Premium</h4>${premiumHtml}</div>`;
+    box.querySelectorAll('[data-access-revoke]').forEach((button) => button.addEventListener('click', async () => {
+      const [kind, id] = button.dataset.accessRevoke.split(':');
+      if (!window.confirm('Отозвать этот доступ? Уже совершённые покупки пользователя не изменятся.')) return;
+      button.disabled = true;
+      await apiFetch(`/api/control/access/revoke/${kind}/${id}`, { method: 'POST' });
+      notify('Доступ отозван');
+      await renderAccessHistory();
+    }));
+  }
+
+  function selectAccessUser(user) {
+    state.accessUser = user;
+    const card = $('accessSelectedUser');
+    if (!card) return;
+    card.hidden = false;
+    card.innerHTML = `<div><span>Получатель</span><h3>${esc(accessUserTitle(user))}</h3><p>Telegram ID: ${Number(user.telegram_id)}${user.premium?.active ? ` · Premium до ${dateText(user.premium.expires_at)}` : ''}</p></div><button type="button" class="secondary compact-button" id="accessChangeUser">Изменить</button>`;
+    $('accessUserResults').innerHTML = '';
+    $('accessUserQuery').value = user.username ? `@${user.username}` : String(user.telegram_id);
+    document.querySelectorAll('[data-access-needs-user]').forEach((node) => { node.hidden = false; });
+    $('accessChangeUser')?.addEventListener('click', () => {
+      state.accessUser = null;
+      card.hidden = true;
+      document.querySelectorAll('[data-access-needs-user]').forEach((node) => { node.hidden = true; });
+      $('accessUserQuery')?.focus();
+    });
+    renderAccessHistory().catch(handleError);
+  }
+
+  function renderAccessUserResults(items) {
+    const box = $('accessUserResults');
+    if (!box) return;
+    if (!items.length) {
+      box.innerHTML = '<article class="empty-card compact-empty"><h3>Пользователь не найден</h3><p>Он должен хотя бы один раз запустить бота.</p></article>';
+      return;
+    }
+    box.innerHTML = items.map((user) => `<button type="button" class="access-user-result" data-access-user='${esc(JSON.stringify(user))}'><span class="access-user-avatar">${esc((user.full_name || user.username || 'V').slice(0, 1))}</span><div><b>${esc(accessUserTitle(user))}</b><small>ID ${Number(user.telegram_id)}${user.is_blocked ? ' · заблокирован' : ''}${user.premium?.active ? ' · Premium активен' : ''}</small></div><i>Выбрать</i></button>`).join('');
+    box.querySelectorAll('[data-access-user]').forEach((button) => button.addEventListener('click', () => selectAccessUser(JSON.parse(button.dataset.accessUser))));
+  }
+
+  async function searchAccessUsers() {
+    const query = String($('accessUserQuery')?.value || '').trim();
+    if (query.length < 2) { notify('Введите Telegram ID, username или имя'); return; }
+    const data = await apiFetch(`/api/control/access/users?q=${encodeURIComponent(query)}`);
+    renderAccessUserResults(data.items || []);
+  }
+
+  async function loadAccessBooks(query = '') {
+    const data = await apiFetch(`/api/control/access/books?q=${encodeURIComponent(query)}`);
+    state.accessBooks = data.items || [];
+    const select = $('accessBookSelect');
+    if (!select) return;
+    select.innerHTML = '<option value="">Выберите книгу</option>' + state.accessBooks.map((book) => `<option value="${Number(book.id)}">${esc(book.title)} · ${Number(book.chapters_count || 0)} глав${book.pen_name ? ` · ${esc(book.pen_name)}` : ''}</option>`).join('');
+  }
+
+  async function previewChapterGrant() {
+    if (!state.accessUser) { notify('Сначала выберите пользователя'); return; }
+    const bookId = Number($('accessBookSelect')?.value || 0);
+    const chapterSpec = String($('accessChapterSpec')?.value || '').trim();
+    if (!bookId || !chapterSpec) { notify('Выберите книгу и укажите главы'); return; }
+    const data = await apiFetch('/api/control/access/chapters/preview', { method: 'POST', body: JSON.stringify({ user_id: state.accessUser.id, book_id: bookId, chapter_spec: chapterSpec }) });
+    const preview = $('accessChapterPreview');
+    preview.hidden = false;
+    const sample = (data.chapters || []).slice(0, 12).map((chapter) => `${Number(chapter.number)}. ${esc(chapter.title)}`).join('<br>');
+    preview.innerHTML = `<b>Будет открыто: ${Number(data.found_count)} глав</b><span>${esc(data.book?.title || '')} · ${esc(data.normalized)}</span>${sample ? `<small>${sample}${data.found_count > 12 ? '<br>…' : ''}</small>` : ''}${data.missing?.length ? `<em>Не найдены: ${data.missing.join(', ')}</em>` : ''}`;
+    if (data.missing?.length) throw new Error('В книге отсутствуют некоторые указанные главы. Исправьте список.');
+    return data;
+  }
+
+  async function grantChapters(event) {
+    event.preventDefault();
+    const preview = await previewChapterGrant();
+    if (!preview || !state.accessUser) return;
+    const form = event.currentTarget;
+    const payload = {
+      user_id: state.accessUser.id,
+      book_id: Number(form.elements.book_id.value),
+      chapter_spec: String(form.elements.chapter_spec.value || ''),
+      duration_days: form.elements.duration_days.value,
+      note: String(form.elements.note.value || '').trim(),
+    };
+    if (!window.confirm(`Открыть пользователю ${accessUserTitle(state.accessUser)} главы ${preview.normalized} книги «${preview.book.title}»?`)) return;
+    const result = await apiFetch('/api/control/access/chapters/grant', { method: 'POST', body: JSON.stringify(payload) });
+    notify(`Открыто глав: ${Number(result.granted || 0)}`);
+    form.elements.chapter_spec.value = '';
+    $('accessChapterPreview').hidden = true;
+    await renderAccessHistory();
+  }
+
+  async function grantPremium(event) {
+    event.preventDefault();
+    if (!state.accessUser) { notify('Сначала выберите пользователя'); return; }
+    const form = event.currentTarget;
+    const days = Number(form.elements.duration_days.value || 0);
+    if (!Number.isInteger(days) || days < 1 || days > 3650) { notify('Укажите срок от 1 до 3650 дней'); return; }
+    if (!window.confirm(`Выдать ${accessUserTitle(state.accessUser)} Premium на ${days} дней? Срок добавится к уже активному Premium.`)) return;
+    const result = await apiFetch('/api/control/access/premium/grant', { method: 'POST', body: JSON.stringify({ user_id: state.accessUser.id, duration_days: days, note: String(form.elements.note.value || '').trim() }) });
+    notify(`Premium действует до ${dateText(result.expires_at)}`);
+    state.accessUser.premium = { active: true, expires_at: result.expires_at };
+    selectAccessUser(state.accessUser);
+  }
+
+  async function loadAccessManagement() {
+    openWorkspace('Выдача доступа', 'Откройте платные главы при сбое или выдайте Premium. Все действия записываются в журнал.', 'Только с отдельным правом');
+    $('workspaceTabs').innerHTML = '<span class="control-access-security">🔐 Доступно владельцу и назначенным сотрудникам</span>';
+    $('workspaceList').innerHTML = `<section class="access-control-shell">
+      <article class="access-step-card">
+        <span class="access-step-number">1</span><div><h3>Найдите пользователя</h3><p>Введите Telegram ID, @username, имя или псевдоним. Пользователь должен ранее запустить бота.</p></div>
+        <div class="access-search-row"><input id="accessUserQuery" type="search" placeholder="Например: 123456789 или @username" autocomplete="off"><button type="button" id="accessUserSearch">Найти</button></div>
+        <div id="accessUserResults" class="access-user-results"></div>
+        <div id="accessSelectedUser" class="access-selected-user" hidden></div>
+      </article>
+      <section class="access-grant-grid" data-access-needs-user hidden>
+        <form id="accessChapterForm" class="access-step-card access-grant-card">
+          <span class="access-step-number">2</span><div><span class="eyebrow">Платные главы</span><h3>Открыть главы вручную</h3><p>Поддерживаются отдельные номера и диапазоны: <b>33</b>, <b>56-67</b>, <b>98 34,36,38</b>, <b>1-100</b>.</p></div>
+          <label>Книга<select id="accessBookSelect" name="book_id" required><option value="">Загружаем книги…</option></select></label>
+          <label>Главы<input id="accessChapterSpec" name="chapter_spec" required placeholder="33, 56-67, 98 34 36 38"></label>
+          <div class="form-grid two"><label>Срок<select name="duration_days"><option value="0">Без ограничения</option><option value="1">1 день</option><option value="7">7 дней</option><option value="30">30 дней</option><option value="90">90 дней</option><option value="365">1 год</option></select></label><label>Причина<input name="note" maxlength="500" placeholder="Например: восстановление после сбоя"></label></div>
+          <div id="accessChapterPreview" class="access-chapter-preview" hidden></div>
+          <div class="form-actions"><button type="button" class="secondary" id="accessPreviewChapters">Проверить список</button><button type="submit" class="approve">Открыть главы</button></div>
+        </form>
+        <form id="accessPremiumForm" class="access-step-card access-grant-card premium-grant-card">
+          <span class="access-step-number">3</span><div><span class="eyebrow">VoxLyra Premium</span><h3>Выдать или продлить Premium</h3><p>Новый срок добавляется к действующей подписке. Оплаченные пользователем периоды не удаляются.</p></div>
+          <label>Срок Premium<select name="duration_days"><option value="1">1 день</option><option value="7">7 дней</option><option value="30" selected>30 дней</option><option value="90">90 дней</option><option value="180">180 дней</option><option value="365">1 год</option></select></label>
+          <label>Причина<input name="note" maxlength="500" placeholder="Подарок, компенсация или технический сбой"></label>
+          <button type="submit" class="premium-subscription-button">Выдать Premium</button>
+        </form>
+      </section>
+      <article class="access-step-card access-history-card" data-access-needs-user hidden><div><span class="eyebrow">История</span><h3>Активные и завершённые выдачи</h3><p>Ручной доступ можно отозвать, не затрагивая обычные покупки.</p></div><div id="accessHistory"></div></article>
+    </section>`;
+    $('accessUserSearch')?.addEventListener('click', () => searchAccessUsers().catch(handleError));
+    $('accessUserQuery')?.addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); searchAccessUsers().catch(handleError); } });
+    $('accessPreviewChapters')?.addEventListener('click', () => previewChapterGrant().catch(handleError));
+    $('accessChapterForm')?.addEventListener('submit', (event) => grantChapters(event).catch(handleError));
+    $('accessPremiumForm')?.addEventListener('submit', (event) => grantPremium(event).catch(handleError));
+    await loadAccessBooks();
+  }
+
   async function refreshDashboard() {
     state.dashboard = await apiFetch('/api/control/dashboard');
     renderDashboard(state.dashboard);
@@ -498,7 +666,7 @@
     const section = event.target.closest('[data-section]');
     if (section) {
       state.active = section.dataset.section;
-      const loaders = { books: loadBooks, graphic_pages: loadGraphicPages, comments: loadComments, complaints: loadComplaints, refunds: loadRefunds, payouts: loadPayouts, rub_profiles: loadRubProfiles, rub_payouts: loadRubPayouts, tts: loadTtsDiagnostics, payments: loadPaymentSettings, premium: loadPremiumSettings };
+      const loaders = { books: loadBooks, graphic_pages: loadGraphicPages, comments: loadComments, complaints: loadComplaints, refunds: loadRefunds, payouts: loadPayouts, rub_profiles: loadRubProfiles, rub_payouts: loadRubPayouts, tts: loadTtsDiagnostics, payments: loadPaymentSettings, premium: loadPremiumSettings, access: loadAccessManagement };
       loaders[state.active]?.().catch(handleError);
       return;
     }
@@ -525,6 +693,10 @@
     if (requested === 'premium' && data.role === 'owner') {
       state.active = 'premium';
       loadPremiumSettings().catch(handleError);
+    }
+    if (requested === 'access' && can('grant_access')) {
+      state.active = 'access';
+      loadAccessManagement().catch(handleError);
     }
   }).catch((error) => showError(error.message));
 })();

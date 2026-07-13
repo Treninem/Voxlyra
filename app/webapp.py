@@ -87,6 +87,14 @@ from app.db import (
     get_personal_reading_insights,
     sync_user_achievements,
     get_user_by_id,
+    search_users,
+    list_grantable_books,
+    resolve_chapters_by_numbers,
+    grant_manual_chapter_access,
+    grant_premium_manually,
+    list_manual_access_grants,
+    revoke_manual_access_grant,
+    record_premium_content_event,
     get_tts_progress,
     has_purchase_access,
     mark_purchase_access_used,
@@ -221,6 +229,7 @@ from app.services.book_assistant import (
 )
 from app.services.quote_cards import build_quote_card, normalize_quote, quote_belongs_to_text
 from app.services.book_parser import BookParseError, build_import_report, parse_book_file
+from app.services.access_grants import ChapterSelectionError, parse_chapter_selection
 from app.services.duplicate_books import find_book_duplicates, sha256_file
 from app.services.graphic_import import (
     GraphicImportError,
@@ -1045,9 +1054,10 @@ def create_app() -> FastAPI:
             and chapter["status"] == "published"
         )
         book_price = int(chapter["book_price_stars"] or 0) if chapter else 0
+        declared_mode = str(chapter["pricing_type"] or "").strip().lower() if chapter else ""
         pricing_mode = (
-            "free" if book_price <= 0
-            else ("chapters" if chapter and str(chapter["pricing_type"] or "") == "chapters" else "whole_book")
+            "premium" if declared_mode == "premium"
+            else ("free" if book_price <= 0 else ("chapters" if declared_mode == "chapters" else "whole_book"))
         )
         chapter_is_free = bool(
             chapter
@@ -1063,7 +1073,7 @@ def create_app() -> FastAPI:
         purchase_url = _bot_purchase_url("chapter", chapter_id) if can_buy_chapter else ""
         book_purchase_url = (
             _bot_purchase_url("book", int(chapter["book_id"]))
-            if is_public and chapter and pricing_mode != "free"
+            if is_public and chapter and pricing_mode not in {"free", "premium"}
             else ""
         )
         ads = []
@@ -1467,11 +1477,13 @@ def create_app() -> FastAPI:
         if not is_public and not moderation_access:
             raise HTTPException(status_code=404, detail="Глава не найдена.")
         book_price = int(chapter["book_price_stars"] or 0)
-        pricing_mode = "free" if book_price <= 0 else ("chapters" if str(chapter["pricing_type"] or "") == "chapters" else "whole_book")
+        declared_mode = str(chapter["pricing_type"] or "").strip().lower()
+        pricing_mode = "premium" if declared_mode == "premium" else ("free" if book_price <= 0 else ("chapters" if declared_mode == "chapters" else "whole_book"))
         chapter_is_free = pricing_mode == "free" or int(chapter["is_free"] or 0) == 1
         can_buy_chapter = pricing_mode == "chapters" and not chapter_is_free and int(chapter["price_stars"] or 0) > 0
+        premium_required = pricing_mode == "premium" and not chapter_is_free
         purchase_url = "" if moderation_access or not can_buy_chapter else _bot_purchase_url("chapter", chapter_id)
-        book_purchase_url = "" if moderation_access or book_price <= 0 else _bot_purchase_url("book", int(chapter["book_id"]))
+        book_purchase_url = "" if moderation_access or pricing_mode in {"free", "premium"} or book_price <= 0 else _bot_purchase_url("book", int(chapter["book_id"]))
         comments = await list_comments_for_chapter(chapter_id, limit=100, viewer_user_id=user.app_user_id) if allowed and is_public and not moderation_access else []
         reactions = await list_chapter_reactions(chapter_id, user.app_user_id) if allowed and is_public and not moderation_access else {"counts": {}, "selected": None}
         progress = await get_reading_progress(user.app_user_id, chapter_id) if allowed and not moderation_access else 0
@@ -1532,6 +1544,8 @@ def create_app() -> FastAPI:
             "book_purchase_url": book_purchase_url,
             "pricing_mode": pricing_mode,
             "can_buy_chapter": can_buy_chapter,
+            "premium_required": premium_required,
+            "premium_url": "/premium" if premium_required else "",
             "package_credits": package_credits if pricing_mode == "chapters" else {"remaining": 0},
             "package_unlock_url": f"/api/reader/{int(chapter_id)}/unlock-package",
             "progress_percent": progress,
@@ -1546,6 +1560,7 @@ def create_app() -> FastAPI:
                 "price_stars": int(chapter["price_stars"] or 0),
                 "buyer_estimate_minor": (int(chapter["price_stars"] or 0) if can_buy_chapter else 0) * (await load_runtime_payment_settings()).buyer_star_rate_minor,
                 "book_price_stars": book_price,
+                "premium_required": premium_required,
                 "text": chapter["text"] if allowed else "",
             },
             "comments": _rows_to_dicts(comments),
@@ -1988,7 +2003,9 @@ def create_app() -> FastAPI:
         achievements = {"new": [], "items": []}
         if not moderation_access:
             await save_reading_progress(user.app_user_id, chapter_id, percent)
+            await record_premium_content_event(user.app_user_id, chapter_id, "open")
             if percent >= 90:
+                await record_premium_content_event(user.app_user_id, chapter_id, "complete")
                 achievements = await sync_user_achievements(user.app_user_id)
                 await _notify_new_achievements(user, achievements)
         return {
@@ -3021,15 +3038,20 @@ def create_app() -> FastAPI:
                 price = max(0, min(100000, int(payload.get("price_stars", current["price_stars"]) or 0)))
             except (TypeError, ValueError):
                 raise HTTPException(status_code=400, detail="Цена всей книги должна быть числом.")
-            requested_mode = str(payload.get("pricing_type") or current["pricing_type"] or "whole_book")
-            if price > 0 and requested_mode not in {"whole_book", "chapters"}:
-                raise HTTPException(status_code=400, detail="Выберите: продавать только всю книгу или также отдельные главы.")
-            if price <= 0 and int(current["price_stars"] or 0) > 0 and not bool(payload.get("confirm_make_free")):
+            requested_mode = str(payload.get("pricing_type") or current["pricing_type"] or "free").strip().lower()
+            if requested_mode not in {"free", "whole_book", "chapters", "premium"}:
+                raise HTTPException(status_code=400, detail="Выберите доступ: бесплатно, покупка книги, покупка глав или VoxLyra Premium.")
+            if requested_mode in {"whole_book", "chapters"} and price <= 0:
+                raise HTTPException(status_code=400, detail="Для режима разовой покупки укажите цену всей книги больше 0 Stars.")
+            if requested_mode in {"free", "premium"}:
+                price = 0
+            current_mode = "premium" if str(current["pricing_type"] or "") == "premium" else ("free" if int(current["price_stars"] or 0) <= 0 else str(current["pricing_type"] or "whole_book"))
+            if requested_mode == "free" and current_mode != "free" and not bool(payload.get("confirm_make_free")):
                 raise HTTPException(
                     status_code=409,
                     detail={
                         "code": "confirm_make_free",
-                        "message": "Подтвердите перевод книги в полностью бесплатный режим. Все главы станут бесплатными, а продажа отдельных глав и пакетов отключится.",
+                        "message": "Подтвердите перевод книги в полностью бесплатный режим. Все главы станут бесплатными, а продажа и доступ по Premium отключатся.",
                     },
                 )
             commerce_changed = await update_book_price(
@@ -3221,6 +3243,8 @@ def create_app() -> FastAPI:
             "book_is_free": "Книга полностью бесплатна. Настройка цен глав отключена.",
             "chapter_sales_disabled": "Для этой книги выключена продажа отдельных глав.",
             "price_required": "Для отдельной продажи укажите цену больше 0.",
+            "premium_mode_only": "В режиме Premium главы можно сделать только бесплатными или доступными по подписке.",
+            "premium_mode_required": "Сначала переключите книгу в режим VoxLyra Premium.",
             "chapters_not_found": "В указанном диапазоне нет глав.",
             "not_found": "Книга не найдена.",
         }
@@ -3251,9 +3275,14 @@ def create_app() -> FastAPI:
         price = max(0, min(100000, int(payload.get("price_stars") or 0)))
         access_mode = str(payload.get("access_mode") or ("free" if price <= 0 else "chapter"))
         book = await get_book(book_id)
-        mode = "free" if not book or int(book["price_stars"] or 0) <= 0 else ("chapters" if str(book["pricing_type"] or "") == "chapters" else "whole_book")
+        declared = str(book["pricing_type"] or "") if book else "free"
+        mode = "premium" if declared == "premium" else ("free" if not book or int(book["price_stars"] or 0) <= 0 else ("chapters" if declared == "chapters" else "whole_book"))
         if mode == "free":
             access_mode, price = "free", 0
+        elif mode == "premium":
+            if access_mode not in {"free", "premium"}:
+                raise HTTPException(status_code=400, detail="В режиме Premium глава может быть бесплатной или доступной по подписке.")
+            price = 0
         elif access_mode == "chapter" and mode != "chapters":
             raise HTTPException(status_code=400, detail="Для этой книги выключена продажа отдельных глав.")
         elif access_mode not in {"free", "book", "chapter"}:
@@ -3337,6 +3366,8 @@ def create_app() -> FastAPI:
                     "book_is_free": "Книга полностью бесплатна. Цена главы не требуется.",
                     "chapter_sales_disabled": "Для этой книги выключена продажа отдельных глав.",
                     "price_required": "Для отдельной продажи укажите цену больше 0.",
+                    "premium_mode_only": "В режиме Premium глава может быть бесплатной или доступной по подписке.",
+                    "premium_mode_required": "Сначала переключите книгу в режим VoxLyra Premium.",
                 }.get(reason, "Не удалось изменить доступ к главе.")
                 raise HTTPException(status_code=400, detail=detail)
             changed = True
@@ -4307,6 +4338,191 @@ def create_app() -> FastAPI:
                 result["queues"]["rub_payouts_new"] = rub.get("payouts_new", 0)
                 result["queues"]["rub_payouts_processing"] = rub.get("payouts_processing", 0)
         return result
+
+    @app.get("/api/control/access/users")
+    async def api_control_access_users(
+        q: str = "",
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        await control_session(x_telegram_init_data, "grant_access")
+        clean = str(q or "").strip()
+        if len(clean) < 2:
+            return {"ok": True, "items": []}
+        rows = await search_users(clean, limit=20)
+        items = []
+        for row in rows:
+            premium = await get_user_premium_status(int(row["id"]))
+            items.append({
+                "id": int(row["id"]),
+                "telegram_id": int(row["telegram_id"]),
+                "username": str(row["username"] or ""),
+                "full_name": str(row["full_name"] or ""),
+                "pen_name": str(row["pen_name"] or "") if "pen_name" in row.keys() else "",
+                "is_blocked": bool(row["is_blocked"]),
+                "premium": {"active": bool(premium.get("active")), "expires_at": str(premium.get("expires_at") or "")},
+            })
+        return {"ok": True, "items": items}
+
+    @app.get("/api/control/access/books")
+    async def api_control_access_books(
+        q: str = "",
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        await control_session(x_telegram_init_data, "grant_access")
+        return {"ok": True, "items": _rows_to_dicts(await list_grantable_books(q, limit=60))}
+
+    @app.post("/api/control/access/chapters/preview")
+    async def api_control_access_chapters_preview(
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        await control_session(x_telegram_init_data, "grant_access")
+        try:
+            user_id = int(payload.get("user_id") or 0)
+            book_id = int(payload.get("book_id") or 0)
+            selection = parse_chapter_selection(str(payload.get("chapter_spec") or ""))
+        except (TypeError, ValueError, ChapterSelectionError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        target = await get_user_by_id(user_id)
+        if not target:
+            raise HTTPException(status_code=404, detail="Пользователь не найден.")
+        resolved = await resolve_chapters_by_numbers(book_id, selection.numbers)
+        if not resolved.get("book"):
+            raise HTTPException(status_code=404, detail="Книга не найдена.")
+        return {
+            "ok": True,
+            "normalized": selection.normalized,
+            "requested_count": len(selection.numbers),
+            "found_count": len(resolved["chapters"]),
+            "missing": resolved["missing"],
+            "user": {"id": int(target["id"]), "telegram_id": int(target["telegram_id"]), "username": str(target["username"] or ""), "full_name": str(target["full_name"] or "")},
+            "book": _row_to_dict(resolved["book"]),
+            "chapters": _rows_to_dicts(resolved["chapters"][:200]),
+        }
+
+    @app.post("/api/control/access/chapters/grant")
+    async def api_control_access_chapters_grant(
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        actor, _, _ = await control_session(x_telegram_init_data, "grant_access")
+        try:
+            user_id = int(payload.get("user_id") or 0)
+            book_id = int(payload.get("book_id") or 0)
+            duration_raw = payload.get("duration_days")
+            duration_days = None if duration_raw in {None, "", 0, "0"} else int(duration_raw)
+            selection = parse_chapter_selection(str(payload.get("chapter_spec") or ""))
+        except (TypeError, ValueError, ChapterSelectionError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        target = await get_user_by_id(user_id)
+        if not target:
+            raise HTTPException(status_code=404, detail="Пользователь не найден.")
+        if bool(target["is_blocked"]):
+            raise HTTPException(status_code=409, detail="Пользователь заблокирован. Сначала снимите блокировку.")
+        resolved = await resolve_chapters_by_numbers(book_id, selection.numbers)
+        if not resolved.get("book"):
+            raise HTTPException(status_code=404, detail="Книга не найдена.")
+        if resolved["missing"]:
+            missing = ", ".join(map(str, resolved["missing"][:30]))
+            raise HTTPException(status_code=400, detail=f"В книге нет глав: {missing}.")
+        result = await grant_manual_chapter_access(
+            user_id=user_id,
+            book_id=book_id,
+            chapter_ids=[int(row["id"]) for row in resolved["chapters"]],
+            granted_by_user_id=actor.app_user_id,
+            duration_days=duration_days,
+            note=str(payload.get("note") or ""),
+        )
+        if not result.get("granted"):
+            raise HTTPException(status_code=400, detail="Не удалось открыть выбранные главы.")
+        expiry_text = "без ограничения срока" if not result.get("expires_at") else f"до {str(result['expires_at']).replace('T',' ')[:16]} UTC"
+        book_title = str(resolved["book"]["title"] or "Книга")
+        await notify_after_action(
+            actor_user_id=actor.app_user_id,
+            event="manual_chapters_granted",
+            target_type="user",
+            target_id=user_id,
+            app_user_id=user_id,
+            telegram_id=int(target["telegram_id"]),
+            text=(f"🎟 <b>Вам открыт доступ к главам</b>\n\n"
+                  f"Книга: <b>{book_title}</b>\n"
+                  f"Главы: <b>{selection.normalized}</b>\n"
+                  f"Срок: <b>{expiry_text}</b>\n\n"
+                  "Откройте книгу в VoxLyra — доступ уже действует."),
+        )
+        await add_audit(actor.app_user_id, "manual_chapter_access_granted", "user", str(user_id), selection.normalized,
+                        json.dumps({"book_id": book_id, "count": result["granted"], "expires_at": result.get("expires_at")}, ensure_ascii=False))
+        return {"ok": True, "normalized": selection.normalized, **result}
+
+    @app.post("/api/control/access/premium/grant")
+    async def api_control_access_premium_grant(
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        actor, _, _ = await control_session(x_telegram_init_data, "grant_access")
+        try:
+            user_id = int(payload.get("user_id") or 0)
+            duration_days = int(payload.get("duration_days") or 0)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="Укажите срок Premium в днях.") from exc
+        if duration_days < 1 or duration_days > 3650:
+            raise HTTPException(status_code=400, detail="Срок Premium должен быть от 1 до 3650 дней.")
+        target = await get_user_by_id(user_id)
+        if not target:
+            raise HTTPException(status_code=404, detail="Пользователь не найден.")
+        if bool(target["is_blocked"]):
+            raise HTTPException(status_code=409, detail="Пользователь заблокирован. Сначала снимите блокировку.")
+        result = await grant_premium_manually(
+            user_id=user_id,
+            duration_days=duration_days,
+            granted_by_user_id=actor.app_user_id,
+            note=str(payload.get("note") or ""),
+        )
+        expiry_text = str(result["expires_at"]).replace("T", " ")[:16] + " UTC"
+        await notify_after_action(
+            actor_user_id=actor.app_user_id,
+            event="manual_premium_granted",
+            target_type="user",
+            target_id=user_id,
+            app_user_id=user_id,
+            telegram_id=int(target["telegram_id"]),
+            text=(f"💎 <b>VoxLyra Premium активирован</b>\n\n"
+                  f"Срок: <b>{duration_days} дн.</b>\n"
+                  f"Действует до: <b>{expiry_text}</b>\n\n"
+                  "Подписка выдана администрацией и уже доступна в Mini App."),
+        )
+        await add_audit(actor.app_user_id, "manual_premium_granted", "user", str(user_id), str(duration_days), str(result.get("expires_at") or ""))
+        return {"ok": True, **result, "subscription": await get_user_premium_status(user_id)}
+
+    @app.get("/api/control/access/grants")
+    async def api_control_access_grants(
+        user_id: int,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        await control_session(x_telegram_init_data, "grant_access")
+        target = await get_user_by_id(int(user_id))
+        if not target:
+            raise HTTPException(status_code=404, detail="Пользователь не найден.")
+        return {
+            "ok": True,
+            "user": {"id": int(target["id"]), "telegram_id": int(target["telegram_id"]), "username": str(target["username"] or ""), "full_name": str(target["full_name"] or "")},
+            "grants": await list_manual_access_grants(int(user_id)),
+            "premium": await get_user_premium_status(int(user_id)),
+        }
+
+    @app.post("/api/control/access/revoke/{grant_type}/{grant_id}")
+    async def api_control_access_revoke(
+        grant_type: str,
+        grant_id: int,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        actor, _, _ = await control_session(x_telegram_init_data, "grant_access")
+        if grant_type not in {"chapter", "premium"}:
+            raise HTTPException(status_code=404, detail="Выдача доступа не найдена.")
+        if not await revoke_manual_access_grant(grant_type=grant_type, grant_id=grant_id, revoked_by_user_id=actor.app_user_id):
+            raise HTTPException(status_code=404, detail="Активная выдача доступа не найдена.")
+        await add_audit(actor.app_user_id, "manual_access_revoked", grant_type, str(grant_id))
+        return {"ok": True}
 
     @app.get("/api/control/tts-diagnostics")
     async def api_control_tts_diagnostics(x_telegram_init_data: str | None = Header(default=None)):

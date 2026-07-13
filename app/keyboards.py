@@ -202,8 +202,9 @@ def yes_no_menu(prefix: str, back_callback: str | None = None, cancel_callback: 
 
 def pricing_menu(back_callback: str | None = None, cancel_callback: str | None = None) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.button(text="Бесплатная книга", callback_data="book:pricing:free")
-    kb.button(text="Платная книга", callback_data="book:pricing:whole_book")
+    kb.button(text="🆓 Бесплатная книга", callback_data="book:pricing:free")
+    kb.button(text="💫 Платная книга", callback_data="book:pricing:whole_book")
+    kb.button(text="👑 По подписке VoxLyra Premium", callback_data="book:pricing:premium")
     _append_navigation(kb, back_callback=back_callback, cancel_callback=cancel_callback)
     kb.adjust(1)
     return kb.as_markup()
@@ -369,6 +370,8 @@ def author_chapters_menu(book_id: int, pricing_mode: str | None = None) -> Inlin
     kb.button(text="📚 Список глав", callback_data=f"chapter:list:{book_id}")
     if pricing_mode == "whole_book":
         kb.button(text="🔓 Доступ одной / диапазона", callback_data=f"chapter:bulk_price:{book_id}")
+    elif pricing_mode == "premium":
+        kb.button(text="👑 Бесплатно / Premium для глав", callback_data=f"chapter:bulk_price:{book_id}")
     elif pricing_mode == "chapters" or pricing_mode is None:
         kb.button(text="💰 Доступ и цена одной / диапазона", callback_data=f"chapter:bulk_price:{book_id}")
     kb.button(text="📤 На проверку", callback_data=f"author:submit_book:{book_id}")
@@ -391,6 +394,8 @@ def author_chapter_list_menu(book_id: int, chapters, pricing_mode: str | None = 
     for chapter in chapters[:40]:
         if pricing_mode == "free" or int(chapter["is_free"] or 0) == 1:
             access_mark = "бесплатно"
+        elif pricing_mode == "premium":
+            access_mark = "VoxLyra Premium"
         elif pricing_mode == "chapters" and int(chapter["price_stars"] or 0) > 0:
             access_mark = f"{int(chapter['price_stars'])} Stars"
         else:

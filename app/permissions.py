@@ -21,6 +21,7 @@ PERMISSIONS = [
     Permission("channel", "📣 Канал"),
     Permission("stats", "📊 Статистика"),
     Permission("support", "🛟 Техподдержка"),
+    Permission("grant_access", "🎟 Выдача доступа и Premium"),
     Permission("change_commission", "⚠️ Изменение комиссии", owner_only=True),
     Permission("payouts", "⚠️ Выплаты авторам", owner_only=True),
     Permission("delete_content", "⚠️ Полное удаление контента", owner_only=True),

@@ -572,12 +572,19 @@ async function initReader() {
         if (paragraphs) paragraphs.innerHTML = '<section class="empty-card access-card"><div class="empty-icon">✦</div><h3>Глава бесплатная</h3><p>Обновите страницу внутри Telegram. Покупка для этой главы не требуется.</p></section>';
         return;
       }
+      const premiumRequired = Boolean(data.premium_required || data.chapter?.premium_required);
       const canBuyChapter = Boolean(data.can_buy_chapter) && Number(data.chapter?.price_stars || 0) > 0;
       const packageRemaining = canBuyChapter ? Number(data.package_credits?.remaining || 0) : 0;
-      if (status) status.textContent = packageRemaining > 0
-        ? `Можно открыть из пакета · осталось ${packageRemaining}`
-        : (canBuyChapter ? 'Эту главу можно купить отдельно или открыть покупкой всей книги.' : 'Глава доступна после покупки всей книги.');
+      if (status) status.textContent = premiumRequired
+        ? 'Эта глава доступна по VoxLyra Premium.'
+        : packageRemaining > 0
+          ? `Можно открыть из пакета · осталось ${packageRemaining}`
+          : (canBuyChapter ? 'Эту главу можно купить отдельно или открыть покупкой всей книги.' : 'Глава доступна после покупки всей книги.');
       if (paragraphs) {
+        if (premiumRequired) {
+          paragraphs.innerHTML = `<section class="empty-card paywall-card premium-paywall-card"><div class="empty-icon">👑</div><h3>Глава доступна по VoxLyra Premium</h3><p>Подписка открывает эту главу и другие произведения, которые авторы включили в Premium.</p><a class="button-link premium-subscription-button" href="${escapeHtml(data.premium_url || '/premium')}">Открыть VoxLyra Premium</a></section>`;
+          return;
+        }
         const packageButton = packageRemaining > 0
           ? `<button class="button-link gold-button" id="unlockChapterWithPackage" type="button">Открыть за 1 главу из пакета · осталось ${packageRemaining}</button>`
           : '';
@@ -2155,7 +2162,7 @@ function recommendationCard(item) {
       ? `/reader/${Number(item.first_chapter_id)}`
       : `/book/${bookId}`;
   const actionText = isGraphic ? 'Смотреть' : 'Читать';
-  const price = Number(item.price_stars || 0) > 0 ? `Вся книга: ${Number(item.price_stars)} Stars` : 'Бесплатно';
+  const price = String(item.pricing_type || '') === 'premium' ? '👑 По подписке Premium' : Number(item.price_stars || 0) > 0 ? `Вся книга: ${Number(item.price_stars)} Stars` : 'Бесплатно';
   const rating = Number(item.rating || 0) > 0 ? `<span>★ ${Number(item.rating).toFixed(1)}</span>` : '';
   const chapters = isGraphic ? `${Number(item.graphic_pages_count || 0)} стр.` : `${Number(item.chapters_count || 0)} глав`;
   return `<article class="book-card premium-book-card shelf recommendation-card" data-recommendation-card="${bookId}">

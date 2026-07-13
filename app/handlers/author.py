@@ -107,7 +107,11 @@ router = Router()
 
 
 def _book_text_pricing_mode(book) -> str:
-    if not book or int(book["price_stars"] or 0) <= 0:
+    if not book:
+        return "free"
+    if str(book["pricing_type"] or "") == "premium":
+        return "premium"
+    if int(book["price_stars"] or 0) <= 0:
         return "free"
     return "chapters" if str(book["pricing_type"] or "") == "chapters" else "whole_book"
 
@@ -115,17 +119,24 @@ def _book_text_pricing_mode(book) -> str:
 def _chapter_access_label(chapter, mode: str) -> str:
     if mode == "free" or int(chapter["is_free"] or 0) == 1:
         return "Бесплатно"
+    if mode == "premium":
+        return "Доступ по VoxLyra Premium"
     if mode == "chapters" and int(chapter["price_stars"] or 0) > 0:
         return f"{int(chapter['price_stars'])} Stars — покупка главы"
     return "После покупки всей книги"
 
 
-def _chapter_access_keyboard(*, prefix: str, book_id: int, allow_chapter_price: bool, cancel_callback: str):
+def _chapter_access_keyboard(
+    *, prefix: str, book_id: int, allow_chapter_price: bool, cancel_callback: str, allow_premium: bool = False
+):
     builder = InlineKeyboardBuilder()
     builder.button(text="🆓 Бесплатная глава", callback_data=f"{prefix}:free")
-    builder.button(text="📘 После покупки всей книги", callback_data=f"{prefix}:book")
-    if allow_chapter_price:
-        builder.button(text="⭐ Поставить рекомендованную цену", callback_data=f"{prefix}:recommended")
+    if allow_premium:
+        builder.button(text="👑 Доступ по VoxLyra Premium", callback_data=f"{prefix}:premium")
+    else:
+        builder.button(text="📘 После покупки всей книги", callback_data=f"{prefix}:book")
+        if allow_chapter_price:
+            builder.button(text="⭐ Поставить рекомендованную цену", callback_data=f"{prefix}:recommended")
     builder.button(text="❌ Отмена", callback_data=cancel_callback)
     builder.adjust(1)
     return builder.as_markup()
@@ -245,6 +256,7 @@ PRICING_RU = {
     "chapters": "платные главы",
     "whole_book": "вся книга",
     "subscription": "подписка",
+    "premium": "VoxLyra Premium",
 }
 
 PUBLICATION_RU = {
@@ -650,7 +662,7 @@ async def add_book_download(call: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(AddBook.pricing_type)
     await call.message.edit_text(
         "<b>Условия доступа к книге</b>\n\n"
-        "Бесплатная книга полностью открывает все главы. Если книга платная, после указания цены бот спросит, разрешать ли отдельную покупку глав.",
+        "Бесплатная книга полностью открывает все главы. Платную можно продавать целиком/по главам либо открыть читателям с активной подпиской VoxLyra Premium.",
         reply_markup=pricing_menu(cancel_callback="author:cancel_flow"),
     )
     await call.answer()
@@ -660,12 +672,16 @@ async def add_book_download(call: CallbackQuery, state: FSMContext) -> None:
 async def add_book_pricing(call: CallbackQuery, state: FSMContext) -> None:
     choice = call.data.split(":")[-1]
     data = await state.get_data()
-    if choice == "free":
-        await state.update_data(pricing_type="free", price_stars=0)
+    if choice in {"free", "premium"}:
+        await state.update_data(pricing_type=choice, price_stars=0)
         await state.set_state(AddBook.cover)
+        text = (
+            "Книга будет полностью бесплатной. Все её главы тоже будут бесплатными, поэтому цены глав спрашиваться не будут."
+            if choice == "free" else
+            "Книга будет доступна по VoxLyra Premium. Первые ознакомительные главы можно оставить бесплатными, остальные откроются только активным подписчикам."
+        )
         await call.message.edit_text(
-            "Книга будет полностью бесплатной. Все её главы тоже будут бесплатными, поэтому цены глав спрашиваться не будут.\n\n"
-            "Теперь загрузите обложку изображением или нажмите «Пропустить».",
+            text + "\n\nТеперь загрузите обложку изображением или нажмите «Пропустить».",
             reply_markup=cover_menu(cancel_callback="author:cancel_flow"),
         )
     else:
@@ -945,11 +961,15 @@ async def book_edit_price_start(call: CallbackQuery, state: FSMContext) -> None:
         return
     await state.update_data(book_id=book_id)
     await state.set_state(EditBookDetails.price)
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🆓 Сделать всю книгу бесплатной", callback_data="book:edit_price_free")
+    builder.button(text="👑 Читать по VoxLyra Premium", callback_data="book:edit_price_premium")
+    builder.button(text="⬅️ Назад", callback_data=f"author:book:{book_id}")
+    builder.adjust(1)
     await call.message.edit_text(
-        "<b>Цена всей книги</b>\n\n"
-        "Введите цену всей книги в Stars. Значение 0 сделает книгу и все главы полностью бесплатными. "
-        "При положительной цене бот отдельно спросит, разрешать ли покупку отдельных глав.",
-        reply_markup=skip_back_menu("book:edit_price_free", f"author:book:{book_id}", "Сделать всю книгу бесплатной"),
+        "<b>Условия доступа к книге</b>\n\n"
+        "Введите цену всей книги в Stars для разовой покупки либо выберите бесплатный доступ или VoxLyra Premium кнопкой ниже.",
+        reply_markup=builder.as_markup(),
     )
     await call.answer()
 
@@ -997,6 +1017,20 @@ async def book_edit_chapter_sales(call: CallbackQuery, state: FSMContext) -> Non
     ) if ok else "Книга не найдена или недоступна."
     await call.message.edit_text(text, reply_markup=author_book_card_menu(book_id, "draft"))
     await call.answer("Сохранено" if ok else "Недоступно")
+
+
+@router.callback_query(EditBookDetails.price, F.data == "book:edit_price_premium")
+async def book_edit_price_premium(call: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    book_id = int(data["book_id"])
+    user = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
+    ok = await update_book_price(book_id, user["id"], "premium", 0)
+    await state.clear()
+    await call.message.edit_text(
+        "Книга переведена в режим VoxLyra Premium. Бесплатные ознакомительные главы сохраняются, остальные доступны активным подписчикам." if ok else "Книга не найдена или недоступна.",
+        reply_markup=author_book_card_menu(book_id, "draft"),
+    )
+    await call.answer("Готово" if ok else "Недоступно")
 
 
 @router.callback_query(EditBookDetails.price, F.data == "book:edit_price_free")
@@ -1310,6 +1344,16 @@ async def chapter_add_manual_text(message: Message, state: FSMContext) -> None:
         )
         return
 
+    if mode == "premium":
+        await message.answer(
+            "Выберите доступ к новой главе: оставить её бесплатной для всех или открыть только читателям с активной подпиской VoxLyra Premium.",
+            reply_markup=_chapter_access_keyboard(
+                prefix="chapter:add_access", book_id=book_id, allow_chapter_price=False,
+                allow_premium=True, cancel_callback="author:cancel_flow",
+            ),
+        )
+        return
+
     await message.answer(
         f"Выберите доступ к новой главе. Если продавать её отдельно, рекомендуемая цена — <b>{recommended} Stars</b>.\n\n"
         "Цена всей книги при этом не меняется. Можно также ввести другую цену числом.",
@@ -1330,6 +1374,16 @@ async def _finish_manual_chapter(message_or_call, state: FSMContext, access_mode
 
     if mode == "free":
         access, active_price = "free", 0
+    elif mode == "premium":
+        if access not in {"free", "premium"}:
+            target_message = message_or_call.message if isinstance(message_or_call, CallbackQuery) else message_or_call
+            await target_message.answer(
+                "В режиме Premium глава может быть только бесплатной или доступной по подписке.",
+                reply_markup=author_chapters_menu(book_id, mode),
+            )
+            await state.clear()
+            return
+        active_price = 0
     elif access == "chapter" and mode != "chapters":
         target_message = message_or_call.message if isinstance(message_or_call, CallbackQuery) else message_or_call
         await target_message.answer("Отдельная продажа глав для этой книги выключена.", reply_markup=author_chapters_menu(book_id, mode))
@@ -1339,7 +1393,7 @@ async def _finish_manual_chapter(message_or_call, state: FSMContext, access_mode
         target_message = message_or_call.message if isinstance(message_or_call, CallbackQuery) else message_or_call
         await target_message.answer("Для отдельной продажи укажите цену больше 0 Stars.")
         return
-    elif access not in {"free", "book", "chapter"}:
+    elif access not in {"free", "book", "chapter", "premium"}:
         access, active_price = "free", 0
 
     chapter_id = await add_manual_chapter(
@@ -1363,6 +1417,7 @@ async def _finish_manual_chapter(message_or_call, state: FSMContext, access_mode
         "free": "Глава сохранена как бесплатная.",
         "book": "Глава сохранена с доступом после покупки всей книги.",
         "chapter": f"Глава сохранена с отдельной ценой {active_price} Stars.",
+        "premium": "Глава сохранена с доступом по VoxLyra Premium.",
     }[access]
     if book and book["publication_status"] == "published":
         status_text = status_text.replace("сохранена", "опубликована", 1)
@@ -1388,8 +1443,24 @@ async def chapter_add_manual_access_book(call: CallbackQuery, state: FSMContext)
     await call.answer("Доступ после покупки книги")
 
 
+@router.callback_query(AddChapterManual.price, F.data == "chapter:add_access:premium")
+async def chapter_add_manual_access_premium(call: CallbackQuery, state: FSMContext) -> None:
+    await _finish_manual_chapter(call, state, "premium", 0)
+    await call.answer("Доступ по Premium")
+
+
 @router.message(AddChapterManual.price)
 async def chapter_add_manual_price(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    if str(data.get("pricing_mode") or "") == "premium":
+        await message.answer(
+            "В режиме Premium цена главы не вводится. Выберите кнопкой: бесплатная глава или доступ по VoxLyra Premium.",
+            reply_markup=_chapter_access_keyboard(
+                prefix="chapter:add_access", book_id=int(data.get("book_id") or 0),
+                allow_chapter_price=False, allow_premium=True, cancel_callback="author:cancel_flow",
+            ),
+        )
+        return
     raw = (message.text or "").strip()
     if not raw.isdigit():
         await message.answer("Введите цену числом, например 3, либо выберите вариант кнопкой.", reply_markup=navigation_menu(cancel_callback="author:cancel_flow"))
@@ -1547,6 +1618,11 @@ async def chapter_upload_file(message: Message, state: FSMContext, bot: Bot) -> 
         pricing_preview = (
             "Первые 3 главы будут бесплатными ознакомительными, остальные — доступны после покупки всей книги. "
             "Отдельные цены можно назначить затем одной главе или диапазону."
+        )
+    elif pricing_mode == "premium":
+        pricing_preview = (
+            "Первые 3 главы будут бесплатными ознакомительными, остальные — доступны читателям с активной подпиской VoxLyra Premium. "
+            "Отдельной покупки этих глав не будет."
         )
     else:
         pricing_preview = (
@@ -1730,7 +1806,10 @@ async def chapter_bulk_price_target(message: Message, state: FSMContext) -> None
     target = f"глав {start_number}–{end_number}" if start_number != end_number else f"главы {start_number}"
     builder = InlineKeyboardBuilder()
     builder.button(text="🆓 Сделать бесплатными", callback_data="chapter:bulk_access:free")
-    builder.button(text="📘 После покупки всей книги", callback_data="chapter:bulk_access:book")
+    if mode == "premium":
+        builder.button(text="👑 Доступ по VoxLyra Premium", callback_data="chapter:bulk_access:premium")
+    else:
+        builder.button(text="📘 После покупки всей книги", callback_data="chapter:bulk_access:book")
     if mode == "chapters":
         builder.button(text="❌ Отмена", callback_data="author:cancel_flow")
         builder.adjust(1)
@@ -1767,6 +1846,8 @@ async def _apply_bulk_chapter_access(message_or_call, state: FSMContext, access_
             "book_is_free": "Книга полностью бесплатна. Настройки доступа к главам не нужны.",
             "chapter_sales_disabled": "Отдельная продажа глав для этой книги выключена.",
             "price_required": "Для отдельной продажи укажите цену больше 0 Stars.",
+            "premium_mode_only": "В режиме Premium главы можно сделать только бесплатными или доступными по подписке.",
+            "premium_mode_required": "Сначала переключите книгу в режим VoxLyra Premium.",
             "chapters_not_found": "В указанном диапазоне главы не найдены.",
             "not_found": "Книга не найдена или недоступна.",
         }.get(reason, "Доступ к главам не изменён.")
@@ -1774,6 +1855,8 @@ async def _apply_bulk_chapter_access(message_or_call, state: FSMContext, access_
         text = f"Готово: <b>{updated}</b> глав открыты бесплатно. Цена всей книги не изменилась."
     elif access_mode == "book":
         text = f"Готово: <b>{updated}</b> глав доступны после покупки всей книги."
+    elif access_mode == "premium":
+        text = f"Готово: <b>{updated}</b> глав доступны по VoxLyra Premium."
     else:
         text = f"Готово: для <b>{updated}</b> глав установлена отдельная цена <b>{price} Stars</b>. Цена всей книги не изменилась."
     await add_audit(
@@ -1787,6 +1870,11 @@ async def _apply_bulk_chapter_access(message_or_call, state: FSMContext, access_
         await message_or_call.answer("Готово" if updated else "Не изменено")
     else:
         await message_or_call.answer(text, reply_markup=markup)
+
+
+@router.callback_query(BulkChapterPrice.price, F.data == "chapter:bulk_access:premium")
+async def chapter_bulk_access_premium(call: CallbackQuery, state: FSMContext) -> None:
+    await _apply_bulk_chapter_access(call, state, "premium", 0)
 
 
 @router.message(BulkChapterPrice.price)
@@ -1955,10 +2043,15 @@ async def chapter_edit_price_start(call: CallbackQuery, state: FSMContext) -> No
     await state.set_state(EditChapterDetails.price)
     builder = InlineKeyboardBuilder()
     builder.button(text="🆓 Бесплатная глава", callback_data="chapter:edit_access:free")
-    builder.button(text="📘 После покупки всей книги", callback_data="chapter:edit_access:book")
+    if mode == "premium":
+        builder.button(text="👑 Доступ по VoxLyra Premium", callback_data="chapter:edit_access:premium")
+    else:
+        builder.button(text="📘 После покупки всей книги", callback_data="chapter:edit_access:book")
     builder.button(text="❌ Отмена", callback_data=f"chapter:view:{chapter_id}")
     builder.adjust(1)
-    if mode == "chapters":
+    if mode == "premium":
+        prompt = "Выберите: оставить главу бесплатной для ознакомления или открыть её только подписчикам VoxLyra Premium."
+    elif mode == "chapters":
         prompt = (
             "Выберите доступ для этой главы. Чтобы продавать её отдельно, введите цену числом от 1 до 100 000 Stars.\n\n"
             "Цена всей книги не изменится."
@@ -1995,6 +2088,8 @@ async def _apply_single_chapter_access(message_or_call, state: FSMContext, acces
         text = "Глава теперь бесплатная."
     elif ok and access_mode == "book":
         text = "Глава теперь открывается после покупки всей книги."
+    elif ok and access_mode == "premium":
+        text = "Глава теперь доступна по VoxLyra Premium."
     elif ok:
         text = f"Для главы установлена отдельная цена {price} Stars."
     else:
@@ -2002,6 +2097,8 @@ async def _apply_single_chapter_access(message_or_call, state: FSMContext, acces
             "book_is_free": "Книга полностью бесплатна. Все главы уже открыты.",
             "chapter_sales_disabled": "Отдельная продажа глав для этой книги выключена.",
             "price_required": "Укажите цену больше 0 Stars.",
+            "premium_mode_only": "В режиме Premium глава может быть бесплатной или доступной по подписке.",
+            "premium_mode_required": "Сначала переключите книгу в режим VoxLyra Premium.",
         }.get(reason, "Не удалось изменить доступ к главе.")
     await add_audit(user["id"], "chapter_access_updated", "chapter", str(chapter_id), None, f"{access_mode}={price}; reason={reason}")
     book = await get_book(book_id)
@@ -2033,6 +2130,11 @@ async def chapter_edit_price_save(message: Message, state: FSMContext) -> None:
 @router.callback_query(EditChapterDetails.price, F.data == "chapter:edit_access:free")
 async def chapter_edit_access_free(call: CallbackQuery, state: FSMContext) -> None:
     await _apply_single_chapter_access(call, state, "free", 0)
+
+
+@router.callback_query(EditChapterDetails.price, F.data == "chapter:edit_access:premium")
+async def chapter_edit_access_premium(call: CallbackQuery, state: FSMContext) -> None:
+    await _apply_single_chapter_access(call, state, "premium", 0)
 
 
 @router.callback_query(EditChapterDetails.price, F.data == "chapter:edit_access:book")
