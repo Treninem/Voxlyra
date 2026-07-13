@@ -5,15 +5,8 @@
 <section class="hero compact legal-hero">
   <div class="eyebrow">ПРАВИЛА И ДОКУМЕНТЫ</div>
   <h1>{% if document %}{{ document.title }}{% else %}Документы Вокслиры{% endif %}</h1>
-  <p>{% if document %}Редакция от {{ document.version }}{% else %}Публичные версии договоров, согласий, правил возвратов и выплат.{% endif %}</p>
+  <p>{% if document %}Редакция от {{ document.version }}{% else %}Публичные версии оферты, политики персональных данных, согласий и договора с авторами.{% endif %}</p>
 </section>
-
-{% if not operator_configured %}
-<section class="surface-card legal-warning">
-  <strong>Режим подготовки</strong>
-  <p>Реквизиты владельца платформы ещё не заполнены. Платные рублёвые функции должны оставаться выключенными до заполнения реквизитов и юридической проверки.</p>
-</section>
-{% endif %}
 
 {% if document %}
 <section class="surface-card legal-document">

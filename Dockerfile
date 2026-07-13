@@ -3,8 +3,8 @@ FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV PIPER_VOICE_DIR=/opt/voxlyra-voices
-ENV VOSK_MODEL_PATH=/opt/voxlyra-voices/vosk
-ENV TTS_VOSK_MODEL_DIR=/opt/voxlyra-voices/vosk
+ENV VOSK_MODEL_PATH=/app/storage/tts/models/vosk
+ENV TTS_VOSK_MODEL_DIR=/app/storage/tts/models/vosk
 ENV TTS_VOSK_MODEL_NAME=vosk-model-tts-ru-0.9-multi
 
 WORKDIR /app
@@ -14,7 +14,6 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-COPY scripts/bootstrap_vosk_tts.py /tmp/bootstrap_vosk_tts.py
 RUN set -eux; \
     pip install --no-cache-dir -r requirements.txt; \
     mkdir -p "$PIPER_VOICE_DIR"; \
@@ -32,15 +31,14 @@ RUN set -eux; \
     test -s "$PIPER_VOICE_DIR/ru_RU-irina-medium.onnx"; \
     test -s "$PIPER_VOICE_DIR/ru_RU-irina-medium.onnx.json"; \
     test -s "$PIPER_VOICE_DIR/ru_RU-dmitri-medium.onnx"; \
-    test -s "$PIPER_VOICE_DIR/ru_RU-dmitri-medium.onnx.json"; \
-    python /tmp/bootstrap_vosk_tts.py; \
-    rm -f /tmp/bootstrap_vosk_tts.py
+    test -s "$PIPER_VOICE_DIR/ru_RU-dmitri-medium.onnx.json"
 
 COPY . .
 
 EXPOSE 8080
 EXPOSE 3000
 
-RUN mkdir -p data storage/covers storage/books storage/audio storage/tts storage/comics storage/temp storage/legal
+RUN mkdir -p data storage/covers storage/books storage/audio storage/tts storage/tts/models/vosk storage/comics storage/temp storage/legal \
+    && chmod +x scripts/start.sh
 
-CMD ["python", "main.py"]
+CMD ["sh", "scripts/start.sh"]

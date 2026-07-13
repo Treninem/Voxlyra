@@ -1,38 +1,22 @@
 {
   "project": "VoxLyra",
-  "version": "v1.11.1",
-  "build": "final_polish_free_access_persistent_legal_owner_version",
-  "created_utc": "2026-07-12T19:28:11.382603+00:00",
-  "base_version": "v1.11.0",
+  "version": "v1.11.3",
+  "build": "bothost_redeploy_hotfix_cumulative",
+  "base_version": "v1.10.5",
+  "owner_only_version": true,
   "features": {
-    "free_book_makes_all_text_chapters_free": true,
-    "zero_star_purchase_ui_removed": true,
-    "protected_free_chapter_uses_neutral_telegram_message": true,
-    "legacy_free_pricing_normalization": true,
-    "chapter_price_drafts_preserved_inactive": true,
-    "persistent_legal_acceptances": true,
-    "routine_release_does_not_reprompt_legal_docs": true,
-    "explicit_per_document_reaccept_version": true,
-    "owner_only_build_version": true,
-    "telegram_static_cache_busted": true,
+    "cumulative_update_from_v1_10_5": true,
+    "vosk_download_no_longer_blocks_docker_build": true,
+    "bot_starts_before_optional_vosk_model_is_ready": true,
+    "vosk_model_persisted_in_storage": true,
+    "piper_fallback_until_vosk_ready": true,
+    "all_v1_11_0_to_v1_11_2_features_included": true,
     "database_reset": false,
-    "avatars_changed": false,
-    "yookassa_active": false,
-    "stars_only": true,
+    "storage_reset": false,
     "transfer_archive_required": true
   },
   "verification": {
-    "pytest_collected": 196,
-    "pytest_passed": 195,
-    "pytest_skipped": 1,
-    "ui_buttons": "87/87",
-    "deploy_checks": "157/157",
     "python_compile": true,
-    "javascript_syntax": true,
-    "jinja_templates": "15/15",
-    "live_bothost_voice_listening": false,
-    "live_telegram_premium_payment": false,
-    "archive_transfer_required": true
-  },
-  "files_in_full_project": 301
+    "live_bothost_redeploy": false
+  }
 }
