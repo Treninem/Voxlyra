@@ -167,4 +167,4 @@ def test_v184_search_navigation_and_build_are_bundled():
     assert 'allowDuplicateImport' in author_js
     assert 'owner_build_label()' in owner_py
     assert 'owner_build_label()' in diagnostics_py
-    assert 'PROJECT_VERSION=v1.11.3-owner-only' in env_example
+    assert 'PROJECT_VERSION=v1.11.4-owner-only' in env_example

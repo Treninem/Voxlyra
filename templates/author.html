@@ -176,14 +176,16 @@
               <option value="vertical">Вертикальная лента</option><option value="single">Одна страница</option><option value="spread">Разворот</option>
             </select></label>
           </div>
-          <section class="pricing-separation-card">
-            <div><strong>Условия доступа и цена всей книги</strong><p class="muted">0 Stars означает полностью бесплатную книгу: все главы открываются бесплатно, а цены глав не настраиваются.</p></div>
-            <label>Вся книга, Stars<input id="bookPriceInput" type="number" min="0" max="100000" value="0"></label>
-            <div id="bookPaidPricingOptions" hidden>
-              <label>Как продавать платную книгу<select id="bookPricingModeInput">
-                <option value="whole_book">Только вся книга целиком</option>
-                <option value="chapters">Вся книга и выбранные главы отдельно</option>
-              </select></label>
+          <section class="pricing-separation-card premium-access-editor">
+            <div><strong>Условия доступа и цена всей книги</strong><p class="muted">Выберите один понятный режим. 0 Stars означает полностью бесплатную книгу. Бесплатный доступ, разовая покупка и Premium никогда не смешиваются на одной закрытой главе.</p></div>
+            <label>Режим книги<select id="bookPricingModeInput">
+              <option value="free">Полностью бесплатно</option>
+              <option value="whole_book">Только вся книга целиком</option>
+              <option value="chapters">Вся книга и выбранные главы отдельно</option>
+              <option value="premium">Чтение по подписке VoxLyra Premium</option>
+            </select></label>
+            <label id="bookPriceLabel">Цена всей книги, Stars<input id="bookPriceInput" type="number" min="1" max="100000" value="10"><small>Показывается только в режимах разовой покупки.</small></label>
+            <div id="bookPaidPricingOptions">
               <p class="muted" id="bookPricingModeHint"></p>
               <button class="button-link secondary compact-button" id="restoreChapterPricesButton" type="button" hidden>Восстановить сохранённые цены глав</button>
             </div>
@@ -369,6 +371,7 @@
               <option value="free">Бесплатная глава</option>
               <option value="book">После покупки всей книги</option>
               <option value="chapter">Продавать главу отдельно</option>
+              <option value="premium">Доступ по VoxLyra Premium</option>
             </select></label>
           </div>
           <label id="chapterBulkPriceLabel">Цена каждой выбранной главы, Stars<input id="chapterBulkPriceInput" type="number" min="1" max="100000" value="3"><small>Показывается только при отдельной продаже глав.</small></label>

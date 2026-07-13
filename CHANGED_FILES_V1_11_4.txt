@@ -1,0 +1,16 @@
+VoxLyra v1.11.4
+
+Основные изменения:
+- app/services/access_grants.py — разбор номеров и диапазонов глав;
+- app/permissions.py — делегируемое право grant_access;
+- app/db.py — Premium-книги, ручные доступы, ручной Premium, миграции и аналитика;
+- app/webapp.py — защищённые API выдачи доступа и Premium;
+- app/handlers/author.py — Premium-режим в Telegram-кабинете автора;
+- app/keyboards.py — кнопки Premium и доступа;
+- templates/author.html, book.html, reader.html, premium.html, _macros.html — интерфейс Premium;
+- static/js/author.js, app.js, control.js — авторский режим, paywall, центр выдачи;
+- static/css/style.css — оформление и мобильная адаптация;
+- app/build_info.py, app/config.py, .env.example — внутренняя версия v1.11.4;
+- tests/test_v1114_premium_access_and_grants.py — проверки новой логики;
+- scripts/start.sh — фоновая подготовка Vosk и удаление только устаревших юридических PDF;
+- документация, манифест и инструкция обновления.

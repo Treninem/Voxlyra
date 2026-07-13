@@ -1,0 +1,18 @@
+# Устаревшие юридические PDF редакции до v1.11.2.
+# scripts/start.sh удаляет их автоматически при первом запуске v1.11.4.
+storage/legal/voxlyra_author_license_agreement.pdf
+storage/legal/voxlyra_author_license_agreement.pdf.sha256
+storage/legal/voxlyra_author_personal_data_consent.pdf
+storage/legal/voxlyra_author_personal_data_consent.pdf.sha256
+storage/legal/voxlyra_content_rules.pdf
+storage/legal/voxlyra_content_rules.pdf.sha256
+storage/legal/voxlyra_copyright_policy.pdf
+storage/legal/voxlyra_copyright_policy.pdf.sha256
+storage/legal/voxlyra_fees_and_payouts.pdf
+storage/legal/voxlyra_fees_and_payouts.pdf.sha256
+storage/legal/voxlyra_reader_offer.pdf
+storage/legal/voxlyra_reader_offer.pdf.sha256
+storage/legal/voxlyra_reader_personal_data_consent.pdf
+storage/legal/voxlyra_reader_personal_data_consent.pdf.sha256
+storage/legal/voxlyra_refund_policy.pdf
+storage/legal/voxlyra_refund_policy.pdf.sha256

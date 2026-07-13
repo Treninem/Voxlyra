@@ -19,14 +19,18 @@ def test_vosk_is_real_local_provider_before_piper():
     assert standard.index('vosk') < standard.index('piper')
 
 
-def test_deploy_installs_and_bootstraps_vosk_model():
+def test_deploy_installs_and_bootstraps_vosk_model_after_start():
     root = Path(__file__).resolve().parents[1]
     requirements = (root / 'requirements.txt').read_text(encoding='utf-8')
     dockerfile = (root / 'Dockerfile').read_text(encoding='utf-8')
+    start = (root / 'scripts/start.sh').read_text(encoding='utf-8')
+    env = (root / '.env.example').read_text(encoding='utf-8')
     bootstrap = (root / 'scripts/bootstrap_vosk_tts.py').read_text(encoding='utf-8')
     assert 'vosk-tts' in requirements
-    assert 'VOSK_MODEL_PATH=/opt/voxlyra-voices/vosk' in dockerfile
-    assert 'python /tmp/bootstrap_vosk_tts.py' in dockerfile
+    assert 'VOSK_MODEL_PATH=/app/storage/tts/models/vosk' in dockerfile
+    assert 'python /tmp/bootstrap_vosk_tts.py' not in dockerfile
+    assert 'python scripts/bootstrap_vosk_tts.py' in start
+    assert 'TTS_VOSK_MODEL_DIR=storage/tts/models/vosk' in env
     assert 'vosk-model-tts-ru-0.9-multi' in bootstrap
     assert "Model(model_name=MODEL_NAME)" in bootstrap
 

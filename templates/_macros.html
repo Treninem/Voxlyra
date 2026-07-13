@@ -28,7 +28,7 @@
    data-audio="{{ 1 if has_audio else 0 }}"
    data-graphic="{{ 1 if is_graphic else 0 }}"
    data-content-type="{{ content_type }}"
-   data-free="{{ 1 if (book.price_stars|int <= 0 or book.free_chapters_count|default(0)|int > 0) else 0 }}"
+   data-free="{{ 1 if ((book.pricing_type|default('')) != 'premium' and book.price_stars|int <= 0) or book.free_chapters_count|default(0)|int > 0 else 0 }}"
    data-popular="{{ book.purchase_count|default(0)|int + book.reviews_count|default(0)|int }}"
    style="--book-cover-image:url('/media/cover/{{ book.id }}?v={{ book.updated_at|default(book.id, true) }}')">
   <a class="book-cover-link" href="/book/{{ book.id }}" aria-label="Открыть произведение {{ book.title }}">
@@ -61,7 +61,7 @@
       <p class="desc">{{ (book.description or 'Откройте произведение, чтобы увидеть описание и доступные главы.')[:120] }}{% if book.description and book.description|length > 120 %}…{% endif %}</p>
     {% endif %}
     <div class="book-price-line">
-      <strong>{% if book.price_stars|int > 0 %}Вся книга: {{ book.price_stars }} Stars <small>≈ {{ '%.2f'|format((book.price_stars|int * buyer_star_rate_minor|default(145)) / 100) }} ₽</small>{% else %}Бесплатно{% endif %}</strong>
+      <strong>{% if book.pricing_type|default('') == 'premium' %}<span class="premium-access-label">👑 По подписке Premium</span>{% elif book.price_stars|int > 0 %}Вся книга: {{ book.price_stars }} Stars <small>≈ {{ '%.2f'|format((book.price_stars|int * buyer_star_rate_minor|default(145)) / 100) }} ₽</small>{% else %}Бесплатно{% endif %}</strong>
       {% if book.free_chapters_count|default(0)|int > 0 %}<span>{{ book.free_chapters_count }} глав бесплатно</span>{% endif %}
     </div>
     <div class="card-actions">

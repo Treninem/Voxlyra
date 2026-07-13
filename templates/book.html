@@ -5,7 +5,7 @@
 {% if book %}
 {% set content_type = book.content_type|default('book', true) %}
 {% set is_graphic = content_type != 'book' %}
-{% set pricing_mode = 'free' if book.price_stars|int <= 0 else ('chapters' if book.pricing_type == 'chapters' else 'whole_book') %}
+{% set pricing_mode = 'premium' if book.pricing_type == 'premium' else ('free' if book.price_stars|int <= 0 else ('chapters' if book.pricing_type == 'chapters' else 'whole_book')) %}
 {% set type_label = {'comic':'Комикс','manga':'Манга','manhwa':'Манхва','webtoon':'Вебтун','graphic_novel':'Графический роман'}.get(content_type, 'Книга') %}
 <section class="book-page premium-book-page{% if is_graphic %} graphic-work-page{% endif %}" id="bookPage" data-book-id="{{ book_id }}">
   <a class="quiet-back" href="/catalog">← Каталог</a>
@@ -38,7 +38,7 @@
     {% if audios %}<a class="button-link purple-btn" href="/audio/{{ audios[0].id }}">Слушать</a>{% endif %}
     <button id="bookmarkReading" class="secondary">В библиотеку</button>
     <button id="bookmarkFavorite" class="secondary">В любимое</button>
-    {% if book.price_stars|int > 0 and bot_username %}<a class="button-link gold-button full-span" href="https://t.me/{{ bot_username }}?start=buy_book_{{ book.id }}">Купить всю {% if is_graphic %}графическую историю{% else %}книгу{% endif %} · {{ book.price_stars }} Stars · ≈ {{ '%.2f'|format((book.price_stars|int * buyer_star_rate_minor|default(145)) / 100) }} ₽</a>{% endif %}
+    {% if pricing_mode == 'premium' %}<a class="button-link premium-subscription-button full-span" href="/premium">👑 Читать по VoxLyra Premium</a>{% elif book.price_stars|int > 0 and bot_username %}<a class="button-link gold-button full-span" href="https://t.me/{{ bot_username }}?start=buy_book_{{ book.id }}">Купить всю {% if is_graphic %}графическую историю{% else %}книгу{% endif %} · {{ book.price_stars }} Stars · ≈ {{ '%.2f'|format((book.price_stars|int * buyer_star_rate_minor|default(145)) / 100) }} ₽</a>{% endif %}
     {% if bot_username and channel_promotion_enabled %}<a class="button-link secondary full-span" href="https://t.me/{{ bot_username }}?start=promote_book_{{ book.id }}">📢 Опубликовать книгу в канале</a>{% endif %}
   </div>
 
@@ -112,10 +112,11 @@
     {% for chapter in chapters %}
       {% set chapter_is_free = pricing_mode == 'free' or chapter.is_free %}
       {% set chapter_is_sold = pricing_mode == 'chapters' and not chapter_is_free and chapter.price_stars|int > 0 %}
+      {% set chapter_is_premium = pricing_mode == 'premium' and not chapter_is_free %}
       <a class="chapter-row" href="/reader/{{ chapter.id }}">
         <span class="episode-number">{{ '%02d'|format(chapter.number) }}</span>
-        <span class="episode-copy"><strong>{{ chapter.title }}</strong><small>{% if chapter_is_free %}Открыта бесплатно{% elif chapter_is_sold %}Цена этой главы: {{ chapter.price_stars }} Stars{% else %}Доступ после покупки всей книги{% endif %}</small></span>
-        <b>{% if chapter_is_free %}Открыть{% elif chapter_is_sold %}Купить · {{ chapter.price_stars }} ★{% else %}Вся книга{% endif %}</b>
+        <span class="episode-copy"><strong>{{ chapter.title }}</strong><small>{% if chapter_is_free %}Открыта бесплатно{% elif chapter_is_premium %}Доступна по VoxLyra Premium{% elif chapter_is_sold %}Цена этой главы: {{ chapter.price_stars }} Stars{% else %}Доступ после покупки всей книги{% endif %}</small></span>
+        <b>{% if chapter_is_free %}Открыть{% elif chapter_is_premium %}<span class="premium-mini-badge">Premium</span>{% elif chapter_is_sold %}Купить · {{ chapter.price_stars }} ★{% else %}Вся книга{% endif %}</b>
       </a>
     {% endfor %}
     </div>

@@ -28,7 +28,7 @@ def test_version_is_owner_only_and_static_cache_is_refreshed():
     base = (ROOT / "templates" / "base.html").read_text(encoding="utf-8")
     config = (ROOT / "app" / "config.py").read_text(encoding="utf-8")
 
-    assert 'OWNER_BUILD_VERSION = "v1.11.3"' in build
+    assert 'OWNER_BUILD_VERSION = "v1.11.4"' in build
     assert "owner_build_label()" in owner
     assert "OWNER_BUILD_VERSION" not in base
     assert "PUBLIC_VERSION_VISIBLE: bool = False" in config
@@ -46,7 +46,7 @@ def test_legal_acceptance_survives_routine_release_and_can_be_forced(tmp_path, m
         from app import db as db_module
         # Другие тесты могли импортировать app.db до смены DATABASE_PATH.
         # Привязываем модуль к актуальным настройкам из monkeypatch.
-        db_module.settings = get_settings()
+        monkeypatch.setattr(db_module, "settings", get_settings())
         from app.db import (
             accept_legal_document,
             get_missing_legal_documents,
