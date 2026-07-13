@@ -1,7 +1,7 @@
 {
   "project": "VoxLyra",
-  "version": "v1.11.4",
-  "build": "premium_content_manual_access_mobile_cumulative",
+  "version": "v1.11.5",
+  "build": "profile_mobile_hotfix_cumulative",
   "base_version": "v1.10.5",
   "owner_only_version": true,
   "features": {
@@ -18,7 +18,11 @@
     "premium_migration_survives_redeploy": true,
     "database_reset": false,
     "storage_reset": false,
-    "transfer_archive_required": true
+    "transfer_archive_required": true,
+    "independent_profile_icon": true,
+    "mobile_library_hero_fix": true,
+    "broken_image_initial_fallback": true,
+    "static_cache_bump": true
   },
   "verification": {
     "python_compile": true,
@@ -27,11 +31,17 @@
     "archive_integrity": true,
     "live_bothost_redeploy": false,
     "live_telegram_payment": false,
-    "pytest_passed": 205,
+    "pytest_passed": 207,
     "pytest_failed": 0,
     "deploy_checks_passed": 161,
     "deploy_checks_total": 161,
     "templates_parsed": 15,
-    "static_buttons_with_handlers": 84
-  }
+    "static_buttons_with_handlers": 84,
+    "profile_icon_asset_in_update": true,
+    "mobile_library_regression_test": true,
+    "jinja_templates_parsed": 15,
+    "pytest_skipped": 1,
+    "live_mobile_screenshot_after_redeploy": false
+  },
+  "name": "profile mobile hotfix"
 }
