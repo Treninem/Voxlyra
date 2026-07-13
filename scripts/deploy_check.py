@@ -158,6 +158,10 @@ def main() -> int:
         "docs/FINAL_POLISH_V1_11_1.md",
         "docs/STATUS_V1_11_1.md",
         "docs/RELEASE_CHECK_V1_11_1.md",
+        "docs/FINAL_LEGAL_RELEASE_V1_11_2.md",
+        "docs/LEGAL_COMPLIANCE_OWNER_V1_11_2.md",
+        "docs/STATUS_V1_11_2.md",
+        "docs/RELEASE_CHECK_V1_11_2.md",
         "docs/TRANSFER_TO_NEW_CHAT.md",
         "docs/PROJECT_MEMORY_CURRENT.md",
         "storage/legal/.gitkeep",
@@ -180,6 +184,7 @@ def main() -> int:
 
     requirements_text = (ROOT / "requirements.txt").read_text(encoding="utf-8") if (ROOT / "requirements.txt").exists() else ""
     docker_text = (ROOT / "Dockerfile").read_text(encoding="utf-8") if (ROOT / "Dockerfile").exists() else ""
+    start_text = (ROOT / "scripts/start.sh").read_text(encoding="utf-8") if (ROOT / "scripts/start.sh").exists() else ""
 
     checks.extend([
         ("piper-tts==1.4.2" in requirements_text, "Piper закреплён в requirements.txt", "Добавьте piper-tts==1.4.2."),
@@ -197,7 +202,7 @@ def main() -> int:
         ("fonts-dejavu-core" in docker_text, "Docker устанавливает кириллический шрифт для PDF", "Добавьте fonts-dejavu-core в Dockerfile."),
         ("piper.download_voices" in docker_text, "Docker загружает голосовые модели", "Добавьте загрузку моделей Piper при Redeploy."),
         ("ru_RU-irina-medium" in docker_text and "ru_RU-dmitri-medium" in docker_text, "Русские модели Ирина и Дмитрий указаны", "Проверьте названия голосовых моделей в Dockerfile."),
-        ("bootstrap_vosk_tts.py" in docker_text, "Docker автоматически готовит модель Vosk", "Подключите scripts/bootstrap_vosk_tts.py в Dockerfile."),
+        ("bootstrap_vosk_tts.py" in start_text and "start.sh" in docker_text, "Vosk готовится в фоне после запуска", "Подключите scripts/start.sh и фоновый bootstrap_vosk_tts.py."),
         ("vosk-model-tts-ru-0.9-multi" in docker_text, "Русская многоголосая модель Vosk указана", "Укажите vosk-model-tts-ru-0.9-multi."),
         (bool(bot_token and bot_token != "PASTE_BOT_TOKEN_HERE"), "BOT_TOKEN указан", "Возьмите токен у @BotFather и вставьте в Bothost."),
         (bool(owner_ids.strip()), "OWNER_IDS указан", "Укажите свой Telegram ID. Можно несколько через запятую."),
@@ -206,9 +211,17 @@ def main() -> int:
         (str(database_path).replace('\\', '/').startswith("data/"), "DATABASE_PATH лежит в data/", "Поставьте DATABASE_PATH=data/voxlyra.sqlite3."),
         (port.isdigit() and int(port) > 0, "PORT указан числом", "Обычно PORT=3000."),
         (bool(legal_name.strip()), "LEGAL_OPERATOR_NAME заполнен", "До реального запуска оплаты укажите владельца платформы."),
-        (bool(legal_status.strip()), "LEGAL_OPERATOR_STATUS заполнен", "Укажите статус владельца: ИП, ООО или иной фактический статус."),
+        (bool(legal_status.strip()), "LEGAL_OPERATOR_STATUS заполнен", "Укажите фактический статус владельца."),
         (len(''.join(ch for ch in legal_inn if ch.isdigit())) in {10, 12}, "LEGAL_OPERATOR_INN похож на корректный ИНН", "Укажите ИНН из 10 или 12 цифр."),
-        (len(''.join(ch for ch in legal_ogrn if ch.isdigit())) in {13, 15}, "LEGAL_OPERATOR_OGRN похож на ОГРН/ОГРНИП", "Укажите ОГРН из 13 цифр или ОГРНИП из 15 цифр."),
+        (
+            len(''.join(ch for ch in legal_ogrn if ch.isdigit())) in {13, 15}
+            or (
+                "самозан" in legal_status.lower()
+                and legal_ogrn.strip().lower() in {"не присваивался", "не требуется", "нет"}
+            ),
+            "LEGAL_OPERATOR_OGRN соответствует статусу",
+            "Для ИП/организации укажите номер; для самозанятого физлица без ИП — «не присваивался».",
+        ),
         (bool(legal_address.strip()), "LEGAL_OPERATOR_ADDRESS заполнен", "Укажите юридический/почтовый адрес."),
         ("@" in legal_email and "." in legal_email, "LEGAL_CONTACT_EMAIL заполнен", "Укажите рабочую электронную почту."),
         (bool(encryption_key.strip()), "DATA_ENCRYPTION_KEY задан", "Создайте отдельный Fernet-ключ и храните его вне Git."),

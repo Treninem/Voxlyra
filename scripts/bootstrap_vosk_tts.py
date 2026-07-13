@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 
 MODEL_NAME = os.getenv('TTS_VOSK_MODEL_NAME', 'vosk-model-tts-ru-0.9-multi')
-MODEL_ROOT = Path(os.getenv('TTS_VOSK_MODEL_DIR', '/opt/voxlyra-voices/vosk'))
+MODEL_ROOT = Path(os.getenv('TTS_VOSK_MODEL_DIR', 'storage/tts/models/vosk'))
 MODEL_PATH = MODEL_ROOT / MODEL_NAME
 REQUIRED = ('model.onnx', 'config.json', 'dictionary')
 
