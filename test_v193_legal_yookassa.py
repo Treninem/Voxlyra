@@ -1,0 +1,49 @@
+from __future__ import annotations
+
+import asyncio
+import sqlite3
+
+
+def test_v1101_build_and_hotfix_docs_exist():
+    from app.build_info import OWNER_BUILD_NAME, OWNER_BUILD_VERSION
+
+    assert OWNER_BUILD_VERSION in {"v1.10.1", "v1.10.2", "v1.10.3", "v1.10.4", "v1.10.5", "v1.11.0", "v1.11.1", "v1.11.2", "v1.11.3", "v1.11.4", "v1.11.5", "v1.11.6"}
+    assert "баз" in OWNER_BUILD_NAME.lower()
+
+
+def test_concurrent_init_db_does_not_duplicate_columns(tmp_path, monkeypatch):
+    from app.config import settings
+
+    database = tmp_path / "concurrent.sqlite3"
+    con = sqlite3.connect(database)
+    con.executescript(
+        """
+        CREATE TABLE books (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            author_id INTEGER,
+            title TEXT NOT NULL,
+            description TEXT,
+            age_limit TEXT DEFAULT '16+',
+            allow_download INTEGER NOT NULL DEFAULT 0,
+            has_audio INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        """
+    )
+    con.commit()
+    con.close()
+    monkeypatch.setattr(settings, "DATABASE_PATH", str(database))
+
+    async def scenario():
+        from app.db import init_db
+
+        await asyncio.gather(*(init_db() for _ in range(8)))
+
+    asyncio.run(scenario())
+
+    con = sqlite3.connect(database)
+    columns = [row[1] for row in con.execute("PRAGMA table_info(books)")]
+    con.close()
+    assert columns.count("content_type") == 1
+    assert columns.count("reading_mode") == 1
