@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from aiogram import Bot
+from aiogram.enums import ParseMode
 from aiogram.types import FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.config import settings
@@ -123,6 +124,7 @@ async def post_book_to_channel(
                 cover_file_id,
                 caption=post,
                 reply_markup=markup,
+                parse_mode=ParseMode.HTML,
             )
             sent_with_cover = True
         except Exception as exc:
@@ -144,6 +146,7 @@ async def post_book_to_channel(
                     FSInputFile(cover_path),
                     caption=post,
                     reply_markup=markup,
+                    parse_mode=ParseMode.HTML,
                 )
                 sent_with_cover = True
         except Exception as exc:
@@ -153,7 +156,12 @@ async def post_book_to_channel(
         if not sent_with_cover:
             # Книга всё равно не теряется из канала. Причина отсутствия обложки
             # сохраняется только в закрытом журнале владельца.
-            await bot.send_message(channel_id, post, reply_markup=markup)
+            await bot.send_message(
+                channel_id,
+                post,
+                reply_markup=markup,
+                parse_mode=ParseMode.HTML,
+            )
         detail = "sent_with_cover" if sent_with_cover else "sent_without_cover"
         error_text = " | ".join(cover_errors)[:1000]
         await add_audit(

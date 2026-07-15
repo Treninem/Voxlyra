@@ -92,10 +92,10 @@ def test_v1119_release_metadata_and_docs_exist():
     from app.build_info import OWNER_BUILD_VERSION
 
     root = Path(__file__).resolve().parents[1]
-    assert OWNER_BUILD_VERSION == "v1.11.9"
+    assert OWNER_BUILD_VERSION == "v1.11.10"
     assert (root / "docs" / "ADAPTIVE_CATALOG_V1_11_9.md").exists()
     assert (root / "docs" / "FINAL_TEST_REPORT_V1_11_9.md").exists()
-    assert '"version": "v1.11.9"' in (root / "RELEASE_MANIFEST.json").read_text(encoding="utf-8")
+    assert '"version": "v1.11.10"' in (root / "RELEASE_MANIFEST.json").read_text(encoding="utf-8")
 
 
 class _FakeState:

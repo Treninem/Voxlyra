@@ -99,11 +99,11 @@ def test_owner_upload_publishes_and_regular_author_goes_to_review(tmp_path):
         def __init__(self):
             self.messages = []
 
-        async def send_message(self, chat_id, text, reply_markup=None):
-            self.messages.append((chat_id, text, reply_markup))
+        async def send_message(self, chat_id, text, reply_markup=None, parse_mode=None):
+            self.messages.append((chat_id, text, reply_markup, parse_mode))
 
-        async def send_photo(self, chat_id, photo, caption=None, reply_markup=None):
-            self.messages.append((chat_id, caption, reply_markup))
+        async def send_photo(self, chat_id, photo, caption=None, reply_markup=None, parse_mode=None):
+            self.messages.append((chat_id, caption, reply_markup, parse_mode))
 
     async def scenario():
         from app.db import (
@@ -167,4 +167,4 @@ def test_v184_search_navigation_and_build_are_bundled():
     assert 'allowDuplicateImport' in author_js
     assert 'owner_build_label()' in owner_py
     assert 'owner_build_label()' in diagnostics_py
-    assert 'PROJECT_VERSION=v1.11.9-owner-only' in env_example
+    assert 'PROJECT_VERSION=v1.11.10-owner-only' in env_example

@@ -16,11 +16,11 @@ def test_channel_post_uses_real_cover_file_id(tmp_path, monkeypatch):
             self.photos = []
             self.messages = []
 
-        async def send_photo(self, chat_id, photo, caption=None, reply_markup=None):
-            self.photos.append((chat_id, photo, caption, reply_markup))
+        async def send_photo(self, chat_id, photo, caption=None, reply_markup=None, parse_mode=None):
+            self.photos.append((chat_id, photo, caption, reply_markup, parse_mode))
 
-        async def send_message(self, chat_id, text, reply_markup=None):
-            self.messages.append((chat_id, text, reply_markup))
+        async def send_message(self, chat_id, text, reply_markup=None, parse_mode=None):
+            self.messages.append((chat_id, text, reply_markup, parse_mode))
 
     async def scenario():
         from app.db import (
@@ -53,6 +53,7 @@ def test_channel_post_uses_real_cover_file_id(tmp_path, monkeypatch):
         assert bot.photos
         assert bot.photos[0][1] == "telegram-cover-file-id"
         assert f"https://voxlyra.example/book/{book_id}" in bot.photos[0][2]
+        assert str(bot.photos[0][4]).lower().endswith("html")
         assert not bot.messages
 
     asyncio.run(scenario())
@@ -106,6 +107,7 @@ def test_moderation_alert_reaches_owner_and_book_moderator(tmp_path, monkeypatch
         assert recipients == {18510, 18511}
         assert result == {"sent": 2, "failed": 0}
         assert all("Открыть проверку" in str(item.get("reply_markup")) for item in bot.sent)
+        assert all(str(item.get("parse_mode")).lower().endswith("html") for item in bot.sent)
 
     asyncio.run(scenario())
 

@@ -5,6 +5,7 @@ import html
 import logging
 
 from aiogram import Bot
+from aiogram.enums import ParseMode
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.config import settings
@@ -20,7 +21,11 @@ logger = logging.getLogger(__name__)
 
 
 async def _send_alert(bot: Bot, telegram_id: int, text: str, reply_markup=None) -> None:
-    kwargs = {"chat_id": int(telegram_id), "text": text}
+    kwargs = {
+        "chat_id": int(telegram_id),
+        "text": text,
+        "parse_mode": ParseMode.HTML,
+    }
     if reply_markup is not None:
         kwargs["reply_markup"] = reply_markup
     try:
