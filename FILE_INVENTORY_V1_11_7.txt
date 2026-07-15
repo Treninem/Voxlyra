@@ -6,11 +6,13 @@ CHANGED_FILES_V1_11_3.txt
 CHANGED_FILES_V1_11_4.txt
 CHANGED_FILES_V1_11_5.txt
 CHANGED_FILES_V1_11_6.txt
+CHANGED_FILES_V1_11_7.txt
 DELETE_FILES_V1_11_4.txt
 Dockerfile
 FILE_INVENTORY_V1_11_4.txt
 FILE_INVENTORY_V1_11_5.txt
 FILE_INVENTORY_V1_11_6.txt
+FILE_INVENTORY_V1_11_7.txt
 README.md
 RELEASE_MANIFEST.json
 UPDATE_INSTRUCTIONS.md
@@ -106,6 +108,7 @@ docs/FINAL_TEST_PLAN.md
 docs/FINAL_TEST_REPORT_V1_11_4.md
 docs/FINAL_TEST_REPORT_V1_11_5.md
 docs/FINAL_TEST_REPORT_V1_11_6.md
+docs/FINAL_TEST_REPORT_V1_11_7.md
 docs/HOTFIX_V1_4_1.md
 docs/IDEAS_NEXT_PREMIUM.md
 docs/ILLUSTRATED_MINIAPP_V1_9_0.md
@@ -131,6 +134,7 @@ docs/PREMIUM_POLISH_STAGE2_V1_7_4.md
 docs/PREMIUM_POLISH_V1_6_0.md
 docs/PREMIUM_UI_V1_7_0.md
 docs/PRICING_RULES_V1_11_0.md
+docs/PROFILE_ICONS_NOTIFICATIONS_HOTFIX_V1_11_7.md
 docs/PROJECT_MEMORY.md
 docs/PROJECT_MEMORY_CURRENT.md
 docs/PUBLISH_SEARCH_NAVIGATION_V1_8_4.md
@@ -150,6 +154,7 @@ docs/RELEASE_CHECK_V1_11_2.md
 docs/RELEASE_CHECK_V1_11_4.md
 docs/RELEASE_CHECK_V1_11_5.md
 docs/RELEASE_CHECK_V1_11_6.md
+docs/RELEASE_CHECK_V1_11_7.md
 docs/RICH_MINIAPP_VISUALS_V1_10_4.md
 docs/SETTINGS_REPAIR_V1_6_2.md
 docs/SMART_TTS_V1_8_9.md
@@ -170,6 +175,7 @@ docs/STATUS_V1_11_2.md
 docs/STATUS_V1_11_4.md
 docs/STATUS_V1_11_5.md
 docs/STATUS_V1_11_6.md
+docs/STATUS_V1_11_7.md
 docs/STATUS_V1_7_7.md
 docs/STATUS_V1_7_8.md
 docs/STATUS_V1_7_9.md
@@ -212,7 +218,9 @@ scripts/deploy_check.py
 scripts/start.sh
 scripts/tts_provider_check.py
 scripts/ui_audit.py
+static/css/hotfix-v1117.css
 static/css/style.css
+static/favicon.ico
 static/img/bot_avatar.png
 static/img/channel_avatar.png
 static/img/miniapp/empty/chapter-loading.webp
@@ -323,6 +331,7 @@ tests/test_v1112_legal_finalization.py
 tests/test_v1114_premium_access_and_grants.py
 tests/test_v1115_profile_mobile_hotfix.py
 tests/test_v1116_author_mobile_layout.py
+tests/test_v1117_profile_icons_notifications.py
 tests/test_v184_release.py
 tests/test_v185_stability.py
 tests/test_v186_reader_tts.py
@@ -340,3 +349,4 @@ tests/test_v198_comics_commerce_navigation.py
 tests/test_v199_chapter_packages.py
 voxlyra_bot_avatar_final.png
 voxlyra_channel_avatar_final.png
+ПЕРЕНОС_В_НОВЫЙ_ЧАТ.md
