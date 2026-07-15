@@ -2431,13 +2431,40 @@ async function initLibrary() {
     const data = await loadMeData();
     page._libraryData = data;
     const profileName = String(data.user?.full_name || data.user?.username || '').trim();
-    const initial = (profileName || 'В').slice(0, 1).toUpperCase();
+    const username = String(data.user?.username || '').replace(/^@+/, '').trim();
+    const telegramPhotoUrl = String(
+      data.user?.photo_url || window.Telegram?.WebApp?.initDataUnsafe?.user?.photo_url || ''
+    ).trim();
+    const initial = (profileName || username || 'В').slice(0, 1).toUpperCase();
     const profileInitial = document.getElementById('libraryProfileInitial');
-    const profileFallback = document.getElementById('libraryProfileFallback');
-    const profileHeading = document.getElementById('libraryProfileName');
-    if (profileInitial) { profileInitial.textContent = initial; profileInitial.hidden = false; }
-    if (profileFallback) profileFallback.hidden = true;
-    if (profileHeading && profileName) profileHeading.textContent = `Моё · ${profileName.split(/\s+/)[0]}`;
+    const profileIcon = document.getElementById('libraryProfileIcon');
+    const profileNameLabel = document.getElementById('libraryProfileName');
+    const showInitialFallback = () => {
+      if (profileIcon) profileIcon.hidden = true;
+      if (profileInitial) {
+        profileInitial.textContent = initial;
+        profileInitial.hidden = false;
+      }
+    };
+    if (profileIcon) {
+      profileIcon.hidden = false;
+      if (telegramPhotoUrl) {
+        profileIcon.src = telegramPhotoUrl;
+        profileIcon.classList.add('telegram-avatar');
+      } else {
+        profileIcon.classList.remove('telegram-avatar');
+      }
+      profileIcon.addEventListener('error', showInitialFallback, { once: true });
+      if (profileIcon.complete && profileIcon.naturalWidth === 0) showInitialFallback();
+    } else {
+      showInitialFallback();
+    }
+    if (profileInitial && profileIcon && !profileIcon.hidden) profileInitial.hidden = true;
+    if (profileNameLabel) {
+      const label = username ? `@${username}` : profileName;
+      profileNameLabel.textContent = label;
+      profileNameLabel.hidden = !label;
+    }
     applyProfileFrame();
     renderLibraryAchievements(data.achievements);
     const premiumBadge = document.getElementById('libraryPremiumBadge');

@@ -317,6 +317,7 @@ function renderAuthorAnalytics(analytics) {
       ['Доход', formatStars(summary.revenue_stars || 0)],
       ['Premium-читатели', summary.premium_readers || 0],
       ['Premium-дочитывания', summary.premium_completions || 0],
+      ['Доход от Premium', formatStars(summary.premium_income_stars || 0)],
       ['Комментарии', summary.comments_count || 0],
       ['Реакции', summary.reactions_count || 0],
     ];
@@ -368,6 +369,8 @@ function renderAuthorDashboard(data) {
     ['Страницы', stats.graphic_pages || 0],
     ['Доступно', formatStars(finance.available)],
     ['В удержании', formatStars(finance.held)],
+    ['Доход Premium', formatStars(finance.premium_total || 0)],
+    ['Premium в удержании', formatStars(finance.premium_held || 0)],
   ];
   document.getElementById('authorStats').innerHTML = cards.map(([label, value]) => `<article><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></article>`).join('');
   renderAuthorAnalytics(data.analytics);

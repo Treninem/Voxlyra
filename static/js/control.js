@@ -380,6 +380,7 @@
         <div class="payment-settings-stack">
           ${paymentToggle('enabled', 'Разрешить новые подписки Premium', Number(plan.is_active || 0) === 1, 'Отключение не отнимает уже оплаченный период у действующих пользователей.')}
           <label class="payment-secret-field"><span>Цена за 30 дней, Stars</span><input type="number" min="1" max="10000" step="1" name="price_stars" value="${Number(plan.price_stars || 99)}"><small>Цена книги и глав не связана с Premium и не меняется.</small></label>
+          <label class="payment-secret-field"><span>Фонд авторов с каждой оплаты, %</span><input type="number" min="1" max="95" step="1" name="author_pool_percent" value="${Number(summary.author_pool_percent || 70)}"><small>Распределяется только целыми Stars по реальному чтению. Изменение действует для новых оплат.</small></label>
         </div>
       </article>
       <div class="control-stat-grid premium-control-summary">
@@ -387,6 +388,10 @@
         ${statCard('Автопродление', summary.auto_renew || 0, 'подписок')}
         ${statCard('Оплаты', summary.payments || 0)}
         ${statCard('Оборот', summary.gross_stars || 0, 'Stars')}
+        ${statCard('Авторам', summary.author_allocated_stars || 0, 'Stars начислено')}
+        ${statCard('Ожидают расчёта', summary.pending_pools || 0, 'периодов')}
+        ${statCard('Без чтения', summary.no_activity_pools || 0, 'периодов')}
+        ${statCard('Нераспределено', summary.unallocated_stars || 0, 'Stars')}
       </div>
       <div class="control-actions payment-settings-actions"><button type="submit" class="approve">Сохранить Premium</button></div>
     </form>`;
@@ -396,6 +401,7 @@
       const payload = {
         enabled: Boolean(form.elements.enabled.checked),
         price_stars: Math.max(1, Math.min(10000, Number(form.elements.price_stars.value || 99))),
+        author_pool_percent: Math.max(1, Math.min(95, Number(form.elements.author_pool_percent.value || 70))),
       };
       await apiFetch('/api/control/premium', { method: 'PATCH', body: JSON.stringify(payload) });
       notify('Настройки Premium сохранены');

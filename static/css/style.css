@@ -3513,3 +3513,423 @@ input, select, textarea, button { max-width:100%; }
   .reader { padding:14px 12px; }
   .reader p { overflow-wrap:anywhere; }
 }
+
+
+/* VoxLyra v1.11.5 · исправление профиля и мобильной личной полки */
+.library-illustrated-hero {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  align-items: center;
+  gap: 18px;
+  min-height: 230px;
+  padding: 22px;
+}
+.library-illustrated-hero .profile-medallion {
+  position: relative;
+  left: auto;
+  top: auto;
+  z-index: 2;
+  overflow: visible;
+}
+.library-illustrated-hero .profile-medallion img,
+.library-illustrated-hero .profile-medallion span {
+  object-fit: contain;
+  object-position: center;
+}
+.library-illustrated-hero .profile-medallion img {
+  padding: 5px;
+  background: rgba(7, 8, 24, .92);
+}
+.library-hero-copy {
+  min-width: 0;
+  max-width: 100%;
+}
+.library-hero-copy h1 {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 9px;
+  margin: 0;
+  font-size: clamp(30px, 7vw, 43px);
+  line-height: 1.05;
+  overflow-wrap: anywhere;
+}
+.library-profile-name {
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  margin-top: 8px;
+  padding: 6px 10px;
+  border: 1px solid rgba(255,255,255,.12);
+  border-radius: 999px;
+  color: rgba(255,255,255,.90);
+  background: rgba(9, 11, 30, .44);
+  backdrop-filter: blur(10px);
+  font-size: 14px;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.library-hero-copy p {
+  max-width: 560px;
+  margin: 13px 0 0;
+  line-height: 1.45;
+}
+@media (max-width: 560px) {
+  .library-illustrated-hero {
+    grid-template-columns: 66px minmax(0, 1fr);
+    gap: 14px;
+    min-height: 190px;
+    padding: 18px 16px;
+  }
+  .library-illustrated-hero .profile-medallion {
+    position: relative;
+    left: auto;
+    top: auto;
+    width: 66px;
+    height: 66px;
+    align-self: start;
+    margin-top: 2px;
+  }
+  .library-illustrated-hero .profile-medallion img,
+  .library-illustrated-hero .profile-medallion span {
+    width: 54px;
+    height: 54px;
+    font-size: 24px;
+  }
+  .library-illustrated-hero {
+    padding-top: 18px;
+  }
+  .library-hero-copy .eyebrow {
+    margin-bottom: 5px;
+    font-size: 10px;
+  }
+  .library-hero-copy h1 {
+    font-size: clamp(28px, 9vw, 36px);
+  }
+  .library-profile-name {
+    margin-top: 7px;
+    font-size: 13px;
+  }
+  .library-hero-copy p {
+    grid-column: 1 / -1;
+    margin-top: 11px;
+    font-size: 14px;
+  }
+  .route-nav {
+    min-height: 58px;
+    padding: 7px;
+    gap: 8px;
+  }
+  .route-nav button,
+  .route-nav a {
+    min-height: 44px;
+    padding: 8px 13px;
+    border-radius: 14px;
+    font-size: 15px;
+  }
+}
+@media (max-width: 360px) {
+  .library-illustrated-hero {
+    grid-template-columns: 58px minmax(0, 1fr);
+    gap: 11px;
+    padding: 16px 13px;
+  }
+  .library-illustrated-hero .profile-medallion {
+    width: 58px;
+    height: 58px;
+  }
+  .library-illustrated-hero .profile-medallion img,
+  .library-illustrated-hero .profile-medallion span {
+    width: 47px;
+    height: 47px;
+  }
+  .library-hero-copy h1 { font-size: 28px; }
+  .library-profile-name { max-width: 170px; }
+  .route-nav button,
+  .route-nav a { padding-inline: 10px; font-size: 14px; }
+}
+
+/* VoxLyra v1.11.6 · полноценная мобильная сетка кабинета автора */
+.author-studio-page .app-shell {
+  min-width: 0;
+  padding-bottom: calc(112px + env(safe-area-inset-bottom));
+}
+.author-studio-page .author-studio,
+.author-studio-page #authorDashboard,
+.author-studio-page .author-analytics-panel,
+.author-studio-page .author-finance-policy,
+.author-studio-page .author-welcome,
+.author-studio-page .panel-card,
+.author-studio-page .section-title,
+.author-studio-page .section-title > *,
+.author-studio-page .author-hero-copy {
+  min-width: 0;
+  max-width: 100%;
+}
+.author-studio-page .author-illustrated-hero {
+  display: grid !important;
+  grid-template-columns: 76px minmax(0, 1fr);
+  align-items: center !important;
+  gap: 16px;
+  min-height: 190px !important;
+  padding: 20px !important;
+}
+.author-studio-page .author-illustrated-hero .logo {
+  position: static !important;
+  inset: auto !important;
+  width: 76px !important;
+  height: 76px !important;
+  margin: 0 !important;
+  align-self: center;
+}
+.author-studio-page .author-hero-copy {
+  position: relative;
+  z-index: 2;
+}
+.author-studio-page .author-hero-copy .eyebrow {
+  display: block;
+  margin-bottom: 5px;
+}
+.author-studio-page .author-hero-copy h1 {
+  margin: 0 0 8px;
+  font-size: clamp(27px, 6.7vw, 38px);
+  line-height: 1.08;
+  overflow-wrap: anywhere;
+}
+.author-studio-page .author-hero-copy p {
+  margin: 0;
+  max-width: 560px;
+  font-size: .94rem;
+  line-height: 1.48;
+  overflow-wrap: anywhere;
+}
+.author-studio-page .author-welcome {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center !important;
+}
+.author-studio-page .author-welcome > div { min-width: 0; }
+.author-studio-page .author-welcome h2,
+.author-studio-page .author-welcome p,
+.author-studio-page .section-title h2,
+.author-studio-page .section-title p,
+.author-studio-page .author-price-example,
+.author-studio-page .analytics-row strong,
+.author-studio-page .analytics-row span,
+.author-studio-page .achievement-card strong,
+.author-studio-page .achievement-card p {
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
+.author-studio-page .section-title.split-title {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start !important;
+  gap: 12px;
+}
+.author-studio-page .section-title.split-title > select,
+.author-studio-page .section-title.split-title > .button-link {
+  align-self: start;
+}
+.author-studio-page .author-analytics-panel,
+.author-studio-page .achievement-panel,
+.author-studio-page .author-finance-policy {
+  overflow: hidden;
+}
+.author-studio-page .author-analytics-summary {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.author-studio-page .author-analytics-summary article,
+.author-studio-page .author-finance-breakdown article,
+.author-studio-page .author-stat-grid article {
+  min-width: 0;
+}
+.author-studio-page .analytics-row {
+  min-width: 0;
+}
+.author-studio-page .analytics-row div { min-width: 0; }
+.author-studio-page .analytics-row strong {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+}
+.author-studio-page .achievement-card {
+  min-width: 0;
+  align-items: flex-start;
+}
+.author-studio-page .achievement-card > div { min-width: 0; }
+.author-studio-page input,
+.author-studio-page textarea,
+.author-studio-page select,
+.author-studio-page button,
+.author-studio-page .button-link {
+  min-width: 0;
+}
+
+@media (max-width: 700px) {
+  .illustrated-miniapp .app-shell {
+    padding-bottom: calc(112px + env(safe-area-inset-bottom));
+  }
+  .author-studio-page .app-ambient i { display: none; }
+  .author-studio-page .author-illustrated-hero {
+    grid-template-columns: 62px minmax(0, 1fr);
+    gap: 13px;
+    min-height: 164px !important;
+    padding: 16px !important;
+  }
+  .author-studio-page .author-illustrated-hero .logo {
+    width: 62px !important;
+    height: 62px !important;
+  }
+  .author-studio-page .author-illustrated-hero .illustrated-hero-backdrop {
+    background-position: 50% 48% !important;
+  }
+  .author-studio-page .author-illustrated-hero .illustrated-hero-backdrop::before {
+    background: linear-gradient(90deg, rgba(7,8,21,.92), rgba(8,9,24,.75) 58%, rgba(8,9,24,.44)) !important;
+  }
+  .author-studio-page .author-hero-copy h1 {
+    font-size: clamp(25px, 7.5vw, 32px);
+  }
+  .author-studio-page .author-hero-copy p { font-size: .86rem; }
+  .author-studio-page .author-welcome {
+    grid-template-columns: 1fr;
+    align-items: stretch !important;
+    gap: 13px;
+    padding: 15px;
+    border-radius: 20px;
+  }
+  .author-studio-page .author-welcome h2 {
+    font-size: 26px;
+    line-height: 1.12;
+  }
+  .author-studio-page .author-welcome > .button-link {
+    width: 100%;
+    justify-self: stretch;
+  }
+  .author-studio-page .section-title.split-title {
+    grid-template-columns: 1fr;
+  }
+  .author-studio-page .section-title.split-title > select,
+  .author-studio-page .section-title.split-title > .button-link {
+    width: 100%;
+  }
+  .author-studio-page .author-analytics-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 8px;
+  }
+  .author-studio-page .author-analytics-summary article {
+    min-height: 82px;
+    padding: 12px;
+    border-radius: 15px;
+  }
+  .author-studio-page .author-analytics-summary span {
+    font-size: .72rem;
+    line-height: 1.28;
+  }
+  .author-studio-page .author-analytics-summary strong { font-size: 1.08rem; }
+  .author-studio-page .analytics-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    align-items: start;
+    gap: 7px;
+    padding: 12px;
+  }
+  .author-studio-page .analytics-row b {
+    justify-self: start;
+    font-size: .82rem;
+  }
+  .author-studio-page .analytics-row span {
+    line-height: 1.42;
+  }
+  .author-studio-page .achievement-card {
+    padding: 12px;
+    gap: 11px;
+  }
+  .author-studio-page .achievement-icon {
+    width: 46px;
+    height: 46px;
+    flex-basis: 46px;
+  }
+  .author-studio-page .author-finance-breakdown {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 8px;
+  }
+  .author-studio-page .author-finance-breakdown article { padding: 12px; }
+  .author-studio-page .author-price-example { line-height: 1.5; }
+  .author-studio-page .author-stat-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 8px;
+    margin: 12px 0 18px;
+  }
+  .author-studio-page .author-stat-grid article {
+    min-height: 76px;
+    padding: 12px;
+  }
+  .author-studio-page .author-book-card {
+    grid-template-columns: 48px minmax(0, 1fr) auto;
+    gap: 10px;
+    padding: 12px;
+  }
+  .author-studio-page .author-book-card h3,
+  .author-studio-page .author-book-card p,
+  .author-studio-page .author-book-card span {
+    overflow-wrap: anywhere;
+  }
+  .bottom-nav {
+    bottom: max(7px, env(safe-area-inset-bottom));
+  }
+}
+
+@media (max-width: 430px) {
+  .author-studio-page .app-shell { padding-inline: 9px; }
+  .author-studio-page .author-illustrated-hero {
+    grid-template-columns: 54px minmax(0, 1fr);
+    gap: 11px;
+    min-height: 150px !important;
+    padding: 14px !important;
+    border-radius: 21px;
+  }
+  .author-studio-page .author-illustrated-hero .logo {
+    width: 54px !important;
+    height: 54px !important;
+  }
+  .author-studio-page .author-hero-copy .eyebrow { font-size: 10px; }
+  .author-studio-page .author-hero-copy h1 { font-size: 24px; }
+  .author-studio-page .author-hero-copy p { font-size: 13px; line-height: 1.42; }
+  .author-studio-page .panel-card { padding: 13px; }
+  .author-studio-page .section-title { margin-inline: 0; }
+  .author-studio-page .section-title h2 { font-size: 22px; }
+  .author-studio-page .section-title p { font-size: 13px; line-height: 1.48; }
+  .author-studio-page .author-analytics-summary article { min-height: 78px; }
+  .author-studio-page .author-finance-breakdown article span { font-size: .7rem; line-height: 1.3; }
+  .author-studio-page .author-finance-breakdown article strong { font-size: 1rem; }
+  .bottom-nav {
+    left: 6px;
+    right: 6px;
+    max-width: calc(100% - 12px);
+    padding: 6px 4px;
+    gap: 1px;
+    border-radius: 19px;
+  }
+  .bottom-nav a { min-height: 50px; border-radius: 14px; }
+  .bottom-nav a img { width: 24px; height: 24px; }
+  .bottom-nav a span { font-size: 8px; }
+}
+
+@media (max-width: 340px) {
+  .author-studio-page .author-illustrated-hero {
+    grid-template-columns: 1fr;
+    text-align: left;
+  }
+  .author-studio-page .author-illustrated-hero .logo {
+    width: 50px !important;
+    height: 50px !important;
+  }
+  .author-studio-page .author-analytics-summary,
+  .author-studio-page .author-finance-breakdown,
+  .author-studio-page .author-stat-grid {
+    grid-template-columns: 1fr !important;
+  }
+}
