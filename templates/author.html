@@ -6,7 +6,7 @@
 <section class="hero compact author-hero illustrated-hero author-illustrated-hero">
   <div class="illustrated-hero-backdrop" aria-hidden="true"></div>
   <img src="/static/img/miniapp/voxlyra-v.webp" alt="Вокслира" class="logo illustrated-logo">
-  <div>
+  <div class="author-hero-copy">
     <span class="eyebrow">Творческая студия</span>
     <h1>Кабинет автора</h1>
     <p>Книги, главы, импорт и публикация — в одном месте.</p>
@@ -48,7 +48,7 @@
 
     <section class="panel-card author-finance-policy" id="authorFinancePolicy">
       <div class="section-title split-title slim">
-        <div><span class="eyebrow">Прозрачные расчёты</span><h2>Комиссии и выплаты</h2><p>Цена задаётся в Telegram Stars. Покупателю показывается ориентировочная стоимость в рублях, а вознаграждение автора фиксируется по отдельному курсу.</p></div>
+        <div><span class="eyebrow">Прозрачные расчёты</span><h2>Комиссии и выплаты</h2><p>Цена задаётся в Telegram Stars. Продажи и доход от Premium входят в общий баланс автора. Фонд Premium распределяется по реальному чтению только целыми Stars.</p></div>
         <a class="button-link secondary compact-button" href="/legal/fees_payouts">Правила выплат</a>
       </div>
       <div class="author-finance-breakdown">
@@ -125,8 +125,8 @@
       <div><span class="eyebrow">Проекты</span><h2>Мои произведения</h2><p>Выберите, что создаёте: текстовую книгу или графическое произведение.</p></div>
     </div>
     <div class="author-create-choices" aria-label="Создать новое произведение">
-      <button class="author-create-choice" id="newTextProject" type="button"><img src="/static/img/miniapp/icons/create-book.webp?v=1.10.4-icons2" alt="" aria-hidden="true"><strong>Создать книгу</strong><small>Текстовые главы, аудио и пакеты глав</small></button>
-      <button class="author-create-choice graphic" id="newGraphicProject" type="button"><img src="/static/img/miniapp/icons/create-comic.webp?v=1.10.4-icons2" alt="" aria-hidden="true"><strong>Создать комикс / мангу</strong><small>Комикс, манга, манхва, вебтун или графический роман</small></button>
+      <button class="author-create-choice" id="newTextProject" type="button"><img src="/static/img/miniapp/icons/create-book.webp?v={{ asset_version }}" alt="" aria-hidden="true"><strong>Создать книгу</strong><small>Текстовые главы, аудио и пакеты глав</small></button>
+      <button class="author-create-choice graphic" id="newGraphicProject" type="button"><img src="/static/img/miniapp/icons/create-comic.webp?v={{ asset_version }}" alt="" aria-hidden="true"><strong>Создать комикс / мангу</strong><small>Комикс, манга, манхва, вебтун или графический роман</small></button>
     </div>
     <form id="newProjectForm" class="author-form panel-card new-project-form" hidden>
       <h3 id="newProjectFormTitle">Новое произведение</h3><p class="muted" id="newProjectFormHint">Сначала выберите тип, затем создайте проект и загрузите главы.</p>
