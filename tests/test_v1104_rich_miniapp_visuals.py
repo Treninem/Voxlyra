@@ -85,8 +85,8 @@ def test_v1104_templates_integrate_splash_icons_and_empty_states():
     base = (ROOT / "templates" / "base.html").read_text(encoding="utf-8")
     assert 'id="voxSplash"' in base
     assert "splash-v.webp" in base
-    assert "icons/home.webp?v=1.10.4-icons2" in base
-    assert "icons/settings.webp?v=1.10.4-icons2" in base
+    assert "icons/home.webp?v={{ asset_version }}" in base
+    assert "icons/settings.webp?v={{ asset_version }}" in base
 
     catalog = (ROOT / "templates" / "catalog.html").read_text(encoding="utf-8")
     assert "hero-main" not in catalog  # mapped through CSS, not duplicated in markup
@@ -96,17 +96,17 @@ def test_v1104_templates_integrate_splash_icons_and_empty_states():
     library = (ROOT / "templates" / "library.html").read_text(encoding="utf-8")
     assert "profile-medallion" in library
     assert "chapter-loading" in library
-    assert "icons/control.webp?v=1.10.4-icons2" in library
+    assert "icons/control.webp?v={{ asset_version }}" in library
     assert "control-center-entry" in library
 
     author = (ROOT / "templates" / "author.html").read_text(encoding="utf-8")
     assert 'id="moderationSuccess"' in author
     assert "empty/moderation.webp" in author
-    assert "icons/create-book.webp?v=1.10.4-icons2" in author
-    assert "icons/create-comic.webp?v=1.10.4-icons2" in author
+    assert "icons/create-book.webp?v={{ asset_version }}" in author
+    assert "icons/create-comic.webp?v={{ asset_version }}" in author
 
     settings = (ROOT / "templates" / "settings.html").read_text(encoding="utf-8")
-    assert "icons/moderator.webp?v=1.10.4-icons2" in settings
+    assert "icons/moderator.webp?v={{ asset_version }}" in settings
     assert 'data-profile-frame="moderator"' in settings
 
 

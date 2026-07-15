@@ -7,7 +7,7 @@ from pathlib import Path
 def test_v198_build_navigation_and_stage4_assets_exist():
     from app.build_info import OWNER_BUILD_NAME, OWNER_BUILD_VERSION
 
-    assert OWNER_BUILD_VERSION in {"v1.9.8", "v1.9.9", "v1.10.0", "v1.10.1", "v1.10.2", "v1.10.3", "v1.10.4", "v1.10.5", "v1.11.0", "v1.11.1", "v1.11.2", "v1.11.3", "v1.11.4"}
+    assert OWNER_BUILD_VERSION in {"v1.9.8", "v1.9.9", "v1.10.0", "v1.10.1", "v1.10.2", "v1.10.3", "v1.10.4", "v1.10.5", "v1.11.0", "v1.11.1", "v1.11.2", "v1.11.3", "v1.11.4", "v1.11.5", "v1.11.6", "v1.11.7", "v1.11.8"}
     assert "комикс" in OWNER_BUILD_NAME.lower()
     for relative in (
         "docs/COMICS_STAGE4_V1_9_8.md",
