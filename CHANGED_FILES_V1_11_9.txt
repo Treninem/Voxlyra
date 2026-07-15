@@ -1,0 +1,23 @@
+VoxLyra v1.11.9
+
+Изменены или добавлены:
+- .env.example
+- README.md
+- RELEASE_MANIFEST.json
+- UPDATE_INSTRUCTIONS.md
+- ПЕРЕНОС_В_НОВЫЙ_ЧАТ.md
+- app/build_info.py
+- app/config.py
+- app/catalog_options.py
+- app/keyboards.py
+- app/handlers/author.py
+- docs/ADAPTIVE_CATALOG_V1_11_9.md
+- docs/STATUS_V1_11_9.md
+- docs/RELEASE_CHECK_V1_11_9.md
+- docs/FINAL_TEST_REPORT_V1_11_9.md
+- docs/PROJECT_MEMORY.md
+- docs/PROJECT_MEMORY_CURRENT.md
+- docs/TRANSFER_TO_NEW_CHAT.md
+- tests/test_v1119_adaptive_catalog.py
+- тесты совместимости версий обновлены для v1.11.9
+- FILE_INVENTORY_V1_11_9.txt

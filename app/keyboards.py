@@ -171,10 +171,17 @@ def navigation_menu(
     return kb.as_markup()
 
 
-def age_menu(prefix: str, back_callback: str | None = None, cancel_callback: str | None = None) -> InlineKeyboardMarkup:
+def age_menu(
+    prefix: str,
+    back_callback: str | None = None,
+    cancel_callback: str | None = None,
+    *,
+    recommended: str | None = None,
+) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     for value in ["0+", "6+", "12+", "16+", "18+"]:
-        kb.button(text=value, callback_data=f"{prefix}:{value}")
+        label = f"⭐ {value}" if value == recommended else value
+        kb.button(text=label, callback_data=f"{prefix}:{value}")
     _append_navigation(kb, back_callback=back_callback, cancel_callback=cancel_callback)
     kb.adjust(3, 2, 1, 1)
     return kb.as_markup()
@@ -562,34 +569,72 @@ def single_select_menu(
     choices,
     back_callback: str | None = None,
     cancel_callback: str | None = None,
+    *,
+    page: int = 0,
+    per_page: int = 12,
 ) -> InlineKeyboardMarkup:
+    choices = list(choices or [])
+    total_pages = max(1, (len(choices) + per_page - 1) // per_page)
+    page = max(0, min(int(page or 0), total_pages - 1))
+    start = page * per_page
     kb = InlineKeyboardBuilder()
-    for choice in choices:
+    for choice in choices[start:start + per_page]:
         kb.button(text=choice.label, callback_data=f"single:{prefix}:{choice.code}")
+    if total_pages > 1:
+        if page > 0:
+            kb.button(text="⬅️ Предыдущие", callback_data=f"single:{prefix}:p:{page-1}")
+        kb.button(text=f"{page + 1}/{total_pages}", callback_data=f"single:{prefix}:noop")
+        if page < total_pages - 1:
+            kb.button(text="Следующие ➡️", callback_data=f"single:{prefix}:p:{page+1}")
     _append_navigation(kb, back_callback=back_callback, cancel_callback=cancel_callback)
     kb.adjust(1)
     return kb.as_markup()
 
 
-def multi_select_menu(prefix: str, choices, selected: set[str] | list[str] | tuple[str, ...], page: int = 0,
-                      per_page: int = 12, back_callback: str | None = None,
-                      cancel_callback: str | None = None) -> InlineKeyboardMarkup:
+def multi_select_menu(
+    prefix: str,
+    choices,
+    selected: set[str] | list[str] | tuple[str, ...],
+    page: int = 0,
+    per_page: int = 10,
+    back_callback: str | None = None,
+    cancel_callback: str | None = None,
+    *,
+    section_code: str = "all",
+    section_label: str = "Все",
+    sections=(),
+    show_sections: bool = False,
+) -> InlineKeyboardMarkup:
     selected_set = set(selected or [])
-    total_pages = max(1, (len(choices) + per_page - 1) // per_page)
-    page = max(0, min(page, total_pages - 1))
-    start = page * per_page
-    end = start + per_page
+    choices = list(choices or [])
     kb = InlineKeyboardBuilder()
-    for choice in choices[start:end]:
+
+    if show_sections:
+        for section in sections or ():
+            mark = "✅" if section.code == section_code else "▫️"
+            kb.button(text=f"{mark} {section.label}", callback_data=f"sel:{prefix}:s:{section.code}")
+        kb.button(text=f"✅ Готово · выбрано {len(selected_set)}", callback_data=f"sel:{prefix}:d")
+        _append_navigation(kb, back_callback=back_callback, cancel_callback=cancel_callback)
+        kb.adjust(1)
+        return kb.as_markup()
+
+    total_pages = max(1, (len(choices) + per_page - 1) // per_page)
+    page = max(0, min(int(page or 0), total_pages - 1))
+    start = page * per_page
+    for choice in choices[start:start + per_page]:
         mark = "✅" if choice.code in selected_set else "▫️"
         kb.button(text=f"{mark} {choice.label}", callback_data=f"sel:{prefix}:t:{choice.code}")
+    if not choices:
+        kb.button(text="В этом разделе пока нет вариантов", callback_data=f"sel:{prefix}:noop")
     if total_pages > 1:
         if page > 0:
-            kb.button(text="⬅️ Назад", callback_data=f"sel:{prefix}:p:{page-1}")
+            kb.button(text="⬅️ Предыдущие", callback_data=f"sel:{prefix}:p:{page-1}")
         kb.button(text=f"{page + 1}/{total_pages}", callback_data=f"sel:{prefix}:noop")
         if page < total_pages - 1:
-            kb.button(text="Вперёд ➡️", callback_data=f"sel:{prefix}:p:{page+1}")
-    kb.button(text="✅ Готово", callback_data=f"sel:{prefix}:d")
+            kb.button(text="Следующие ➡️", callback_data=f"sel:{prefix}:p:{page+1}")
+    if sections:
+        kb.button(text=f"📂 Раздел: {section_label}", callback_data=f"sel:{prefix}:m")
+    kb.button(text=f"✅ Готово · выбрано {len(selected_set)}", callback_data=f"sel:{prefix}:d")
     _append_navigation(kb, back_callback=back_callback, cancel_callback=cancel_callback)
     kb.adjust(1)
     return kb.as_markup()

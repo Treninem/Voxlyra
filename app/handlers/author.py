@@ -99,11 +99,96 @@ from app.services.publication import finish_book_content_workflow, publish_book_
 from app.services.audio_tools import AudioImportError, build_audio_import_report, extract_audio_zip, format_duration, inspect_audio_file
 from app.services.pricing import recommend_book_price
 from app.handlers.legal import send_next_required_document
-from app.catalog_options import BOOK_TYPES, LANGUAGES, GENRES, TROPES, AUDIENCES, CONTENT_WARNINGS, AD_PLACEMENTS, PROMO_DISCOUNTS, label_for, labels_for
+from app.catalog_options import (
+    BOOK_TYPES,
+    LANGUAGES,
+    GENRES,
+    TROPES,
+    AUDIENCES,
+    CONTENT_WARNINGS,
+    AD_PLACEMENTS,
+    PROMO_DISCOUNTS,
+    choices_in_section,
+    section_label,
+    sections_for_prefix,
+    suggested_age_limit,
+    label_for,
+    labels_for,
+)
 
 logger = logging.getLogger(__name__)
 
 router = Router()
+
+
+_OPTION_CHOICES = {
+    "g": GENRES,
+    "t": TROPES,
+    "a": AUDIENCES,
+    "c": CONTENT_WARNINGS,
+}
+_OPTION_STATE_KEYS = {
+    "g": "selected_g",
+    "t": "selected_t",
+    "a": "selected_a",
+    "c": "selected_c",
+}
+
+
+def _smart_option_markup(prefix: str, data: dict, *, selected=None):
+    choices = _OPTION_CHOICES[prefix]
+    state_key = _OPTION_STATE_KEYS[prefix]
+    selected_values = set(selected if selected is not None else data.get(state_key, []))
+    section_code = str(data.get(f"section_{prefix}") or "recommended")
+    show_sections = bool(data.get(f"section_menu_{prefix}", False))
+    page = int(data.get(f"page_{prefix}", 0) or 0)
+    visible_choices = choices_in_section(
+        prefix,
+        choices,
+        section_code,
+        selected=selected_values,
+        book_type_codes=data.get("book_type", []),
+        genre_codes=data.get("selected_g", []),
+        trope_codes=data.get("selected_t", []),
+    )
+    return multi_select_menu(
+        prefix,
+        visible_choices,
+        selected_values,
+        page=page,
+        per_page=10,
+        cancel_callback="author:cancel_flow",
+        section_code=section_code,
+        section_label=section_label(prefix, section_code),
+        sections=sections_for_prefix(prefix, selected_values),
+        show_sections=show_sections,
+    )
+
+
+def _option_intro(prefix: str, data: dict) -> str:
+    if prefix == "g":
+        return (
+            f"<b>Выберите жанры</b>\n\nДоступно вариантов: <b>{len(GENRES)}</b>. "
+            "Сначала показаны варианты, подходящие к выбранному типу книги. "
+            "Кнопка «Раздел» открывает тематические группы и полный список. Можно выбрать несколько жанров."
+        )
+    if prefix == "t":
+        return (
+            f"<b>Выберите сюжетные теги и особенности</b>\n\nДоступно вариантов: <b>{len(TROPES)}</b>. "
+            "Подходящие варианты рассчитаны по типу и выбранным жанрам. "
+            "Отмечайте только действительно важные особенности: они влияют на рекомендации и рекламу похожих книг."
+        )
+    if prefix == "a":
+        return (
+            f"<b>Кому подойдёт книга</b>\n\nДоступно вариантов: <b>{len(AUDIENCES)}</b>. "
+            "Сначала показаны вероятные группы читателей. Можно выбрать возраст, интересы и привычный стиль чтения."
+        )
+    return (
+        f"<b>Предупреждения по содержанию</b>\n\nДоступно вариантов: <b>{len(CONTENT_WARNINGS)}</b>. "
+        "Сначала показаны темы, которые могут встречаться при выбранных жанрах и тегах. "
+        "Ничего не отмечается автоматически — выберите только то, что действительно есть в книге. "
+        "Пункт «Без особых предупреждений» нельзя сочетать с другими предупреждениями."
+    )
 
 
 def _book_text_pricing_mode(book) -> str:
@@ -529,108 +614,248 @@ async def add_book_duplicate_title_change(call: CallbackQuery, state: FSMContext
 @router.message(AddBook.description)
 async def add_book_description(message: Message, state: FSMContext) -> None:
     description = (message.text or "").strip()
-    await state.update_data(description=description[:4000])
+    await state.update_data(description=description[:4000], page_type=0)
     await state.set_state(AddBook.book_type)
     await message.answer(
-        "Выберите тип книги.",
-        reply_markup=single_select_menu("type", BOOK_TYPES, cancel_callback="author:cancel_flow"),
+        "<b>Выберите тип книги</b>\n\n"
+        "Тип описывает форму произведения, а не содержание: роман, сборник, книга-игра, руководство и так далее. "
+        "Жанры будут выбраны следующим шагом.",
+        reply_markup=single_select_menu(
+            "type", BOOK_TYPES, cancel_callback="author:cancel_flow", page=0, per_page=9
+        ),
     )
 
 
 @router.callback_query(AddBook.description, F.data == "book:skip:description")
 async def add_book_description_skip(call: CallbackQuery, state: FSMContext) -> None:
-    await state.update_data(description="")
+    await state.update_data(description="", page_type=0)
     await state.set_state(AddBook.book_type)
     await call.message.edit_text(
-        "Описание пропущено. Выберите тип книги.",
-        reply_markup=single_select_menu("type", BOOK_TYPES, cancel_callback="author:cancel_flow"),
+        "<b>Выберите тип книги</b>\n\n"
+        "Тип описывает форму произведения, а жанр — содержание. После выбора система покажет наиболее подходящие жанры.",
+        reply_markup=single_select_menu(
+            "type", BOOK_TYPES, cancel_callback="author:cancel_flow", page=0, per_page=9
+        ),
     )
-    await call.answer("Пропущено")
+    await call.answer("Описание пропущено")
+
+
+@router.callback_query(AddBook.book_type, F.data.startswith("single:type:p:"))
+async def add_book_type_page(call: CallbackQuery, state: FSMContext) -> None:
+    try:
+        page = max(0, int(call.data.rsplit(":", 1)[-1]))
+    except (TypeError, ValueError):
+        await call.answer()
+        return
+    await state.update_data(page_type=page)
+    await call.message.edit_reply_markup(
+        reply_markup=single_select_menu(
+            "type", BOOK_TYPES, cancel_callback="author:cancel_flow", page=page, per_page=9
+        )
+    )
+    await call.answer()
+
+
+@router.callback_query(AddBook.book_type, F.data == "single:type:noop")
+async def add_book_type_noop(call: CallbackQuery) -> None:
+    await call.answer()
 
 
 @router.callback_query(AddBook.book_type, F.data.startswith("single:type:"))
 async def add_book_type(call: CallbackQuery, state: FSMContext) -> None:
-    code = call.data.split(":")[-1]
+    parts = call.data.split(":")
+    if len(parts) != 3:
+        await call.answer()
+        return
+    code = parts[-1]
+    if code not in {item.code for item in BOOK_TYPES}:
+        await call.answer("Неизвестный тип", show_alert=True)
+        return
     await state.update_data(book_type=[code])
     await state.set_state(AddBook.language)
-    await call.message.edit_text("Выберите язык книги.", reply_markup=single_select_menu("lang", LANGUAGES, cancel_callback="author:cancel_flow"))
+    await call.message.edit_text(
+        "Выберите язык книги.",
+        reply_markup=single_select_menu("lang", LANGUAGES, cancel_callback="author:cancel_flow"),
+    )
     await call.answer()
 
 
 @router.callback_query(AddBook.language, F.data.startswith("single:lang:"))
 async def add_book_language(call: CallbackQuery, state: FSMContext) -> None:
-    code = call.data.split(":")[-1]
-    await state.update_data(language=[code], selected_g=[], selected_t=[], selected_a=[], selected_c=[])
+    parts = call.data.split(":")
+    if len(parts) != 3:
+        await call.answer()
+        return
+    code = parts[-1]
+    if code not in {item.code for item in LANGUAGES}:
+        await call.answer("Неизвестный язык", show_alert=True)
+        return
+    await state.update_data(
+        language=[code],
+        selected_g=[], selected_t=[], selected_a=[], selected_c=[],
+        section_g="recommended", section_t="recommended", section_a="recommended", section_c="recommended",
+        section_menu_g=False, section_menu_t=False, section_menu_a=False, section_menu_c=False,
+        page_g=0, page_t=0, page_a=0, page_c=0,
+    )
     await state.set_state(AddBook.genres)
-    await call.message.edit_text("Выберите жанры. Можно отметить несколько вариантов.", reply_markup=multi_select_menu("g", GENRES, set(), page=0, cancel_callback="author:cancel_flow"))
+    data = await state.get_data()
+    await call.message.edit_text(_option_intro("g", data), reply_markup=_smart_option_markup("g", data))
     await call.answer()
 
 
-async def _handle_multiselect(call: CallbackQuery, state: FSMContext, *, prefix: str, choices, state_key: str,
-                              next_state, next_text: str, next_markup, min_required: int = 0) -> None:
+def _ordered_selected(choices, selected: set[str]) -> list[str]:
+    return [item.code for item in choices if item.code in selected]
+
+
+async def _handle_multiselect(
+    call: CallbackQuery,
+    state: FSMContext,
+    *,
+    prefix: str,
+    next_state,
+    next_prefix: str | None = None,
+    min_required: int = 0,
+) -> None:
     parts = call.data.split(":")
     action = parts[2] if len(parts) > 2 else "noop"
+    choices = _OPTION_CHOICES[prefix]
+    valid_codes = {item.code for item in choices}
+    state_key = _OPTION_STATE_KEYS[prefix]
     data = await state.get_data()
-    selected = set(data.get(state_key, []))
+    selected = set(data.get(state_key, [])) & valid_codes
     page_key = f"page_{prefix}"
-    page = int(data.get(page_key, 0))
+
     if action == "t" and len(parts) >= 4:
         code = parts[3]
+        if code not in valid_codes:
+            await call.answer("Такого варианта нет", show_alert=True)
+            return
         if code in selected:
             selected.remove(code)
         else:
-            selected.add(code)
-        await state.update_data(**{state_key: list(selected)})
-        await call.message.edit_reply_markup(reply_markup=multi_select_menu(prefix, choices, selected, page=page, cancel_callback="author:cancel_flow"))
+            if prefix == "c" and code == "none":
+                selected = {"none"}
+            else:
+                selected.add(code)
+                if prefix == "c":
+                    selected.discard("none")
+        ordered = _ordered_selected(choices, selected)
+        await state.update_data(**{state_key: ordered})
+        data[state_key] = ordered
+        await call.message.edit_reply_markup(reply_markup=_smart_option_markup(prefix, data, selected=selected))
         await call.answer("Выбор обновлён")
         return
+
     if action == "p" and len(parts) >= 4:
-        page = int(parts[3])
+        try:
+            page = max(0, int(parts[3]))
+        except ValueError:
+            await call.answer()
+            return
         await state.update_data(**{page_key: page})
-        await call.message.edit_reply_markup(reply_markup=multi_select_menu(prefix, choices, selected, page=page, cancel_callback="author:cancel_flow"))
+        data[page_key] = page
+        await call.message.edit_reply_markup(reply_markup=_smart_option_markup(prefix, data, selected=selected))
         await call.answer()
         return
+
+    if action == "m":
+        await state.update_data(**{f"section_menu_{prefix}": True})
+        data[f"section_menu_{prefix}"] = True
+        await call.message.edit_reply_markup(reply_markup=_smart_option_markup(prefix, data, selected=selected))
+        await call.answer("Выберите раздел")
+        return
+
+    if action == "s" and len(parts) >= 4:
+        section_code = parts[3]
+        allowed_sections = {item.code for item in sections_for_prefix(prefix, selected)}
+        if section_code not in allowed_sections:
+            await call.answer("Раздел недоступен", show_alert=True)
+            return
+        await state.update_data(
+            **{
+                f"section_{prefix}": section_code,
+                f"section_menu_{prefix}": False,
+                page_key: 0,
+            }
+        )
+        data[f"section_{prefix}"] = section_code
+        data[f"section_menu_{prefix}"] = False
+        data[page_key] = 0
+        await call.message.edit_reply_markup(reply_markup=_smart_option_markup(prefix, data, selected=selected))
+        await call.answer(section_label(prefix, section_code))
+        return
+
     if action == "d":
+        if prefix == "c" and not selected:
+            selected = {"none"}
+            ordered = ["none"]
+            await state.update_data(selected_c=ordered)
+            data["selected_c"] = ordered
         if len(selected) < min_required:
             await call.answer(f"Выберите минимум {min_required} пункт(а).", show_alert=True)
             return
         await state.set_state(next_state)
-        await call.message.edit_text(next_text, reply_markup=next_markup)
+        if next_prefix:
+            next_key = _OPTION_STATE_KEYS[next_prefix]
+            await state.update_data(
+                **{
+                    next_key: [],
+                    f"section_{next_prefix}": "recommended",
+                    f"section_menu_{next_prefix}": False,
+                    f"page_{next_prefix}": 0,
+                }
+            )
+            data[next_key] = []
+            data[f"section_{next_prefix}"] = "recommended"
+            data[f"section_menu_{next_prefix}"] = False
+            data[f"page_{next_prefix}"] = 0
+            await call.message.edit_text(
+                _option_intro(next_prefix, data),
+                reply_markup=_smart_option_markup(next_prefix, data),
+            )
+        else:
+            recommendation = suggested_age_limit(data.get("selected_c", []), data.get("selected_g", []))
+            await state.update_data(suggested_age_limit=recommendation)
+            await call.message.edit_text(
+                "<b>Выберите возрастное ограничение</b>\n\n"
+                f"По отмеченным темам предварительно подходит <b>{recommendation}</b>. "
+                "Звёздочка — только подсказка: автор обязан выбрать достоверную маркировку по фактическому содержанию.",
+                reply_markup=age_menu(
+                    "book:age", cancel_callback="author:cancel_flow", recommended=recommendation
+                ),
+            )
         await call.answer()
         return
+
     await call.answer()
 
 
 @router.callback_query(AddBook.genres, F.data.startswith("sel:g:"))
 async def add_book_genres(call: CallbackQuery, state: FSMContext) -> None:
-    await _handle_multiselect(call, state, prefix="g", choices=GENRES, state_key="selected_g",
-                              next_state=AddBook.tropes,
-                              next_text="Выберите сюжетные теги и особенности. Это нужно для рекомендаций и рекламы похожих книг.",
-                              next_markup=multi_select_menu("t", TROPES, set(), page=0, cancel_callback="author:cancel_flow"), min_required=1)
+    await _handle_multiselect(
+        call, state, prefix="g", next_state=AddBook.tropes, next_prefix="t", min_required=1
+    )
 
 
 @router.callback_query(AddBook.tropes, F.data.startswith("sel:t:"))
 async def add_book_tropes(call: CallbackQuery, state: FSMContext) -> None:
-    await _handle_multiselect(call, state, prefix="t", choices=TROPES, state_key="selected_t",
-                              next_state=AddBook.audience,
-                              next_text="Выберите, кому книга больше подходит. Можно отметить несколько вариантов.",
-                              next_markup=multi_select_menu("a", AUDIENCES, set(), page=0, cancel_callback="author:cancel_flow"), min_required=0)
+    await _handle_multiselect(
+        call, state, prefix="t", next_state=AddBook.audience, next_prefix="a", min_required=1
+    )
 
 
 @router.callback_query(AddBook.audience, F.data.startswith("sel:a:"))
 async def add_book_audience(call: CallbackQuery, state: FSMContext) -> None:
-    await _handle_multiselect(call, state, prefix="a", choices=AUDIENCES, state_key="selected_a",
-                              next_state=AddBook.content_warnings,
-                              next_text="Выберите предупреждения по содержанию. Если ничего особого нет, просто нажмите «Готово».",
-                              next_markup=multi_select_menu("c", CONTENT_WARNINGS, set(), page=0, cancel_callback="author:cancel_flow"), min_required=0)
+    await _handle_multiselect(
+        call, state, prefix="a", next_state=AddBook.content_warnings, next_prefix="c", min_required=0
+    )
 
 
 @router.callback_query(AddBook.content_warnings, F.data.startswith("sel:c:"))
 async def add_book_content_warnings(call: CallbackQuery, state: FSMContext) -> None:
-    await _handle_multiselect(call, state, prefix="c", choices=CONTENT_WARNINGS, state_key="selected_c",
-                              next_state=AddBook.age_limit,
-                              next_text="Выберите возрастное ограничение.",
-                              next_markup=age_menu("book:age", cancel_callback="author:cancel_flow"), min_required=0)
+    await _handle_multiselect(
+        call, state, prefix="c", next_state=AddBook.age_limit, next_prefix=None, min_required=0
+    )
 
 
 @router.callback_query(AddBook.age_limit, F.data.startswith("book:age:"))

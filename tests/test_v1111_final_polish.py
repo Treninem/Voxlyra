@@ -28,7 +28,7 @@ def test_version_is_owner_only_and_static_cache_is_refreshed():
     base = (ROOT / "templates" / "base.html").read_text(encoding="utf-8")
     config = (ROOT / "app" / "config.py").read_text(encoding="utf-8")
 
-    assert 'OWNER_BUILD_VERSION = "v1.11.8"' in build
+    assert 'OWNER_BUILD_VERSION = "v1.11.9"' in build
     assert "owner_build_label()" in owner
     assert "OWNER_BUILD_VERSION" not in base
     assert "PUBLIC_VERSION_VISIBLE: bool = False" in config

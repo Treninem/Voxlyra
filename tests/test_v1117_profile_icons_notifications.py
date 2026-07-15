@@ -71,4 +71,4 @@ def test_root_favicon_route_and_file_exist():
 
 def test_build_version_bumped_to_v1117():
     build = (ROOT / "app" / "build_info.py").read_text(encoding="utf-8")
-    assert 'OWNER_BUILD_VERSION = "v1.11.8"' in build
+    assert 'OWNER_BUILD_VERSION = "v1.11.9"' in build

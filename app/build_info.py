@@ -5,12 +5,12 @@
 передаётся.
 """
 
-OWNER_BUILD_VERSION = "v1.11.8"
-OWNER_BUILD_NAME = "база и комиксы сохранены · доход Premium авторам целыми Stars"
+OWNER_BUILD_VERSION = "v1.11.9"
+OWNER_BUILD_NAME = "база и комиксы сохранены · умный каталог жанров, тегов и предупреждений"
 
 
 def owner_build_label() -> str:
     return f"{OWNER_BUILD_VERSION} · {OWNER_BUILD_NAME}"
 
 
-WORKING_BUILD_STAGE = "v1.11.8 · фонд авторов Premium и целочисленное распределение"
+WORKING_BUILD_STAGE = "v1.11.9 · адаптивная классификация книг"
