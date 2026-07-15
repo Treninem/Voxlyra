@@ -464,6 +464,7 @@ async def _init_db_impl() -> None:
         await _ensure_v1110_premium_schema(db)
         await _ensure_v1111_final_schema(db)
         await _ensure_v1114_access_schema(db)
+        await _ensure_v1118_premium_revenue_schema(db)
         await db.commit()
 
 
@@ -4652,6 +4653,8 @@ async def get_author_finance_summary(author_user_id: int) -> dict[str, int]:
             return {
                 "gross": 0, "commission": 0, "net": 0, "held": 0, "available": 0,
                 "requested": 0, "paid": 0, "refunded": 0, "frozen": 0,
+                "premium_total": 0, "premium_held": 0, "premium_available": 0,
+                "premium_requested": 0, "premium_paid": 0,
             }
         author_id = int(author["id"])
         await _release_ready_author_ledger(db, author_id)
@@ -4671,7 +4674,12 @@ async def get_author_finance_summary(author_user_id: int) -> dict[str, int]:
                 COALESCE(SUM(CASE WHEN status='available' THEN net_minor ELSE 0 END), 0) AS available_minor,
                 COALESCE(SUM(CASE WHEN status='payout_requested' THEN net_minor ELSE 0 END), 0) AS requested_minor,
                 COALESCE(SUM(CASE WHEN status='paid' THEN net_minor ELSE 0 END), 0) AS paid_minor,
-                COALESCE(SUM(CASE WHEN status!='refunded' THEN net_minor ELSE 0 END), 0) AS net_minor
+                COALESCE(SUM(CASE WHEN status!='refunded' THEN net_minor ELSE 0 END), 0) AS net_minor,
+                COALESCE(SUM(CASE WHEN source_type='premium_pool' AND status!='refunded' THEN net_stars ELSE 0 END), 0) AS premium_total,
+                COALESCE(SUM(CASE WHEN source_type='premium_pool' AND status='held' THEN net_stars ELSE 0 END), 0) AS premium_held,
+                COALESCE(SUM(CASE WHEN source_type='premium_pool' AND status='available' THEN net_stars ELSE 0 END), 0) AS premium_available,
+                COALESCE(SUM(CASE WHEN source_type='premium_pool' AND status='payout_requested' THEN net_stars ELSE 0 END), 0) AS premium_requested,
+                COALESCE(SUM(CASE WHEN source_type='premium_pool' AND status='paid' THEN net_stars ELSE 0 END), 0) AS premium_paid
             FROM author_ledger
             WHERE author_id=?
             """,
@@ -10191,6 +10199,17 @@ async def get_author_analytics(author_user_id: int, days: int = 30) -> dict[str,
 
         cur = await db.execute(
             """
+            SELECT COALESCE(SUM(net_stars),0) AS income_stars
+            FROM author_ledger
+            WHERE author_id=? AND source_type='premium_pool'
+              AND status!='refunded' AND created_at>=?
+            """,
+            (author_id, since),
+        )
+        premium_income = await cur.fetchone()
+
+        cur = await db.execute(
+            """
             SELECT b.id, b.title, b.publication_status,
                    COUNT(DISTINCT rp.user_id) AS readers,
                    COUNT(DISTINCT bm.user_id) AS saved,
@@ -10268,6 +10287,7 @@ async def get_author_analytics(author_user_id: int, days: int = 30) -> dict[str,
             "premium_readers": int(premium_activity["premium_readers"] or 0),
             "premium_opens": int(premium_activity["premium_opens"] or 0),
             "premium_completions": int(premium_activity["premium_completions"] or 0),
+            "premium_income_stars": int(premium_income["income_stars"] or 0),
             "sales_count": int(sales["sales_count"] or 0),
             "revenue_stars": int(sales["revenue_stars"] or 0),
         }
@@ -10497,6 +10517,7 @@ async def _ensure_v1110_premium_schema(db: aiosqlite.Connection) -> None:
     features = json.dumps(
         [
             {"code": "premium_books", "title": "Чтение книг и глав, которые авторы включили в Premium"},
+            {"code": "author_support", "title": "Часть оплаты направляется в фонд прочитанных авторов"},
             {"code": "no_promoted_blocks", "title": "Без рекламных рекомендаций в читалке"},
             {"code": "priority_tts", "title": "Приоритет в очереди озвучивания"},
             {"code": "premium_badge", "title": "Знак Premium в личной библиотеке"},
@@ -10524,7 +10545,7 @@ async def _ensure_v1110_premium_schema(db: aiosqlite.Connection) -> None:
         (
             PREMIUM_PLAN_MONTHLY,
             "VoxLyra Premium",
-            "Книги авторов по подписке, дополнительный комфорт, оформление и приоритетная локальная озвучка. Бесплатные функции и разовые покупки остаются отдельными.",
+            "Книги авторов по подписке, поддержка прочитанных авторов, дополнительный комфорт, оформление и приоритетная локальная озвучка. Бесплатные функции и разовые покупки остаются отдельными.",
             99,
             PREMIUM_SUBSCRIPTION_PERIOD_SECONDS,
             features,
@@ -10600,6 +10621,7 @@ async def set_premium_plan_settings(
     *,
     price_stars: int | None = None,
     enabled: bool | None = None,
+    author_pool_percent: int | None = None,
 ) -> dict[str, Any]:
     now = utc_now()
     async with connect() as db:
@@ -10624,6 +10646,13 @@ async def set_premium_plan_settings(
                 "INSERT INTO settings(key,value,updated_at) VALUES('premium_enabled',?,?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
                 (str(flag), now),
+            )
+        if author_pool_percent is not None:
+            pool_percent = max(1, min(95, int(author_pool_percent)))
+            await db.execute(
+                "INSERT INTO settings(key,value,updated_at) VALUES('premium_author_pool_percent',?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                (str(pool_percent), now),
             )
         await db.commit()
     plan = await get_premium_plan(PREMIUM_PLAN_MONTHLY)
@@ -10788,6 +10817,16 @@ async def activate_premium_subscription(
             (int(user_id), expected, charge_id, now, str(invoice_payload or f"vox:premium:{plan_code}")),
         )
         purchase_id = int(cur.lastrowid)
+        await _create_premium_author_pool_row(
+            db,
+            purchase_id=purchase_id,
+            subscription_id=subscription_id,
+            user_id=int(user_id),
+            gross_stars=expected,
+            period_end=expires_dt,
+            duration_days=int(plan.get("duration_days") or 30),
+            now=now,
+        )
         await db.execute(
             "INSERT INTO premium_events(user_id,event_type,plan_code,metadata_json,created_at) VALUES(?,?,?,?,?)",
             (
@@ -10892,12 +10931,38 @@ async def get_premium_owner_summary() -> dict[str, Any]:
             "SELECT COALESCE(SUM(amount_stars),0) AS gross FROM purchases WHERE purchase_kind='premium' AND status='paid'"
         )
         gross = await cur.fetchone()
+        cur = await db.execute(
+            """
+            SELECT
+              COUNT(CASE WHEN status='pending' THEN 1 END) AS pending_pools,
+              COUNT(CASE WHEN status='settled' THEN 1 END) AS settled_pools,
+              COUNT(CASE WHEN status='no_activity' THEN 1 END) AS no_activity_pools,
+              COALESCE(SUM(CASE WHEN status IN ('settled','no_activity') THEN allocated_stars ELSE 0 END),0) AS author_allocated_stars,
+              COALESCE(SUM(CASE WHEN status IN ('settled','no_activity') THEN unallocated_stars ELSE 0 END),0) AS unallocated_stars,
+              COALESCE(SUM(platform_stars),0) AS platform_stars
+            FROM premium_author_pools
+            """
+        )
+        pools = await cur.fetchone()
+        cur = await db.execute("SELECT value FROM settings WHERE key='premium_author_pool_percent'")
+        percent_row = await cur.fetchone()
+    try:
+        pool_percent = max(1, min(95, int(percent_row["value"] if percent_row else 70)))
+    except (TypeError, ValueError):
+        pool_percent = 70
     return {
         "active_users": int(counts["active_users"] or 0) if counts else 0,
         "auto_renew": int(counts["auto_renew"] or 0) if counts else 0,
         "payments": int(counts["payments"] or 0) if counts else 0,
         "manual_grants": int(counts["manual_grants"] or 0) if counts and "manual_grants" in counts.keys() else 0,
         "gross_stars": int(gross["gross"] or 0) if gross else 0,
+        "author_pool_percent": pool_percent,
+        "pending_pools": int(pools["pending_pools"] or 0) if pools else 0,
+        "settled_pools": int(pools["settled_pools"] or 0) if pools else 0,
+        "no_activity_pools": int(pools["no_activity_pools"] or 0) if pools else 0,
+        "author_allocated_stars": int(pools["author_allocated_stars"] or 0) if pools else 0,
+        "unallocated_stars": int(pools["unallocated_stars"] or 0) if pools else 0,
+        "platform_stars": int(pools["platform_stars"] or 0) if pools else 0,
     }
 
 async def get_personal_reading_insights(user_id: int) -> dict[str, Any]:
@@ -11284,8 +11349,8 @@ async def record_premium_content_event(user_id: int, chapter_id: int, event_type
     if mode != "premium" or int(chapter["is_free"] or 0) == 1 or not await user_has_premium(int(user_id)):
         return False
     now_dt = datetime.now(timezone.utc)
-    period = now_dt.strftime("%Y-%m")
     async with connect() as db:
+        period = await _premium_event_period_key(db, int(user_id), now_dt)
         cur = await db.execute(
             "INSERT OR IGNORE INTO premium_content_events(user_id,book_id,chapter_id,event_type,period_key,created_at) "
             "VALUES(?,?,?,?,?,?)",
@@ -11315,3 +11380,352 @@ async def has_purchase_access(
         audio_chapter_id=audio_chapter_id,
         graphic_chapter_id=graphic_chapter_id,
     )
+
+
+# ---------------------------------------------------------------------------
+# VoxLyra v1.11.8 — целочисленное распределение дохода Premium авторам
+# ---------------------------------------------------------------------------
+
+def allocate_integer_stars(total_stars: int, weights: dict[int, int]) -> dict[int, int]:
+    """Распределяет целые Stars методом наибольших остатков.
+
+    Дробные Stars в Telegram не существуют. Поэтому сначала каждому автору
+    начисляется целая нижняя часть его доли, а оставшиеся Stars по одной
+    передаются авторам с наибольшим дробным остатком. Итог всегда целый и
+    всегда в точности равен ``total_stars`` при наличии положительных весов.
+    """
+    total = max(0, int(total_stars))
+    clean = {int(author_id): max(0, int(weight)) for author_id, weight in weights.items()}
+    clean = {author_id: weight for author_id, weight in clean.items() if weight > 0}
+    weight_sum = sum(clean.values())
+    if total <= 0 or weight_sum <= 0:
+        return {author_id: 0 for author_id in clean}
+
+    allocations: dict[int, int] = {}
+    ranking: list[tuple[int, int, int]] = []
+    assigned = 0
+    for author_id in sorted(clean):
+        weight = clean[author_id]
+        base, remainder = divmod(total * weight, weight_sum)
+        allocations[author_id] = int(base)
+        assigned += int(base)
+        # Больше остаток -> выше приоритет. При равенстве больше реальный вес,
+        # затем меньший id для полностью детерминированного результата.
+        ranking.append((int(remainder), int(weight), int(author_id)))
+
+    remaining = total - assigned
+    ranking.sort(key=lambda item: (-item[0], -item[1], item[2]))
+    for _, _, author_id in ranking[:remaining]:
+        allocations[author_id] += 1
+    return allocations
+
+
+async def _ensure_v1118_premium_revenue_schema(db: aiosqlite.Connection) -> None:
+    now = utc_now()
+    await db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS premium_author_pools (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            purchase_id INTEGER NOT NULL UNIQUE,
+            subscription_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            gross_stars INTEGER NOT NULL,
+            author_pool_percent INTEGER NOT NULL DEFAULT 70,
+            author_pool_stars INTEGER NOT NULL,
+            platform_stars INTEGER NOT NULL,
+            period_start_at TEXT NOT NULL,
+            period_end_at TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            allocated_stars INTEGER NOT NULL DEFAULT 0,
+            unallocated_stars INTEGER NOT NULL DEFAULT 0,
+            settled_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(purchase_id) REFERENCES purchases(id) ON DELETE CASCADE,
+            FOREIGN KEY(subscription_id) REFERENCES premium_subscriptions(id) ON DELETE CASCADE,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS premium_author_allocations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pool_id INTEGER NOT NULL,
+            author_id INTEGER NOT NULL,
+            weight_points INTEGER NOT NULL,
+            total_weight_points INTEGER NOT NULL,
+            allocated_stars INTEGER NOT NULL,
+            ledger_id INTEGER,
+            created_at TEXT NOT NULL,
+            UNIQUE(pool_id, author_id),
+            FOREIGN KEY(pool_id) REFERENCES premium_author_pools(id) ON DELETE CASCADE,
+            FOREIGN KEY(author_id) REFERENCES author_profiles(id) ON DELETE CASCADE,
+            FOREIGN KEY(ledger_id) REFERENCES author_ledger(id) ON DELETE SET NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_premium_author_pools_due
+            ON premium_author_pools(status, period_end_at);
+        CREATE INDEX IF NOT EXISTS idx_premium_author_pools_user_period
+            ON premium_author_pools(user_id, period_start_at, period_end_at);
+        CREATE INDEX IF NOT EXISTS idx_premium_author_allocations_author
+            ON premium_author_allocations(author_id, created_at DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_author_ledger_premium_pool_unique
+            ON author_ledger(author_id, source_type, source_id)
+            WHERE source_type='premium_pool';
+        """
+    )
+    defaults = {
+        "premium_author_pool_percent": "70",
+        "premium_open_weight": "1",
+        "premium_complete_weight": "2",
+        "premium_settlement_enabled": "1",
+    }
+    for key, value in defaults.items():
+        await db.execute(
+            "INSERT INTO settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO NOTHING",
+            (key, value, now),
+        )
+
+    # Старые оплаченные Premium-периоды получают фонд без повторного платежа.
+    # Это не затрагивает ручные выдачи Premium: у них нет оплаченной покупки.
+    cur = await db.execute(
+        """
+        SELECT p.id AS purchase_id, ps.id AS subscription_id, ps.user_id,
+               p.amount_stars, ps.expires_at, COALESCE(pp.duration_days, 30) AS duration_days
+        FROM purchases p
+        JOIN premium_subscriptions ps
+          ON ps.telegram_payment_charge_id=p.telegram_payment_charge_id
+        LEFT JOIN premium_plans pp ON pp.code=ps.plan_code
+        LEFT JOIN premium_author_pools pap ON pap.purchase_id=p.id
+        WHERE p.purchase_kind='premium' AND p.status='paid'
+          AND COALESCE(ps.source,'payment')='payment' AND pap.id IS NULL
+        """
+    )
+    for row in await cur.fetchall():
+        period_end = _premium_dt(str(row["expires_at"] or ""))
+        if not period_end:
+            continue
+        await _create_premium_author_pool_row(
+            db,
+            purchase_id=int(row["purchase_id"]),
+            subscription_id=int(row["subscription_id"]),
+            user_id=int(row["user_id"]),
+            gross_stars=int(row["amount_stars"] or 0),
+            period_end=period_end,
+            duration_days=int(row["duration_days"] or 30),
+            now=now,
+        )
+
+
+async def _create_premium_author_pool_row(
+    db: aiosqlite.Connection,
+    *,
+    purchase_id: int,
+    subscription_id: int,
+    user_id: int,
+    gross_stars: int,
+    period_end: datetime,
+    duration_days: int,
+    now: str,
+) -> None:
+    cur = await db.execute("SELECT value FROM settings WHERE key='premium_author_pool_percent'")
+    row = await cur.fetchone()
+    try:
+        percent = max(1, min(95, int(row["value"] if row else 70)))
+    except (TypeError, ValueError):
+        percent = 70
+    gross = max(0, int(gross_stars))
+    author_pool = gross * percent // 100
+    platform = gross - author_pool
+    safe_days = max(1, min(366, int(duration_days or 30)))
+    end_dt = period_end.astimezone(timezone.utc)
+    start_dt = end_dt - timedelta(days=safe_days)
+    await db.execute(
+        """
+        INSERT OR IGNORE INTO premium_author_pools(
+            purchase_id, subscription_id, user_id, gross_stars,
+            author_pool_percent, author_pool_stars, platform_stars,
+            period_start_at, period_end_at, status, allocated_stars,
+            unallocated_stars, created_at, updated_at
+        ) VALUES(?,?,?,?,?,?,?,?,?,'pending',0,0,?,?)
+        """,
+        (
+            int(purchase_id), int(subscription_id), int(user_id), gross,
+            percent, author_pool, platform, start_dt.isoformat(), end_dt.isoformat(),
+            now, now,
+        ),
+    )
+
+
+async def _premium_event_period_key(db: aiosqlite.Connection, user_id: int, now_dt: datetime) -> str:
+    now = now_dt.isoformat()
+    cur = await db.execute(
+        """
+        SELECT id FROM premium_author_pools
+        WHERE user_id=? AND status='pending' AND period_start_at<=? AND period_end_at>?
+        ORDER BY period_end_at, id LIMIT 1
+        """,
+        (int(user_id), now, now),
+    )
+    row = await cur.fetchone()
+    if row:
+        return f"pool:{int(row['id'])}"
+    # Ручной или бонусный Premium не создаёт авторский денежный фонд.
+    return f"manual:{now_dt.strftime('%Y-%m')}"
+
+
+async def settle_due_premium_author_pools(*, limit: int = 100, now_at: str | None = None) -> dict[str, int]:
+    """Закрывает завершившиеся оплаченные Premium-периоды и начисляет авторам Stars."""
+    now = str(now_at or utc_now())
+    result = {"processed": 0, "settled": 0, "no_activity": 0, "refunded": 0, "allocated_stars": 0}
+    async with connect() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        cur = await db.execute("SELECT value FROM settings WHERE key='premium_settlement_enabled'")
+        enabled_row = await cur.fetchone()
+        if str(enabled_row["value"] if enabled_row else "1") != "1":
+            await db.commit()
+            return result
+
+        settings_values: dict[str, int] = {}
+        for key, default in (("premium_open_weight", 1), ("premium_complete_weight", 2),
+                             ("hold_days_default", 14), ("payments_stars_author_rate_minor", 100)):
+            cur = await db.execute("SELECT value FROM settings WHERE key=?", (key,))
+            row = await cur.fetchone()
+            try:
+                settings_values[key] = int(row["value"] if row else default)
+            except (TypeError, ValueError):
+                settings_values[key] = default
+        open_weight = max(1, settings_values["premium_open_weight"])
+        complete_weight = max(1, settings_values["premium_complete_weight"])
+        hold_days = max(0, settings_values["hold_days_default"])
+        settlement_rate_minor = max(1, settings_values["payments_stars_author_rate_minor"])
+
+        cur = await db.execute(
+            """
+            SELECT pap.*, p.status AS purchase_status
+            FROM premium_author_pools pap
+            JOIN purchases p ON p.id=pap.purchase_id
+            WHERE pap.status='pending' AND pap.period_end_at<=?
+            ORDER BY pap.period_end_at, pap.id
+            LIMIT ?
+            """,
+            (now, max(1, min(1000, int(limit)))),
+        )
+        pools = await cur.fetchall()
+        for pool in pools:
+            result["processed"] += 1
+            pool_id = int(pool["id"])
+            if str(pool["purchase_status"] or "") != "paid":
+                await db.execute(
+                    "UPDATE premium_author_pools SET status='refunded', unallocated_stars=author_pool_stars, "
+                    "settled_at=?, updated_at=? WHERE id=? AND status='pending'",
+                    (now, now, pool_id),
+                )
+                result["refunded"] += 1
+                continue
+
+            event_key = f"pool:{pool_id}"
+            cur = await db.execute(
+                """
+                SELECT b.author_id,
+                       SUM(CASE WHEN pce.event_type='complete' THEN ? ELSE ? END) AS weight_points
+                FROM premium_content_events pce
+                JOIN books b ON b.id=pce.book_id
+                JOIN author_profiles ap ON ap.id=b.author_id
+                WHERE pce.user_id=? AND b.author_id IS NOT NULL AND ap.user_id<>?
+                  AND (
+                    pce.period_key=? OR
+                    (pce.period_key NOT LIKE 'pool:%' AND pce.created_at>=? AND pce.created_at<?)
+                  )
+                GROUP BY b.author_id
+                HAVING weight_points>0
+                """,
+                (
+                    complete_weight, open_weight,
+                    int(pool["user_id"]), int(pool["user_id"]), event_key,
+                    str(pool["period_start_at"]), str(pool["period_end_at"]),
+                ),
+            )
+            weights = {int(row["author_id"]): int(row["weight_points"] or 0) for row in await cur.fetchall()}
+            total_pool = max(0, int(pool["author_pool_stars"] or 0))
+            allocations = allocate_integer_stars(total_pool, weights)
+            total_weight = sum(weights.values())
+            allocated = 0
+            available_at = (datetime.now(timezone.utc) + timedelta(days=hold_days)).isoformat()
+
+            for author_id, stars in allocations.items():
+                if stars <= 0:
+                    continue
+                cur = await db.execute(
+                    """
+                    INSERT OR IGNORE INTO author_ledger(
+                        author_id, purchase_id, source_type, source_id,
+                        gross_stars, commission_percent, commission_stars, net_stars,
+                        settlement_rate_minor, net_minor, hold_days, available_at,
+                        status, created_at, updated_at
+                    ) VALUES(?,?,'premium_pool',?,?,0,0,?,?,?,?,?,'held',?,?)
+                    """,
+                    (
+                        int(author_id), int(pool["purchase_id"]), pool_id,
+                        int(stars), int(stars), settlement_rate_minor,
+                        int(stars) * settlement_rate_minor, hold_days, available_at, now, now,
+                    ),
+                )
+                if cur.rowcount:
+                    ledger_id = int(cur.lastrowid)
+                else:
+                    existing = await db.execute(
+                        "SELECT id FROM author_ledger WHERE author_id=? AND source_type='premium_pool' AND source_id=?",
+                        (int(author_id), pool_id),
+                    )
+                    ledger_row = await existing.fetchone()
+                    ledger_id = int(ledger_row["id"]) if ledger_row else None
+                await db.execute(
+                    """
+                    INSERT OR IGNORE INTO premium_author_allocations(
+                        pool_id, author_id, weight_points, total_weight_points,
+                        allocated_stars, ledger_id, created_at
+                    ) VALUES(?,?,?,?,?,?,?)
+                    """,
+                    (pool_id, int(author_id), int(weights[author_id]), int(total_weight), int(stars), ledger_id, now),
+                )
+                allocated += int(stars)
+
+            unallocated = max(0, total_pool - allocated)
+            status = "settled" if allocated > 0 else "no_activity"
+            await db.execute(
+                """
+                UPDATE premium_author_pools
+                SET status=?, allocated_stars=?, unallocated_stars=?, settled_at=?, updated_at=?
+                WHERE id=? AND status='pending'
+                """,
+                (status, allocated, unallocated, now, now, pool_id),
+            )
+            result[status] += 1
+            result["allocated_stars"] += allocated
+        await db.commit()
+    return result
+
+
+async def get_author_premium_income_summary(author_user_id: int) -> dict[str, int]:
+    async with connect() as db:
+        cur = await db.execute("SELECT id FROM author_profiles WHERE user_id=?", (int(author_user_id),))
+        author = await cur.fetchone()
+        if not author:
+            return {"total": 0, "held": 0, "available": 0, "requested": 0, "paid": 0, "readers": 0}
+        author_id = int(author["id"])
+        cur = await db.execute(
+            """
+            SELECT
+              COALESCE(SUM(CASE WHEN al.status!='refunded' THEN al.net_stars ELSE 0 END),0) AS total,
+              COALESCE(SUM(CASE WHEN al.status='held' THEN al.net_stars ELSE 0 END),0) AS held,
+              COALESCE(SUM(CASE WHEN al.status='available' THEN al.net_stars ELSE 0 END),0) AS available,
+              COALESCE(SUM(CASE WHEN al.status='payout_requested' THEN al.net_stars ELSE 0 END),0) AS requested,
+              COALESCE(SUM(CASE WHEN al.status='paid' THEN al.net_stars ELSE 0 END),0) AS paid,
+              COUNT(DISTINCT pap.user_id) AS readers
+            FROM author_ledger al
+            LEFT JOIN premium_author_pools pap ON pap.id=al.source_id AND al.source_type='premium_pool'
+            WHERE al.author_id=? AND al.source_type='premium_pool'
+            """,
+            (author_id,),
+        )
+        row = await cur.fetchone()
+        return {key: int(row[key] or 0) for key in row.keys()} if row else {}

@@ -64,6 +64,8 @@ def main() -> int:
         "static/js/comic.js",
         "static/js/comic-sw.js",
         "static/js/control.js",
+        "static/css/hotfix-v1117.css",
+        "static/favicon.ico",
         "static/img/bot_avatar.png",
         "static/img/channel_avatar.png",
         "static/img/miniapp/scene-library.webp",

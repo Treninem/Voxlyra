@@ -450,8 +450,9 @@ async def successful_payment_handler(message: Message) -> None:
     user = await upsert_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
     target = await get_purchase_target(payment.invoice_payload)
 
-    # Premium — отдельный платёжный контур. Он не создаёт доход автора и
-    # сохраняет дату окончания/автопродление, которые передал Telegram.
+    # Premium — отдельный платёжный контур. С каждой оплаченной подписки
+    # создаётся авторский фонд, который распределится после завершения периода
+    # по подтверждённому чтению произведений Premium целыми Stars.
     if target and target.get("kind") == "premium":
         try:
             subscription_id = await activate_premium_subscription(
@@ -474,8 +475,8 @@ async def successful_payment_handler(message: Message) -> None:
         await add_audit(user["id"], "premium_payment_success", "premium_subscription", str(subscription_id), None, payment.invoice_payload)
         await message.answer(
             "<b>VoxLyra Premium активирован.</b>\n\n"
-            "Открыты дополнительные стили карточек цитат, личная статистика, знак Premium и приоритет в очереди локальной озвучки. "
-            "Базовые функции VoxLyra по-прежнему доступны всем пользователям.",
+            "Открыты произведения, которые авторы включили в Premium, дополнительные стили карточек цитат, личная статистика, знак Premium и приоритет в очереди локальной озвучки. "
+            "Часть оплаты направляется авторам пропорционально вашему реальному чтению. Базовые функции VoxLyra по-прежнему доступны всем пользователям.",
             reply_markup=back_to_main(),
         )
         return

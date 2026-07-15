@@ -15,16 +15,15 @@ def main_menu(is_owner: bool, has_admin_access: bool, has_author_profile: bool =
         kb.button(text="🎧 Слушать", web_app=WebAppInfo(url=f"{base}/audio"))
     kb.button(text="⭐ Моё", callback_data="main:my")
     kb.button(text="✍️ Автору", callback_data="author:menu")
-    kb.button(text="💎 Бонусы", callback_data="main:bonuses")
     kb.button(text="⚙️ Ещё", callback_data="main:more")
     if has_admin_access:
         kb.button(text="🛡 Модерация", callback_data="mod:menu")
     if is_owner:
         kb.button(text="👑 Управление", callback_data="owner:menu")
     if settings.WEBAPP_URL:
-        kb.adjust(2, 1, 2, 2, 1, 1)
+        kb.adjust(2, 1, 2, 1, 1, 1)
     else:
-        kb.adjust(2, 2, 1, 1)
+        kb.adjust(2, 1, 1, 1)
     return kb.as_markup()
 
 

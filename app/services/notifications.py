@@ -4,6 +4,7 @@ import logging
 from typing import Literal
 
 from aiogram import Bot
+from aiogram.enums import ParseMode
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 
 from app.config import settings
@@ -147,6 +148,7 @@ async def send_user_notification(
     bot: Bot | None = None,
     category: Literal["chapters", "audio", "discounts", "reminders", "achievements"] | None = None,
     reply_markup: InlineKeyboardMarkup | None = None,
+    parse_mode: ParseMode | str | None = None,
 ) -> NotificationStatus:
     if not settings.BOT_TOKEN or not telegram_id:
         return "unavailable"
@@ -167,6 +169,8 @@ async def send_user_notification(
         }
         if reply_markup is not None:
             kwargs["reply_markup"] = reply_markup
+        if parse_mode is not None:
+            kwargs["parse_mode"] = parse_mode
         await delivery_bot.send_message(**kwargs)
         return "sent"
     except Exception as exc:  # Telegram may reject delivery when the user blocked the bot.

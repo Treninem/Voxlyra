@@ -13,6 +13,7 @@ from app.middleware import BlockedUserMiddleware
 from app.services.cover_storage import restore_missing_book_covers
 from app.services.moderation_alerts import moderation_reminder_loop
 from app.services.smart_notifications import smart_reader_reminder_loop
+from app.services.premium_settlements import premium_author_settlement_loop
 
 logger = logging.getLogger(__name__)
 
@@ -47,12 +48,14 @@ async def run_bot() -> None:
     logger.info("Bot started")
     reminder_task = asyncio.create_task(moderation_reminder_loop(bot))
     reader_reminder_task = asyncio.create_task(smart_reader_reminder_loop(bot))
+    premium_settlement_task = asyncio.create_task(premium_author_settlement_loop())
     try:
         await dp.start_polling(bot)
     finally:
         reminder_task.cancel()
         reader_reminder_task.cancel()
-        for task in (reminder_task, reader_reminder_task):
+        premium_settlement_task.cancel()
+        for task in (reminder_task, reader_reminder_task, premium_settlement_task):
             try:
                 await task
             except asyncio.CancelledError:

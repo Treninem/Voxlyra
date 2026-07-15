@@ -22,6 +22,7 @@ class TMAUser:
     telegram_id: int
     username: str | None
     full_name: str | None
+    photo_url: str | None = None
 
 
 def _validate_init_data_raw(init_data: str, bot_token: str, max_age_seconds: int = 86400) -> dict[str, str]:
@@ -67,6 +68,7 @@ async def authenticate_init_data(init_data: str) -> TMAUser:
     telegram_id = int(tg_user["id"])
     username = tg_user.get("username")
     full_name = " ".join(filter(None, [tg_user.get("first_name"), tg_user.get("last_name")])) or username
+    photo_url = str(tg_user.get("photo_url") or "").strip() or None
     app_user = await upsert_user(telegram_id=telegram_id, username=username, full_name=full_name)
     if bool(app_user["is_blocked"]) and telegram_id not in settings.owner_ids:
         raise TMAAuthError("Доступ к платформе ограничен. Обратитесь в поддержку.")
@@ -75,4 +77,5 @@ async def authenticate_init_data(init_data: str) -> TMAUser:
         telegram_id=telegram_id,
         username=username,
         full_name=full_name,
+        photo_url=photo_url,
     )

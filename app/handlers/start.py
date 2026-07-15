@@ -1,5 +1,6 @@
 from aiogram import F, Router
 from aiogram.filters import CommandStart
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
@@ -9,6 +10,24 @@ from app.keyboards import back_to_main, bonuses_menu, main_menu, more_menu, user
 from app.handlers.legal import send_next_required_document
 
 router = Router()
+
+async def _safe_edit_text(message, text: str, *, reply_markup=None) -> None:
+    try:
+        await message.edit_text(text, reply_markup=reply_markup)
+    except TelegramBadRequest as exc:
+        if "message is not modified" not in str(exc).lower():
+            raise
+
+
+def _bonus_reason_label(reason: object) -> str:
+    labels = {
+        "daily_bonus": "Ежедневное начисление",
+        "referral_invite": "Приглашённый друг",
+        "referral_join": "Вход по приглашению",
+    }
+    raw = str(reason or "").strip()
+    return labels.get(raw, raw.replace("_", " ") or "Начисление")
+
 
 
 async def build_context(message_or_call) -> tuple[bool, bool, bool, int]:
@@ -125,7 +144,7 @@ async def callback_daily_bonus(call: CallbackQuery) -> None:
         text = f"Начислено: <b>{amount}</b> бонусов.\nБаланс: <b>{balance}</b>."
     else:
         text = f"Сегодня бонус уже получен.\nБаланс: <b>{balance}</b>."
-    await call.message.edit_text("<b>💎 Бонусы</b>\n\n" + text, reply_markup=bonuses_menu(not received))
+    await _safe_edit_text(call.message, "<b>💎 Бонусы</b>\n\n" + text, reply_markup=bonuses_menu(not received))
     await call.answer("Готово" if received else "Уже получали сегодня")
 
 
@@ -139,7 +158,7 @@ async def callback_bonus_history(call: CallbackQuery) -> None:
         lines = ["<b>📜 История бонусов</b>\n"]
         for row in rows:
             sign = "+" if int(row["amount"]) >= 0 else ""
-            lines.append(f"• {sign}{row['amount']} · {row['reason']} · {row['created_at'][:10]}")
+            lines.append(f"• {sign}{row['amount']} · {_bonus_reason_label(row['reason'])} · {row['created_at'][:10]}")
         text = "\n".join(lines)
     await call.message.edit_text(text, reply_markup=bonuses_menu(True))
     await call.answer()

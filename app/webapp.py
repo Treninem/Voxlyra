@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from html import escape
 import hmac
 import json
 import shutil
@@ -16,6 +17,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from aiogram import Bot
+from aiogram.enums import ParseMode
 from aiogram.types import LabeledPrice
 
 from app.config import settings
@@ -715,6 +717,12 @@ def create_app() -> FastAPI:
     app = FastAPI(title="Вокслира", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.mount("/static", StaticFiles(directory="static"), name="static")
 
+    @app.get("/favicon.ico", include_in_schema=False)
+    async def favicon() -> FileResponse:
+        response = FileResponse(Path("static/favicon.ico"), media_type="image/x-icon")
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        return response
+
     @app.get("/comic-sw.js", include_in_schema=False)
     async def comic_service_worker() -> FileResponse:
         response = FileResponse(
@@ -761,12 +769,14 @@ def create_app() -> FastAPI:
         telegram_id: int | None,
         text: str,
         reply_markup=None,
+        parse_mode: ParseMode | str | None = None,
     ) -> str:
         result = await send_user_notification(
             app_user_id=app_user_id,
             telegram_id=telegram_id,
             text=text,
             reply_markup=reply_markup,
+            parse_mode=parse_mode,
         )
         await add_audit(
             actor_user_id,
@@ -1229,6 +1239,7 @@ def create_app() -> FastAPI:
         if not is_owner:
             raise HTTPException(status_code=403, detail="Настройки Premium доступны только владельцу.")
         price = payload.get("price_stars") if "price_stars" in payload else None
+        author_pool_percent = payload.get("author_pool_percent") if "author_pool_percent" in payload else None
         raw_enabled = payload.get("enabled") if "enabled" in payload else None
         enabled = None
         if raw_enabled is not None:
@@ -1237,10 +1248,11 @@ def create_app() -> FastAPI:
             plan = await set_premium_plan_settings(
                 price_stars=int(price) if price is not None else None,
                 enabled=enabled,
+                author_pool_percent=int(author_pool_percent) if author_pool_percent is not None else None,
             )
         except (TypeError, ValueError) as exc:
-            raise HTTPException(status_code=400, detail="Цена Premium должна быть целым числом от 1 до 10000 Stars.") from exc
-        await add_audit(user.app_user_id, "premium_settings_updated", "premium_plan", str(plan.get("code")), None, json.dumps({"price": plan.get("price_stars"), "enabled": plan.get("is_active")}, ensure_ascii=False))
+            raise HTTPException(status_code=400, detail="Цена Premium должна быть целым числом, а фонд авторов — от 1% до 95%.") from exc
+        await add_audit(user.app_user_id, "premium_settings_updated", "premium_plan", str(plan.get("code")), None, json.dumps({"price": plan.get("price_stars"), "enabled": plan.get("is_active"), "author_pool_percent": author_pool_percent}, ensure_ascii=False))
         return {"ok": True, "plan": plan, "summary": await get_premium_owner_summary()}
 
     @app.get("/author", response_class=HTMLResponse)
@@ -1321,6 +1333,7 @@ def create_app() -> FastAPI:
                 "telegram_id": user.telegram_id,
                 "username": user.username,
                 "full_name": user.full_name,
+                "photo_url": user.photo_url,
             },
             "bookmarks": _rows_to_dicts(bookmarks),
             "continue_reading": _rows_to_dicts(continue_reading),
@@ -4445,10 +4458,11 @@ def create_app() -> FastAPI:
             app_user_id=user_id,
             telegram_id=int(target["telegram_id"]),
             text=(f"🎟 <b>Вам открыт доступ к главам</b>\n\n"
-                  f"Книга: <b>{book_title}</b>\n"
+                  f"Книга: <b>{escape(book_title)}</b>\n"
                   f"Главы: <b>{selection.normalized}</b>\n"
                   f"Срок: <b>{expiry_text}</b>\n\n"
                   "Откройте книгу в VoxLyra — доступ уже действует."),
+            parse_mode=ParseMode.HTML,
         )
         await add_audit(actor.app_user_id, "manual_chapter_access_granted", "user", str(user_id), selection.normalized,
                         json.dumps({"book_id": book_id, "count": result["granted"], "expires_at": result.get("expires_at")}, ensure_ascii=False))
@@ -4490,6 +4504,7 @@ def create_app() -> FastAPI:
                   f"Срок: <b>{duration_days} дн.</b>\n"
                   f"Действует до: <b>{expiry_text}</b>\n\n"
                   "Подписка выдана администрацией и уже доступна в Mini App."),
+            parse_mode=ParseMode.HTML,
         )
         await add_audit(actor.app_user_id, "manual_premium_granted", "user", str(user_id), str(duration_days), str(result.get("expires_at") or ""))
         return {"ok": True, **result, "subscription": await get_user_premium_status(user_id)}
@@ -4694,11 +4709,12 @@ def create_app() -> FastAPI:
                 telegram_id=int(author_user["telegram_id"]) if author_user else None,
                 text=(
                     f"<b>Страница графической главы скрыта после проверки</b>\n\n"
-                    f"Глава: <b>{page_before['chapter_title']}</b>\n"
+                    f"Глава: <b>{escape(str(page_before['chapter_title'] or ''))}</b>\n"
                     f"Страница: <b>{page_before['page_number']}</b>\n"
-                    f"Причина: {note}\n\n"
+                    f"Причина: {escape(note)}\n\n"
                     "Замените или исправьте страницу в кабинете автора, затем сохраните изменения."
                 ),
+                parse_mode=ParseMode.HTML,
             )
         return {"ok": True}
 
