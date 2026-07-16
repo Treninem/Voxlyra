@@ -2292,6 +2292,26 @@ async def list_chapters_for_book(
         return await cur.fetchall()
 
 
+async def list_author_chapter_summaries(book_id: int) -> list[aiosqlite.Row]:
+    """Возвращает список глав для кабинета автора без тяжёлого поля text.
+
+    Полный текст загружается отдельным запросом только при открытии конкретной
+    главы. Это не даёт книгам на сотни и тысячи глав переполнять ответ Mini App.
+    """
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT id, book_id, number, title, is_free, price_stars,
+                   saved_price_stars, status, created_at, updated_at
+            FROM chapters
+            WHERE book_id = ? AND status != 'deleted'
+            ORDER BY number ASC
+            """,
+            (int(book_id),),
+        )
+        return await cur.fetchall()
+
+
 async def get_adjacent_chapters(chapter_id: int) -> dict[str, aiosqlite.Row | None]:
     """Возвращает соседние опубликованные главы той же книги."""
     async with connect() as db:

@@ -145,3 +145,33 @@
     font-size: 26px !important;
   }
 }
+
+
+/* v1.11.12 — быстрый кабинет автора для книг на сотни и тысячи глав. */
+.author-chapter-pager {
+  display: grid;
+  grid-template-columns: minmax(0, auto) minmax(160px, 1fr) minmax(0, auto);
+  align-items: center;
+  gap: 12px;
+  margin: 12px 0;
+}
+.author-chapter-pager span,
+.author-chapter-count {
+  margin: 0;
+  text-align: center;
+  color: var(--muted, #b9b5ca);
+  font-size: 13px;
+}
+.author-chapter-pager button[disabled] {
+  opacity: .42;
+  pointer-events: none;
+}
+@media (max-width: 560px) {
+  .author-chapter-pager {
+    grid-template-columns: 1fr 1fr;
+  }
+  .author-chapter-pager span {
+    grid-column: 1 / -1;
+    grid-row: 1;
+  }
+}

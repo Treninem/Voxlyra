@@ -29,10 +29,11 @@ def build_new_book_post(
     book_url: str,
     repeated: bool = False,
 ) -> str:
-    """Собирает компактную премиальную карточку книги для Telegram-канала.
+    """Собирает компактную карточку книги для Telegram-канала.
 
     Текст рассчитан на подпись к изображению (лимит Telegram — 1024 символа).
-    Ссылка присутствует и отдельной строкой, и на кнопке публикации.
+    Адрес книги намеренно не вставляется в текст: переход остаётся только на
+    отдельной кнопке «Открыть книгу», чтобы публикация выглядела аккуратно.
     """
     safe_title = escape(_clean_line(title, "Новая книга"))
     safe_author = escape(_clean_line(author, "Автор не указан"))
@@ -49,7 +50,7 @@ def build_new_book_post(
         price_line = "Бесплатно"
     heading = "✨ <b>Снова в центре внимания</b>" if repeated else "✨ <b>Новая книга на Вокслире</b>"
     description_block = f"\n\n<i>{safe_description}</i>" if safe_description else ""
-    link_block = f"\n\n🔗 <b>Открыть книгу:</b>\n{escape(book_url)}" if book_url else ""
+    _ = book_url  # Адрес используется кнопкой публикации, но не показывается в подписи.
     return (
         f"{heading}\n\n"
         f"📖 <b>{safe_title}</b>\n"
@@ -59,5 +60,4 @@ def build_new_book_post(
         f"💎 {escape(price_line)}"
         f"{audio_line}"
         f"{description_block}"
-        f"{link_block}"
     )[:1024]

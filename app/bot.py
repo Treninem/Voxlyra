@@ -28,6 +28,15 @@ async def run_bot() -> None:
         token=settings.BOT_TOKEN,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
+    try:
+        identity = await bot.get_me()
+        if identity.username:
+            settings.BOT_USERNAME = identity.username
+    except Exception as exc:
+        # Публикация продолжит использовать BOT_USERNAME из .env или безопасный
+        # проектный резерв. Ошибка определения имени не должна останавливать бота.
+        logger.warning("Could not resolve bot username: %s", exc)
+
     dp = Dispatcher(storage=MemoryStorage())
     blocked_guard = BlockedUserMiddleware()
     dp.message.outer_middleware(blocked_guard)

@@ -9,6 +9,32 @@
   } catch (_) {}
 })();
 
+(function routeTelegramMiniAppStartParam() {
+  const path = window.location.pathname || '/';
+  if (path !== '/' && path !== '') return;
+  const query = new URLSearchParams(window.location.search);
+  const unsafe = window.Telegram?.WebApp?.initDataUnsafe || {};
+  const startParam = String(query.get('tgWebAppStartParam') || unsafe.start_param || '').trim();
+  const bookMatch = /^book_(\d+)$/.exec(startParam);
+  if (!bookMatch) return;
+  const bookId = Number(bookMatch[1]);
+  if (Number.isInteger(bookId) && bookId > 0) {
+    // Telegram передаёт авторизационные параметры в адресе запуска. Сохраняем
+    // query/hash при переходе, иначе новая страница может решить, что открыта
+    // вне Mini App, и попросить пользователя вернуться в Telegram.
+    window.location.replace(`/book/${bookId}${window.location.search || ''}${window.location.hash || ''}`);
+  }
+})();
+
+(function handPublicBookLinkToTelegramMiniApp() {
+  const match = /^\/book\/(\d+)\/?$/.exec(window.location.pathname || '');
+  if (!match || window.Telegram?.WebApp?.initData) return;
+  const username = String(document.querySelector('meta[name="voxlyra-bot-username"]')?.content || '').trim().replace(/^@/, '');
+  const bookId = Number(match[1]);
+  if (!username || !Number.isInteger(bookId) || bookId <= 0) return;
+  window.location.replace(`https://t.me/${encodeURIComponent(username)}?startapp=book_${bookId}`);
+})();
+
 const root = document.documentElement;
 const DEFAULTS = {
   theme: 'system', fontSize: 18, lineHeight: 1.78, readerWidth: 'normal',

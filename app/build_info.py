@@ -5,12 +5,12 @@
 передаётся.
 """
 
-OWNER_BUILD_VERSION = "v1.11.11"
-OWNER_BUILD_NAME = "база и комиксы сохранены · повторные нажатия в умном каталоге больше не вызывают ошибку"
+OWNER_BUILD_VERSION = "v1.11.12"
+OWNER_BUILD_NAME = "крупные книги открываются быстро · ссылки из канала запускают Mini App сразу на книге"
 
 
 def owner_build_label() -> str:
     return f"{OWNER_BUILD_VERSION} · {OWNER_BUILD_NAME}"
 
 
-WORKING_BUILD_STAGE = "v1.11.11 · безопасные кнопки умного каталога"
+WORKING_BUILD_STAGE = "v1.11.12 · быстрый кабинет автора и прямые ссылки Mini App"

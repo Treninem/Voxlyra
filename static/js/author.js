@@ -10,7 +10,10 @@ let authorState = {
   graphicDraggedPageId: null,
   graphicAdvancedPageId: null,
   sbpBanksLoaded: false,
+  chapterPage: 1,
 };
+
+const AUTHOR_CHAPTERS_PER_PAGE = 100;
 
 const statusLabels = {
   draft: 'Черновик', review: 'На проверке', published: 'Опубликовано', rejected: 'Нужны изменения', deleted: 'Удалено',
@@ -515,6 +518,7 @@ function fillBookEditor(data) {
   const splitLongInput = document.getElementById('graphicSplitLongInput');
   if (splitLongInput) splitLongInput.checked = type === 'webtoon' || type === 'manhwa';
   syncTextPricingControls();
+  authorState.chapterPage = 1;
   renderAuthorChapters(data.chapters || []);
   renderChapterPackages(data.chapter_packages || []);
   renderGraphicVolumes(data.graphic_volumes || []);
@@ -531,7 +535,7 @@ function fillBookEditor(data) {
   editor.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
-function renderAuthorChapters(chapters) {
+function renderAuthorChapters(chapters, requestedPage = authorState.chapterPage) {
   const box = document.getElementById('authorChapters');
   if (!box) return;
   if (!chapters.length) {
@@ -539,7 +543,12 @@ function renderAuthorChapters(chapters) {
     return;
   }
   const mode = currentTextPricingMode();
-  box.innerHTML = chapters.map((chapter) => {
+  const pages = Math.max(1, Math.ceil(chapters.length / AUTHOR_CHAPTERS_PER_PAGE));
+  const page = Math.max(1, Math.min(pages, Number(requestedPage || 1)));
+  authorState.chapterPage = page;
+  const start = (page - 1) * AUTHOR_CHAPTERS_PER_PAGE;
+  const visible = chapters.slice(start, start + AUTHOR_CHAPTERS_PER_PAGE);
+  const rows = visible.map((chapter) => {
     const access = chapterAccessMode(chapter, mode);
     const accessText = access === 'free'
       ? 'Бесплатная глава'
@@ -552,6 +561,14 @@ function renderAuthorChapters(chapters) {
       <div><span>Глава ${chapter.number}</span><strong>${escapeHtml(chapter.title)}</strong><small>${accessText} · ${escapeHtml(statusLabels[chapter.status] || chapter.status)}</small></div><b>Изменить</b>
     </button>`;
   }).join('');
+  const from = start + 1;
+  const to = Math.min(chapters.length, start + visible.length);
+  const pager = pages > 1 ? `<nav class="author-chapter-pager" aria-label="Страницы списка глав">
+    <button type="button" class="button-link secondary" data-author-chapter-page="${page - 1}" ${page <= 1 ? 'disabled' : ''}>← Предыдущие</button>
+    <span>Главы ${from}–${to} из ${chapters.length} · страница ${page} из ${pages}</span>
+    <button type="button" class="button-link secondary" data-author-chapter-page="${page + 1}" ${page >= pages ? 'disabled' : ''}>Следующие →</button>
+  </nav>` : `<p class="author-chapter-count">Глав: ${chapters.length}</p>`;
+  box.innerHTML = `${pager}${rows}${pages > 1 ? pager : ''}`;
 }
 
 function chapterPackageScopeLabel(scope) {
@@ -694,20 +711,40 @@ function resetChapterForm() {
   syncChapterAccessInputs();
 }
 
-function editChapter(chapterId) {
-  const chapter = (authorState.book?.chapters || []).find((item) => Number(item.id) === Number(chapterId));
-  if (!chapter) return;
+async function editChapter(chapterId) {
+  const chapters = authorState.book?.chapters || [];
+  const index = chapters.findIndex((item) => Number(item.id) === Number(chapterId));
+  if (index < 0) return;
+  let chapter = chapters[index];
   const form = document.getElementById('chapterForm');
   form.hidden = false;
   document.getElementById('chapterIdInput').value = chapter.id;
   document.getElementById('chapterTitleInput').value = chapter.title || '';
-  document.getElementById('chapterTextInput').value = chapter.text || '';
-  const access = chapterAccessMode(chapter);
-  document.getElementById('chapterAccessInput').value = access;
-  document.getElementById('chapterPriceInput').value = access === 'chapter' ? Number(chapter.price_stars || 3) : 3;
-  document.getElementById('deleteChapterButton').hidden = false;
-  syncChapterAccessInputs();
+  const textInput = document.getElementById('chapterTextInput');
+  textInput.value = '';
+  textInput.placeholder = 'Загружаем текст главы…';
+  textInput.disabled = true;
   form.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  try {
+    if (!Object.prototype.hasOwnProperty.call(chapter, 'text')) {
+      const payload = await apiFetch(`/api/author/chapter/${Number(chapter.id)}`);
+      chapter = { ...chapter, ...(payload.chapter || {}) };
+      chapters[index] = chapter;
+    }
+    document.getElementById('chapterTitleInput').value = chapter.title || '';
+    textInput.value = chapter.text || '';
+    const access = chapterAccessMode(chapter);
+    document.getElementById('chapterAccessInput').value = access;
+    document.getElementById('chapterPriceInput').value = access === 'chapter' ? Number(chapter.price_stars || 3) : 3;
+    document.getElementById('deleteChapterButton').hidden = false;
+    syncChapterAccessInputs();
+  } catch (error) {
+    form.hidden = true;
+    notify(error.message || 'Не удалось загрузить текст главы');
+  } finally {
+    textInput.disabled = false;
+    textInput.placeholder = '';
+  }
 }
 
 function resetGraphicChapterForm() {
@@ -1360,6 +1397,7 @@ function bindAuthorEvents() {
     if (target.dataset.pageDelete) { await deleteGraphicPage(target, target.dataset.pageDelete); return; }
     if (target.id === 'closeGraphicPageEditor') { document.getElementById('graphicPageEditor').hidden = true; return; }
     if (target.dataset.authorBookId) { await openAuthorBook(target.dataset.authorBookId); return; }
+    if (target.dataset.authorChapterPage) { renderAuthorChapters(authorState.book?.chapters || [], Number(target.dataset.authorChapterPage)); document.getElementById('authorChapters')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); return; }
     if (target.id === 'newTextProject') { openNewProjectForm('book'); return; }
     if (target.id === 'newGraphicProject') { openNewProjectForm('graphic'); return; }
     if (target.id === 'cancelNewProject') { document.getElementById('newProjectForm').hidden = true; return; }
@@ -1368,7 +1406,7 @@ function bindAuthorEvents() {
     if (target.id === 'newChapterPackageButton') { resetChapterPackageForm(); document.getElementById('chapterPackageForm').hidden = false; return; }
     if (target.dataset.editChapterPackage) { editChapterPackage(target.dataset.editChapterPackage); return; }
     if (target.id === 'cancelChapterPackageEdit') { resetChapterPackageForm(); return; }
-    if (target.dataset.editChapter) { editChapter(target.dataset.editChapter); return; }
+    if (target.dataset.editChapter) { await editChapter(target.dataset.editChapter); return; }
     if (target.id === 'cancelChapterEdit') { resetChapterForm(); return; }
     if (target.dataset.saveGraphicVolume) {
       const card = target.closest('[data-volume-card]');

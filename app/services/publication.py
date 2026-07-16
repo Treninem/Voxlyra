@@ -47,12 +47,13 @@ class PublicationResult:
 
 
 def _book_link(book_id: int) -> str:
+    """Ссылка из канала сразу запускает Main Mini App на нужной книге."""
+    username = settings.BOT_USERNAME.strip().lstrip("@")
+    if username:
+        return f"https://t.me/{username}?startapp=book_{int(book_id)}"
     web_url = settings.WEBAPP_URL.strip().rstrip("/")
     if web_url:
         return f"{web_url}/book/{int(book_id)}"
-    username = settings.BOT_USERNAME.strip().lstrip("@")
-    if username:
-        return f"https://t.me/{username}?start=book_{int(book_id)}"
     return ""
 
 

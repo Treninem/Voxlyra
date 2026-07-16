@@ -1,23 +1,26 @@
 {
   "project": "VoxLyra",
-  "version": "v1.11.11",
-  "build": "adaptive_catalog_message_not_modified_hotfix",
-  "base_version": "v1.11.10",
+  "version": "v1.11.12",
+  "build": "author_large_book_and_direct_miniapp_links_hotfix",
+  "base_version": "v1.11.11",
   "owner_only_version": true,
   "features": {
     "database_reset": false,
     "storage_reset": false,
-    "adaptive_catalog_safe_markup_edits": true,
-    "double_tap_not_modified_guard": true,
-    "book_type_pagination_guard": true,
-    "existing_catalog_preserved": true,
+    "large_author_books_open_without_chapter_text_payload": true,
+    "chapter_text_lazy_loading": true,
+    "author_chapter_list_pagination": true,
+    "channel_button_opens_main_mini_app_book": true,
+    "telegram_launch_parameters_preserved": true,
+    "visible_text_url_removed_from_channel_caption": true,
+    "legacy_web_book_links_redirect_to_telegram": true,
     "existing_books_preserved": true
   },
   "verification": {
     "python_compile": true,
-    "pytest_passed": 236,
+    "pytest_passed": 241,
     "pytest_failed": 0,
-    "pytest_skipped": 0,
+    "pytest_skipped": 1,
     "archive_integrity": true,
     "live_bothost_redeploy": false,
     "live_telegram_flow": false,
@@ -26,5 +29,5 @@
     "ui_callbacks_passed": 83,
     "ui_callbacks_total": 83
   },
-  "name": "Adaptive catalog repeated-click hotfix"
+  "name": "Large author book and direct Mini App links hotfix"
 }

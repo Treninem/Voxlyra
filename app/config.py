@@ -12,10 +12,10 @@ class Settings(BaseSettings):
     PORT: int = 3000
     WEBAPP_URL: str = ""
     CHANNEL_ID: str = ""
-    BOT_USERNAME: str = ""
+    BOT_USERNAME: str = "VoxlyraBot"
     PROJECT_NAME: str = "Вокслира"
     PUBLIC_VERSION_VISIBLE: bool = False
-    PROJECT_VERSION: str = "v1.11.11-owner-only"
+    PROJECT_VERSION: str = "v1.11.12-owner-only"
     MAX_BOOK_UPLOAD_MB: int = 0
     MAX_BOOK_UNPACKED_MB: int = 2048
     MAX_COMIC_UPLOAD_MB: int = 512

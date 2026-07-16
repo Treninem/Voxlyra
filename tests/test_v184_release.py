@@ -4,7 +4,7 @@ import asyncio
 from pathlib import Path
 
 
-def test_channel_card_is_premium_and_contains_direct_link():
+def test_channel_card_is_premium_and_keeps_link_only_in_button():
     from app.services.channel import build_new_book_post
 
     text = build_new_book_post(
@@ -24,7 +24,8 @@ def test_channel_card_is_premium_and_contains_direct_link():
     assert '✍️ Treninem' in text
     assert '4853 глав' in text
     assert 'Есть аудиоверсия' in text
-    assert 'https://voxlyra.example/book/7' in text
+    assert 'https://voxlyra.example/book/7' not in text
+    assert 'Открыть книгу:' not in text
     assert len(text) <= 1024
 
     repeated = build_new_book_post(
@@ -135,7 +136,8 @@ def test_owner_upload_publishes_and_regular_author_goes_to_review(tmp_path):
         assert result.workflow_status == 'published'
         assert (await get_book(owner_book))['publication_status'] == 'published'
         assert fake_bot.messages
-        assert f'https://voxlyra.example/book/{owner_book}' in fake_bot.messages[0][1]
+        assert 'https://' not in fake_bot.messages[0][1]
+        assert fake_bot.messages[0][2].inline_keyboard[0][0].url.endswith(f'?startapp=book_{owner_book}')
 
         author_book = await create_book(author_profile['id'], 'Книга автора', 'Описание', '16+', 'finished', False, 'free', 0)
         await add_manual_chapter(author_book, 'Глава 1', 'Текст ' * 200, is_free=True, price_stars=0)
@@ -167,4 +169,4 @@ def test_v184_search_navigation_and_build_are_bundled():
     assert 'allowDuplicateImport' in author_js
     assert 'owner_build_label()' in owner_py
     assert 'owner_build_label()' in diagnostics_py
-    assert 'PROJECT_VERSION=v1.11.11-owner-only' in env_example
+    assert 'PROJECT_VERSION=v1.11.12-owner-only' in env_example

@@ -52,7 +52,8 @@ def test_channel_post_uses_real_cover_file_id(tmp_path, monkeypatch):
         assert result.channel_status == "sent"
         assert bot.photos
         assert bot.photos[0][1] == "telegram-cover-file-id"
-        assert f"https://voxlyra.example/book/{book_id}" in bot.photos[0][2]
+        assert "https://" not in bot.photos[0][2]
+        assert bot.photos[0][3].inline_keyboard[0][0].url.endswith(f"?startapp=book_{book_id}")
         assert str(bot.photos[0][4]).lower().endswith("html")
         assert not bot.messages
 

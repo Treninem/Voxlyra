@@ -159,6 +159,7 @@ from app.db import (
     publish_book_content,
     list_catalog_books,
     list_chapters_for_book,
+    list_author_chapter_summaries,
     list_chapter_packages_for_book,
     get_chapter_package,
     create_chapter_package_for_author,
@@ -736,7 +737,7 @@ def create_app() -> FastAPI:
     templates.env.globals["asset_version"] = OWNER_BUILD_VERSION
 
     def common_context(extra: dict[str, Any] | None = None) -> dict[str, Any]:
-        data = {"project_name": settings.PROJECT_NAME}
+        data = {"project_name": settings.PROJECT_NAME, "bot_username": settings.BOT_USERNAME.strip().lstrip("@")}
         if extra:
             data.update(extra)
         return data
@@ -3002,7 +3003,7 @@ def create_app() -> FastAPI:
         book_row = await get_book(book_id)
         if not book_row or book_row["publication_status"] == "deleted":
             raise HTTPException(status_code=404, detail="Книга не найдена.")
-        chapters = await list_chapters_for_book(book_id)
+        chapters = await list_author_chapter_summaries(book_id)
         graphic_chapters = await list_graphic_chapters_for_book(book_id)
         graphic_volumes = await list_graphic_volumes_for_book(book_id)
         chapter_packages = await list_chapter_packages_for_book(book_id, include_inactive=True)
@@ -3017,6 +3018,15 @@ def create_app() -> FastAPI:
             "chapter_packages": _rows_to_dicts(chapter_packages),
             "audio": _rows_to_dicts(audio),
         }
+
+    @app.get("/api/author/chapter/{chapter_id}")
+    async def api_author_chapter(chapter_id: int, x_telegram_init_data: str | None = Header(default=None)):
+        user, _ = await author_session(x_telegram_init_data)
+        chapter = await get_chapter(chapter_id)
+        if not chapter or not await book_belongs_to_author(int(chapter["book_id"]), user.app_user_id):
+            raise HTTPException(status_code=404, detail="Глава не найдена.")
+        return {"ok": True, "chapter": _row_to_dict(chapter)}
+
 
     @app.patch("/api/author/book/{book_id}")
     async def api_author_update_book(
