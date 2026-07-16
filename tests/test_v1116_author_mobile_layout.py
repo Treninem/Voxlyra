@@ -20,4 +20,4 @@ def test_author_mobile_layout_prevents_overlap_and_clipping():
 
 def test_static_cache_version_is_at_least_v1116():
     build = (ROOT / "app" / "build_info.py").read_text(encoding="utf-8")
-    assert 'OWNER_BUILD_VERSION = "v1.11.10"' in build
+    assert 'OWNER_BUILD_VERSION = "v1.11.11"' in build

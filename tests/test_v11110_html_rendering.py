@@ -16,4 +16,4 @@ def test_moderation_alerts_force_html_parse_mode():
 
 def test_build_version_is_v11110():
     source = (ROOT / "app" / "build_info.py").read_text(encoding="utf-8")
-    assert 'OWNER_BUILD_VERSION = "v1.11.10"' in source
+    assert 'OWNER_BUILD_VERSION = "v1.11.11"' in source

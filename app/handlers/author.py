@@ -648,10 +648,11 @@ async def add_book_type_page(call: CallbackQuery, state: FSMContext) -> None:
         await call.answer()
         return
     await state.update_data(page_type=page)
-    await call.message.edit_reply_markup(
+    await _safe_edit_reply_markup(
+        call.message,
         reply_markup=single_select_menu(
             "type", BOOK_TYPES, cancel_callback="author:cancel_flow", page=page, per_page=9
-        )
+        ),
     )
     await call.answer()
 
@@ -707,6 +708,34 @@ def _ordered_selected(choices, selected: set[str]) -> list[str]:
     return [item.code for item in choices if item.code in selected]
 
 
+def _markup_payload(markup):
+    if markup is None:
+        return None
+    dump = getattr(markup, "model_dump", None)
+    if callable(dump):
+        return dump(exclude_none=True)
+    return markup
+
+
+async def _safe_edit_reply_markup(message: Message, *, reply_markup) -> bool:
+    """Обновляет клавиатуру без падения на повторном или двойном нажатии.
+
+    CallbackQuery может прийти повторно, пока первый запрос уже успел изменить
+    клавиатуру. Telegram в таком случае отвечает ``message is not modified``.
+    Для пользователя это нормальная ситуация: нужная клавиатура уже показана.
+    """
+    current_markup = getattr(message, "reply_markup", None)
+    if _markup_payload(current_markup) == _markup_payload(reply_markup):
+        return False
+    try:
+        await message.edit_reply_markup(reply_markup=reply_markup)
+    except TelegramBadRequest as exc:
+        if "message is not modified" in str(exc).lower():
+            return False
+        raise
+    return True
+
+
 async def _handle_multiselect(
     call: CallbackQuery,
     state: FSMContext,
@@ -742,7 +771,7 @@ async def _handle_multiselect(
         ordered = _ordered_selected(choices, selected)
         await state.update_data(**{state_key: ordered})
         data[state_key] = ordered
-        await call.message.edit_reply_markup(reply_markup=_smart_option_markup(prefix, data, selected=selected))
+        await _safe_edit_reply_markup(call.message, reply_markup=_smart_option_markup(prefix, data, selected=selected))
         await call.answer("Выбор обновлён")
         return
 
@@ -754,14 +783,14 @@ async def _handle_multiselect(
             return
         await state.update_data(**{page_key: page})
         data[page_key] = page
-        await call.message.edit_reply_markup(reply_markup=_smart_option_markup(prefix, data, selected=selected))
+        await _safe_edit_reply_markup(call.message, reply_markup=_smart_option_markup(prefix, data, selected=selected))
         await call.answer()
         return
 
     if action == "m":
         await state.update_data(**{f"section_menu_{prefix}": True})
         data[f"section_menu_{prefix}"] = True
-        await call.message.edit_reply_markup(reply_markup=_smart_option_markup(prefix, data, selected=selected))
+        await _safe_edit_reply_markup(call.message, reply_markup=_smart_option_markup(prefix, data, selected=selected))
         await call.answer("Выберите раздел")
         return
 
@@ -781,7 +810,7 @@ async def _handle_multiselect(
         data[f"section_{prefix}"] = section_code
         data[f"section_menu_{prefix}"] = False
         data[page_key] = 0
-        await call.message.edit_reply_markup(reply_markup=_smart_option_markup(prefix, data, selected=selected))
+        await _safe_edit_reply_markup(call.message, reply_markup=_smart_option_markup(prefix, data, selected=selected))
         await call.answer(section_label(prefix, section_code))
         return
 

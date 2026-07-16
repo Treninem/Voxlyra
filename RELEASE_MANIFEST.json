@@ -1,21 +1,21 @@
 {
   "project": "VoxLyra",
-  "version": "v1.11.10",
-  "build": "telegram_html_rendering_hotfix",
-  "base_version": "v1.11.9",
+  "version": "v1.11.11",
+  "build": "adaptive_catalog_message_not_modified_hotfix",
+  "base_version": "v1.11.10",
   "owner_only_version": true,
   "features": {
     "database_reset": false,
     "storage_reset": false,
-    "channel_posts_force_html_parse_mode": true,
-    "moderation_alerts_force_html_parse_mode": true,
-    "miniapp_created_bot_instances_supported": true,
-    "existing_catalog_and_adaptive_options_preserved": true,
+    "adaptive_catalog_safe_markup_edits": true,
+    "double_tap_not_modified_guard": true,
+    "book_type_pagination_guard": true,
+    "existing_catalog_preserved": true,
     "existing_books_preserved": true
   },
   "verification": {
     "python_compile": true,
-    "pytest_passed": 234,
+    "pytest_passed": 236,
     "pytest_failed": 0,
     "pytest_skipped": 0,
     "archive_integrity": true,
@@ -26,5 +26,5 @@
     "ui_callbacks_passed": 83,
     "ui_callbacks_total": 83
   },
-  "name": "Telegram HTML rendering hotfix"
+  "name": "Adaptive catalog repeated-click hotfix"
 }
