@@ -3933,3 +3933,184 @@ input, select, textarea, button { max-width:100%; }
     grid-template-columns: 1fr !important;
   }
 }
+
+/* v1.12.2 — адаптивные карточки каталога без наложений. */
+.premium-book-card {
+  grid-template-columns: clamp(86px, 24vw, 118px) minmax(0, 1fr) !important;
+  gap: clamp(12px, 3.2vw, 18px) !important;
+  align-items: stretch !important;
+  min-width: 0;
+  padding: clamp(12px, 3.2vw, 18px) !important;
+}
+.premium-book-card .book-cover-link {
+  width: 100% !important;
+  min-width: 0;
+  align-self: start;
+}
+.premium-book-card .cover-mini,
+.premium-book-card .cover-image.cover-mini {
+  display: block;
+  width: 100% !important;
+  height: auto !important;
+  aspect-ratio: 2 / 3;
+  object-fit: cover;
+  object-position: center;
+  border-radius: clamp(14px, 3vw, 19px);
+}
+.premium-book-card .book-info {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-self: stretch;
+  overflow: hidden;
+}
+.premium-book-card .book-topline {
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+}
+.premium-book-card .book-meta-line {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 8px;
+}
+.premium-book-card .top-rank-badge {
+  max-width: 100%;
+  white-space: normal;
+  text-align: right;
+}
+.premium-book-card .book-title-link,
+.premium-book-card .book-title-link h3,
+.premium-book-card .book-author,
+.premium-book-card .desc,
+.premium-book-card .book-price-line {
+  min-width: 0;
+  max-width: 100%;
+}
+.premium-book-card .book-title-link h3 {
+  margin-top: 7px;
+  font-size: clamp(20px, 5.3vw, 28px);
+  line-height: 1.14;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+.premium-book-card .book-author {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.premium-book-card .genre-line {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+.premium-book-card .genre-line span {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.premium-book-card .desc {
+  margin: 9px 0 0;
+  font-size: clamp(14px, 3.7vw, 17px);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+}
+.premium-book-card .book-price-line {
+  margin-top: auto;
+  padding-top: 11px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 4px;
+}
+.premium-book-card .book-price-line strong,
+.premium-book-card .book-price-line span,
+.premium-book-card .book-price-line small {
+  overflow-wrap: anywhere;
+}
+.premium-book-card .card-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+.premium-book-card .card-action {
+  width: 100%;
+  min-width: 0;
+  min-height: 42px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  white-space: normal;
+  line-height: 1.15;
+}
+.premium-book-card .card-actions .card-action:nth-child(3) {
+  grid-column: 1 / -1;
+}
+
+/* Полки остаются компактными, но используют те же безопасные границы. */
+.premium-book-card.shelf {
+  grid-template-columns: clamp(76px, 22vw, 92px) minmax(0, 1fr) !important;
+  min-height: 0;
+}
+.premium-book-card.shelf .book-cover-link { width: 100% !important; }
+.premium-book-card.shelf .cover-mini,
+.premium-book-card.shelf .cover-image.cover-mini {
+  width: 100% !important;
+  height: auto !important;
+  aspect-ratio: 2 / 3;
+}
+
+@media (max-width: 430px) {
+  .premium-book-card {
+    grid-template-columns: clamp(78px, 25vw, 94px) minmax(0, 1fr) !important;
+    gap: 11px !important;
+    padding: 11px !important;
+  }
+  .premium-book-card .book-title-link h3 {
+    font-size: clamp(18px, 5.8vw, 23px);
+    margin-top: 5px;
+  }
+  .premium-book-card .book-author { font-size: 12px; }
+  .premium-book-card .genre-line { margin: 6px 0; gap: 4px; }
+  .premium-book-card .genre-line span { padding: 4px 7px; font-size: 9px; }
+  .premium-book-card .desc {
+    font-size: clamp(13px, 4vw, 15px);
+    -webkit-line-clamp: 3;
+  }
+  .premium-book-card .book-price-line strong { font-size: 13px; }
+  .premium-book-card .card-action { min-height: 40px; padding: 7px 6px; font-size: 11px; }
+}
+
+@media (max-width: 350px) {
+  .premium-book-card {
+    grid-template-columns: 74px minmax(0, 1fr) !important;
+    gap: 9px !important;
+    padding: 10px !important;
+  }
+  .premium-book-card .book-title-link h3 { font-size: 18px; }
+  .premium-book-card .desc { -webkit-line-clamp: 2; }
+  .premium-book-card .card-actions { grid-template-columns: 1fr; }
+  .premium-book-card .card-actions .card-action { grid-column: 1; }
+}
+
+@media (min-width: 721px) {
+  .catalog-grid .premium-book-card {
+    grid-template-columns: clamp(108px, 18vw, 132px) minmax(0, 1fr) !important;
+  }
+  .premium-book-card .book-title-link h3 { font-size: clamp(22px, 2.7vw, 30px); }
+  .premium-book-card .desc { font-size: 16px; }
+}
