@@ -20,6 +20,15 @@
     <p>Продолжение чтения, любимые книги, аудио и покупки.</p>
   </div>
 </section>
+<section class="author-studio-entry wallet-entry" id="walletEntry">
+  <img src="/static/img/miniapp/icons/coins.webp?v={{ asset_version }}" alt="" aria-hidden="true">
+  <div><b>Баланс и бонусы</b><small><span id="walletStars">0</span> Stars · <span id="walletBonusPoints">0</span> бонусов</small></div>
+  <button type="button" class="secondary compact-button" id="walletTopupButton">Пополнить</button>
+</section>
+<div class="wallet-topup-panel" id="walletTopupPanel" hidden>
+  <div><b>Пополнить баланс</b><small id="walletCashbackHint">Кешбэк начисляется после успешной оплаты</small></div>
+  <div class="wallet-topup-buttons" id="walletTopupButtons"></div>
+</div>
 <a class="author-studio-entry premium-entry" href="/premium"><img src="/static/img/miniapp/icons/premium.webp?v={{ asset_version }}" alt="" aria-hidden="true"><div><b>VoxLyra Premium</b><small>Комфорт, оформление и приоритетная озвучка</small></div><i>›</i></a>
 <a class="author-studio-entry" id="authorStudioEntry" href="/author" hidden><img src="/static/img/miniapp/icons/author.webp?v={{ asset_version }}" alt="" aria-hidden="true"><div><b>Кабинет автора</b><small>Книги, главы, импорт и публикация</small></div><i>›</i></a>
 <a class="author-studio-entry control-center-entry" id="controlCenterEntry" href="/control" hidden><img src="/static/img/miniapp/icons/control.webp?v={{ asset_version }}" alt="" aria-hidden="true"><div><b>Центр управления</b><small id="controlCenterHint">Модерация и рабочие очереди</small></div><i>›</i></a>
