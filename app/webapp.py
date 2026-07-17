@@ -266,11 +266,22 @@ from app.services.chunked_upload import (
     assemble_upload,
     cleanup_upload,
     create_graphic_upload,
+    create_library_import_upload,
     create_upload,
     get_upload_status,
     load_upload,
     save_chunk,
 )
+from app.services.library_import_queue import (
+    IMPORT_UPLOAD_ROOT,
+    calculate_archive_hash,
+    enqueue_import_job,
+)
+from app.services.library_import_upload import (
+    LibraryImportUploadTokenError,
+    verify_library_import_upload_token,
+)
+from app.services.library_manager import get_import_settings
 from app.services.notifications import (
     book_moderation_message,
     book_revision_markup,
@@ -801,6 +812,145 @@ def create_app() -> FastAPI:
         if required and not is_owner and not any(code in permissions for code in required):
             raise HTTPException(status_code=403, detail="Для этого действия не выдано право доступа.")
         return user, is_owner, permissions
+
+    async def library_import_upload_session(
+        init_data: str | None, token: str
+    ) -> tuple[TMAUser, Any]:
+        try:
+            token_data = verify_library_import_upload_token(token)
+        except LibraryImportUploadTokenError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        user, _, _ = await control_session(init_data, "library_import_manage")
+        if int(user.telegram_id) != int(token_data.telegram_id):
+            raise HTTPException(status_code=403, detail="Эта ссылка создана для другого аккаунта Telegram.")
+        return user, token_data
+
+    @app.get("/library-import-upload", response_class=HTMLResponse)
+    async def library_import_upload_page(request: Request, token: str = ""):
+        if not token:
+            raise HTTPException(status_code=400, detail="Ссылка загрузки не указана.")
+        try:
+            verify_library_import_upload_token(token)
+        except LibraryImportUploadTokenError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        return templates.TemplateResponse(
+            request,
+            "library_import_upload.html",
+            common_context({"upload_token": token}),
+        )
+
+    @app.post("/api/library-import-upload/start")
+    async def api_library_import_upload_start(
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        token = str(payload.get("token") or "")
+        user, _ = await library_import_upload_session(x_telegram_init_data, token)
+        cfg = await get_import_settings()
+        try:
+            meta = create_library_import_upload(
+                user_id=user.app_user_id,
+                filename=str(payload.get("filename") or ""),
+                total_size=int(payload.get("size") or 0),
+                max_mb=int(cfg.get("max_archive_mb") or 0),
+            )
+        except ChunkedUploadError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "ok": True,
+            "upload_id": meta["upload_id"],
+            "chunk_size": CHUNK_SIZE_BYTES,
+        }
+
+    @app.post("/api/library-import-upload/{upload_id}/chunk")
+    async def api_library_import_upload_chunk(
+        upload_id: str,
+        index: int = Form(...),
+        total_chunks: int = Form(...),
+        chunk: UploadFile = File(...),
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user, _, _ = await control_session(x_telegram_init_data, "library_import_manage")
+        try:
+            meta = load_upload(upload_id, user_id=user.app_user_id, book_id=0)
+            if str(meta.get("kind") or "") != "library_import":
+                raise ChunkedUploadError("Загрузка не относится к импорту библиотеки.")
+            result = await save_chunk(
+                upload_id,
+                user_id=user.app_user_id,
+                book_id=0,
+                index=int(index),
+                total_chunks=int(total_chunks),
+                chunk=chunk,
+            )
+        except ChunkedUploadError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"ok": True, **result}
+
+    @app.post("/api/library-import-upload/{upload_id}/finish")
+    async def api_library_import_upload_finish(
+        upload_id: str,
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        token = str(payload.get("token") or "")
+        user, token_data = await library_import_upload_session(x_telegram_init_data, token)
+        total_chunks = int(payload.get("total_chunks") or 0)
+        queue_path: Path | None = None
+        try:
+            meta = load_upload(upload_id, user_id=user.app_user_id, book_id=0)
+            if str(meta.get("kind") or "") != "library_import":
+                raise ChunkedUploadError("Загрузка не относится к импорту библиотеки.")
+            assembled_path, meta = assemble_upload(
+                upload_id,
+                user_id=user.app_user_id,
+                book_id=0,
+                total_chunks=total_chunks,
+            )
+            await asyncio.to_thread(IMPORT_UPLOAD_ROOT.mkdir, parents=True, exist_ok=True)
+            queue_path = IMPORT_UPLOAD_ROOT / f"{uuid.uuid4().hex}.zip"
+            await asyncio.to_thread(shutil.move, str(assembled_path), str(queue_path))
+            archive_hash = await calculate_archive_hash(queue_path)
+            job_id, position = await enqueue_import_job(
+                archive_path=queue_path,
+                archive_name=str(meta.get("filename") or "library.zip"),
+                archive_hash=archive_hash,
+                actor_user_id=user.app_user_id,
+                chat_id=int(token_data.chat_id),
+                progress_message_id=int(token_data.progress_message_id),
+            )
+        except (ChunkedUploadError, ValueError) as exc:
+            if queue_path is not None and queue_path.exists():
+                await asyncio.to_thread(queue_path.unlink)
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            if queue_path is not None and queue_path.exists():
+                await asyncio.to_thread(queue_path.unlink)
+            raise HTTPException(
+                status_code=500, detail="Не удалось поставить архив в очередь. Повторите загрузку."
+            ) from exc
+        finally:
+            cleanup_upload(upload_id)
+
+        if settings.BOT_TOKEN.strip():
+            delivery_bot = Bot(token=settings.BOT_TOKEN)
+            try:
+                position_text = "начинается сейчас" if position == 1 else f"позиция в очереди: <b>{position}</b>"
+                await delivery_bot.edit_message_text(
+                    chat_id=int(token_data.chat_id),
+                    message_id=int(token_data.progress_message_id),
+                    text=(
+                        "<b>✅ Большой архив принят</b>\n\n"
+                        f"Задание: <b>#{job_id}</b>\n"
+                        f"Импорт {position_text}. Прогресс будет обновляться в этом сообщении.\n\n"
+                        "Архив обрабатывается в фоне. Ботом можно пользоваться без ожидания."
+                    ),
+                )
+            except Exception:
+                pass
+            finally:
+                await delivery_bot.session.close()
+        return {"ok": True, "job_id": job_id, "position": position}
 
     async def premium_invoice_link(plan: dict[str, Any]) -> str:
         if not settings.BOT_TOKEN.strip():
