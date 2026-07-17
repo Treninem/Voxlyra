@@ -4,7 +4,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from pathlib import Path
 
-from aiogram.types import CallbackQuery, FSInputFile, LabeledPrice, Message, PreCheckoutQuery
+from aiogram.types import CallbackQuery, FSInputFile, LabeledPrice, Message, PreCheckoutQuery, WebAppInfo
 
 from app.config import settings
 from app.db import (
@@ -1164,15 +1164,43 @@ async def send_paid_or_free_audio(call: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("open:book:"))
 async def open_paid_or_free_book(call: CallbackQuery) -> None:
-    book_id = int(call.data.split(":")[-1])
+    try:
+        book_id = int(str(call.data or "").rsplit(":", 1)[-1])
+    except (TypeError, ValueError):
+        await call.answer("Кнопка книги повреждена. Откройте раздел заново.", show_alert=True)
+        return
+
+    book = await get_book(book_id)
+    if not book or str(book["publication_status"] or "") != "published":
+        await call.answer("Книга не найдена или ещё не опубликована", show_alert=True)
+        return
+
+    web_url = settings.WEBAPP_URL.strip().rstrip("/")
+    if web_url:
+        from aiogram.utils.keyboard import InlineKeyboardBuilder
+        kb = InlineKeyboardBuilder()
+        kb.button(
+            text="📚 Открыть книгу",
+            web_app=WebAppInfo(url=f"{web_url}/book/{book_id}"),
+        )
+        kb.button(text="⬅️ Назад", callback_data="main:my")
+        kb.adjust(1)
+        await call.message.edit_text(
+            f"<b>📚 {book['title']}</b>\n\nНажмите кнопку ниже — книга откроется сразу в Mini App.",
+            reply_markup=kb.as_markup(),
+        )
+        await call.answer()
+        return
+
     user = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
-    if not await has_purchase_access(user["id"], book_id=book_id):
+    is_free_book = str(book["pricing_type"] or "free") == "free" or int(book["price_stars"] or 0) <= 0
+    if not is_free_book and not await has_purchase_access(user["id"], book_id=book_id):
         await call.answer("Сначала купите книгу", show_alert=True)
         await _send_invoice(call, "book", book_id)
         return
     chapters = await list_chapters_for_book(book_id)
     if not chapters:
-        await call.message.edit_text("В книге пока нет глав.", reply_markup=back_to_main())
+        await call.message.edit_text("В книге пока нет опубликованных глав.", reply_markup=back_to_main())
         await call.answer()
         return
     from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -1181,7 +1209,7 @@ async def open_paid_or_free_book(call: CallbackQuery) -> None:
         kb.button(text=f"{chapter['number']}. {chapter['title']}", callback_data=f"read:chapter:{chapter['id']}")
     kb.button(text="⬅️ В меню", callback_data="menu:main")
     kb.adjust(1)
-    await call.message.edit_text("<b>Книга куплена.</b>\n\nВыберите главу.", reply_markup=kb.as_markup())
+    await call.message.edit_text("<b>Книга открыта.</b>\n\nВыберите главу.", reply_markup=kb.as_markup())
     await call.answer()
 
 

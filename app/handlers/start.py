@@ -1,7 +1,7 @@
 from aiogram import F, Router
 from aiogram.filters import CommandStart
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, Message, WebAppInfo
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.config import settings
@@ -92,7 +92,10 @@ async def cmd_start(message: Message) -> None:
                 kb = InlineKeyboardBuilder()
                 web_url = settings.WEBAPP_URL.strip().rstrip("/")
                 if web_url:
-                    kb.button(text="📖 Открыть книгу", url=f"{web_url}/book/{int(raw_book_id)}")
+                    kb.button(
+                        text="📖 Открыть книгу",
+                        web_app=WebAppInfo(url=f"{web_url}/book/{int(raw_book_id)}"),
+                    )
                 kb.button(text="🏠 Главное меню", callback_data="menu:main")
                 kb.adjust(1)
                 await message.answer(
@@ -199,9 +202,16 @@ async def callback_bonus_history(call: CallbackQuery) -> None:
 async def callback_read_fallback(call: CallbackQuery) -> None:
     url = settings.WEBAPP_URL.rstrip("/")
     if url:
+        kb = InlineKeyboardBuilder()
+        kb.button(
+            text="📚 Открыть Mini App",
+            web_app=WebAppInfo(url=f"{url}/catalog"),
+        )
+        kb.button(text="⬅️ Назад", callback_data="menu:main")
+        kb.adjust(1)
         await call.message.edit_text(
-            "<b>📚 Читать</b>\n\nКаталог открывается во встроенном окне Telegram. Если окно не появилось, закройте Telegram и попробуйте ещё раз. Если ошибка повторится, напишите в поддержку.",
-            reply_markup=back_to_main(),
+            "<b>📚 Читать</b>\n\nНажмите кнопку ниже — каталог откроется сразу во встроенном окне Telegram.",
+            reply_markup=kb.as_markup(),
         )
     else:
         await call.message.edit_text("<b>📚 Читать</b>\n\nКаталог временно недоступен. Попробуйте открыть его позже или напишите в поддержку.", reply_markup=back_to_main())

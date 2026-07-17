@@ -62,6 +62,27 @@ router = Router()
 TELEGRAM_CLOUD_DOWNLOAD_LIMIT_BYTES = 20 * 1024 * 1024
 
 
+def _parse_duplicate_action(data: str | None) -> tuple[int, str, int] | None:
+    prefix = "library:duplicate_action:"
+    raw = str(data or "")
+    if not raw.startswith(prefix):
+        return None
+    parts = raw[len(prefix):].split(":")
+    if len(parts) != 3:
+        return None
+    duplicate_raw, action, batch_raw = parts
+    if action not in {"skip", "replace"}:
+        return None
+    try:
+        duplicate_id = int(duplicate_raw)
+        batch_id = int(batch_raw)
+    except (TypeError, ValueError):
+        return None
+    if duplicate_id <= 0 or batch_id <= 0:
+        return None
+    return duplicate_id, action, batch_id
+
+
 def _direct_upload_keyboard(url: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -425,14 +446,31 @@ async def library_duplicates(call: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("library:duplicate_action:"))
 async def library_duplicate_action(call: CallbackQuery) -> None:
-    if await _deny(call): return
-    _, _, _, duplicate_id, action, batch_id = call.data.split(":")
+    if await _deny(call):
+        return
+
+    parsed = _parse_duplicate_action(call.data)
+    if parsed is None:
+        await call.answer(
+            "Кнопка устарела или повреждена. Откройте список дублей заново.",
+            show_alert=True,
+        )
+        return
+    duplicate_id, action, batch_id = parsed
+
     try:
-        await resolve_duplicate(int(duplicate_id), action)
+        result = await resolve_duplicate(duplicate_id, action)
     except Exception as exc:
-        await call.answer(f"Не удалось обработать дубль: {exc}", show_alert=True); return
-    await call.answer("Книга заменена" if action == "replace" else "Дубль пропущен")
-    rows = await list_batch_duplicates(int(batch_id))
+        await call.answer(f"Не удалось обработать дубль: {exc}", show_alert=True)
+        return
+
+    if result.get("status") == "resolved" and result.get("action") is None:
+        answer_text = "Этот дубль уже обработан"
+    else:
+        answer_text = "Книга заменена" if action == "replace" else "Дубль пропущен"
+    await call.answer(answer_text)
+
+    rows = await list_batch_duplicates(batch_id)
     if rows:
         row = rows[0]
         await _safe_edit(
@@ -441,10 +479,14 @@ async def library_duplicate_action(call: CallbackQuery) -> None:
             f"Книга: <b>{html.escape(str(row['title']))}</b>\n"
             f"Автор: <b>{html.escape(str(row['author']))}</b>\n"
             f"Существующая книга: <b>ID {row['existing_book_id']}</b>",
-            library_duplicate_menu(int(row["id"]), int(batch_id), len(rows)),
+            library_duplicate_menu(int(row["id"]), batch_id, len(rows)),
         )
     else:
-        await _safe_edit(call, "<b>✅ Все дубли обработаны</b>", library_batch_details_menu(int(batch_id)))
+        await _safe_edit(
+            call,
+            "<b>✅ Все дубли обработаны</b>",
+            library_batch_details_menu(batch_id),
+        )
 
 
 @router.callback_query(F.data == "library:export")

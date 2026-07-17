@@ -557,7 +557,14 @@ def access_granted_menu(kind: str, target_id: int) -> InlineKeyboardMarkup:
     elif kind == "audio":
         kb.button(text="🎧 Получить аудио", callback_data=f"listen:audio:{target_id}")
     elif kind == "book":
-        kb.button(text="📚 Открыть книгу", callback_data=f"open:book:{target_id}")
+        web_url = settings.WEBAPP_URL.strip().rstrip("/")
+        if web_url:
+            kb.button(
+                text="📚 Открыть книгу",
+                web_app=WebAppInfo(url=f"{web_url}/book/{int(target_id)}"),
+            )
+        else:
+            kb.button(text="📚 Открыть книгу", callback_data=f"open:book:{target_id}")
     elif kind == "chapter_package" and settings.WEBAPP_URL:
         kb.button(text="📚 Выбрать главы", web_app=WebAppInfo(url=f"{settings.WEBAPP_URL.rstrip('/')}/book/{int(target_id)}"))
     elif kind == "graphic" and settings.WEBAPP_URL:
