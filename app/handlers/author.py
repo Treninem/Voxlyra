@@ -96,6 +96,7 @@ from app.services.import_store import delete_import_preview, load_import_preview
 from app.services.notifications import discount_message, new_audio_message, new_chapter_message, notify_book_followers
 from app.services.cover_storage import download_book_cover
 from app.services.publication import finish_book_content_workflow, publish_book_and_channel
+from app.services.automatic_moderation import evaluate_metadata_text
 from app.services.audio_tools import AudioImportError, build_audio_import_report, extract_audio_zip, format_duration, inspect_audio_file
 from app.services.pricing import recommend_book_price
 from app.handlers.legal import send_next_required_document
@@ -1190,7 +1191,13 @@ async def book_edit_description_save(message: Message, state: FSMContext) -> Non
     data = await state.get_data()
     book_id = int(data["book_id"])
     user = await upsert_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
-    ok = await update_book_description(book_id, user["id"], (message.text or "").strip()[:4000])
+    value = (message.text or "").strip()[:4000]
+    current = await get_book(book_id)
+    reasons = evaluate_metadata_text(value, age_limit=str(current["age_limit"] if current else "0+"), field_name="Описание")
+    if reasons:
+        await message.answer("Изменение не сохранено:\n• " + "\n• ".join(reasons))
+        return
+    ok = await update_book_description(book_id, user["id"], value)
     await state.clear()
     await message.answer("Описание книги обновлено." if ok else "Книга не найдена или недоступна.", reply_markup=author_menu(True))
 
@@ -1385,6 +1392,11 @@ async def book_edit_title_save(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     book_id = int(data["book_id"])
     user = await upsert_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
+    current = await get_book(book_id)
+    reasons = evaluate_metadata_text(title, age_limit=str(current["age_limit"] if current else "0+"), field_name="Название")
+    if reasons:
+        await message.answer("Изменение не сохранено:\n• " + "\n• ".join(reasons))
+        return
     ok = await update_book_title(book_id, user["id"], title)
     await add_audit(user["id"], "book_title_updated", "book", str(book_id), None, title)
     await state.clear()

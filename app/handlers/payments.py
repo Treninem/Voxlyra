@@ -57,6 +57,11 @@ from app.db import (
     set_setting,
     upsert_user,
     activate_premium_subscription,
+    credit_wallet_topup,
+    get_chapter_wallet_checkout,
+    purchase_chapter_from_wallet,
+    get_wallet_summary,
+    restore_wallet_purchase_funds,
 )
 from app.keyboards import (
     access_granted_menu,
@@ -73,9 +78,12 @@ from app.keyboards import (
     refund_requests_menu,
     user_purchases_menu,
     channel_promotion_confirm_menu,
+    chapter_wallet_checkout_menu,
+    bonuses_menu,
 )
 from app.services.payments import build_pay_target, describe_purchase_row
 from app.services.payment_runtime import load_runtime_payment_settings
+from app.services.bonus_economy import load_revenue_split_settings
 from app.services.notifications import payout_message, refund_message, send_user_notification
 from app.services.publication import post_book_to_channel
 from app.handlers.legal import missing_legal_codes, send_next_required_document
@@ -288,7 +296,7 @@ async def _send_invoice(message_or_call, kind: str, target_id: int, promo_code: 
         payload=intent["payload"],
         provider_token="",
         currency="XTR",
-        prices=[LabeledPrice(label=("Публикация" if kind == "channel_promo" else "Пакет глав" if kind == "chapter_package" else "Доступ"), amount=target.amount_stars)],
+        prices=[LabeledPrice(label=("Пополнение баланса" if kind == "wallet_topup" else "Публикация" if kind == "channel_promo" else "Пакет глав" if kind == "chapter_package" else "Доступ"), amount=target.amount_stars)],
         protect_content=True,
         reply_markup=payment_invoice_menu(intent["token"], target.amount_stars),
     )
@@ -297,12 +305,81 @@ async def _send_invoice(message_or_call, kind: str, target_id: int, promo_code: 
         await message_or_call.answer("Счёт отправлен")
 
 
+async def _show_chapter_wallet_checkout(message_or_call, chapter_id: int) -> None:
+    tg = message_or_call.from_user
+    user = await upsert_user(tg.id, tg.username, tg.full_name)
+    target_message = message_or_call.message if isinstance(message_or_call, CallbackQuery) else message_or_call
+    if await send_next_required_document(target_message, int(user["id"])):
+        if isinstance(message_or_call, CallbackQuery):
+            await message_or_call.answer("Сначала примите обязательные документы", show_alert=True)
+        return
+    checkout = await get_chapter_wallet_checkout(int(user["id"]), int(chapter_id))
+    if not checkout:
+        text = "Глава не найдена, бесплатна или отдельно не продаётся."
+        if isinstance(message_or_call, CallbackQuery):
+            await message_or_call.answer(text, show_alert=True)
+        else:
+            await message_or_call.answer(text, reply_markup=back_to_main())
+        return
+    if checkout.get("already_owned"):
+        text = "Эта глава уже доступна в вашей библиотеке."
+        if isinstance(message_or_call, CallbackQuery):
+            await message_or_call.message.edit_text(text, reply_markup=access_granted_menu("chapter", int(chapter_id)))
+            await message_or_call.answer()
+        else:
+            await message_or_call.answer(text, reply_markup=access_granted_menu("chapter", int(chapter_id)))
+        return
+    cfg = await load_revenue_split_settings()
+    bonus_stars = int(checkout.get("bonus_stars_used") or 0)
+    with_bonus = int(checkout.get("wallet_stars_needed") or checkout["price_stars"])
+    text = (
+        f"<b>📖 Покупка главы</b>\n\n"
+        f"Книга: <b>{checkout['book_title']}</b>\n"
+        f"Глава: <b>{checkout['title']}</b>\n"
+        f"Цена: <b>{checkout['price_stars']} Stars</b>\n\n"
+        f"Баланс: <b>{checkout['wallet_stars']} Stars</b>\n"
+        f"Бонусы: <b>{checkout['bonus_points']}</b> "
+        f"({checkout['points_per_star']} бонусов = 1 Star)\n"
+    )
+    if bonus_stars > 0:
+        text += (
+            f"Можно применить: <b>{bonus_stars} Star</b> скидки.\n"
+            f"С баланса спишется: <b>{with_bonus} Stars</b>.\n\n"
+        )
+    else:
+        text += "Для этой покупки пока нет целой Star скидки.\n\n"
+    text += (
+        f"Автор получает свою долю <b>{cfg.author_percent}%</b> от полной цены. "
+        "Бонусная скидка не уменьшает доход автора."
+    )
+    markup = chapter_wallet_checkout_menu(
+        int(chapter_id),
+        can_bonus=bool(checkout.get("can_buy_with_bonus") and bonus_stars > 0),
+        can_plain=bool(checkout.get("can_buy_without_bonus")),
+        topup_packages=cfg.topup_packages,
+    )
+    if isinstance(message_or_call, CallbackQuery):
+        await message_or_call.message.edit_text(text, reply_markup=markup)
+        await message_or_call.answer()
+    else:
+        await message_or_call.answer(text, reply_markup=markup)
+
+
 @router.message(CommandStart(deep_link=True))
 async def start_deeplink(message: Message, state: FSMContext) -> None:
     args = (message.text or "").split(maxsplit=1)
     payload = args[1] if len(args) > 1 else ""
     if payload.startswith("buy_chapter_"):
-        await _send_invoice(message, "chapter", int(payload.replace("buy_chapter_", "")))
+        await _show_chapter_wallet_checkout(message, int(payload.replace("buy_chapter_", "")))
+        return
+    if payload == "wallet":
+        cfg = await load_revenue_split_settings()
+        summary = await get_wallet_summary((await upsert_user(message.from_user.id, message.from_user.username, message.from_user.full_name))["id"])
+        await message.answer(
+            f"<b>💎 Баланс и бонусы</b>\n\nБаланс: <b>{summary['wallet_stars']} Stars</b>.\n"
+            f"Бонусы: <b>{summary['bonus_points']}</b>.\nВыберите сумму пополнения.",
+            reply_markup=bonuses_menu(cfg.topup_packages),
+        )
         return
     if payload.startswith("buy_package_"):
         raw = payload.replace("buy_package_", "", 1)
@@ -380,6 +457,46 @@ async def channel_promote_pay(call: CallbackQuery) -> None:
     await _send_invoice(call, "channel_promo", promotion_id)
 
 
+@router.callback_query(F.data.startswith("wallet:topup:"))
+async def wallet_topup_invoice(call: CallbackQuery) -> None:
+    raw = call.data.rsplit(":", 1)[-1]
+    if not raw.isdigit():
+        await call.answer("Неверная сумма", show_alert=True)
+        return
+    await _send_invoice(call, "wallet_topup", int(raw))
+
+
+@router.callback_query(F.data.startswith("wallet:buy_chapter:"))
+async def wallet_buy_chapter(call: CallbackQuery) -> None:
+    parts = call.data.split(":")
+    if len(parts) != 4 or not parts[2].isdigit() or parts[3] not in {"bonus", "plain"}:
+        await call.answer("Неверная покупка", show_alert=True)
+        return
+    chapter_id = int(parts[2])
+    user = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
+    try:
+        result = await purchase_chapter_from_wallet(int(user["id"]), chapter_id, use_bonus=parts[3] == "bonus")
+    except ValueError as exc:
+        await call.answer(str(exc), show_alert=True)
+        await _show_chapter_wallet_checkout(call, chapter_id)
+        return
+    await add_audit(
+        int(user["id"]), "wallet_chapter_purchase", "purchase", str(result["purchase_id"]), None,
+        f"wallet={result['wallet_stars_used']};bonus={result['bonus_points_used']}",
+    )
+    discount_line = (
+        f"\nПрименено бонусами: <b>{result['bonus_stars_used']} Stars</b>."
+        if int(result["bonus_stars_used"]) > 0 else ""
+    )
+    await call.message.edit_text(
+        f"<b>Глава куплена.</b>\n\nС баланса списано: <b>{result['wallet_stars_used']} Stars</b>."
+        f"{discount_line}\nОстаток баланса: <b>{result['wallet_stars']} Stars</b>.\n"
+        f"Остаток бонусов: <b>{result['bonus_points']}</b>.",
+        reply_markup=access_granted_menu("chapter", chapter_id),
+    )
+    await call.answer("Доступ открыт")
+
+
 @router.callback_query(F.data.startswith("payment:cancel:"))
 async def payment_invoice_cancel(call: CallbackQuery) -> None:
     token = call.data.split(":", 2)[-1]
@@ -411,6 +528,9 @@ async def buy_callback(call: CallbackQuery) -> None:
     _, kind, raw_id = call.data.split(":", 2)
     if kind not in {"book", "chapter", "audio", "graphic", "chapter_package"} or not raw_id.isdigit():
         await call.answer("Неверная покупка", show_alert=True)
+        return
+    if kind == "chapter":
+        await _show_chapter_wallet_checkout(call, int(raw_id))
         return
     await _send_invoice(call, kind, int(raw_id))
 
@@ -449,6 +569,52 @@ async def successful_payment_handler(message: Message) -> None:
     payment = message.successful_payment
     user = await upsert_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
     target = await get_purchase_target(payment.invoice_payload)
+
+    if target and target.get("kind") == "wallet_topup":
+        try:
+            result = await credit_wallet_topup(
+                user_id=int(user["id"]),
+                amount_stars=int(payment.total_amount),
+                telegram_payment_charge_id=str(payment.telegram_payment_charge_id or ""),
+                payload=str(payment.invoice_payload or ""),
+            )
+        except Exception as exc:
+            await add_audit(user["id"], "wallet_topup_save_failed", "payment", payment.invoice_payload, None, str(exc))
+            await message.answer(
+                "Пополнение прошло, но баланс не обновился автоматически. Платёж сохранён в Telegram — напишите в поддержку, повторно платить не нужно.",
+                reply_markup=back_to_main(),
+            )
+            return
+        await add_audit(user["id"], "wallet_topup_success", "wallet_topup", str(result["topup_id"]), None, str(payment.total_amount))
+        cashback = int(result.get("buyer_bonus_points") or 0)
+        referrer_user_id = int(result.get("referrer_user_id") or 0)
+        referrer_points = int(result.get("referrer_bonus_points") or 0)
+        if referrer_user_id and referrer_points:
+            try:
+                await send_user_notification(
+                    app_user_id=referrer_user_id,
+                    telegram_id=None,
+                    text=(
+                        "<b>Реферальный бонус начислен</b>\n\n"
+                        f"Приглашённый пользователь пополнил баланс. Вам начислено <b>{referrer_points} бонусов</b>."
+                    ),
+                    bot=message.bot,
+                )
+            except Exception as exc:
+                await add_audit(user["id"], "referral_topup_notification_failed", "wallet_topup", str(result["topup_id"]), None, str(exc))
+        referral_line = (
+            f"Из начисления пригласившему направлено: <b>{referrer_points} бонусов</b>.\n"
+            if referrer_points else ""
+        )
+        await message.answer(
+            f"<b>Баланс пополнен.</b>\n\nЗачислено: <b>{int(payment.total_amount)} Stars</b>.\n"
+            f"Баланс: <b>{result['wallet_stars']} Stars</b>.\n"
+            f"Ваш кешбэк: <b>{cashback} бонусов</b>.\n"
+            f"{referral_line}"
+            f"Всего ваших бонусов: <b>{result['bonus_points']}</b>.",
+            reply_markup=back_to_main(),
+        )
+        return
 
     # Premium — отдельный платёжный контур. С каждой оплаченной подписки
     # создаётся авторский фонд, который распределится после завершения периода
@@ -626,23 +792,36 @@ async def purchase_cancel_confirm(call: CallbackQuery) -> None:
     except ValueError as exc:
         await call.answer(str(exc), show_alert=True)
         return
-    try:
-        await call.bot.refund_star_payment(
-            user_id=int(purchase["telegram_id"]),
-            telegram_payment_charge_id=str(purchase["telegram_payment_charge_id"]),
-        )
-    except Exception as exc:
-        await add_audit(int(user["id"]), "purchase_cancel_refund_failed", "purchase", str(purchase_id), None, str(exc))
-        await call.answer("Telegram не выполнил автоматический возврат. Запрос сохранён для проверки владельцем, доступ временно приостановлен.", show_alert=True)
-        return
+    wallet_refund = str(purchase["funding_method"] or "telegram") == "wallet"
+    if wallet_refund:
+        try:
+            restored = await restore_wallet_purchase_funds(purchase_id, int(user["id"]))
+        except Exception as exc:
+            await add_audit(int(user["id"]), "purchase_cancel_wallet_refund_failed", "purchase", str(purchase_id), None, str(exc))
+            await call.answer("Не удалось восстановить внутренний баланс. Запрос сохранён для проверки владельцем.", show_alert=True)
+            return
+    else:
+        try:
+            await call.bot.refund_star_payment(
+                user_id=int(purchase["telegram_id"]),
+                telegram_payment_charge_id=str(purchase["telegram_payment_charge_id"]),
+            )
+        except Exception as exc:
+            await add_audit(int(user["id"]), "purchase_cancel_refund_failed", "purchase", str(purchase_id), None, str(exc))
+            await call.answer("Telegram не выполнил автоматический возврат. Запрос сохранён для проверки владельцем, доступ временно приостановлен.", show_alert=True)
+            return
     if not await finalize_refund(refund_id, int(user["id"]), "Покупка отменена пользователем в период автоматической отмены"):
-        await call.answer("Stars возвращены, но запись уже была обработана. Проверьте раздел покупок.", show_alert=True)
+        await call.answer("Возврат выполнен, но запись уже была обработана. Проверьте раздел покупок.", show_alert=True)
         return
     await add_audit(int(user["id"]), "purchase_canceled_by_user", "purchase", str(purchase_id), None, str(refund_id))
-    await call.message.edit_text(
-        f"Покупка отменена. <b>{int(purchase['amount_stars'])} Stars</b> возвращены через Telegram, доступ закрыт.",
-        reply_markup=back_to_main(),
-    )
+    if wallet_refund:
+        text = (
+            "Покупка отменена. На внутренний баланс возвращено "
+            f"<b>{int(restored['wallet_stars_restored'])} Stars</b> и <b>{int(restored['bonus_points_restored'])} бонусов</b>."
+        )
+    else:
+        text = f"Покупка отменена. <b>{int(purchase['amount_stars'])} Stars</b> возвращены через Telegram, доступ закрыт."
+    await call.message.edit_text(text, reply_markup=back_to_main())
     await call.answer("Покупка отменена")
 
 
@@ -767,16 +946,20 @@ async def refund_approve(call: CallbackQuery) -> None:
     if refund["purchase_status"] != "paid":
         await call.answer("Покупка уже не в статусе оплаты", show_alert=True)
         return
+    wallet_refund = str(refund["funding_method"] or "telegram") == "wallet"
     try:
-        await call.bot.refund_star_payment(
-            user_id=int(refund["telegram_id"]),
-            telegram_payment_charge_id=refund["telegram_payment_charge_id"],
-        )
+        if wallet_refund:
+            await restore_wallet_purchase_funds(int(refund["purchase_id"]), int(refund["user_id"]))
+        else:
+            await call.bot.refund_star_payment(
+                user_id=int(refund["telegram_id"]),
+                telegram_payment_charge_id=refund["telegram_payment_charge_id"],
+            )
     except Exception as exc:
         await add_audit(actor_user_id, "refund_failed", "refund", str(refund_id), None, str(exc))
-        await call.answer("Telegram не принял возврат. Подробности записаны в журнал.", show_alert=True)
+        await call.answer("Не удалось выполнить возврат. Подробности записаны в журнал.", show_alert=True)
         return
-    if not await finalize_refund(refund_id, actor_user_id, "Возврат Stars выполнен"):
+    if not await finalize_refund(refund_id, actor_user_id, "Возврат на внутренний баланс выполнен" if wallet_refund else "Возврат Stars выполнен"):
         await call.answer("Возврат выполнен Telegram, но запись уже была обработана. Проверьте журнал.", show_alert=True)
         return
     await add_audit(actor_user_id, "refund_approved", "refund", str(refund_id))
@@ -790,7 +973,10 @@ async def refund_approve(call: CallbackQuery) -> None:
         telegram_id=int(refund["telegram_id"]),
         text=refund_message("refunded", refund["amount_stars"]),
     )
-    await call.message.edit_text("Возврат одобрен и отправлен через Telegram Stars.", reply_markup=back_to_main())
+    await call.message.edit_text(
+        "Возврат одобрен и зачислен на внутренний баланс." if wallet_refund else "Возврат одобрен и отправлен через Telegram Stars.",
+        reply_markup=back_to_main(),
+    )
     await call.answer("Возвращено")
 
 

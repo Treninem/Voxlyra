@@ -31,6 +31,9 @@ from app.db import (
 )
 from app.keyboards import ad_moderation_card_menu, back_to_main, complaint_card_menu, complaints_menu, moderation_ads_menu, moderation_book_card_menu, moderation_books_menu, moderation_comments_menu, moderation_content_menu, moderation_hide_menu, moderation_menu, moderation_reviews_menu
 from app.services.publication import publish_book_and_channel
+from app.services.automatic_moderation import (
+    count_book_moderation_findings, list_book_moderation_findings, resolve_book_moderation_findings,
+)
 from app.services.moderation_alerts import notify_moderation_resolved
 from app.services.notifications import (
     book_moderation_message,
@@ -118,6 +121,7 @@ async def moderation_book_card(call: CallbackQuery) -> None:
         return
     chapters_count = await count_chapters_for_book(book_id)
     queue = await get_book_moderation_entry(book_id)
+    findings_count = await count_book_moderation_findings(book_id)
     reasons = ""
     if queue and str(queue["reasons"] or "").strip():
         reasons = "\n\n<b>Почему нужна ручная проверка:</b>\n" + str(queue["reasons"] or "")
@@ -128,11 +132,44 @@ async def moderation_book_card(call: CallbackQuery) -> None:
         f"Глав: <b>{chapters_count}</b>\n"
         f"Цена: <b>{book['price_stars']} Stars</b>\n"
         f"Скачивание: <b>{'разрешено' if book['allow_download'] else 'запрещено'}</b>\n\n"
-        f"{book['description'] or ''}{reasons}"
+        f"{book['description'] or ''}{reasons}\n\n🔎 Точных совпадений: <b>{findings_count}</b>"
     )
     await call.message.edit_text(text[:4096], reply_markup=moderation_book_card_menu(book_id))
     await call.answer()
 
+
+
+
+@router.callback_query(F.data.startswith("mod:book_findings:"))
+async def moderation_book_findings(call: CallbackQuery) -> None:
+    if not await _require_perm(call, "mod_books"):
+        return
+    parts = call.data.split(":")
+    book_id = int(parts[2]); offset = int(parts[3] if len(parts) > 3 else 0)
+    rows = await list_book_moderation_findings(book_id, limit=5, offset=offset)
+    total = await count_book_moderation_findings(book_id)
+    if not rows:
+        await call.message.edit_text("Точных совпадений для этой книги нет.", reply_markup=moderation_book_card_menu(book_id))
+        await call.answer(); return
+    lines = [f"<b>🔎 Найденные фрагменты</b>", f"Совпадений: <b>{total}</b>", ""]
+    for idx, row in enumerate(rows, start=offset + 1):
+        chapter = f"Глава {row['chapter_number']}" if row['chapter_number'] is not None else "Метаданные"
+        if str(row['chapter_title'] or '').strip(): chapter += f" — {row['chapter_title']}"
+        lines.extend([
+            f"<b>#{idx} · {chapter}</b>",
+            f"Причина: <b>{row['reason']}</b>",
+            f"Строка: <b>{row['line_number']}</b> · позиция: <b>{row['character_offset']}</b>",
+            f"Найдено: <code>{str(row['matched_text'] or '')[:250]}</code>",
+            f"Контекст: {str(row['context'] or '')[:650]}", ""
+        ])
+    buttons=[]
+    if offset > 0: buttons.append(InlineKeyboardButton(text="⬅️ Предыдущие", callback_data=f"mod:book_findings:{book_id}:{max(0, offset-5)}"))
+    if offset + len(rows) < total: buttons.append(InlineKeyboardButton(text="Следующие ➡️", callback_data=f"mod:book_findings:{book_id}:{offset+5}"))
+    keyboard=[]
+    if buttons: keyboard.append(buttons)
+    keyboard.append([InlineKeyboardButton(text="⬅️ К книге", callback_data=f"mod:book:{book_id}")])
+    await call.message.edit_text("\n".join(lines)[:4096], reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
+    await call.answer()
 
 @router.callback_query(F.data.startswith("mod:book_publish:"))
 async def moderation_book_publish(call: CallbackQuery) -> None:

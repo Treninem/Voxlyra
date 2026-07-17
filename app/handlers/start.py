@@ -5,9 +5,15 @@ from aiogram.types import CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.config import settings
-from app.db import claim_daily_bonus, get_admin_permissions, get_author_profile, get_bonus_balance, get_referral_stats, list_bonus_transactions, register_referral, reward_referral_if_needed, upsert_user, get_user_preferences, set_user_preference, reset_user_preferences, get_book
+from app.db import (
+    get_admin_permissions, get_author_profile, get_bonus_balance, get_referral_stats,
+    list_bonus_transactions, list_reader_wallet_transactions, get_wallet_summary,
+    register_referral, upsert_user, get_user_preferences, set_user_preference,
+    reset_user_preferences, get_book,
+)
 from app.keyboards import back_to_main, bonuses_menu, main_menu, more_menu, user_settings_menu, user_notifications_menu, user_theme_menu, user_font_menu
 from app.handlers.legal import send_next_required_document
+from app.services.bonus_economy import load_revenue_split_settings
 
 router = Router()
 
@@ -21,9 +27,13 @@ async def _safe_edit_text(message, text: str, *, reply_markup=None) -> None:
 
 def _bonus_reason_label(reason: object) -> str:
     labels = {
-        "daily_bonus": "Ежедневное начисление",
-        "referral_invite": "Приглашённый друг",
-        "referral_join": "Вход по приглашению",
+        "daily_bonus": "Старое ежедневное начисление",
+        "referral_invite": "Старый бонус за приглашение",
+        "referral_join": "Старый бонус приглашённому",
+        "topup_cashback": "Кешбэк за пополнение",
+        "referral_topup": "Пополнение приглашённого",
+        "chapter_purchase_discount": "Скидка на главу",
+        "chapter_purchase_refund": "Возврат бонусов за главу",
     }
     raw = str(reason or "").strip()
     return labels.get(raw, raw.replace("_", " ") or "Начисление")
@@ -55,7 +65,6 @@ async def cmd_start(message: Message) -> None:
             if ref_tg_id != message.from_user.id:
                 ref_user = await upsert_user(ref_tg_id, None, None)
                 await register_referral(int(ref_user["id"]), user_id)
-                await reward_referral_if_needed(user_id)
     if settings.LEGAL_REQUIRE_ON_START and await send_next_required_document(message, user_id):
         return
     if payload.startswith("promote_book_"):
@@ -126,41 +135,63 @@ async def callback_more(call: CallbackQuery) -> None:
 @router.callback_query(F.data == "main:bonuses")
 async def callback_bonuses(call: CallbackQuery) -> None:
     _, _, _, user_id = await build_context(call)
-    balance = await get_bonus_balance(user_id)
+    summary = await get_wallet_summary(user_id)
+    cfg = await load_revenue_split_settings()
+    points_per_star = max(1, int(summary["points_per_star"]))
+    usable_bonus_stars, points_remainder = divmod(int(summary["bonus_points"]), points_per_star)
+    next_star_line = (
+        f"До следующей целой Star скидки: <b>{points_per_star - points_remainder} бонусов</b>.\n"
+        if points_remainder else ""
+    )
     await call.message.edit_text(
-        "<b>💎 Бонусы</b>\n\n"
-        f"Ваш баланс: <b>{balance}</b> бонусов.\n\n"
-        "Получайте бонусы за ежедневный вход и приглашения.",
-        reply_markup=bonuses_menu(True),
+        "<b>💎 Баланс и бонусы</b>\n\n"
+        f"Баланс покупок: <b>{summary['wallet_stars']} Stars</b>.\n"
+        f"Бонусы: <b>{summary['bonus_points']}</b>. Доступно: <b>{usable_bonus_stars} Stars</b> скидки.\n"
+        f"{next_star_line}"
+        f"Курс: <b>{points_per_star} бонусов = 1 целая Star</b>.\n\n"
+        "Ежедневных начислений больше нет. Бонусы появляются только после реального пополнения баланса. "
+        "Если пользователь пришёл по реферальной ссылке, часть бонусного фонда получает пригласивший. "
+        "Бонусы можно применить к покупке платной главы; доход автора при этом не уменьшается.",
+        reply_markup=bonuses_menu(cfg.topup_packages),
     )
     await call.answer()
 
 
 @router.callback_query(F.data == "bonus:daily")
 async def callback_daily_bonus(call: CallbackQuery) -> None:
-    _, _, _, user_id = await build_context(call)
-    received, amount, balance = await claim_daily_bonus(user_id)
-    if received:
-        text = f"Начислено: <b>{amount}</b> бонусов.\nБаланс: <b>{balance}</b>."
-    else:
-        text = f"Сегодня бонус уже получен.\nБаланс: <b>{balance}</b>."
-    await _safe_edit_text(call.message, "<b>💎 Бонусы</b>\n\n" + text, reply_markup=bonuses_menu(not received))
-    await call.answer("Готово" if received else "Уже получали сегодня")
+    # Старые сообщения с этой кнопкой могут оставаться в чатах после обновления.
+    await call.answer("Ежедневные бонусы отключены. Теперь бонусы начисляются за пополнение.", show_alert=True)
 
 
 @router.callback_query(F.data == "bonus:history")
 async def callback_bonus_history(call: CallbackQuery) -> None:
     _, _, _, user_id = await build_context(call)
-    rows = await list_bonus_transactions(user_id, limit=10)
-    if not rows:
-        text = "История бонусов пока пустая."
+    bonus_rows = await list_bonus_transactions(user_id, limit=12)
+    wallet_rows = await list_reader_wallet_transactions(user_id, limit=12)
+    events: list[tuple[str, str]] = []
+    for row in bonus_rows:
+        amount = int(row["amount"] or 0)
+        sign = "+" if amount >= 0 else ""
+        events.append((str(row["created_at"]), f"• {sign}{amount} бонусов · {_bonus_reason_label(row['reason'])}"))
+    wallet_labels = {
+        "topup": "Пополнение баланса",
+        "chapter_purchase": "Покупка главы",
+        "purchase_refund": "Возврат на баланс",
+    }
+    for row in wallet_rows:
+        amount = int(row["amount_stars"] or 0)
+        sign = "+" if amount >= 0 else ""
+        events.append((str(row["created_at"]), f"• {sign}{amount} Stars · {wallet_labels.get(str(row['transaction_type']), str(row['transaction_type']))}"))
+    events.sort(key=lambda item: item[0], reverse=True)
+    if not events:
+        text = "История баланса и бонусов пока пустая."
     else:
-        lines = ["<b>📜 История бонусов</b>\n"]
-        for row in rows:
-            sign = "+" if int(row["amount"]) >= 0 else ""
-            lines.append(f"• {sign}{row['amount']} · {_bonus_reason_label(row['reason'])} · {row['created_at'][:10]}")
+        lines = ["<b>📜 История баланса и бонусов</b>\n"]
+        for created_at, line in events[:15]:
+            lines.append(f"{line} · {created_at[:10]}")
         text = "\n".join(lines)
-    await call.message.edit_text(text, reply_markup=bonuses_menu(True))
+    cfg = await load_revenue_split_settings()
+    await call.message.edit_text(text, reply_markup=bonuses_menu(cfg.topup_packages))
     await call.answer()
 
 
@@ -306,8 +337,10 @@ async def callback_referral(call: CallbackQuery) -> None:
         "<b>👥 Пригласить друга</b>\n\n"
         f"Ваша ссылка:\n<code>{link}</code>\n\n"
         f"Приглашено: <b>{stats['invited']}</b>\n"
-        f"С бонусом: <b>{stats['rewarded']}</b>\n\n"
-        "Бонус начисляется, когда новый человек открывает бота по вашей ссылке.",
-        reply_markup=bonuses_menu(True),
+        f"Пополнили баланс: <b>{stats['funded']}</b>\n"
+        f"Пополнений рефералов: <b>{stats['topups']}</b>\n"
+        f"Заработано: <b>{stats['earned_points']}</b> бонусов.\n\n"
+        "За сам вход по ссылке начисления нет. Бонус появляется только после успешного пополнения баланса приглашённым пользователем.",
+        reply_markup=bonuses_menu((await load_revenue_split_settings()).topup_packages),
     )
     await call.answer()

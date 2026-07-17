@@ -1,7 +1,7 @@
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, Message, FSInputFile
 
 from app.config import settings
 from app.build_info import owner_build_label
@@ -56,12 +56,15 @@ from app.keyboards import (
     complaints_menu,
     complaint_card_menu,
     navigation_menu,
+    owner_backups_menu,
 )
 from app.permissions import DELEGABLE_PERMISSION_CODES, PERMISSION_BY_CODE
 from app.services.diagnostics import format_diagnostics_for_owner
 from app.services.notifications import complaint_message, send_user_notification
 from app.services.publication import post_book_to_channel
 from app.services.payment_runtime import public_runtime_payment_settings, update_runtime_payment_settings
+from app.services.bonus_economy import load_revenue_split_settings, update_revenue_split_settings
+from app.services.backups import create_backup, list_backups, prune_backups, restore_backup
 
 router = Router()
 
@@ -97,6 +100,10 @@ class SetCommission(StatesGroup):
     waiting_for_value = State()
 
 
+class SetRevenueSplit(StatesGroup):
+    waiting_for_values = State()
+
+
 class OwnerSearch(StatesGroup):
     user_query = State()
     book_query = State()
@@ -104,6 +111,10 @@ class OwnerSearch(StatesGroup):
 
 class OwnerChannelSettings(StatesGroup):
     price = State()
+
+
+class OwnerBackupRestore(StatesGroup):
+    waiting_for_zip = State()
 
 
 def is_owner_tg(telegram_id: int) -> bool:
@@ -264,15 +275,18 @@ async def owner_remove_admin(call: CallbackQuery) -> None:
 async def owner_finance(call: CallbackQuery) -> None:
     if await deny_if_not_owner(call):
         return
-    books = await get_setting("commission_books", "20")
-    audio = await get_setting("commission_audio", "20")
+    split = await load_revenue_split_settings()
     donations = await get_setting("commission_donations", "10")
     await call.message.edit_text(
         "<b>💰 Финансы</b>\n\n"
-        f"Комиссия книг: <b>{books}%</b>\n"
-        f"Комиссия аудио: <b>{audio}%</b>\n"
+        f"Автору: <b>{split.author_percent}%</b>\n"
+        f"Платформе: <b>{split.platform_percent}%</b>\n"
+        f"В бонусный фонд: <b>{split.bonus_percent}%</b>\n"
         f"Комиссия донатов: <b>{donations}%</b>\n\n"
-        "Менять комиссии может только владелец.",
+        f"Курс бонусов: <b>{split.points_per_star} бонусов = 1 Star</b>\n"
+        f"Рефералу: <b>{split.referral_percent_of_bonus}%</b> бонусного фонда пополнения\n\n"
+        "Три основные доли всегда должны давать ровно 100%. Изменение применяется только к новым покупкам и пополнениям. "
+        "В каждой операции используются только целые Stars; для небольшой цены система выбирает ближайшее целое распределение без потери общей суммы.",
         reply_markup=finance_owner_menu(),
     )
     await call.answer()
@@ -313,6 +327,62 @@ async def owner_payment_toggle(call: CallbackQuery) -> None:
     await add_audit(owner["id"], "payment_setting_changed", "setting", key, str(current.get(key)), str(updated.get(key)))
     await call.message.edit_reply_markup(reply_markup=payment_systems_owner_menu(updated))
     await call.answer("Сохранено")
+
+
+@router.callback_query(F.data == "owner:set_revenue_split")
+async def owner_set_revenue_split_start(call: CallbackQuery, state: FSMContext) -> None:
+    if await deny_if_not_owner(call):
+        return
+    cfg = await load_revenue_split_settings()
+    await state.set_state(SetRevenueSplit.waiting_for_values)
+    await call.message.edit_text(
+        "<b>⚖️ Распределение каждой новой продажи</b>\n\n"
+        f"Сейчас: автор <b>{cfg.author_percent}%</b>, платформа <b>{cfg.platform_percent}%</b>, бонусы <b>{cfg.bonus_percent}%</b>.\n\n"
+        "Отправьте три целых числа через пробел в порядке:\n"
+        "<code>автор платформа бонусы</code>\n\n"
+        "Пример: <code>80 19 1</code>\n"
+        "Сумма обязана быть 100%, доля автора — не ниже 50%.\n"
+        "Stars не дробятся: для небольших цен применяется ближайшее целое распределение, а сумма всегда совпадает с ценой.",
+        reply_markup=navigation_menu(cancel_callback="owner:cancel_input"),
+    )
+    await call.answer()
+
+
+@router.message(SetRevenueSplit.waiting_for_values)
+async def owner_set_revenue_split_finish(message: Message, state: FSMContext) -> None:
+    if not is_owner_tg(message.from_user.id):
+        await message.answer("Недоступно")
+        await state.clear()
+        return
+    raw = (message.text or "").replace("%", " ").replace(",", " ").replace("/", " ")
+    parts = [part for part in raw.split() if part]
+    if len(parts) != 3 or not all(part.isdigit() for part in parts):
+        await message.answer("Нужно отправить ровно три целых числа. Например: <code>80 19 1</code>")
+        return
+    author, platform, bonus = map(int, parts)
+    old = await load_revenue_split_settings()
+    try:
+        updated = await update_revenue_split_settings({
+            "author_percent": author,
+            "platform_percent": platform,
+            "bonus_percent": bonus,
+        })
+    except ValueError as exc:
+        await message.answer(str(exc))
+        return
+    owner = await upsert_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
+    await add_audit(
+        owner["id"], "revenue_split_changed", "setting", "revenue_split",
+        f"{old.author_percent}/{old.platform_percent}/{old.bonus_percent}",
+        f"{updated['author_percent']}/{updated['platform_percent']}/{updated['bonus_percent']}",
+    )
+    await state.clear()
+    await message.answer(
+        "Распределение сохранено:\n"
+        f"автор — <b>{updated['author_percent']}%</b>, платформа — <b>{updated['platform_percent']}%</b>, "
+        f"бонусы — <b>{updated['bonus_percent']}%</b>.",
+        reply_markup=finance_owner_menu(),
+    )
 
 
 @router.callback_query(F.data.startswith("owner:set_commission:"))
@@ -839,3 +909,99 @@ async def owner_security(call: CallbackQuery) -> None:
         reply_markup=back_to_main(),
     )
     await call.answer()
+
+
+@router.callback_query(F.data == "owner:backups")
+async def owner_backups(call: CallbackQuery) -> None:
+    if await deny_if_not_owner(call):
+        return
+    backups = list_backups()
+    latest = backups[0] if backups else None
+    text = "<b>💾 Резервные копии</b>\n\n"
+    if latest:
+        text += f"Последняя: <b>{latest.path.name}</b>\nРазмер: <b>{latest.size_bytes / 1024 / 1024:.1f} МБ</b>\n\n"
+    else:
+        text += "Резервных копий пока нет.\n\n"
+    text += "Копия включает базу данных и пользовательские файлы из storage. Перед восстановлением автоматически создаётся страховочная копия текущей базы."
+    await call.message.edit_text(text, reply_markup=owner_backups_menu(bool(backups)))
+    await call.answer()
+
+
+@router.callback_query(F.data == "owner:backup_create")
+async def owner_backup_create(call: CallbackQuery) -> None:
+    if await deny_if_not_owner(call):
+        return
+    await call.answer("Создаю резервную копию…")
+    status = await call.message.edit_text("<b>💾 Создание резервной копии…</b>\n\nНе закрывайте этот раздел.")
+    try:
+        info = await create_backup(include_storage=True)
+        prune_backups(settings.BACKUP_KEEP_COUNT)
+        await status.edit_text(
+            "<b>✅ Резервная копия создана</b>\n\n"
+            f"Файл: <b>{info.path.name}</b>\n"
+            f"Размер: <b>{info.size_bytes / 1024 / 1024:.1f} МБ</b>\n"
+            f"SHA-256: <code>{info.sha256}</code>",
+            reply_markup=owner_backups_menu(True),
+        )
+    except Exception as exc:
+        await status.edit_text(f"<b>❌ Не удалось создать резерв</b>\n\n<code>{type(exc).__name__}: {exc}</code>", reply_markup=owner_backups_menu(bool(list_backups())))
+
+
+@router.callback_query(F.data == "owner:backup_download_latest")
+async def owner_backup_download_latest(call: CallbackQuery) -> None:
+    if await deny_if_not_owner(call):
+        return
+    backups = list_backups()
+    if not backups:
+        await call.answer("Резервных копий нет", show_alert=True)
+        return
+    await call.answer("Отправляю файл…")
+    await call.message.answer_document(FSInputFile(backups[0].path), caption="Последняя резервная копия VoxLyra")
+
+
+@router.callback_query(F.data == "owner:backup_prune")
+async def owner_backup_prune(call: CallbackQuery) -> None:
+    if await deny_if_not_owner(call):
+        return
+    removed = prune_backups(settings.BACKUP_KEEP_COUNT)
+    await call.answer(f"Удалено старых копий: {removed}", show_alert=True)
+    await owner_backups(call)
+
+
+@router.callback_query(F.data == "owner:backup_restore_start")
+async def owner_backup_restore_start(call: CallbackQuery, state: FSMContext) -> None:
+    if await deny_if_not_owner(call):
+        return
+    await state.set_state(OwnerBackupRestore.waiting_for_zip)
+    await call.message.edit_text(
+        "<b>♻️ Восстановление VoxLyra</b>\n\nОтправьте ZIP, созданный разделом резервных копий. Архив будет проверен, текущая база сохранится отдельно, затем данные будут восстановлены.",
+        reply_markup=navigation_menu(cancel_callback="owner:backups"),
+    )
+    await call.answer()
+
+
+@router.message(OwnerBackupRestore.waiting_for_zip)
+async def owner_backup_restore_receive(message: Message, state: FSMContext) -> None:
+    if not is_owner_tg(message.from_user.id):
+        await state.clear(); return
+    document = message.document
+    if not document or not (document.file_name or "").lower().endswith(".zip"):
+        await message.answer("Отправьте ZIP-файл резервной копии.")
+        return
+    import tempfile
+    from pathlib import Path
+    progress = await message.answer("<b>♻️ Проверяю и восстанавливаю резерв…</b>")
+    try:
+        with tempfile.TemporaryDirectory(prefix="voxlyra_restore_upload_") as td:
+            path = Path(td) / "backup.zip"
+            await message.bot.download(document, destination=path)
+            result = await restore_backup(path)
+        await state.clear()
+        await progress.edit_text(
+            "<b>✅ Восстановление завершено</b>\n\n"
+            f"Файлов storage восстановлено: <b>{result['storage_files']}</b>\n"
+            "Страховочная копия прежней базы сохранена. Выполните Redeploy/перезапуск, чтобы все процессы открыли восстановленную базу.",
+            reply_markup=owner_backups_menu(bool(list_backups())),
+        )
+    except Exception as exc:
+        await progress.edit_text(f"<b>❌ Восстановление отменено</b>\n\n<code>{type(exc).__name__}: {exc}</code>")
