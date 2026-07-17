@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import html
 import json
 import tempfile
+import uuid
 from pathlib import Path
 
 from aiogram import F, Router
@@ -28,6 +30,11 @@ from app.keyboards import (
 from app.services.author_channel_queue import (
     get_author_channel_status, retry_failed_author_posts, update_author_channel_settings,
 )
+from app.services.library_import_queue import (
+    IMPORT_UPLOAD_ROOT,
+    calculate_archive_hash,
+    enqueue_import_job,
+)
 from app.services.library_manager import (
     audit_batch_publication,
     build_batch_report,
@@ -36,7 +43,6 @@ from app.services.library_manager import (
     get_batch,
     get_channel_schedule_status,
     get_import_settings,
-    import_library_zip,
     list_batch_duplicates,
     list_batches,
     list_imported_books,
@@ -113,76 +119,72 @@ async def library_import_start(call: CallbackQuery, state: FSMContext) -> None:
 @router.message(LibraryImportFlow.waiting_zip, F.document)
 async def library_import_receive(message: Message, state: FSMContext) -> None:
     if not await _allowed(message.from_user.id):
-        await state.clear(); return
+        await state.clear()
+        return
     document = message.document
     filename = document.file_name or "library.zip"
     if not filename.lower().endswith(".zip"):
-        await message.answer("Нужен ZIP-архив.", reply_markup=navigation_menu(cancel_callback="library:menu")); return
-    cfg = await get_import_settings()
-    max_mb = int(cfg["max_archive_mb"])
-    if int(document.file_size or 0) > max_mb * 1024 * 1024:
-        await message.answer(f"Архив больше {max_mb} МБ. Разделите библиотеку на несколько пакетов."); return
-    actor = await upsert_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
-    progress = await message.answer("⏳ Архив загружается, проверяется и импортируется…")
-    last_progress = {"processed": -1, "phase": -1}
-
-    async def update_progress(data: dict[str, int]) -> None:
-        processed = int(data.get("processed", 0))
-        total = int(data.get("total", 0))
-        phase = int(data.get("phase", 0))
-        # Не редактируем сообщение на каждой книге: Telegram может ограничить частые изменения.
-        step = 1 if total <= 20 else max(5, total // 20)
-        if phase == last_progress["phase"] and processed not in {0, total} and processed - last_progress["processed"] < step:
-            return
-        last_progress.update(processed=processed, phase=phase)
-        phase_text = {1: "Проверяю структуру", 2: "Импортирую книги", 3: "Завершаю пакет"}.get(phase, "Обрабатываю архив")
-        percent = int(processed * 100 / total) if total else 0
-        text = (
-            f"<b>⏳ {phase_text}</b>\n\n"
-            f"Обработано: <b>{processed} из {total}</b> ({percent}%)\n"
-            f"Добавлено: <b>{data.get('added', 0)}</b>\n"
-            f"Дублей: <b>{data.get('duplicates', 0)}</b>\n"
-            f"Ошибок: <b>{data.get('errors', 0)}</b>"
-        )
-        try:
-            await progress.edit_text(text)
-        except TelegramBadRequest as exc:
-            if "message is not modified" not in str(exc).lower():
-                raise
-
-    try:
-        with tempfile.TemporaryDirectory(prefix="voxlyra_upload_") as temp_name:
-            zip_path = Path(temp_name) / "library.zip"
-            await message.bot.download(document, destination=zip_path)
-            result = await import_library_zip(
-                zip_path,
-                filename,
-                int(actor["id"]),
-                progress_callback=update_progress,
-            )
-    except ValueError as exc:
-        await state.clear()
-        await progress.edit_text(
-            f"<b>❌ Импорт не начат</b>\n\n{html.escape(str(exc))}",
+        await message.answer(
+            "Нужен ZIP-архив.",
             reply_markup=navigation_menu(cancel_callback="library:menu"),
         )
         return
+    cfg = await get_import_settings()
+    max_mb = int(cfg["max_archive_mb"])
+    if int(document.file_size or 0) > max_mb * 1024 * 1024:
+        await message.answer(f"Архив больше {max_mb} МБ. Разделите библиотеку на несколько пакетов.")
+        return
+
+    actor = await upsert_user(
+        message.from_user.id, message.from_user.username, message.from_user.full_name
+    )
+    progress = await message.answer(
+        "<b>⏳ Архив загружается</b>\n\n"
+        "После загрузки он будет поставлен в фоновую очередь. Бот останется доступным."
+    )
+    await asyncio.to_thread(IMPORT_UPLOAD_ROOT.mkdir, parents=True, exist_ok=True)
+    zip_path = IMPORT_UPLOAD_ROOT / f"{uuid.uuid4().hex}.zip"
+
+    try:
+        await message.bot.download(document, destination=zip_path)
+        archive_hash = await calculate_archive_hash(zip_path)
+        job_id, position = await enqueue_import_job(
+            archive_path=zip_path,
+            archive_name=filename,
+            archive_hash=archive_hash,
+            actor_user_id=int(actor["id"]),
+            chat_id=int(message.chat.id),
+            progress_message_id=int(progress.message_id),
+        )
+    except ValueError as exc:
+        if zip_path.exists():
+            await asyncio.to_thread(zip_path.unlink)
+        await state.clear()
+        await progress.edit_text(
+            f"<b>❌ Импорт не поставлен в очередь</b>\n\n{html.escape(str(exc))}",
+            reply_markup=navigation_menu(cancel_callback="library:menu"),
+        )
+        return
+    except Exception as exc:
+        if zip_path.exists():
+            await asyncio.to_thread(zip_path.unlink)
+        await state.clear()
+        await progress.edit_text(
+            "<b>❌ Не удалось загрузить архив</b>\n\n"
+            f"Причина: {html.escape(str(exc)[:1000])}",
+            reply_markup=navigation_menu(cancel_callback="library:menu"),
+        )
+        return
+
     await state.clear()
-    lines = [
-        "<b>✅ Импорт завершён</b>", "",
-        f"📚 Добавлено: <b>{result.added}</b>",
-        f"⚠️ Найдено дублей: <b>{result.duplicates}</b>",
-        f"❌ Ошибок: <b>{len(result.errors)}</b>", "",
-        "Новые книги сохранены как черновики.",
-    ]
-    if result.duplicate_ids:
-        lines.append("Дубли ожидают решения: пропустить или заменить существующую книгу.")
-    if result.errors:
-        lines.extend(["", "<b>Первые ошибки:</b>"])
-        for item in result.errors[:6]:
-            lines.append(f"• {html.escape(item.title)} ({html.escape(item.folder)}): {html.escape('; '.join(item.reasons))}")
-        if len(result.errors) > 6: lines.append(f"…ещё {len(result.errors)-6}")
-    await progress.edit_text("\n".join(lines), reply_markup=library_batch_menu(result.batch_id, bool(result.duplicate_ids)))
+    position_text = "начинается сейчас" if position == 1 else f"позиция в очереди: <b>{position}</b>"
+    await progress.edit_text(
+        "<b>✅ Архив принят</b>\n\n"
+        f"Задание: <b>#{job_id}</b>\n"
+        f"Импорт {position_text}. Прогресс будет обновляться в этом сообщении.\n\n"
+        "Во время импорта можно пользоваться ботом, читать книги и открывать другие разделы.",
+        reply_markup=navigation_menu(cancel_callback="library:menu"),
+    )
 
 
 @router.message(LibraryImportFlow.waiting_zip)
@@ -444,23 +446,80 @@ async def library_rollback(call: CallbackQuery) -> None:
     await call.answer()
 
 
+SETTING_INPUTS = {
+    "max_books": {
+        "title": "Изменение лимита",
+        "label": "максимальное количество книг в архиве",
+        "hint": "Для количества книг значение <b>0</b> означает отсутствие лимита.",
+        "cancel": "library:settings",
+        "minimum": 0,
+        "maximum": 100000,
+    },
+    "max_archive_mb": {
+        "title": "Изменение лимита",
+        "label": "максимальный размер ZIP в МБ",
+        "hint": "Допустимое значение: от <b>10</b> до <b>2000</b> МБ.",
+        "cancel": "library:settings",
+        "minimum": 10,
+        "maximum": 2000,
+    },
+    "max_unpacked_mb": {
+        "title": "Изменение лимита",
+        "label": "максимальный размер после распаковки в МБ",
+        "hint": "Допустимое значение: от <b>100</b> до <b>20000</b> МБ.",
+        "cancel": "library:settings",
+        "minimum": 100,
+        "maximum": 20000,
+    },
+    "channel_interval_minutes": {
+        "title": "Интервал пакетной библиотеки",
+        "label": "интервал между запусками публикации в минутах",
+        "hint": "Допустимое значение: от <b>1</b> минуты до <b>10080</b> минут.",
+        "cancel": "library:channel_schedule",
+        "minimum": 1,
+        "maximum": 10080,
+    },
+    "channel_posts_per_run": {
+        "title": "Книги пакетной библиотеки",
+        "label": "количество книг за один запуск",
+        "hint": "Допустимое значение: от <b>1</b> до <b>50</b> книг.",
+        "cancel": "library:channel_schedule",
+        "minimum": 1,
+        "maximum": 50,
+    },
+    "author_channel_interval_minutes": {
+        "title": "Интервал обычных авторов",
+        "label": "интервал между запусками авторской очереди в минутах",
+        "hint": "Допустимое значение: от <b>1</b> минуты до <b>10080</b> минут.",
+        "cancel": "library:channel_schedule",
+        "minimum": 1,
+        "maximum": 10080,
+    },
+    "author_channel_posts_per_run": {
+        "title": "Книги обычных авторов",
+        "label": "количество авторских книг за один запуск",
+        "hint": "Допустимое значение: от <b>1</b> до <b>20</b> книг.",
+        "cancel": "library:channel_schedule",
+        "minimum": 1,
+        "maximum": 20,
+    },
+}
+
+
 @router.callback_query(F.data.startswith("library:set_limit:"))
 async def library_set_limit_start(call: CallbackQuery, state: FSMContext) -> None:
     if await _deny(call): return
     key = call.data.rsplit(":", 1)[1]
-    labels = {
-        "max_books": "максимальное количество книг в архиве",
-        "max_archive_mb": "максимальный размер ZIP в МБ",
-        "max_unpacked_mb": "максимальный размер после распаковки в МБ",
-    }
-    if key not in labels:
-        await call.answer("Неизвестная настройка", show_alert=True); return
+    item = SETTING_INPUTS.get(key)
+    if item is None:
+        await call.answer("Неизвестная настройка", show_alert=True)
+        return
     await state.set_state(LibraryImportFlow.waiting_setting_value)
     await state.update_data(setting_key=key)
     await _safe_edit(
         call,
-        f"<b>Изменение лимита</b>\n\nВведите целое число: {labels[key]}." + ("\nДля количества книг значение <b>0</b> означает отсутствие лимита." if key == "max_books" else ""),
-        navigation_menu(cancel_callback="library:settings"),
+        f"<b>{item['title']}</b>\n\nВведите целое число: {item['label']}.\n{item['hint']}",
+        navigation_menu(cancel_callback=str(item["cancel"])),
     )
     await call.answer()
 
@@ -476,6 +535,16 @@ async def library_set_limit_receive(message: Message, state: FSMContext) -> None
         await message.answer("Введите целое число."); return
     data = await state.get_data()
     key = str(data.get("setting_key") or "")
+    item = SETTING_INPUTS.get(key)
+    if item is None:
+        await state.clear()
+        await message.answer("Эта настройка больше недоступна. Откройте меню расписания заново.")
+        return
+    minimum = int(item["minimum"])
+    maximum = int(item["maximum"])
+    if value < minimum or value > maximum:
+        await message.answer(f"Введите число от <b>{minimum}</b> до <b>{maximum}</b>.")
+        return
     try:
         if key == "author_channel_interval_minutes":
             await update_author_channel_settings(interval_minutes=value)
@@ -483,8 +552,10 @@ async def library_set_limit_receive(message: Message, state: FSMContext) -> None
         elif key == "author_channel_posts_per_run":
             await update_author_channel_settings(posts_per_run=value)
             cfg = await get_import_settings()
-        else:
+        elif key in {"max_books", "max_archive_mb", "max_unpacked_mb", "channel_interval_minutes", "channel_posts_per_run"}:
             cfg = await update_import_settings(**{key: value})
+        else:
+            raise ValueError("Неизвестная настройка")
     except Exception as exc:
         await message.answer(f"Не удалось сохранить: {html.escape(str(exc))}"); return
     await state.clear()
