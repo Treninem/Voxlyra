@@ -5,12 +5,12 @@
 передаётся.
 """
 
-OWNER_BUILD_VERSION = "v1.13.11"
-OWNER_BUILD_NAME = "точные фрагменты модерации и импорт без лимита"
+OWNER_BUILD_VERSION = "v1.13.12.1"
+OWNER_BUILD_NAME = "фоновая очередь импорта библиотеки"
 
 
 def owner_build_label() -> str:
     return f"{OWNER_BUILD_VERSION} · {OWNER_BUILD_NAME}"
 
 
-WORKING_BUILD_STAGE = "v1.13.11 · точные фрагменты модерации и импорт без лимита"
+WORKING_BUILD_STAGE = "v1.13.12.1 · фоновая очередь импорта библиотеки"

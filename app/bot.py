@@ -15,6 +15,7 @@ from app.services.moderation_alerts import moderation_reminder_loop
 from app.services.smart_notifications import smart_reader_reminder_loop
 from app.services.premium_settlements import premium_author_settlement_loop
 from app.services.library_manager import library_channel_scheduler_loop
+from app.services.library_import_queue import library_import_worker_loop
 from app.services.author_channel_queue import author_channel_scheduler_loop, ensure_author_channel_queue_schema
 
 logger = logging.getLogger(__name__)
@@ -64,6 +65,7 @@ async def run_bot() -> None:
     premium_settlement_task = asyncio.create_task(premium_author_settlement_loop())
     library_channel_task = asyncio.create_task(library_channel_scheduler_loop(bot))
     author_channel_task = asyncio.create_task(author_channel_scheduler_loop(bot))
+    library_import_task = asyncio.create_task(library_import_worker_loop(bot))
     try:
         await dp.start_polling(bot)
     finally:
@@ -72,7 +74,11 @@ async def run_bot() -> None:
         premium_settlement_task.cancel()
         library_channel_task.cancel()
         author_channel_task.cancel()
-        for task in (reminder_task, reader_reminder_task, premium_settlement_task, library_channel_task, author_channel_task):
+        library_import_task.cancel()
+        for task in (
+            reminder_task, reader_reminder_task, premium_settlement_task,
+            library_channel_task, author_channel_task, library_import_task,
+        ):
             try:
                 await task
             except asyncio.CancelledError:
