@@ -99,6 +99,21 @@ def create_graphic_upload(*, user_id: int, book_id: int, filename: str, total_si
     )
 
 
+def create_library_import_upload(
+    *, user_id: int, filename: str, total_size: int, max_mb: int
+) -> dict[str, Any]:
+    return _create_upload(
+        user_id=user_id,
+        book_id=0,
+        filename=filename,
+        total_size=total_size,
+        allowed_extensions={".zip"},
+        max_mb=max(0, int(max_mb or 0)),
+        kind="library_import",
+        error_text="Для импорта библиотеки нужен ZIP-архив.",
+    )
+
+
 def load_upload(upload_id: str, *, user_id: int, book_id: int) -> dict[str, Any]:
     folder = _upload_dir(upload_id)
     path = folder / "meta.json"
