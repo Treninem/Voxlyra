@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#090b18">
+  <title>Загрузка библиотеки · {{ project_name }}</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; color: #f6f7ff; background: radial-gradient(circle at 20% 0%, #24285f 0, transparent 38%), radial-gradient(circle at 100% 35%, #34205e 0, transparent 36%), #080a16; }
+    main { width: min(680px, 100%); margin: 0 auto; padding: max(26px, env(safe-area-inset-top)) 18px max(32px, env(safe-area-inset-bottom)); }
+    .card { padding: 24px; border: 1px solid rgba(255,255,255,.12); border-radius: 26px; background: linear-gradient(145deg, rgba(25,28,63,.96), rgba(11,13,31,.96)); box-shadow: 0 24px 70px rgba(0,0,0,.38); }
+    .mark { display: grid; place-items: center; width: 58px; height: 58px; margin-bottom: 17px; border-radius: 18px; font-size: 30px; background: linear-gradient(145deg, #8b5cf6, #4f46e5); box-shadow: 0 12px 32px rgba(93,72,219,.38); }
+    h1 { margin: 0; font-size: 27px; line-height: 1.15; }
+    .lead { margin: 12px 0 22px; color: #c7c9dd; line-height: 1.55; }
+    .picker { display: block; padding: 18px; border: 1px dashed rgba(180,173,255,.55); border-radius: 19px; background: rgba(90,77,180,.12); cursor: pointer; }
+    .picker strong, .picker span { display: block; }
+    .picker span { margin-top: 7px; color: #aeb1c9; font-size: 14px; overflow-wrap: anywhere; }
+    input { position: absolute; opacity: 0; pointer-events: none; }
+    button { width: 100%; margin-top: 16px; padding: 15px 18px; border: 0; border-radius: 17px; color: white; font-size: 16px; font-weight: 750; background: linear-gradient(135deg, #7c3aed, #4f46e5); box-shadow: 0 13px 32px rgba(78,70,220,.32); }
+    button:disabled { opacity: .46; box-shadow: none; }
+    .progress { display: none; margin-top: 20px; }
+    .track { height: 13px; overflow: hidden; border-radius: 999px; background: rgba(255,255,255,.09); }
+    .bar { width: 0; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #8b5cf6, #22d3ee); transition: width .2s ease; }
+    .progress-line { display: flex; justify-content: space-between; gap: 12px; margin-top: 9px; color: #c7c9dd; font-size: 14px; }
+    .status { min-height: 22px; margin-top: 17px; line-height: 1.45; color: #d7d9eb; }
+    .status.error { color: #ffb4bd; }
+    .status.success { color: #9ff0c8; }
+    .note { margin: 20px 0 0; padding-top: 18px; border-top: 1px solid rgba(255,255,255,.09); color: #9da1bc; font-size: 13px; line-height: 1.5; }
+  </style>
+</head>
+<body>
+<main>
+  <section class="card">
+    <div class="mark">📚</div>
+    <h1>Загрузка большого ZIP</h1>
+    <p class="lead">Выберите тот же архив библиотеки. Он загрузится напрямую в VoxLyra частями и автоматически попадёт в фоновую очередь.</p>
+
+    <label class="picker" for="archive">
+      <strong>Выбрать ZIP-архив</strong>
+      <span id="fileName">Файл ещё не выбран</span>
+    </label>
+    <input id="archive" type="file" accept=".zip,application/zip">
+    <button id="uploadButton" type="button" disabled>Загрузить и начать импорт</button>
+
+    <div class="progress" id="progress">
+      <div class="track"><div class="bar" id="bar"></div></div>
+      <div class="progress-line"><span id="progressText">0%</span><span id="sizeText"></span></div>
+    </div>
+    <div class="status" id="status" role="status" aria-live="polite"></div>
+    <p class="note">После постановки архива в очередь окно можно закрыть. Импорт продолжится на сервере, а прогресс появится в сообщении бота.</p>
+  </section>
+</main>
+<script>
+(() => {
+  const tg = window.Telegram?.WebApp;
+  if (tg) { tg.ready(); tg.expand(); }
+  const token = {{ upload_token | tojson }};
+  const input = document.getElementById('archive');
+  const button = document.getElementById('uploadButton');
+  const fileName = document.getElementById('fileName');
+  const progress = document.getElementById('progress');
+  const bar = document.getElementById('bar');
+  const progressText = document.getElementById('progressText');
+  const sizeText = document.getElementById('sizeText');
+  const status = document.getElementById('status');
+
+  const formatBytes = (value) => {
+    const mb = Number(value || 0) / 1024 / 1024;
+    return `${mb.toFixed(mb >= 10 ? 1 : 2)} МБ`;
+  };
+  const initData = () => tg?.initData || '';
+  const apiError = async (response) => {
+    let message = 'Не удалось выполнить загрузку.';
+    try { const data = await response.json(); message = data.detail || message; } catch (_) {}
+    throw new Error(message);
+  };
+  const jsonRequest = async (url, body) => {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', 'X-Telegram-Init-Data': initData()},
+      body: JSON.stringify(body),
+    });
+    if (!response.ok) await apiError(response);
+    return response.json();
+  };
+
+  input.addEventListener('change', () => {
+    const file = input.files?.[0];
+    if (!file) {
+      fileName.textContent = 'Файл ещё не выбран';
+      button.disabled = true;
+      return;
+    }
+    fileName.textContent = `${file.name} · ${formatBytes(file.size)}`;
+    button.disabled = !file.name.toLowerCase().endsWith('.zip');
+    status.className = 'status';
+    status.textContent = button.disabled ? 'Нужен файл с расширением .zip' : '';
+  });
+
+  button.addEventListener('click', async () => {
+    const file = input.files?.[0];
+    if (!file || button.disabled) return;
+    if (!initData()) {
+      status.className = 'status error';
+      status.textContent = 'Откройте эту страницу кнопкой из сообщения бота в Telegram.';
+      return;
+    }
+    button.disabled = true;
+    input.disabled = true;
+    progress.style.display = 'block';
+    status.className = 'status';
+    status.textContent = 'Подготавливаю защищённую загрузку…';
+    try {
+      const start = await jsonRequest('/api/library-import-upload/start', {
+        token, filename: file.name, size: file.size,
+      });
+      const chunkSize = Number(start.chunk_size || 6 * 1024 * 1024);
+      const totalChunks = Math.ceil(file.size / chunkSize);
+      for (let index = 0; index < totalChunks; index += 1) {
+        const startByte = index * chunkSize;
+        const endByte = Math.min(file.size, startByte + chunkSize);
+        const form = new FormData();
+        form.append('index', String(index));
+        form.append('total_chunks', String(totalChunks));
+        form.append('chunk', file.slice(startByte, endByte), file.name);
+        const response = await fetch(`/api/library-import-upload/${start.upload_id}/chunk`, {
+          method: 'POST', headers: {'X-Telegram-Init-Data': initData()}, body: form,
+        });
+        if (!response.ok) await apiError(response);
+        const uploaded = endByte;
+        const percent = Math.min(100, Math.round(uploaded * 100 / file.size));
+        bar.style.width = `${percent}%`;
+        progressText.textContent = `${percent}%`;
+        sizeText.textContent = `${formatBytes(uploaded)} из ${formatBytes(file.size)}`;
+        status.textContent = `Загружаю часть ${index + 1} из ${totalChunks}…`;
+      }
+      status.textContent = 'Проверяю файл и ставлю импорт в очередь…';
+      const finish = await jsonRequest(`/api/library-import-upload/${start.upload_id}/finish`, {
+        token, total_chunks: totalChunks,
+      });
+      bar.style.width = '100%';
+      progressText.textContent = '100%';
+      status.className = 'status success';
+      status.textContent = `Архив принят. Задание №${finish.job_id} поставлено в очередь. Ботом можно пользоваться.`;
+      button.textContent = 'Архив принят';
+      if (tg?.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
+    } catch (error) {
+      status.className = 'status error';
+      status.textContent = error?.message || 'Загрузка остановлена. Повторите попытку.';
+      button.disabled = false;
+      input.disabled = false;
+      button.textContent = 'Повторить загрузку';
+      if (tg?.HapticFeedback) tg.HapticFeedback.notificationOccurred('error');
+    }
+  });
+})();
+</script>
+</body>
+</html>
