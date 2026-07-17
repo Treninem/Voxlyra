@@ -8,12 +8,14 @@ from aiogram.client.default import DefaultBotProperties
 
 from app.config import settings
 from app.db import init_db
-from app.handlers import author, legal, moderation, owner, payments, start
+from app.handlers import author, legal, moderation, owner, payments, start, library_manager
 from app.middleware import BlockedUserMiddleware
 from app.services.cover_storage import restore_missing_book_covers
 from app.services.moderation_alerts import moderation_reminder_loop
 from app.services.smart_notifications import smart_reader_reminder_loop
 from app.services.premium_settlements import premium_author_settlement_loop
+from app.services.library_manager import library_channel_scheduler_loop
+from app.services.author_channel_queue import author_channel_scheduler_loop, ensure_author_channel_queue_schema
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +25,7 @@ async def run_bot() -> None:
         raise RuntimeError("BOT_TOKEN is empty. Fill .env or environment variables.")
 
     await init_db()
+    await ensure_author_channel_queue_schema()
 
     bot = Bot(
         token=settings.BOT_TOKEN,
@@ -48,6 +51,7 @@ async def run_bot() -> None:
     dp.include_router(start.router)
     dp.include_router(author.router)
     dp.include_router(owner.router)
+    dp.include_router(library_manager.router)
     dp.include_router(moderation.router)
 
     await bot.delete_webhook(drop_pending_updates=False)
@@ -58,13 +62,17 @@ async def run_bot() -> None:
     reminder_task = asyncio.create_task(moderation_reminder_loop(bot))
     reader_reminder_task = asyncio.create_task(smart_reader_reminder_loop(bot))
     premium_settlement_task = asyncio.create_task(premium_author_settlement_loop())
+    library_channel_task = asyncio.create_task(library_channel_scheduler_loop(bot))
+    author_channel_task = asyncio.create_task(author_channel_scheduler_loop(bot))
     try:
         await dp.start_polling(bot)
     finally:
         reminder_task.cancel()
         reader_reminder_task.cancel()
         premium_settlement_task.cancel()
-        for task in (reminder_task, reader_reminder_task, premium_settlement_task):
+        library_channel_task.cancel()
+        author_channel_task.cancel()
+        for task in (reminder_task, reader_reminder_task, premium_settlement_task, library_channel_task, author_channel_task):
             try:
                 await task
             except asyncio.CancelledError:

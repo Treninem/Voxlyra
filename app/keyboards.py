@@ -33,10 +33,11 @@ def more_menu(has_author_profile: bool) -> InlineKeyboardMarkup:
         kb.button(text="🎨 Оформление", web_app=WebAppInfo(url=f"{settings.WEBAPP_URL.rstrip('/')}/settings"))
     else:
         kb.button(text="🎨 Оформление", callback_data="main:settings")
+    kb.button(text="💎 Баланс и бонусы", callback_data="main:bonuses")
     kb.button(text="🛟 Поддержка", callback_data="main:support")
     kb.button(text="📜 Правила", callback_data="main:legal")
     kb.button(text="⬅️ Назад", callback_data="menu:main")
-    kb.adjust(1, 2, 1)
+    kb.adjust(1, 2, 1, 1)
     return kb.as_markup()
 
 
@@ -47,6 +48,7 @@ def owner_menu() -> InlineKeyboardMarkup:
     rows = [
         ("👥 Администрация", "owner:admins"),
         ("📚 Книги", "owner:books"),
+        ("📚 Управление библиотекой", "library:menu"),
         ("✍️ Авторы", "owner:authors"),
         ("👤 Пользователи", "owner:users"),
         ("💰 Финансы", "owner:finance"),
@@ -55,6 +57,7 @@ def owner_menu() -> InlineKeyboardMarkup:
         ("📊 Статистика", "owner:stats"),
         ("⚙️ Настройки", "owner:settings"),
         ("🛡 Безопасность", "owner:security"),
+        ("💾 Резервные копии", "owner:backups"),
         ("🧩 Система", "owner:system"),
         ("⬅️ Назад", "menu:main"),
     ]
@@ -293,6 +296,7 @@ def moderation_books_menu(books) -> InlineKeyboardMarkup:
 
 def moderation_book_card_menu(book_id: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
+    kb.button(text="🔎 Найденные фрагменты", callback_data=f"mod:book_findings:{book_id}:0")
     kb.button(text="✅ Опубликовать", callback_data=f"mod:book_publish:{book_id}")
     kb.button(text="↩️ На доработку", callback_data=f"mod:book_reject:{book_id}")
     kb.button(text="⬅️ К списку", callback_data="mod:books")
@@ -305,8 +309,7 @@ def finance_owner_menu() -> InlineKeyboardMarkup:
     kb.button(text="💳 Платёжные системы", callback_data="owner:payment_systems")
     kb.button(text="📤 Заявки на выплату", callback_data="owner:payouts")
     kb.button(text="⚙️ Удержания и вывод", callback_data="owner:payout_settings")
-    kb.button(text="Комиссия книг", callback_data="owner:set_commission:commission_books")
-    kb.button(text="Комиссия аудио", callback_data="owner:set_commission:commission_audio")
+    kb.button(text="⚖️ Автор / платформа / бонусы", callback_data="owner:set_revenue_split")
     kb.button(text="Комиссия донатов", callback_data="owner:set_commission:commission_donations")
     kb.button(text="↩️ Возвраты", callback_data="owner:refunds")
     kb.button(text="⬅️ Назад", callback_data="owner:menu")
@@ -508,6 +511,7 @@ def user_purchases_menu(purchases) -> InlineKeyboardMarkup:
             title = "Покупка"
         status = "возврат" if row["status"] == "refunded" else "отменяется" if row["status"] == "canceling" else "оплачено"
         kb.button(text=f"{title[:35]} · {row['amount_stars']} ⭐ · {status}", callback_data=f"purchase:view:{row['id']}")
+    kb.button(text="💎 Баланс и бонусы", callback_data="main:bonuses")
     kb.button(text="⬅️ В меню", callback_data="menu:main")
     kb.adjust(1)
     return kb.as_markup()
@@ -640,12 +644,25 @@ def multi_select_menu(
     return kb.as_markup()
 
 
-def bonuses_menu(can_claim: bool = True) -> InlineKeyboardMarkup:
+def bonuses_menu(topup_packages: tuple[int, ...] | list[int] = ()) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    if can_claim:
-        kb.button(text="🎁 Получить ежедневный бонус", callback_data="bonus:daily")
+    for amount in list(topup_packages)[:8]:
+        kb.button(text=f"➕ Пополнить на {int(amount)} Stars", callback_data=f"wallet:topup:{int(amount)}")
     kb.button(text="👥 Пригласить друга", callback_data="bonus:referral")
-    kb.button(text="📜 История бонусов", callback_data="bonus:history")
+    kb.button(text="📜 История баланса и бонусов", callback_data="bonus:history")
+    kb.button(text="⬅️ В меню", callback_data="menu:main")
+    kb.adjust(2, 2, 1, 1, 1)
+    return kb.as_markup()
+
+
+def chapter_wallet_checkout_menu(chapter_id: int, *, can_bonus: bool, can_plain: bool, topup_packages: tuple[int, ...] | list[int] = ()) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    if can_bonus:
+        kb.button(text="💎 Купить с бонусами", callback_data=f"wallet:buy_chapter:{int(chapter_id)}:bonus")
+    if can_plain:
+        kb.button(text="⭐ Купить с баланса без бонусов", callback_data=f"wallet:buy_chapter:{int(chapter_id)}:plain")
+    if topup_packages:
+        kb.button(text="➕ Пополнить баланс", callback_data="main:bonuses")
     kb.button(text="⬅️ В меню", callback_data="menu:main")
     kb.adjust(1)
     return kb.as_markup()
@@ -1041,5 +1058,125 @@ def user_font_menu() -> InlineKeyboardMarkup:
     kb.button(text="Обычный", callback_data="settings:set_font:normal")
     kb.button(text="Крупный", callback_data="settings:set_font:large")
     kb.button(text="⬅️ Назад", callback_data="main:settings")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def library_manager_menu() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📥 Импорт книг", callback_data="library:import")
+    kb.button(text="📖 Все книги", callback_data="library:list:all:0")
+    kb.button(text="⏳ Книги на проверке", callback_data="library:list:drafts:0")
+    kb.button(text="✅ Опубликованные", callback_data="library:list:published:0")
+    kb.button(text="📦 Экспорт библиотеки", callback_data="library:export")
+    kb.button(text="🗂 История импортов", callback_data="library:batches")
+    kb.button(text="⏱ Публикация в канал", callback_data="library:channel_schedule")
+    kb.button(text="⚙️ Настройки импорта", callback_data="library:settings")
+    kb.button(text="⬅️ Назад", callback_data="owner:menu")
+    kb.adjust(1, 2, 2, 1, 1, 1, 1)
+    return kb.as_markup()
+
+
+def library_batch_menu(batch_id: int, has_duplicates: bool = False) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    if has_duplicates:
+        kb.button(text="⚠️ Разобрать дубли", callback_data=f"library:duplicates:{int(batch_id)}")
+    kb.button(text="🔎 Открыть пакет", callback_data=f"library:batch:{int(batch_id)}")
+    kb.button(text="✅ Опубликовать все", callback_data=f"library:publish_confirm:{int(batch_id)}")
+    kb.button(text="⬅️ Управление библиотекой", callback_data="library:menu")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def library_batch_details_menu(batch_id: int, has_duplicates: bool = False) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    if has_duplicates:
+        kb.button(text="⚠️ Разобрать дубли", callback_data=f"library:duplicates:{int(batch_id)}")
+    kb.button(text="🔎 Проверить готовность", callback_data=f"library:audit:{int(batch_id)}")
+    kb.button(text="📄 Скачать отчёт", callback_data=f"library:report:{int(batch_id)}")
+    kb.button(text="✅ Опубликовать готовые", callback_data=f"library:publish_confirm:{int(batch_id)}")
+    kb.button(text="🗑 Удалить черновики пакета", callback_data=f"library:rollback_confirm:{int(batch_id)}")
+    kb.button(text="🗂 История импортов", callback_data="library:batches")
+    kb.button(text="⬅️ Управление библиотекой", callback_data="library:menu")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def library_rollback_confirm_menu(batch_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🗑 Да, удалить черновики", callback_data=f"library:rollback:{int(batch_id)}")
+    kb.button(text="❌ Отмена", callback_data=f"library:batch:{int(batch_id)}")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def library_publish_confirm_menu(batch_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Да, опубликовать", callback_data=f"library:publish:{int(batch_id)}")
+    kb.button(text="❌ Отмена", callback_data=f"library:batch:{int(batch_id)}")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def library_duplicate_menu(duplicate_id: int, batch_id: int, remaining: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⏭ Пропустить", callback_data=f"library:duplicate_action:{int(duplicate_id)}:skip:{int(batch_id)}")
+    kb.button(text="♻️ Заменить", callback_data=f"library:duplicate_action:{int(duplicate_id)}:replace:{int(batch_id)}")
+    kb.button(text=f"⬅️ К пакету · осталось {int(remaining)}", callback_data=f"library:batch:{int(batch_id)}")
+    kb.adjust(2, 1)
+    return kb.as_markup()
+
+
+def library_book_list_menu(kind: str, page: int, total: int, limit: int = 10) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    if page > 0:
+        kb.button(text="⬅️", callback_data=f"library:list:{kind}:{page-1}")
+    if (page + 1) * limit < total:
+        kb.button(text="➡️", callback_data=f"library:list:{kind}:{page+1}")
+    kb.button(text="⬅️ Управление библиотекой", callback_data="library:menu")
+    kb.adjust(2, 1)
+    return kb.as_markup()
+
+
+
+def library_channel_schedule_menu(enabled: bool, author_enabled: bool = True) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(
+        text=("⏸ Остановить автопубликацию" if enabled else "▶️ Включить автопубликацию"),
+        callback_data="library:channel_toggle",
+    )
+    kb.button(text="⏱ Изменить интервал", callback_data="library:set_limit:channel_interval_minutes")
+    kb.button(text="📚 Изменить книг за запуск", callback_data="library:set_limit:channel_posts_per_run")
+    kb.button(text="🔁 Повторить ошибки библиотеки", callback_data="library:channel_retry_failed")
+    kb.button(text=("⏸ Остановить авторские посты" if author_enabled else "▶️ Включить авторские посты"), callback_data="library:author_channel_toggle")
+    kb.button(text="⏱ Интервал авторских постов", callback_data="library:set_limit:author_channel_interval_minutes")
+    kb.button(text="✍️ Авторских книг за запуск", callback_data="library:set_limit:author_channel_posts_per_run")
+    kb.button(text="🔁 Повторить ошибки авторов", callback_data="library:author_channel_retry_failed")
+    kb.button(text="⬅️ Управление библиотекой", callback_data="library:menu")
+    kb.adjust(1)
+    return kb.as_markup()
+
+def library_settings_menu(current_policy: str) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    labels = {"ask": "Спрашивать", "skip": "Пропускать", "replace": "Заменять"}
+    for value in ("ask", "skip", "replace"):
+        mark = "✅ " if value == current_policy else ""
+        kb.button(text=mark + labels[value], callback_data=f"library:set_duplicate_policy:{value}")
+    kb.button(text="🔢 Изменить лимит книг", callback_data="library:set_limit:max_books")
+    kb.button(text="📦 Изменить лимит ZIP", callback_data="library:set_limit:max_archive_mb")
+    kb.button(text="🗜 Изменить лимит распаковки", callback_data="library:set_limit:max_unpacked_mb")
+    kb.button(text="⬅️ Управление библиотекой", callback_data="library:menu")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def owner_backups_menu(has_backups: bool = False) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="💾 Создать резерв сейчас", callback_data="owner:backup_create")
+    if has_backups:
+        kb.button(text="📥 Скачать последнюю", callback_data="owner:backup_download_latest")
+        kb.button(text="🧹 Очистить старые", callback_data="owner:backup_prune")
+    kb.button(text="♻️ Восстановить из ZIP", callback_data="owner:backup_restore_start")
+    kb.button(text="⬅️ Назад", callback_data="owner:menu")
     kb.adjust(1)
     return kb.as_markup()

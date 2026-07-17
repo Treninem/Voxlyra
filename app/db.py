@@ -465,6 +465,7 @@ async def _init_db_impl() -> None:
         await _ensure_v1111_final_schema(db)
         await _ensure_v1114_access_schema(db)
         await _ensure_v1118_premium_revenue_schema(db)
+        await _ensure_v1200_bonus_wallet_schema(db)
         await db.commit()
 
 
@@ -588,6 +589,14 @@ async def _ensure_book_columns(db: aiosqlite.Connection) -> None:
         "price_stars": "ALTER TABLE books ADD COLUMN price_stars INTEGER NOT NULL DEFAULT 0",
         "content_type": "ALTER TABLE books ADD COLUMN content_type TEXT NOT NULL DEFAULT 'book'",
         "reading_mode": "ALTER TABLE books ADD COLUMN reading_mode TEXT NOT NULL DEFAULT 'ltr'",
+        "license_type": "ALTER TABLE books ADD COLUMN license_type TEXT NOT NULL DEFAULT 'platform_original'",
+        "source_name": "ALTER TABLE books ADD COLUMN source_name TEXT",
+        "rights_checked": "ALTER TABLE books ADD COLUMN rights_checked INTEGER NOT NULL DEFAULT 0",
+        "import_batch_id": "ALTER TABLE books ADD COLUMN import_batch_id INTEGER",
+        "import_file_hash": "ALTER TABLE books ADD COLUMN import_file_hash TEXT",
+        "source_author_name": "ALTER TABLE books ADD COLUMN source_author_name TEXT",
+        "source_year": "ALTER TABLE books ADD COLUMN source_year TEXT",
+        "source_language": "ALTER TABLE books ADD COLUMN source_language TEXT NOT NULL DEFAULT 'ru'",
     }
     for column, sql in migrations.items():
         if column not in existing:
@@ -1069,7 +1078,7 @@ async def update_book_title(book_id: int, author_user_id: int, title: str) -> bo
         cur = await db.execute(
             """
             UPDATE books
-            SET title=?, publication_status=CASE WHEN publication_status='published' THEN 'review' ELSE publication_status END, updated_at=?
+            SET title=?, updated_at=?
             WHERE id=? AND author_id=(SELECT id FROM author_profiles WHERE user_id=?)
             """,
             (title[:160], now, book_id, author_user_id),
@@ -1084,7 +1093,7 @@ async def update_book_age_limit(book_id: int, author_user_id: int, age_limit: st
         cur = await db.execute(
             """
             UPDATE books
-            SET age_limit=?, publication_status=CASE WHEN publication_status='published' THEN 'review' ELSE publication_status END, updated_at=?
+            SET age_limit=?, updated_at=?
             WHERE id=? AND author_id=(SELECT id FROM author_profiles WHERE user_id=?)
             """,
             (age_limit, now, book_id, author_user_id),
@@ -1280,7 +1289,7 @@ async def update_author_book_fields(book_id: int, author_user_id: int, values: d
     now = utc_now()
     fields = [f"{key}=?" for key in clean]
     values_list = list(clean.values())
-    sensitive = {"title", "description", "age_limit", "pricing_type", "price_stars", "content_type", "reading_mode"}
+    sensitive = {"content_type", "reading_mode"}
     if sensitive.intersection(clean):
         fields.append("publication_status=CASE WHEN publication_status='published' THEN 'review' ELSE publication_status END")
     fields.append("updated_at=?")
@@ -1305,7 +1314,7 @@ async def get_book(book_id: int) -> aiosqlite.Row | None:
     async with connect() as db:
         cur = await db.execute(
             """
-            SELECT b.*, a.pen_name, a.user_id AS author_user_id,
+            SELECT b.*, COALESCE(a.pen_name, b.source_author_name) AS pen_name, a.user_id AS author_user_id,
                    u.telegram_id AS author_telegram_id
             FROM books b
             LEFT JOIN author_profiles a ON a.id = b.author_id
@@ -1326,7 +1335,7 @@ async def list_catalog_books(limit: int = 50, include_drafts: bool = False) -> l
     async with connect() as db:
         cur = await db.execute(
             f"""
-            SELECT b.*, a.pen_name,
+            SELECT b.*, COALESCE(a.pen_name, b.source_author_name) AS pen_name,
                    COALESCE((SELECT AVG(r.rating) FROM reviews r WHERE r.book_id=b.id AND r.status='published'), 0) AS rating,
                    (SELECT COUNT(*) FROM reviews r WHERE r.book_id=b.id AND r.status='published') AS reviews_count,
                    (SELECT COUNT(*) FROM chapters c WHERE c.book_id=b.id AND {chapter_status}) AS text_chapters_count,
@@ -9351,7 +9360,7 @@ async def update_book_price(book_id: int, author_user_id: int, pricing_type: str
         cur = await db.execute(
             """
             UPDATE books
-            SET price_stars=?, publication_status=CASE WHEN publication_status='published' THEN 'review' ELSE publication_status END, updated_at=?
+            SET price_stars=?, updated_at=?
             WHERE id=? AND publication_status!='deleted'
               AND author_id=(SELECT id FROM author_profiles WHERE user_id=?)
             """,
@@ -11749,3 +11758,808 @@ async def get_author_premium_income_summary(author_user_id: int) -> dict[str, in
         )
         row = await cur.fetchone()
         return {key: int(row[key] or 0) for key in row.keys()} if row else {}
+
+
+# ---------------------------------------------------------------------------
+# VoxLyra v1.12.0 — баланс покупок, кешбэк и реферальные бонусы
+# ---------------------------------------------------------------------------
+
+async def _ensure_v1200_bonus_wallet_schema(db: aiosqlite.Connection) -> None:
+    """Idempotent wallet/bonus economy migration.
+
+    Old daily/referral points are preserved as bonus points. Daily issuance is
+    disabled by the handlers, while the nullable legacy timestamp remains for
+    backward compatibility with existing databases.
+    """
+    now = utc_now()
+    await db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS reader_wallets (
+            user_id INTEGER PRIMARY KEY,
+            balance_stars INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS reader_wallet_transactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            amount_stars INTEGER NOT NULL,
+            transaction_type TEXT NOT NULL,
+            source_type TEXT,
+            source_id TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS wallet_topups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            purchase_id INTEGER,
+            amount_stars INTEGER NOT NULL,
+            buyer_bonus_points INTEGER NOT NULL DEFAULT 0,
+            referrer_user_id INTEGER,
+            referrer_bonus_points INTEGER NOT NULL DEFAULT 0,
+            telegram_payment_charge_id TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL DEFAULT 'paid',
+            created_at TEXT NOT NULL,
+            refunded_at TEXT,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY(referrer_user_id) REFERENCES users(id) ON DELETE SET NULL,
+            FOREIGN KEY(purchase_id) REFERENCES purchases(id) ON DELETE SET NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_reader_wallet_tx_user_created
+          ON reader_wallet_transactions(user_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_wallet_topups_user_created
+          ON wallet_topups(user_id, created_at DESC);
+        """
+    )
+    purchase_columns = {row[1] for row in await (await db.execute("PRAGMA table_info(purchases)")).fetchall()}
+    purchase_migrations = {
+        "original_amount_stars": "ALTER TABLE purchases ADD COLUMN original_amount_stars INTEGER NOT NULL DEFAULT 0",
+        "wallet_stars_used": "ALTER TABLE purchases ADD COLUMN wallet_stars_used INTEGER NOT NULL DEFAULT 0",
+        "bonus_points_used": "ALTER TABLE purchases ADD COLUMN bonus_points_used INTEGER NOT NULL DEFAULT 0",
+        "funding_method": "ALTER TABLE purchases ADD COLUMN funding_method TEXT NOT NULL DEFAULT 'telegram'",
+    }
+    for column, sql in purchase_migrations.items():
+        if column not in purchase_columns:
+            await _execute_schema_ddl(db, sql)
+
+    ledger_columns = {row[1] for row in await (await db.execute("PRAGMA table_info(author_ledger)")).fetchall()}
+    ledger_migrations = {
+        "platform_stars": "ALTER TABLE author_ledger ADD COLUMN platform_stars INTEGER NOT NULL DEFAULT 0",
+        "bonus_pool_stars": "ALTER TABLE author_ledger ADD COLUMN bonus_pool_stars INTEGER NOT NULL DEFAULT 0",
+        "bonus_discount_stars": "ALTER TABLE author_ledger ADD COLUMN bonus_discount_stars INTEGER NOT NULL DEFAULT 0",
+    }
+    for column, sql in ledger_migrations.items():
+        if column not in ledger_columns:
+            await _execute_schema_ddl(db, sql)
+
+    referral_columns = {row[1] for row in await (await db.execute("PRAGMA table_info(referrals)")).fetchall()}
+    referral_migrations = {
+        "qualified_at": "ALTER TABLE referrals ADD COLUMN qualified_at TEXT",
+        "topup_count": "ALTER TABLE referrals ADD COLUMN topup_count INTEGER NOT NULL DEFAULT 0",
+        "rewarded_bonus_points": "ALTER TABLE referrals ADD COLUMN rewarded_bonus_points INTEGER NOT NULL DEFAULT 0",
+    }
+    for column, sql in referral_migrations.items():
+        if column not in referral_columns:
+            await _execute_schema_ddl(db, sql)
+
+    defaults = {
+        "revenue_author_percent": "80",
+        "revenue_platform_percent": "19",
+        "revenue_bonus_percent": "1",
+        "bonus_points_per_star": "100",
+        "referral_percent_of_bonus": "30",
+        "wallet_topup_packages": "50,100,250,500,1000",
+        "daily_bonus_enabled": "0",
+    }
+    for key, value in defaults.items():
+        await db.execute(
+            "INSERT INTO settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO NOTHING",
+            (key, value, now),
+        )
+    # Эти параметры намеренно фиксированы в v1.12.0. Обновляем и старые базы,
+    # чтобы служебные экраны не показывали устаревшие значения.
+    await db.execute("UPDATE settings SET value='0',updated_at=? WHERE key='daily_bonus_enabled'", (now,))
+    await db.execute("UPDATE settings SET value='100',updated_at=? WHERE key='bonus_points_per_star'", (now,))
+    await db.execute("UPDATE settings SET value='30',updated_at=? WHERE key='referral_percent_of_bonus'", (now,))
+    # Normalize old rows for transparent purchase history.
+    await db.execute(
+        "UPDATE purchases SET original_amount_stars=amount_stars WHERE COALESCE(original_amount_stars,0)=0 AND amount_stars>0"
+    )
+
+
+async def ensure_reader_wallet(user_id: int) -> aiosqlite.Row:
+    now = utc_now()
+    async with connect() as db:
+        await db.execute(
+            "INSERT INTO reader_wallets(user_id,balance_stars,created_at,updated_at) VALUES(?,0,?,?) "
+            "ON CONFLICT(user_id) DO NOTHING",
+            (int(user_id), now, now),
+        )
+        await db.commit()
+        cur = await db.execute("SELECT * FROM reader_wallets WHERE user_id=?", (int(user_id),))
+        row = await cur.fetchone()
+        if not row:
+            raise RuntimeError("Reader wallet was not created")
+        return row
+
+
+async def get_reader_wallet_balance(user_id: int) -> int:
+    row = await ensure_reader_wallet(int(user_id))
+    return int(row["balance_stars"] or 0)
+
+
+async def list_reader_wallet_transactions(user_id: int, limit: int = 20) -> list[aiosqlite.Row]:
+    async with connect() as db:
+        cur = await db.execute(
+            "SELECT * FROM reader_wallet_transactions WHERE user_id=? ORDER BY id DESC LIMIT ?",
+            (int(user_id), max(1, min(100, int(limit)))),
+        )
+        return await cur.fetchall()
+
+
+async def get_wallet_summary(user_id: int) -> dict[str, int]:
+    wallet = await get_reader_wallet_balance(int(user_id))
+    bonus = await get_bonus_balance(int(user_id))
+    points_per_star = int(await get_setting("bonus_points_per_star", "100") or 100)
+    return {
+        "wallet_stars": wallet,
+        "bonus_points": bonus,
+        "bonus_whole_stars": bonus // max(1, points_per_star),
+        "points_per_star": max(1, points_per_star),
+    }
+
+
+async def _referrer_for_user(db: aiosqlite.Connection, user_id: int) -> aiosqlite.Row | None:
+    cur = await db.execute(
+        "SELECT * FROM referrals WHERE referred_user_id=? ORDER BY id LIMIT 1",
+        (int(user_id),),
+    )
+    return await cur.fetchone()
+
+
+async def credit_wallet_topup(
+    *,
+    user_id: int,
+    amount_stars: int,
+    telegram_payment_charge_id: str,
+    payload: str,
+) -> dict[str, int]:
+    """Credit a top-up exactly once and issue cashback/referral points."""
+    from app.services.bonus_economy import load_revenue_split_settings, topup_bonus_points
+
+    amount = max(1, int(amount_stars))
+    charge_id = str(telegram_payment_charge_id or "").strip()
+    if not charge_id:
+        raise ValueError("Missing Telegram charge id")
+    cfg = await load_revenue_split_settings()
+    raw_payload = str(payload or "")
+    intent = await get_payment_intent(raw_payload) if raw_payload.startswith("vox:intent:") else None
+    canonical_payload = str(intent["canonical_payload"] or "") if intent else raw_payload
+    expected_payload = f"vox:wallet_topup:{amount}"
+    if canonical_payload != expected_payload:
+        raise ValueError("Top-up payload does not match the paid amount")
+    # Сумма могла исчезнуть из меню уже после выставления счёта. Успешный
+    # платёж всё равно зачисляется: повторно платить пользователь не должен.
+    now = utc_now()
+    async with connect() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        cur = await db.execute("SELECT * FROM wallet_topups WHERE telegram_payment_charge_id=?", (charge_id,))
+        existing = await cur.fetchone()
+        if existing:
+            await db.commit()
+            cur = await db.execute("SELECT balance_stars FROM reader_wallets WHERE user_id=?", (int(user_id),))
+            wallet = await cur.fetchone()
+            cur = await db.execute("SELECT balance FROM bonus_wallets WHERE user_id=?", (int(user_id),))
+            bonus = await cur.fetchone()
+            return {
+                "topup_id": int(existing["id"]),
+                "purchase_id": int(existing["purchase_id"] or 0),
+                "wallet_stars": int(wallet["balance_stars"] or 0) if wallet else 0,
+                "buyer_bonus_points": int(existing["buyer_bonus_points"] or 0),
+                "referrer_user_id": int(existing["referrer_user_id"] or 0),
+                "referrer_bonus_points": int(existing["referrer_bonus_points"] or 0),
+                "bonus_points": int(bonus["balance"] or 0) if bonus else 0,
+            }
+
+        referral = await _referrer_for_user(db, int(user_id))
+        referrer_user_id = int(referral["referrer_user_id"]) if referral else None
+        points = topup_bonus_points(
+            amount,
+            bonus_percent=cfg.bonus_percent,
+            points_per_star=cfg.points_per_star,
+            referral_percent_of_bonus=cfg.referral_percent_of_bonus,
+            has_referrer=referrer_user_id is not None,
+        )
+        cur = await db.execute(
+            """
+            INSERT INTO purchases(user_id,amount_stars,status,telegram_payment_charge_id,created_at,payload,purchase_kind,
+                                  original_amount_stars,wallet_stars_used,bonus_points_used,funding_method)
+            VALUES(?,?,'paid',?,?,?,'wallet_topup',?,0,0,'telegram')
+            """,
+            (int(user_id), amount, charge_id, now, canonical_payload, amount),
+        )
+        purchase_id = int(cur.lastrowid)
+        await db.execute(
+            "INSERT INTO reader_wallets(user_id,balance_stars,created_at,updated_at) VALUES(?,0,?,?) ON CONFLICT(user_id) DO NOTHING",
+            (int(user_id), now, now),
+        )
+        await db.execute(
+            "UPDATE reader_wallets SET balance_stars=balance_stars+?,updated_at=? WHERE user_id=?",
+            (amount, now, int(user_id)),
+        )
+        await db.execute(
+            "INSERT INTO reader_wallet_transactions(user_id,amount_stars,transaction_type,source_type,source_id,metadata_json,created_at) "
+            "VALUES(?,?,'topup','telegram',?,?,?)",
+            (int(user_id), amount, str(purchase_id), json.dumps({"charge_id": charge_id}, ensure_ascii=False), now),
+        )
+        for uid in [int(user_id)] + ([referrer_user_id] if referrer_user_id is not None else []):
+            await db.execute(
+                "INSERT INTO bonus_wallets(user_id,balance,created_at,updated_at) VALUES(?,0,?,?) ON CONFLICT(user_id) DO NOTHING",
+                (uid, now, now),
+            )
+        if points["buyer_points"]:
+            await db.execute("UPDATE bonus_wallets SET balance=balance+?,updated_at=? WHERE user_id=?", (points["buyer_points"], now, int(user_id)))
+            await db.execute(
+                "INSERT INTO bonus_transactions(user_id,amount,reason,source_type,source_id,created_at) VALUES(?,?, 'topup_cashback','wallet_topup',?,?)",
+                (int(user_id), points["buyer_points"], str(purchase_id), now),
+            )
+        if referrer_user_id is not None and points["referrer_points"]:
+            await db.execute("UPDATE bonus_wallets SET balance=balance+?,updated_at=? WHERE user_id=?", (points["referrer_points"], now, referrer_user_id))
+            await db.execute(
+                "INSERT INTO bonus_transactions(user_id,amount,reason,source_type,source_id,created_at) VALUES(?,?, 'referral_topup','wallet_topup',?,?)",
+                (referrer_user_id, points["referrer_points"], str(purchase_id), now),
+            )
+            await db.execute(
+                "UPDATE referrals SET bonus_given=1,qualified_at=COALESCE(qualified_at,?),topup_count=topup_count+1,"
+                "rewarded_bonus_points=rewarded_bonus_points+? WHERE id=?",
+                (now, points["referrer_points"], int(referral["id"])),
+            )
+        cur = await db.execute(
+            """
+            INSERT INTO wallet_topups(user_id,purchase_id,amount_stars,buyer_bonus_points,referrer_user_id,
+                                      referrer_bonus_points,telegram_payment_charge_id,status,created_at)
+            VALUES(?,?,?,?,?,?,?,'paid',?)
+            """,
+            (int(user_id), purchase_id, amount, points["buyer_points"], referrer_user_id, points["referrer_points"], charge_id, now),
+        )
+        topup_id = int(cur.lastrowid)
+        if intent:
+            await db.execute(
+                "UPDATE payment_intents SET status='paid',paid_charge_id=?,updated_at=? WHERE token=?",
+                (charge_id, now, str(intent["token"])),
+            )
+        await db.commit()
+        cur = await db.execute("SELECT balance_stars FROM reader_wallets WHERE user_id=?", (int(user_id),))
+        wallet = await cur.fetchone()
+        cur = await db.execute("SELECT balance FROM bonus_wallets WHERE user_id=?", (int(user_id),))
+        bonus = await cur.fetchone()
+        return {
+            "topup_id": topup_id,
+            "purchase_id": purchase_id,
+            "wallet_stars": int(wallet["balance_stars"] or 0),
+            "buyer_bonus_points": int(points["buyer_points"]),
+            "referrer_user_id": int(referrer_user_id or 0),
+            "referrer_bonus_points": int(points["referrer_points"]),
+            "bonus_points": int(bonus["balance"] or 0),
+        }
+
+
+async def get_chapter_wallet_checkout(user_id: int, chapter_id: int) -> dict[str, Any] | None:
+    from app.services.bonus_economy import bonus_discount_limit, load_revenue_split_settings
+
+    target = await get_purchase_target(f"vox:chapter:{int(chapter_id)}")
+    if not target or str(target.get("kind")) != "chapter" or int(target.get("amount_stars") or 0) <= 0:
+        return None
+    if await has_purchase_access(int(user_id), chapter_id=int(chapter_id)):
+        return {"already_owned": True, "chapter_id": int(chapter_id), "book_id": int(target.get("book_id") or 0)}
+    cfg = await load_revenue_split_settings()
+    wallet = await get_reader_wallet_balance(int(user_id))
+    bonus = await get_bonus_balance(int(user_id))
+    discount = bonus_discount_limit(
+        int(target["amount_stars"]), bonus,
+        points_per_star=cfg.points_per_star,
+        author_percent=cfg.author_percent,
+        platform_percent=cfg.platform_percent,
+        bonus_percent=cfg.bonus_percent,
+    )
+    return {
+        "already_owned": False,
+        "chapter_id": int(chapter_id),
+        "book_id": int(target.get("book_id") or 0),
+        "title": str(target.get("title") or "Глава"),
+        "book_title": str(target.get("book_title") or "Книга"),
+        "price_stars": int(target["amount_stars"]),
+        "wallet_stars": wallet,
+        "bonus_points": bonus,
+        "points_per_star": cfg.points_per_star,
+        **discount,
+        "can_buy_with_bonus": wallet >= int(discount["wallet_stars_needed"]),
+        "can_buy_without_bonus": wallet >= int(target["amount_stars"]),
+    }
+
+
+async def purchase_chapter_from_wallet(user_id: int, chapter_id: int, *, use_bonus: bool = True) -> dict[str, int]:
+    """Atomically buy one text chapter from the prepaid wallet."""
+    from app.services.bonus_economy import bonus_discount_limit, load_revenue_split_settings
+
+    cfg = await load_revenue_split_settings()
+    now = utc_now()
+    async with connect() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        cur = await db.execute(
+            """
+            SELECT c.*, b.title AS book_title, b.author_id, b.pricing_type, b.price_stars AS book_price_stars,
+                   b.publication_status
+            FROM chapters c JOIN books b ON b.id=c.book_id WHERE c.id=?
+            """,
+            (int(chapter_id),),
+        )
+        chapter = await cur.fetchone()
+        if not chapter or str(chapter["publication_status"] or "") != "published":
+            await db.rollback(); raise ValueError("Глава не найдена")
+        if str(chapter["pricing_type"] or "") != "chapters" or int(chapter["is_free"] or 0) == 1 or int(chapter["price_stars"] or 0) <= 0:
+            await db.rollback(); raise ValueError("Эта глава отдельно не продаётся")
+        cur = await db.execute(
+            "SELECT id FROM purchases WHERE user_id=? AND chapter_id=? AND status='paid' LIMIT 1",
+            (int(user_id), int(chapter_id)),
+        )
+        if await cur.fetchone():
+            await db.rollback(); raise ValueError("Глава уже куплена")
+        await db.execute(
+            "INSERT INTO reader_wallets(user_id,balance_stars,created_at,updated_at) VALUES(?,0,?,?) ON CONFLICT(user_id) DO NOTHING",
+            (int(user_id), now, now),
+        )
+        await db.execute(
+            "INSERT INTO bonus_wallets(user_id,balance,created_at,updated_at) VALUES(?,0,?,?) ON CONFLICT(user_id) DO NOTHING",
+            (int(user_id), now, now),
+        )
+        cur = await db.execute("SELECT balance_stars FROM reader_wallets WHERE user_id=?", (int(user_id),))
+        wallet = int((await cur.fetchone())["balance_stars"] or 0)
+        cur = await db.execute("SELECT balance FROM bonus_wallets WHERE user_id=?", (int(user_id),))
+        bonus = int((await cur.fetchone())["balance"] or 0)
+        price = int(chapter["price_stars"] or 0)
+        plan = bonus_discount_limit(
+            price,
+            bonus if use_bonus else 0,
+            points_per_star=cfg.points_per_star,
+            author_percent=cfg.author_percent,
+            platform_percent=cfg.platform_percent,
+            bonus_percent=cfg.bonus_percent,
+        )
+        wallet_needed = int(plan["wallet_stars_needed"])
+        bonus_stars = int(plan["bonus_stars_used"])
+        bonus_points = bonus_stars * cfg.points_per_star
+        if wallet < wallet_needed:
+            await db.rollback(); raise ValueError(f"Недостаточно Stars на балансе. Нужно ещё {wallet_needed-wallet}.")
+        await db.execute("UPDATE reader_wallets SET balance_stars=balance_stars-?,updated_at=? WHERE user_id=?", (wallet_needed, now, int(user_id)))
+        if bonus_points:
+            bonus_update = await db.execute(
+                "UPDATE bonus_wallets SET balance=balance-?,updated_at=? WHERE user_id=? AND balance>=?",
+                (bonus_points, now, int(user_id), bonus_points),
+            )
+            if bonus_update.rowcount <= 0:
+                await db.rollback(); raise ValueError("Бонусный баланс изменился. Повторите покупку.")
+        charge_id = f"wallet:{uuid.uuid4().hex}"
+        cur = await db.execute(
+            """
+            INSERT INTO purchases(user_id,book_id,chapter_id,amount_stars,status,telegram_payment_charge_id,created_at,payload,purchase_kind,
+                                  original_amount_stars,wallet_stars_used,bonus_points_used,funding_method)
+            VALUES(?,?,?,?,'paid',?,?,?,'content',?,?,?,'wallet')
+            """,
+            (int(user_id), int(chapter["book_id"]), int(chapter_id), price, charge_id, now,
+             f"vox:chapter:{int(chapter_id)}", price, wallet_needed, bonus_points),
+        )
+        purchase_id = int(cur.lastrowid)
+        await db.execute(
+            "INSERT INTO reader_wallet_transactions(user_id,amount_stars,transaction_type,source_type,source_id,metadata_json,created_at) "
+            "VALUES(?,?,'chapter_purchase','purchase',?,?,?)",
+            (int(user_id), -wallet_needed, str(purchase_id), json.dumps({"chapter_id": int(chapter_id), "bonus_stars": bonus_stars}, ensure_ascii=False), now),
+        )
+        if bonus_points:
+            await db.execute(
+                "INSERT INTO bonus_transactions(user_id,amount,reason,source_type,source_id,created_at) VALUES(?,?,'chapter_purchase_discount','purchase',?,?)",
+                (int(user_id), -bonus_points, str(purchase_id), now),
+            )
+        author_id = chapter["author_id"]
+        if author_id is not None:
+            hold_days = int(await get_setting("hold_days_default", "14") or 14)
+            rate_minor = int(await get_setting("payments_stars_author_rate_minor", "100") or 100)
+            available_at = (datetime.now(timezone.utc) + timedelta(days=max(0, hold_days))).isoformat()
+            commission = int(plan["platform_stars"] + plan["bonus_pool_stars"])
+            await db.execute(
+                """
+                INSERT INTO author_ledger(author_id,purchase_id,source_type,source_id,gross_stars,commission_percent,
+                                          commission_stars,net_stars,settlement_rate_minor,net_minor,hold_days,
+                                          available_at,status,created_at,updated_at,platform_stars,bonus_pool_stars,bonus_discount_stars)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?, 'held',?,?,?,?,?)
+                """,
+                (int(author_id), purchase_id, "chapter", int(chapter_id), price, 100-cfg.author_percent,
+                 commission, int(plan["author_stars"]), rate_minor, int(plan["author_stars"])*rate_minor,
+                 hold_days, available_at, now, now, int(plan["platform_stars"]), int(plan["bonus_pool_stars"]), bonus_stars),
+            )
+        await db.commit()
+        return {
+            "purchase_id": purchase_id,
+            "price_stars": price,
+            "wallet_stars_used": wallet_needed,
+            "bonus_stars_used": bonus_stars,
+            "bonus_points_used": bonus_points,
+            "wallet_stars": wallet-wallet_needed,
+            "bonus_points": bonus-bonus_points,
+            "author_stars": int(plan["author_stars"]),
+            "platform_stars": max(0, int(plan["platform_stars"] + plan["bonus_pool_stars"])-bonus_stars),
+        }
+
+
+async def get_referral_stats(user_id: int) -> dict[str, int]:
+    """Qualified referrals are counted only after a real wallet top-up."""
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT COUNT(*) AS invited,
+                   COALESCE(SUM(CASE WHEN topup_count>0 THEN 1 ELSE 0 END),0) AS funded,
+                   COALESCE(SUM(topup_count),0) AS topups,
+                   COALESCE(SUM(rewarded_bonus_points),0) AS earned_points
+            FROM referrals WHERE referrer_user_id=?
+            """,
+            (int(user_id),),
+        )
+        row = await cur.fetchone()
+        return {
+            "invited": int(row["invited"] or 0),
+            "rewarded": int(row["funded"] or 0),
+            "funded": int(row["funded"] or 0),
+            "topups": int(row["topups"] or 0),
+            "earned_points": int(row["earned_points"] or 0),
+        }
+
+
+_previous_get_purchase_target_v1200_wallet = get_purchase_target
+
+
+async def get_purchase_target(payload: str) -> dict[str, Any] | None:
+    value = str(payload or "")
+    if value.startswith("vox:intent:"):
+        intent = await get_payment_intent(value)
+        if not intent or str(intent["status"] or "") not in {"active", "paid"}:
+            return None
+        canonical = str(intent["canonical_payload"] or "")
+        wallet = await get_purchase_target(canonical)
+        return wallet
+    parts = value.split(":")
+    if len(parts) == 3 and parts[0] == "vox" and parts[1] == "wallet_topup" and parts[2].isdigit():
+        amount = int(parts[2])
+        if amount < 1 or amount > 10000:
+            return None
+        # Доступные кнопки проверяются при создании счёта. Здесь сохраняем
+        # уже выставленный счёт действительным, даже если владелец позже
+        # изменил набор пакетов пополнения.
+        return {
+            "kind": "wallet_topup",
+            "target_id": amount,
+            "amount_stars": amount,
+            "title": "Баланс VoxLyra",
+            "description": f"Пополнение баланса на {amount} Stars",
+            "author_id": None,
+            "book_id": None,
+        }
+    return await _previous_get_purchase_target_v1200_wallet(value)
+
+_previous_create_paid_purchase_v1200_split = create_paid_purchase
+
+
+async def create_paid_purchase(
+    *,
+    user_id: int,
+    payload: str,
+    amount_stars: int,
+    telegram_payment_charge_id: str,
+) -> int:
+    """Create a Telegram-funded purchase and normalize its 80/19/1 split.
+
+    Premium, advertising and wallet top-ups have their own accounting paths.
+    For author content, the owner-configured split is applied in whole Stars.
+    """
+    purchase_id = await _previous_create_paid_purchase_v1200_split(
+        user_id=int(user_id),
+        payload=str(payload),
+        amount_stars=int(amount_stars),
+        telegram_payment_charge_id=str(telegram_payment_charge_id),
+    )
+    target = await get_purchase_target(str(payload))
+    if not target or str(target.get("kind") or "") in {"premium", "wallet_topup", "ad_budget", "channel_promo"}:
+        return purchase_id
+    from app.services.bonus_economy import allocate_revenue_stars, load_revenue_split_settings
+    cfg = await load_revenue_split_settings()
+    split = allocate_revenue_stars(
+        int(amount_stars),
+        author_percent=cfg.author_percent,
+        platform_percent=cfg.platform_percent,
+        bonus_percent=cfg.bonus_percent,
+    )
+    rate_minor = int(await get_setting("payments_stars_author_rate_minor", "100") or 100)
+    commission = int(split["platform_stars"] + split["bonus_pool_stars"])
+    async with connect() as db:
+        await db.execute(
+            """
+            UPDATE purchases
+            SET original_amount_stars=CASE WHEN COALESCE(original_amount_stars,0)=0 THEN amount_stars ELSE original_amount_stars END,
+                wallet_stars_used=0, bonus_points_used=0, funding_method='telegram'
+            WHERE id=?
+            """,
+            (int(purchase_id),),
+        )
+        await db.execute(
+            """
+            UPDATE author_ledger
+            SET commission_percent=?, commission_stars=?, net_stars=?,
+                settlement_rate_minor=?, net_minor=?, platform_stars=?, bonus_pool_stars=?, bonus_discount_stars=0,
+                updated_at=?
+            WHERE purchase_id=? AND source_type!='premium_pool'
+            """,
+            (
+                100-cfg.author_percent,
+                commission,
+                int(split["author_stars"]),
+                rate_minor,
+                int(split["author_stars"])*rate_minor,
+                int(split["platform_stars"]),
+                int(split["bonus_pool_stars"]),
+                utc_now(),
+                int(purchase_id),
+            ),
+        )
+        await db.commit()
+    return purchase_id
+
+async def restore_wallet_purchase_funds(purchase_id: int, user_id: int | None = None) -> dict[str, int]:
+    """Restore an internally funded purchase exactly once before finalizing refund."""
+    now = utc_now()
+    async with connect() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        cur = await db.execute(
+            "SELECT * FROM purchases WHERE id=?",
+            (int(purchase_id),),
+        )
+        purchase = await cur.fetchone()
+        if not purchase or str(purchase["funding_method"] or "") != "wallet":
+            await db.rollback()
+            raise ValueError("Это не покупка с внутреннего баланса")
+        if user_id is not None and int(purchase["user_id"]) != int(user_id):
+            await db.rollback()
+            raise ValueError("Покупка принадлежит другому пользователю")
+        cur = await db.execute(
+            "SELECT 1 FROM reader_wallet_transactions WHERE transaction_type='purchase_refund' AND source_type='purchase' AND source_id=? LIMIT 1",
+            (str(int(purchase_id)),),
+        )
+        if await cur.fetchone():
+            await db.commit()
+            cur = await db.execute("SELECT balance_stars FROM reader_wallets WHERE user_id=?", (int(purchase["user_id"]),))
+            wallet = await cur.fetchone()
+            cur = await db.execute("SELECT balance FROM bonus_wallets WHERE user_id=?", (int(purchase["user_id"]),))
+            bonus = await cur.fetchone()
+            return {
+                "wallet_stars_restored": 0,
+                "bonus_points_restored": 0,
+                "wallet_stars": int(wallet["balance_stars"] or 0) if wallet else 0,
+                "bonus_points": int(bonus["balance"] or 0) if bonus else 0,
+            }
+        if str(purchase["status"] or "") not in {"paid", "canceling"}:
+            await db.rollback()
+            raise ValueError("Покупка уже обработана")
+        wallet_stars = max(0, int(purchase["wallet_stars_used"] or 0))
+        bonus_points = max(0, int(purchase["bonus_points_used"] or 0))
+        uid = int(purchase["user_id"])
+        await db.execute(
+            "INSERT INTO reader_wallets(user_id,balance_stars,created_at,updated_at) VALUES(?,0,?,?) ON CONFLICT(user_id) DO NOTHING",
+            (uid, now, now),
+        )
+        await db.execute(
+            "UPDATE reader_wallets SET balance_stars=balance_stars+?,updated_at=? WHERE user_id=?",
+            (wallet_stars, now, uid),
+        )
+        await db.execute(
+            "INSERT INTO reader_wallet_transactions(user_id,amount_stars,transaction_type,source_type,source_id,metadata_json,created_at) VALUES(?,?,'purchase_refund','purchase',?,?,?)",
+            (uid, wallet_stars, str(int(purchase_id)), json.dumps({"bonus_points": bonus_points}, ensure_ascii=False), now),
+        )
+        if bonus_points:
+            await db.execute(
+                "INSERT INTO bonus_wallets(user_id,balance,created_at,updated_at) VALUES(?,0,?,?) ON CONFLICT(user_id) DO NOTHING",
+                (uid, now, now),
+            )
+            await db.execute(
+                "UPDATE bonus_wallets SET balance=balance+?,updated_at=? WHERE user_id=?",
+                (bonus_points, now, uid),
+            )
+            await db.execute(
+                "INSERT INTO bonus_transactions(user_id,amount,reason,source_type,source_id,created_at) VALUES(?,?,'chapter_purchase_refund','purchase',?,?)",
+                (uid, bonus_points, str(int(purchase_id)), now),
+            )
+        await db.commit()
+        cur = await db.execute("SELECT balance_stars FROM reader_wallets WHERE user_id=?", (uid,))
+        wallet = await cur.fetchone()
+        cur = await db.execute("SELECT balance FROM bonus_wallets WHERE user_id=?", (uid,))
+        bonus = await cur.fetchone()
+        return {
+            "wallet_stars_restored": wallet_stars,
+            "bonus_points_restored": bonus_points,
+            "wallet_stars": int(wallet["balance_stars"] or 0) if wallet else 0,
+            "bonus_points": int(bonus["balance"] or 0) if bonus else 0,
+        }
+
+
+async def list_refund_requests(status: str = "new", limit: int = 30) -> list[aiosqlite.Row]:
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT rr.*, p.amount_stars, p.telegram_payment_charge_id, p.funding_method,
+                   p.wallet_stars_used, p.bonus_points_used, u.telegram_id, u.username, u.full_name,
+                   b.title AS book_title, c.title AS chapter_title, ac.title AS audio_title
+            FROM refund_requests rr
+            JOIN purchases p ON p.id = rr.purchase_id
+            JOIN users u ON u.id = rr.user_id
+            LEFT JOIN books b ON b.id = p.book_id
+            LEFT JOIN chapters c ON c.id = p.chapter_id
+            LEFT JOIN audio_chapters ac ON ac.id = p.audio_chapter_id
+            WHERE rr.status=?
+            ORDER BY rr.id ASC
+            LIMIT ?
+            """,
+            (str(status), max(1, int(limit))),
+        )
+        return await cur.fetchall()
+
+
+async def get_refund_request(refund_id: int) -> aiosqlite.Row | None:
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT rr.*, p.amount_stars, p.telegram_payment_charge_id, p.status AS purchase_status,
+                   p.funding_method, p.wallet_stars_used, p.bonus_points_used,
+                   u.telegram_id, u.username, u.full_name,
+                   b.title AS book_title, c.title AS chapter_title, ac.title AS audio_title
+            FROM refund_requests rr
+            JOIN purchases p ON p.id = rr.purchase_id
+            JOIN users u ON u.id = rr.user_id
+            LEFT JOIN books b ON b.id = p.book_id
+            LEFT JOIN chapters c ON c.id = p.chapter_id
+            LEFT JOIN audio_chapters ac ON ac.id = p.audio_chapter_id
+            WHERE rr.id=?
+            """,
+            (int(refund_id),),
+        )
+        return await cur.fetchone()
+
+
+async def list_user_purchases(user_id: int, limit: int = 20) -> list[aiosqlite.Row]:
+    """Content purchases only; wallet top-ups are shown in wallet history."""
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT p.*, b.title AS book_title,
+                   c.title AS chapter_title,
+                   ac.title AS audio_title,
+                   gc.title AS graphic_chapter_title,
+                   gc.volume_number AS graphic_chapter_volume,
+                   COALESCE(gvs.title, '') AS graphic_volume_title,
+                   cp.title AS chapter_package_title,
+                   cp.chapters_count AS chapter_package_count,
+                   cpb.total_credits AS chapter_package_total,
+                   cpb.remaining_credits AS chapter_package_remaining
+            FROM purchases p
+            LEFT JOIN books b ON b.id=p.book_id
+            LEFT JOIN chapters c ON c.id=p.chapter_id
+            LEFT JOIN audio_chapters ac ON ac.id=p.audio_chapter_id
+            LEFT JOIN graphic_chapters gc ON gc.id=p.graphic_chapter_id
+            LEFT JOIN graphic_volume_settings gvs
+              ON gvs.book_id=p.book_id AND gvs.volume_number=p.graphic_volume_number
+            LEFT JOIN chapter_packages cp ON cp.id=p.chapter_package_id
+            LEFT JOIN chapter_package_balances cpb ON cpb.purchase_id=p.id
+            WHERE p.user_id=? AND COALESCE(p.purchase_kind,'content')!='wallet_topup'
+            ORDER BY p.id DESC LIMIT ?
+            """,
+            (int(user_id), max(1, int(limit))),
+        )
+        return await cur.fetchall()
+
+
+async def get_platform_finance_summary() -> dict[str, int]:
+    """Financial summary without double-counting prepaid wallet spending.
+
+    Telegram inflow counts wallet top-ups and direct Telegram purchases once.
+    Purchases later paid from the internal wallet are content turnover, but are
+    not a second external receipt of Stars.
+    """
+    async with connect() as db:
+        await _release_ready_author_ledger(db)
+        await db.commit()
+        cur = await db.execute(
+            """
+            SELECT
+                COALESCE(SUM(CASE
+                    WHEN status='paid' AND COALESCE(funding_method,'telegram')!='wallet'
+                    THEN amount_stars ELSE 0 END), 0) AS telegram_inflow_stars,
+                COALESCE(SUM(CASE
+                    WHEN status='refunded' AND COALESCE(funding_method,'telegram')!='wallet'
+                    THEN amount_stars ELSE 0 END), 0) AS telegram_refunded_stars,
+                COUNT(CASE
+                    WHEN status='paid' AND COALESCE(funding_method,'telegram')!='wallet'
+                    THEN 1 END) AS external_paid_count,
+                COUNT(CASE
+                    WHEN status='refunded' AND COALESCE(funding_method,'telegram')!='wallet'
+                    THEN 1 END) AS external_refunded_count,
+                COALESCE(SUM(CASE
+                    WHEN status='paid' AND COALESCE(purchase_kind,'content')!='wallet_topup'
+                    THEN CASE WHEN COALESCE(original_amount_stars,0)>0
+                              THEN original_amount_stars ELSE amount_stars END
+                    ELSE 0 END), 0) AS content_sales_stars,
+                COALESCE(SUM(CASE
+                    WHEN status='paid' AND COALESCE(purchase_kind,'content')='wallet_topup'
+                    THEN amount_stars ELSE 0 END), 0) AS wallet_topup_stars,
+                COALESCE(SUM(CASE
+                    WHEN status='paid' AND COALESCE(funding_method,'telegram')='wallet'
+                    THEN wallet_stars_used ELSE 0 END), 0) AS wallet_spent_stars
+            FROM purchases
+            """
+        )
+        purchases = await cur.fetchone()
+        cur = await db.execute(
+            """
+            SELECT
+                COALESCE(SUM(CASE WHEN status!='refunded' THEN
+                    CASE
+                      WHEN COALESCE(platform_stars,0)=0 AND COALESCE(bonus_pool_stars,0)=0
+                      THEN commission_stars
+                      ELSE platform_stars
+                    END ELSE 0 END), 0) AS platform_commission,
+                COALESCE(SUM(CASE WHEN status!='refunded' THEN bonus_pool_stars ELSE 0 END), 0) AS bonus_pool_stars,
+                COALESCE(SUM(CASE WHEN status!='refunded' THEN bonus_discount_stars ELSE 0 END), 0) AS bonus_discount_stars,
+                COALESCE(SUM(CASE WHEN status!='refunded' THEN commission_stars ELSE 0 END), 0) AS non_author_total,
+                COALESCE(SUM(CASE WHEN status='held' THEN net_stars ELSE 0 END), 0) AS held_authors,
+                COALESCE(SUM(CASE WHEN status='available' THEN net_stars ELSE 0 END), 0) AS available_authors,
+                COALESCE(SUM(CASE WHEN status='payout_requested' THEN net_stars ELSE 0 END), 0) AS requested_authors,
+                COALESCE(SUM(CASE WHEN status='paid' THEN net_stars ELSE 0 END), 0) AS paid_authors
+            FROM author_ledger
+            """
+        )
+        ledger = await cur.fetchone()
+        cur = await db.execute("SELECT COUNT(*) AS cnt FROM author_payout_requests WHERE status IN ('new','approved')")
+        payouts = await cur.fetchone()
+        cur = await db.execute("SELECT COALESCE(SUM(balance_stars),0) AS total FROM reader_wallets")
+        wallet = await cur.fetchone()
+        cur = await db.execute("SELECT COALESCE(SUM(balance),0) AS total FROM bonus_wallets")
+        bonuses = await cur.fetchone()
+        points_per_star = 100
+        return {
+            "paid_gross": int(purchases["telegram_inflow_stars"] or 0),
+            "telegram_inflow_stars": int(purchases["telegram_inflow_stars"] or 0),
+            "refunded_gross": int(purchases["telegram_refunded_stars"] or 0),
+            "paid_count": int(purchases["external_paid_count"] or 0),
+            "refunded_count": int(purchases["external_refunded_count"] or 0),
+            "content_sales_stars": int(purchases["content_sales_stars"] or 0),
+            "wallet_topup_stars": int(purchases["wallet_topup_stars"] or 0),
+            "wallet_spent_stars": int(purchases["wallet_spent_stars"] or 0),
+            "wallet_liability_stars": int(wallet["total"] or 0),
+            "bonus_liability_points": int(bonuses["total"] or 0),
+            "bonus_liability_stars": int(bonuses["total"] or 0) // points_per_star,
+            "platform_commission": int(ledger["platform_commission"] or 0),
+            "bonus_pool_stars": int(ledger["bonus_pool_stars"] or 0),
+            "bonus_discount_stars": int(ledger["bonus_discount_stars"] or 0),
+            "non_author_total": int(ledger["non_author_total"] or 0),
+            "held_authors": int(ledger["held_authors"] or 0),
+            "available_authors": int(ledger["available_authors"] or 0),
+            "requested_authors": int(ledger["requested_authors"] or 0),
+            "paid_authors": int(ledger["paid_authors"] or 0),
+            "payout_requests_open": int(payouts["cnt"] or 0),
+        }
+
+
+async def claim_daily_bonus(user_id: int) -> tuple[bool, int, int]:
+    """Compatibility stub: daily rewards were permanently removed in v1.12.0."""
+    return False, 0, await get_bonus_balance(int(user_id))

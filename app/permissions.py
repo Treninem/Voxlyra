@@ -10,6 +10,7 @@ class Permission:
 
 PERMISSIONS = [
     Permission("mod_books", "📚 Модерация книг"),
+    Permission("library_import_manage", "📥 Массовый импорт библиотеки"),
     Permission("mod_comments", "💬 Модерация комментариев"),
     Permission("complaints", "🧾 Работа с жалобами"),
     Permission("authors", "✍️ Работа с авторами"),
@@ -36,6 +37,7 @@ DELEGABLE_PERMISSION_CODES = {permission.code for permission in DELEGABLE_PERMIS
 MODERATION_BUTTONS = {
     # Показываем только те разделы, где уже есть рабочая логика.
     "mod_books": ("📚 Книги на проверке", "mod:books"),
+    "library_import_manage": ("📚 Управление библиотекой", "library:menu"),
     "mod_comments": ("💬 Комментарии и отзывы", "mod:comments"),
     "complaints": ("🧾 Жалобы", "mod:complaints"),
     "refunds": ("↩️ Возвраты", "mod:refunds"),

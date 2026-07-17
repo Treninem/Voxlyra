@@ -27,6 +27,7 @@ from app.services.legal_documents import ensure_legal_pdf
 from app.services.secure_fields import decrypt_text, encrypt_text, mask_phone
 from app.services.yookassa_payouts import create_sbp_payout, list_sbp_banks, normalize_phone, payouts_configured, YooKassaPayoutError
 from app.services.payment_runtime import load_runtime_payment_settings, public_runtime_payment_settings, update_runtime_payment_settings
+from app.services.bonus_economy import public_revenue_split_settings, load_revenue_split_settings
 from app.services.yookassa_checkout import test_shop_connection, YooKassaCheckoutError
 from app.services.pricing import split_platform_commission, final_price_for_desired_net, two_rate_price
 from app.services.rankings import attach_ranking, attach_rankings
@@ -82,6 +83,8 @@ from app.db import (
     get_user_review,
     get_user_preferences,
     get_user_premium_status,
+    get_wallet_summary,
+    restore_wallet_purchase_funds,
     list_premium_plans,
     set_premium_auto_renew,
     set_premium_plan_settings,
@@ -816,6 +819,27 @@ def create_app() -> FastAPI:
         finally:
             await bot.session.close()
 
+    async def wallet_invoice_link(amount_stars: int) -> str:
+        cfg = await load_revenue_split_settings()
+        amount = int(amount_stars)
+        if amount not in cfg.topup_packages:
+            raise HTTPException(status_code=400, detail="Выберите доступную сумму пополнения.")
+        if not settings.BOT_TOKEN.strip():
+            raise HTTPException(status_code=503, detail="Бот не настроен для пополнения баланса.")
+        total_points = amount * cfg.bonus_percent * cfg.points_per_star // 100
+        bot = Bot(token=settings.BOT_TOKEN)
+        try:
+            return await bot.create_invoice_link(
+                title="Баланс VoxLyra",
+                description=f"Пополнение на {amount} Stars · кешбэк до {total_points} бонусов"[:255],
+                payload=f"vox:wallet_topup:{amount}",
+                provider_token="",
+                currency="XTR",
+                prices=[LabeledPrice(label="Пополнение баланса", amount=amount)],
+            )
+        finally:
+            await bot.session.close()
+
     @app.get("/health")
     async def health():
         """Короткая проверка для Bothost и владельца. Не раскрывает токен и секреты."""
@@ -1327,6 +1351,8 @@ def create_app() -> FastAPI:
         preferences = await get_user_preferences(user.app_user_id)
         achievements = await sync_user_achievements(user.app_user_id)
         premium = await get_user_premium_status(user.app_user_id)
+        wallet = await get_wallet_summary(user.app_user_id)
+        bonus_economy = await public_revenue_split_settings()
         return {
             "ok": True,
             "user": {
@@ -1344,6 +1370,8 @@ def create_app() -> FastAPI:
             "preferences": preferences,
             "achievements": achievements,
             "premium": premium,
+            "wallet": wallet,
+            "bonus_economy": bonus_economy,
             "author": {
                 "enabled": bool(author_profile and author_profile["status"] in {"active", "approved"}),
             },
@@ -1353,6 +1381,20 @@ def create_app() -> FastAPI:
                 "permissions": sorted(permissions),
             },
         }
+
+    @app.post("/api/wallet/checkout")
+    async def api_wallet_checkout(
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        payment_cfg = await load_runtime_payment_settings()
+        if not payment_cfg.stars_enabled:
+            raise HTTPException(status_code=503, detail="Новые оплаты временно остановлены владельцем.")
+        if await get_missing_legal_documents(user.app_user_id, REQUIRED_ON_START):
+            raise HTTPException(status_code=409, detail="Сначала примите актуальные документы в боте.")
+        amount = int(payload.get("amount_stars") or 0)
+        return {"ok": True, "invoice_link": await wallet_invoice_link(amount)}
 
     @app.get("/api/preferences")
     async def api_preferences(x_telegram_init_data: str | None = Header(default=None)):
@@ -2761,6 +2803,7 @@ def create_app() -> FastAPI:
         }
         financial_profile = await get_author_financial_profile(user.app_user_id)
         books = await list_author_books_with_counts(user.app_user_id)
+        revenue_split = await load_revenue_split_settings()
         public_financial_profile = None
         if financial_profile:
             public_financial_profile = {
@@ -2785,14 +2828,18 @@ def create_app() -> FastAPI:
             "rub_finance": rub_finance,
             "financial_profile": public_financial_profile,
             "pricing_policy": {
-                "model": "stars_only_two_rates",
-                "commission_percent": 20,
+                "model": "stars_wallet_bonus_split",
+                "author_percent": revenue_split.author_percent,
+                "platform_percent": revenue_split.platform_percent,
+                "bonus_percent": revenue_split.bonus_percent,
+                "commission_percent": revenue_split.non_author_percent,
+                "bonus_points_per_star": revenue_split.points_per_star,
                 "hold_days": 14,
                 "example": two_rate_price(
                     10,
                     (await load_runtime_payment_settings()).buyer_star_rate_minor,
                     (await load_runtime_payment_settings()).author_star_rate_minor,
-                    20,
+                    revenue_split.non_author_percent,
                 ),
                 "yookassa_payouts_configured": False,
                 "manual_payouts_only": True,
@@ -4651,6 +4698,7 @@ def create_app() -> FastAPI:
         allowed = {
             "stars_enabled", "content_protection_enabled", "watermark_enabled",
             "buyer_star_rate_minor", "author_star_rate_minor", "purchase_cancel_minutes",
+            "author_percent", "platform_percent", "bonus_percent", "topup_packages",
         }
         clean = {key: value for key, value in payload.items() if key in allowed}
         try:
@@ -4995,20 +5043,32 @@ def create_app() -> FastAPI:
         refund = await get_refund_request(refund_id)
         if not refund or refund["status"] not in {"new", "pending"} or refund["purchase_status"] != "paid":
             raise HTTPException(status_code=409, detail="Запрос уже обработан или недоступен.")
-        if not settings.BOT_TOKEN:
-            raise HTTPException(status_code=503, detail="Возврат временно недоступен.")
-        bot = Bot(token=settings.BOT_TOKEN)
-        try:
-            await bot.refund_star_payment(
-                user_id=int(refund["telegram_id"]),
-                telegram_payment_charge_id=str(refund["telegram_payment_charge_id"]),
-            )
-        except Exception:
-            await add_audit(user.app_user_id, "refund_failed_web", "refund", str(refund_id))
-            raise HTTPException(status_code=502, detail="Telegram не подтвердил возврат. Попробуйте позже.")
-        finally:
-            await bot.session.close()
-        if not await finalize_refund(refund_id, user.app_user_id):
+        wallet_refund = str(refund["funding_method"] or "telegram") == "wallet"
+        if wallet_refund:
+            try:
+                await restore_wallet_purchase_funds(int(refund["purchase_id"]), int(refund["user_id"]))
+            except Exception as exc:
+                await add_audit(user.app_user_id, "refund_failed_web", "refund", str(refund_id))
+                raise HTTPException(status_code=409, detail="Не удалось восстановить внутренний баланс.") from exc
+        else:
+            if not settings.BOT_TOKEN:
+                raise HTTPException(status_code=503, detail="Возврат временно недоступен.")
+            bot = Bot(token=settings.BOT_TOKEN)
+            try:
+                await bot.refund_star_payment(
+                    user_id=int(refund["telegram_id"]),
+                    telegram_payment_charge_id=str(refund["telegram_payment_charge_id"]),
+                )
+            except Exception as exc:
+                await add_audit(user.app_user_id, "refund_failed_web", "refund", str(refund_id))
+                raise HTTPException(status_code=502, detail="Telegram не подтвердил возврат. Попробуйте позже.") from exc
+            finally:
+                await bot.session.close()
+        if not await finalize_refund(
+            refund_id,
+            user.app_user_id,
+            "Возврат на внутренний баланс выполнен" if wallet_refund else "Возврат Stars выполнен",
+        ):
             raise HTTPException(status_code=409, detail="Возврат уже был обработан.")
         await add_audit(user.app_user_id, "refund_approved_web", "refund", str(refund_id))
         notification = await notify_after_action(
