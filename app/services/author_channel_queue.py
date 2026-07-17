@@ -44,6 +44,16 @@ async def update_author_channel_settings(*, enabled: int | None = None, interval
     if interval_minutes is not None:
         current["interval_minutes"] = max(1, min(10080, int(interval_minutes)))
         await set_setting("author_channel_interval_minutes", str(current["interval_minutes"]))
+        await ensure_author_channel_queue_schema()
+        next_run = (
+            datetime.now(timezone.utc) + timedelta(minutes=current["interval_minutes"])
+        ).replace(microsecond=0).isoformat()
+        async with connect() as db:
+            await db.execute(
+                "UPDATE author_channel_queue SET next_attempt_at=? WHERE status='queued'",
+                (next_run,),
+            )
+            await db.commit()
     if posts_per_run is not None:
         current["posts_per_run"] = max(1, min(20, int(posts_per_run)))
         await set_setting("author_channel_posts_per_run", str(current["posts_per_run"]))
