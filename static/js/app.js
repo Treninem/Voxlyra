@@ -2445,10 +2445,69 @@ function initPremiumPage() {
   refreshPremiumPage();
 }
 
+async function openWalletTopup(amount) {
+  const buttons = document.querySelectorAll('[data-wallet-topup]');
+  buttons.forEach((button) => { button.disabled = true; });
+  try {
+    const data = await apiFetch('/api/wallet/checkout', {
+      method: 'POST',
+      body: JSON.stringify({ amount_stars: Number(amount) }),
+    });
+    const telegram = window.Telegram?.WebApp;
+    if (telegram?.openInvoice) {
+      telegram.openInvoice(data.invoice_link, (status) => {
+        if (status === 'paid') {
+          notify('Баланс пополнен');
+          setTimeout(() => { meDataPromise = null; loadMeData().then(renderWalletSummary).catch(() => {}); }, 900);
+        } else if (status === 'cancelled') notify('Пополнение отменено');
+        else if (status === 'failed') notify('Telegram не завершил оплату');
+      });
+    } else {
+      window.location.assign(data.invoice_link);
+    }
+  } catch (error) {
+    notify(error.message || 'Не удалось открыть пополнение');
+  } finally {
+    buttons.forEach((button) => { button.disabled = false; });
+  }
+}
+
+function renderWalletSummary(data) {
+  const wallet = data?.wallet || {};
+  const economy = data?.bonus_economy || {};
+  const stars = document.getElementById('walletStars');
+  const points = document.getElementById('walletBonusPoints');
+  const hint = document.getElementById('walletCashbackHint');
+  const buttons = document.getElementById('walletTopupButtons');
+  if (stars) stars.textContent = Number(wallet.wallet_stars || 0);
+  if (points) points.textContent = Number(wallet.bonus_points || 0);
+  if (hint) {
+    const rate = Math.max(1, Number(economy.points_per_star || 100));
+    const usable = Math.floor(Number(wallet.bonus_points || 0) / rate);
+    const remainder = Number(wallet.bonus_points || 0) % rate;
+    hint.textContent = `${rate} бонусов = 1 целая Star · доступно ${usable} Stars${remainder ? ` · ещё ${rate - remainder} бонусов до следующей` : ''}`;
+  }
+  if (buttons) {
+    const packages = economy.topup_packages || [];
+    buttons.innerHTML = packages.map((amount) => {
+      const totalPoints = Math.floor(Number(amount) * Number(economy.bonus_percent || 0) * Number(economy.points_per_star || 100) / 100);
+      return `<button type="button" class="secondary" data-wallet-topup="${Number(amount)}"><strong>${Number(amount)} Stars</strong><small>до +${totalPoints} бонусов</small></button>`;
+    }).join('');
+    buttons.querySelectorAll('[data-wallet-topup]').forEach((button) => button.addEventListener('click', () => openWalletTopup(button.dataset.walletTopup)));
+  }
+}
+
 async function initLibrary() {
   const page = document.getElementById('libraryPage');
   if (!page) return;
   const content = document.getElementById('libraryContent');
+  const walletTopupButton = document.getElementById('walletTopupButton');
+  const walletTopupPanel = document.getElementById('walletTopupPanel');
+  walletTopupButton?.addEventListener('click', () => {
+    if (!walletTopupPanel) return;
+    walletTopupPanel.hidden = !walletTopupPanel.hidden;
+    walletTopupButton.textContent = walletTopupPanel.hidden ? 'Пополнить' : 'Скрыть';
+  });
   if (!tgInitData()) {
     if (content) content.innerHTML = emptyStateMarkup('no-books', 'Откройте внутри Telegram', 'Личная библиотека привязана к вашему Telegram-профилю.', '/catalog', 'Смотреть каталог');
     return;
@@ -2456,6 +2515,7 @@ async function initLibrary() {
   try {
     const data = await loadMeData();
     page._libraryData = data;
+    renderWalletSummary(data);
     const profileName = String(data.user?.full_name || data.user?.username || '').trim();
     const username = String(data.user?.username || '').replace(/^@+/, '').trim();
     const telegramPhotoUrl = String(

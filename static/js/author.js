@@ -380,6 +380,9 @@ function renderAuthorDashboard(data) {
   renderAuthorAchievements(data.achievements);
   const rubFinance = data.rub_finance || {};
   const policy = data.pricing_policy || {};
+  document.getElementById('authorAuthorPercent').textContent = `${Number(policy.author_percent || 80)}%`;
+  document.getElementById('authorPlatformPercent').textContent = `${Number(policy.platform_percent ?? 19)}%`;
+  document.getElementById('authorBonusPercent').textContent = `${Number(policy.bonus_percent ?? 1)}%`;
   document.getElementById('authorCommissionPercent').textContent = `${Number(policy.commission_percent || 20)}%`;
   document.getElementById('authorHoldDays').textContent = `${Number(policy.hold_days || 14)} дней`;
   document.getElementById('authorRubAvailable').textContent = formatRubMinor(rubFinance.available_minor);
@@ -390,7 +393,7 @@ function renderAuthorDashboard(data) {
   const commissionStars = Number(example.commission_stars || 2);
   const netStars = Number(example.net_stars || 8);
   const authorNet = Number(example.author_net_minor || 800);
-  document.getElementById('authorPriceExample').textContent = `При цене ${grossStars} Stars: покупателю показывается ориентир ${formatRubMinor(buyerEstimate)}, комиссия ${commissionStars} Stars, автору ${netStars} Stars = ${formatRubMinor(authorNet)}.`;
+  document.getElementById('authorPriceExample').textContent = `При цене ${grossStars} Stars: покупателю показывается ориентир ${formatRubMinor(buyerEstimate)}, платформенная и бонусная части вместе ${commissionStars} Stars, автору ${netStars} Stars = ${formatRubMinor(authorNet)}. Начисления всегда целые.`;
   document.getElementById('authorPayoutState').textContent = 'Продажи принимаются только в Stars. Рублёвая сумма автора фиксируется для каждой продажи, а выплата подтверждается владельцем вручную.';
   const desired = document.getElementById('authorDesiredNet');
   const suggested = document.getElementById('authorSuggestedFinal');

@@ -47,8 +47,11 @@
       stats.push(statCard('Жалобы', q.complaints_new || 0));
     }
     if (data.finance) {
-      stats.push(statCard('Оборот', finance.paid_gross || 0, 'Stars'));
-      stats.push(statCard('Комиссия платформы', finance.platform_commission || 0, 'Stars'));
+      stats.push(statCard('Принято от Telegram', finance.paid_gross || 0, 'Stars'));
+      stats.push(statCard('Продажи контента', finance.content_sales_stars || 0, 'Stars'));
+      stats.push(statCard('Доля платформы', finance.platform_commission || 0, 'Stars'));
+      stats.push(statCard('Бонусный фонд', finance.bonus_pool_stars || 0, 'Stars'));
+      stats.push(statCard('На балансах читателей', finance.wallet_liability_stars || 0, 'Stars'));
       stats.push(statCard('Удерживается авторам', finance.held_authors || 0, 'Stars'));
       stats.push(statCard('К выплате', finance.available_authors || 0, 'Stars'));
     }
@@ -328,7 +331,14 @@
           <label class="payment-secret-field"><span>Ориентир покупателя, копеек за 1 Star</span><input type="number" min="2" max="100000" step="1" name="buyer_star_rate_minor" value="${Number(cfg.buyer_star_rate_minor || 145)}"><small>Например, 145 = примерно 1,45 ₽. Фактическую цену Stars определяет Telegram.</small></label>
           <label class="payment-secret-field"><span>Расчётный курс автора, копеек за 1 Star</span><input type="number" min="1" max="99999" step="1" name="author_star_rate_minor" value="${Number(cfg.author_star_rate_minor || 100)}"><small>Например, 100 = 1,00 ₽. Сначала удерживается комиссия платформы, затем чистые Stars автора фиксируются по этому курсу.</small></label>
           <label class="payment-secret-field"><span>Быстрая отмена неиспользованной покупки, минут</span><input type="number" min="1" max="120" step="1" name="purchase_cancel_minutes" value="${Number(cfg.purchase_cancel_minutes || 15)}"><small>В течение этого времени читатель может вернуть Stars автоматически, пока не начал читать, слушать или расходовать пакет.</small></label>
-          <div class="payment-rate-example"><b>Пример для 10 Stars и комиссии 20%</b><p id="paymentRateExample"></p></div>
+          <div class="payment-rate-example"><b>Распределение каждой новой продажи</b><p>Сумма трёх долей всегда должна быть ровно 100%. Для небольших цен используются только целые Stars и ближайшее целое распределение без потери общей суммы.</p></div>
+          <label class="payment-secret-field"><span>Автору, %</span><input type="number" min="50" max="99" step="1" name="author_percent" value="${Number(cfg.author_percent || 80)}"><small>Минимум 50%. Начисляется автору целыми Stars.</small></label>
+          <label class="payment-secret-field"><span>Платформе, %</span><input type="number" min="0" max="99" step="1" name="platform_percent" value="${Number(cfg.platform_percent ?? 19)}"><small>Доход и расходы платформы.</small></label>
+          <label class="payment-secret-field"><span>В бонусный фонд, %</span><input type="number" min="0" max="25" step="1" name="bonus_percent" value="${Number(cfg.bonus_percent ?? 1)}"><small>Из этой доли обеспечиваются кешбэк и реферальные бонусы.</small></label>
+          <div class="payment-rate-example"><b>Фиксированный курс бонусов</b><p>${Number(cfg.points_per_star || 100)} бонусов = 1 Star скидки. Курс не меняется, чтобы уже накопленные баллы не обесценивались.</p></div>
+          <div class="payment-rate-example"><b>Реферальное распределение</b><p>${Number(cfg.referral_percent_of_bonus ?? 30)}% бонусного начисления получает пригласивший, ${Number(cfg.buyer_percent_of_bonus ?? 70)}% — пополнивший баланс. Без реферала покупатель получает всё начисление.</p></div>
+          <label class="payment-secret-field"><span>Пакеты пополнения, Stars</span><input type="text" name="topup_packages" value="${esc((cfg.topup_packages || [50,100,250,500,1000]).join(','))}"><small>Целые числа через запятую.</small></label>
+          <div class="payment-rate-example"><b>Проверочный расчёт</b><p id="paymentRateExample"></p></div>
         </div>
       </article>
       <article class="control-item payment-settings-card"><div class="control-item-main"><span>Защита</span><h3>Копирование и распространение</h3><p>Абсолютно запретить системный скриншот в Mini App нельзя, поэтому используются блокировка копирования, защищённые ссылки и персональный водяной знак.</p></div>
@@ -341,12 +351,39 @@
     </form>`;
 
     const form = $('paymentSettingsForm');
+    const integerSplit = (total, values) => {
+      const keys = ['author', 'platform', 'bonus'];
+      const tie = { bonus: 0, platform: 1, author: 2 };
+      const result = {};
+      const ranking = [];
+      let assigned = 0;
+      keys.forEach((key) => {
+        const raw = total * Number(values[key] || 0);
+        result[key] = Math.floor(raw / 100);
+        assigned += result[key];
+        ranking.push({ key, remainder: raw % 100, tie: tie[key] });
+      });
+      ranking.sort((a, b) => b.remainder - a.remainder || a.tie - b.tie);
+      for (let i = 0; i < total - assigned; i += 1) result[ranking[i % ranking.length].key] += 1;
+      return result;
+    };
     const renderExample = () => {
       const buyer = Math.max(2, Number(form.elements.buyer_star_rate_minor.value || 145));
-      const author = Math.max(1, Number(form.elements.author_star_rate_minor.value || 100));
-      const buyerRub = (10 * buyer / 100).toFixed(2);
-      const authorRub = (8 * author / 100).toFixed(2);
-      $('paymentRateExample').textContent = `Покупателю показывается ориентир ${buyerRub} ₽. Комиссия — 2 Stars. Автору начисляется 8 Stars = ${authorRub} ₽.`;
+      const authorRate = Math.max(1, Number(form.elements.author_star_rate_minor.value || 100));
+      const shares = {
+        author: Number(form.elements.author_percent.value || 80),
+        platform: Number(form.elements.platform_percent.value || 19),
+        bonus: Number(form.elements.bonus_percent.value || 1),
+      };
+      const split = integerSplit(100, shares);
+      const pointsRate = Math.max(1, Number(cfg.points_per_star || 100));
+      const refPct = Math.max(0, Math.min(100, Number(cfg.referral_percent_of_bonus ?? 30)));
+      const cashback = Math.floor(100 * shares.bonus * pointsRate / 100);
+      const referrer = Math.floor(cashback * refPct / 100);
+      const buyerPoints = cashback - referrer;
+      const buyerRub = (100 * buyer / 100).toFixed(2);
+      const authorRub = (split.author * authorRate / 100).toFixed(2);
+      $('paymentRateExample').textContent = `Продажи на 100 Stars: автору ${split.author}, платформе ${split.platform}, в бонусный фонд ${split.bonus}; ориентир покупателя ${buyerRub} ₽, автору ${authorRub} ₽. Пополнение 100 Stars: ${cashback} бонусов; при реферале ${buyerPoints} покупателю и ${referrer} пригласившему.`;
     };
     form?.addEventListener('input', renderExample);
     renderExample();
@@ -355,6 +392,16 @@
       const buyer = Math.max(2, Number(form.elements.buyer_star_rate_minor.value || 145));
       const author = Math.max(1, Number(form.elements.author_star_rate_minor.value || 100));
       if (buyer <= author) { notify('Курс покупателя должен быть выше курса автора'); return; }
+      const shares = {
+        author_percent: Math.max(50, Math.min(99, Number(form.elements.author_percent.value || 80))),
+        platform_percent: Math.max(0, Math.min(99, Number(form.elements.platform_percent.value || 19))),
+        bonus_percent: Math.max(0, Math.min(25, Number(form.elements.bonus_percent.value || 1))),
+      };
+      if (shares.author_percent + shares.platform_percent + shares.bonus_percent !== 100) {
+        notify('Доли автора, платформы и бонусов должны давать ровно 100%'); return;
+      }
+      const packages = String(form.elements.topup_packages.value || '').split(',').map((value) => Number(value.trim())).filter((value) => Number.isInteger(value) && value > 0 && value <= 10000);
+      if (!packages.length) { notify('Укажите хотя бы один пакет пополнения'); return; }
       const payload = {
         stars_enabled: Boolean(form.elements.stars_enabled.checked),
         content_protection_enabled: Boolean(form.elements.content_protection_enabled.checked),
@@ -362,6 +409,8 @@
         buyer_star_rate_minor: buyer,
         author_star_rate_minor: author,
         purchase_cancel_minutes: Math.max(1, Math.min(120, Number(form.elements.purchase_cancel_minutes.value || 15))),
+        ...shares,
+        topup_packages: packages,
       };
       await apiFetch('/api/control/payment-settings', { method: 'PATCH', body: JSON.stringify(payload) });
       notify('Настройки Stars сохранены');
