@@ -32,6 +32,23 @@ RIGHTS_HOLDER_TYPES = {"public_domain", "person", "publisher", "platform", "othe
 REVENUE_MODES = {"none", "platform", "author_account"}
 
 
+async def _run_blocking(func, /, *args, **kwargs):
+    """Run blocking work without freezing Telegram updates.
+
+    If shutdown arrives while a ZIP/file operation is active, wait for that
+    operation to finish before unwinding temporary directories. This avoids a
+    race between a worker thread and cleanup of the same files.
+    """
+    task = asyncio.create_task(asyncio.to_thread(func, *args, **kwargs))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        try:
+            await task
+        finally:
+            raise
+
+
 @dataclass
 class ImportErrorItem:
     folder: str
@@ -266,7 +283,7 @@ async def ensure_library_schema() -> None:
 
             CREATE TABLE IF NOT EXISTS library_import_settings (
                 id INTEGER PRIMARY KEY CHECK(id=1),
-                max_books INTEGER NOT NULL DEFAULT 500,
+                max_books INTEGER NOT NULL DEFAULT 0,
                 max_archive_mb INTEGER NOT NULL DEFAULT 200,
                 max_unpacked_mb INTEGER NOT NULL DEFAULT 4096,
                 duplicate_policy TEXT NOT NULL DEFAULT 'ask',
@@ -274,7 +291,7 @@ async def ensure_library_schema() -> None:
             );
             INSERT OR IGNORE INTO library_import_settings(
                 id, max_books, max_archive_mb, max_unpacked_mb, duplicate_policy, updated_at
-            ) VALUES(1, 500, 200, 4096, 'ask', '');
+            ) VALUES(1, 0, 200, 4096, 'ask', '');
 
             CREATE TABLE IF NOT EXISTS library_channel_queue (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -300,9 +317,19 @@ async def ensure_library_schema() -> None:
             "channel_auto_post": "ALTER TABLE library_import_settings ADD COLUMN channel_auto_post INTEGER NOT NULL DEFAULT 1",
             "channel_interval_minutes": "ALTER TABLE library_import_settings ADD COLUMN channel_interval_minutes INTEGER NOT NULL DEFAULT 60",
             "channel_posts_per_run": "ALTER TABLE library_import_settings ADD COLUMN channel_posts_per_run INTEGER NOT NULL DEFAULT 5",
+            "legacy_book_limit_removed": "ALTER TABLE library_import_settings ADD COLUMN legacy_book_limit_removed INTEGER NOT NULL DEFAULT 0",
         }.items():
             if name not in setting_columns:
                 await db.execute(ddl)
+        # v1.13.12.1: старое значение 500 было заводским ограничением, а не
+        # осознанной настройкой владельца. Один раз переводим его в режим без
+        # ограничения; любые другие уже выбранные значения сохраняем.
+        await db.execute(
+            """UPDATE library_import_settings
+               SET max_books=CASE WHEN max_books=500 THEN 0 ELSE max_books END,
+                   legacy_book_limit_removed=1
+               WHERE id=1 AND COALESCE(legacy_book_limit_removed, 0)=0"""
+        )
         cur = await db.execute("PRAGMA table_info(books)")
         existing = {row[1] for row in await cur.fetchall()}
         migrations = {
@@ -437,7 +464,7 @@ async def import_library_zip(
     progress_callback: ProgressCallback | None = None,
 ) -> ImportResult:
     zip_path = Path(zip_path)
-    archive_hash = _sha256(zip_path)
+    archive_hash = await _run_blocking(_sha256, zip_path)
     await ensure_library_schema()
     async with connect() as db:
         cur = await db.execute(
@@ -467,6 +494,11 @@ async def import_library_zip(
             "phase": phase,
         })
 
+    # Сразу связываем фоновое задание с созданным пакетом. Если сервер
+    # перезапустится во время распаковки, очередь сможет удалить только
+    # незавершённые данные и безопасно начать это же задание заново.
+    await report(0, phase=0)
+
     import_settings = await get_import_settings()
     max_unpacked = int(import_settings["max_unpacked_mb"]) * 1024 * 1024
     max_books = int(import_settings["max_books"])
@@ -475,21 +507,25 @@ async def import_library_zip(
     with tempfile.TemporaryDirectory(prefix="voxlyra_library_") as temp_name:
         temp_root = Path(temp_name)
         try:
-            with zipfile.ZipFile(zip_path) as archive:
-                all_members = archive.infolist()
-                members = [item for item in all_members if not item.is_dir()]
-                if any(not _safe_member(item.filename) for item in all_members):
-                    raise ValueError("Архив содержит небезопасные пути")
-                if any((item.external_attr >> 16) & 0o170000 == 0o120000 for item in all_members):
-                    raise ValueError("Архив содержит символические ссылки")
-                for item in members:
-                    compressed = max(1, int(item.compress_size or 0))
-                    if int(item.file_size or 0) > 10 * 1024 * 1024 and int(item.file_size or 0) / compressed > MAX_COMPRESSION_RATIO:
-                        raise ValueError("Обнаружено подозрительно сильное сжатие ZIP")
-                unpacked = sum(max(0, int(item.file_size or 0)) for item in members)
-                if unpacked > max_unpacked:
-                    raise ValueError("Архив после распаковки превышает допустимый размер")
-                archive.extractall(temp_root)
+            def inspect_and_extract() -> None:
+                with zipfile.ZipFile(zip_path) as archive:
+                    all_members = archive.infolist()
+                    members = [item for item in all_members if not item.is_dir()]
+                    if any(not _safe_member(item.filename) for item in all_members):
+                        raise ValueError("Архив содержит небезопасные пути")
+                    if any((item.external_attr >> 16) & 0o170000 == 0o120000 for item in all_members):
+                        raise ValueError("Архив содержит символические ссылки")
+                    for item in members:
+                        compressed = max(1, int(item.compress_size or 0))
+                        if int(item.file_size or 0) > 10 * 1024 * 1024 and int(item.file_size or 0) / compressed > MAX_COMPRESSION_RATIO:
+                            raise ValueError("Обнаружено подозрительно сильное сжатие ZIP")
+                    unpacked = sum(max(0, int(item.file_size or 0)) for item in members)
+                    if unpacked > max_unpacked:
+                        raise ValueError("Архив после распаковки превышает допустимый размер")
+                    archive.extractall(temp_root)
+
+            # Проверка и распаковка ZIP выполняются вне цикла Telegram-бота.
+            await _run_blocking(inspect_and_extract)
         except (zipfile.BadZipFile, ValueError) as exc:
             result.errors.append(ImportErrorItem(folder="ZIP", reasons=[str(exc)]))
             await _finish_batch(batch_id, result, total_found)
@@ -525,14 +561,14 @@ async def import_library_zip(
             metadata_error = ""
             if metadata_path.exists():
                 try:
-                    metadata = json.loads(_read_text(metadata_path))
+                    metadata = json.loads(await _run_blocking(_read_text, metadata_path))
                     if not isinstance(metadata, dict):
                         raise ValueError("корневое значение должно быть объектом")
                 except Exception as exc:
                     metadata_error = f"Ошибка metadata.json: {exc}"
             if not book_files:
                 item.reasons.append("Нет файла книги EPUB/FB2/TXT/DOCX/PDF")
-            embedded = _embedded_book_metadata(book_files[0]) if book_files else {}
+            embedded = await _run_blocking(_embedded_book_metadata, book_files[0]) if book_files else {}
             metadata = _merge_import_metadata(metadata, embedded, description_path)
             item.title = str(metadata.get("title") or "Без названия").strip()
             if metadata_error:
@@ -567,15 +603,19 @@ async def import_library_zip(
 
             book_path = sorted(book_files, key=lambda p: (p.suffix.lower() != ".epub", p.name.lower()))[0]
             cover_path = sorted(cover_files, key=lambda p: p.name.lower())[0]
-            file_hash = _sha256(book_path)
+            file_hash = await _run_blocking(_sha256, book_path)
             normalized_title = " ".join(title.casefold().replace("ё", "е").split())
             normalized_author = " ".join(author.casefold().replace("ё", "е").split())
 
-            explicit_id = metadata.get("id")
+            # Поле `id` в пакетах часто является порядковым номером папки
+            # (001, 002, ...), а не ID книги в базе VoxLyra. Используем только
+            # явно названный платформенный идентификатор, чтобы не заменить
+            # случайно чужую книгу и чтобы повтор после перезапуска был безопасен.
+            explicit_id = metadata.get("voxlyra_book_id") or metadata.get("existing_book_id")
             try:
                 explicit_id = int(explicit_id) if explicit_id not in (None, "") else None
             except (TypeError, ValueError):
-                item.reasons.append("Некорректный существующий ID в metadata.json")
+                item.reasons.append("Некорректный существующий ID VoxLyra в metadata.json")
                 result.errors.append(item)
                 await report(processed_index, phase=2)
                 continue
@@ -605,9 +645,9 @@ async def import_library_zip(
                     continue
                 candidate_dir = DEFAULT_STORAGE_ROOT / "duplicates" / str(batch_id) / folder.name
                 if candidate_dir.exists():
-                    shutil.rmtree(candidate_dir)
+                    await _run_blocking(shutil.rmtree, candidate_dir)
                 candidate_dir.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copytree(folder, candidate_dir)
+                await _run_blocking(shutil.copytree, folder, candidate_dir)
                 async with connect() as db:
                     cur = await db.execute(
                         """INSERT INTO library_import_duplicates(
@@ -626,7 +666,12 @@ async def import_library_zip(
                 continue
 
             try:
-                chapters = parse_book_file(book_path, original_filename=book_path.name, temp_dir=temp_root / f"parse_{folder.name}")
+                chapters = await _run_blocking(
+                    parse_book_file,
+                    book_path,
+                    original_filename=book_path.name,
+                    temp_dir=temp_root / f"parse_{folder.name}",
+                )
                 chapters = [ch for ch in chapters if (ch.text or "").strip()]
                 if not chapters:
                     raise BookParseError("В книге не найден текст")
@@ -643,15 +688,19 @@ async def import_library_zip(
             pricing_type = "whole_book" if pricing in {"paid", "whole_book"} and price_stars > 0 else "free"
             now = utc_now()
             storage_dir = DEFAULT_STORAGE_ROOT / "books" / str(batch_id) / folder.name
-            storage_dir.mkdir(parents=True, exist_ok=True)
             stored_book = storage_dir / f"book{book_path.suffix.lower()}"
             stored_cover = storage_dir / f"cover{cover_path.suffix.lower()}"
-            shutil.copy2(book_path, stored_book)
-            shutil.copy2(cover_path, stored_cover)
-            (storage_dir / "metadata.json").write_text(
-                json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
-            (storage_dir / "description.txt").write_text(description, encoding="utf-8")
+
+            def store_book_files() -> None:
+                storage_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(book_path, stored_book)
+                shutil.copy2(cover_path, stored_cover)
+                (storage_dir / "metadata.json").write_text(
+                    json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+                (storage_dir / "description.txt").write_text(description, encoding="utf-8")
+
+            await _run_blocking(store_book_files)
 
             async with connect() as db:
                 source_name = str(metadata.get("source") or "").strip()
@@ -1114,7 +1163,7 @@ async def export_library_zip(output_path: str | Path) -> int:
             description = str(book["description"] or "")
             (folder / "description.txt").write_text(description, encoding="utf-8")
             metadata = {
-                "id": int(book["id"]), "title": book["title"], "author": book["export_author"],
+                "voxlyra_book_id": int(book["id"]), "title": book["title"], "author": book["export_author"],
                 "genre": str(book["genres"] or "").split("||") if book["genres"] else [],
                 "tags": str(book["tags"] or "").split("||") if book["tags"] else [],
                 "description": description, "language": book["source_language"] or "ru",
@@ -1142,7 +1191,7 @@ async def get_import_settings() -> dict[str, Any]:
         cur = await db.execute("SELECT * FROM library_import_settings WHERE id=1")
         row = await cur.fetchone()
         return dict(row) if row else {
-            "max_books": 500, "max_archive_mb": 200,
+            "max_books": 0, "max_archive_mb": 200,
             "max_unpacked_mb": 4096, "duplicate_policy": "ask",
             "channel_auto_post": 1, "channel_interval_minutes": 60,
             "channel_posts_per_run": 5,
@@ -1175,6 +1224,14 @@ async def update_import_settings(*, max_books: int | None = None, max_archive_mb
              values["duplicate_policy"], values["channel_auto_post"],
              values["channel_interval_minutes"], values["channel_posts_per_run"], utc_now()),
         )
+        if channel_interval_minutes is not None:
+            next_run = (
+                datetime.now(timezone.utc) + timedelta(minutes=values["channel_interval_minutes"])
+            ).replace(microsecond=0).isoformat()
+            await db.execute(
+                "UPDATE library_channel_queue SET next_attempt_at=? WHERE status='queued'",
+                (next_run,),
+            )
         await db.commit()
     return values
 
