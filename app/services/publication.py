@@ -43,6 +43,7 @@ class PublicationResult:
             "not_configured": "Канал не подключён: укажите CHANNEL_ID.",
             "failed": "Книга опубликована в каталоге, но пост в канал отправить не удалось.",
             "duplicate": "Публикация остановлена: найдена возможная копия книги.",
+            "queued": "Карточка книги поставлена в очередь канала и выйдет по расписанию.",
         }.get(self.channel_status, "")
 
 
@@ -245,6 +246,13 @@ async def publish_book_and_channel(
     await set_book_publication_status(book_id, "published")
     await publish_book_content(book_id)
     await add_audit(actor_user_id, "book_published", "book", str(book_id), None, "published")
+    # Импортированные книги ставит в очередь Library Manager. Обычные авторские
+    # книги идут в отдельную справедливую очередь, чтобы сотни публикаций не спамили канал.
+    fresh = await get_book(book_id)
+    if fresh and fresh["author_id"] is not None and fresh["import_batch_id"] is None and not force_channel:
+        from app.services.author_channel_queue import enqueue_author_channel_post
+        await enqueue_author_channel_post(book_id, author_id=int(fresh["author_id"]), actor_user_id=actor_user_id)
+        return PublicationResult(True, "queued", workflow_status="published")
     return await post_book_to_channel(
         bot,
         book_id,
@@ -267,8 +275,24 @@ async def finish_book_content_workflow(
         return PublicationResult(False, "failed", "Книга не найдена", workflow_status="failed")
 
     if book["publication_status"] == "published":
-        await publish_book_content(book_id)
-        return PublicationResult(True, "already_sent", workflow_status="published")
+        # Изменения текста опубликованной книги проходят автоматическую проверку.
+        # Безопасные правки публикуются без участия модератора; сомнительные остаются
+        # черновиком и создают одно объединённое задание проверки.
+        check = await evaluate_book_for_auto_publication(
+            book_id, actor_telegram_id=actor_telegram_id, revision_mode=True
+        )
+        if check.auto_publish or not check.reasons:
+            await publish_book_content(book_id)
+            await resolve_book_moderation(
+                book_id, resolution="revision_auto_approved", actor_user_id=actor_user_id,
+                note="Изменение текста прошло автоматическую проверку",
+            )
+            await add_audit(actor_user_id, "book_revision_auto_approved", "book", str(book_id), source, "published")
+            return PublicationResult(True, "already_sent", workflow_status="published")
+        await enqueue_book_moderation(book_id, check.reasons, risk_level="revision")
+        await notify_book_needs_moderation(bot, book_id=book_id, reasons=check.reasons, reminder=False)
+        await add_audit(actor_user_id, "book_revision_manual_review", "book", str(book_id), source, " | ".join(check.reasons)[:1000])
+        return PublicationResult(False, "", workflow_status="review", duplicate_text="\n".join(check.reasons))
 
     check = await evaluate_book_for_auto_publication(
         book_id,

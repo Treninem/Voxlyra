@@ -93,6 +93,8 @@ async def load_runtime_payment_settings() -> RuntimePaymentSettings:
 
 async def public_runtime_payment_settings() -> dict[str, Any]:
     cfg = await load_runtime_payment_settings()
+    from app.services.bonus_economy import public_revenue_split_settings
+    split = await public_revenue_split_settings()
     return {
         "stars_enabled": cfg.stars_enabled,
         "content_protection_enabled": cfg.content_protection_enabled,
@@ -109,9 +111,10 @@ async def public_runtime_payment_settings() -> dict[str, Any]:
             "фактическая стоимость приобретения Stars зависит от Telegram, страны, платформы и сборов."
         ),
         "author_note": (
-            "Курс автора фиксируется для каждой продажи. После удержания комиссии платформы доход автора "
-            "рассчитывается в рублях по курсу, действовавшему в момент покупки."
+            "Курс автора фиксируется для каждой продажи. Доход автора рассчитывается в целых Stars "
+            "по действующему распределению, затем переводится в расчётный рублёвый эквивалент."
         ),
+        **split,
         # Совместимость со старыми интерфейсами: интеграция ЮKassa полностью выключена.
         "yookassa_external_enabled": False,
         "yookassa_telegram_provider_enabled": False,
@@ -148,6 +151,14 @@ async def update_runtime_payment_settings(payload: dict[str, Any]) -> dict[str, 
         await set_setting("payments_stars_buyer_rate_minor", str(buyer_rate))
     if "author_star_rate_minor" in payload:
         await set_setting("payments_stars_author_rate_minor", str(author_rate))
+
+    split_keys = {
+        "author_percent", "platform_percent", "bonus_percent", "topup_packages",
+    }
+    split_payload = {key: value for key, value in payload.items() if key in split_keys}
+    if split_payload:
+        from app.services.bonus_economy import update_revenue_split_settings
+        await update_revenue_split_settings(split_payload)
 
     # Жёсткий откат: старые переключатели ЮKassa остаются выключенными даже в старой базе.
     for key in (

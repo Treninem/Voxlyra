@@ -32,6 +32,8 @@ def make_payload(kind: str, target_id: int, promo_code: str | None = None, amoun
         return f"vox:graphic_volume:{int(amount_stars)}:{int(target_id)}"
     if kind == "chapter_package":
         return f"vox:chapter_package:{int(target_id)}"
+    if kind == "wallet_topup":
+        return f"vox:wallet_topup:{int(target_id)}"
     base = f"vox:{kind}:{int(target_id)}"
     if promo_code:
         return f"{base}:promo:{promo_code.strip().upper()}"
@@ -48,6 +50,17 @@ def _apply_discount(amount: int, discount_percent: int) -> int:
 
 async def build_pay_target(kind: str, target_id: int, user_id: int | None = None,
                            promo_code: str | None = None, amount_stars: int | None = None) -> PayTarget | None:
+    if kind == "wallet_topup":
+        from app.services.bonus_economy import load_revenue_split_settings
+        cfg = await load_revenue_split_settings()
+        amount = int(target_id)
+        if amount not in cfg.topup_packages:
+            return None
+        total_points = amount * cfg.bonus_percent * cfg.points_per_star // 100
+        title = "Баланс VoxLyra"
+        description = f"Пополнение на {amount} Stars · кешбэк до {total_points} бонусов"
+        return PayTarget(kind, amount, title[:32], description[:255], amount, make_payload(kind, amount))
+
     if kind == "channel_promo":
         promotion = await get_channel_promotion(target_id)
         if not promotion or promotion["status"] not in {"invoice", "paid", "failed"}:
