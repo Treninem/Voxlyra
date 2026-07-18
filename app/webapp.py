@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -337,6 +338,7 @@ GRAPHIC_CONTENT_TYPES = {"comic", "manga", "manhwa", "webtoon", "graphic_novel"}
 GRAPHIC_READING_MODES = {"ltr", "rtl", "vertical", "single", "spread", "inherit"}
 GRAPHIC_STORAGE_ROOT = graphic_storage_root()
 GRAPHIC_TEMP_ROOT = Path("storage/temp/graphic_imports")
+LIBRARY_IMPORT_CHUNK_SIZE_BYTES = 1024 * 1024
 
 
 def _reader_watermark_label(user: TMAUser) -> str:
@@ -730,6 +732,17 @@ def create_app() -> FastAPI:
             await tts_sessions.close()
 
     app = FastAPI(title="Вокслира", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+    # Прямая загрузка может открываться Telegram WebView через промежуточный origin.
+    # Все API импорта всё равно защищены проверкой Telegram initData и одноразовым
+    # подписанным токеном, поэтому разрешаем preflight без cookie-аутентификации.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+        allow_headers=["*"],
+        max_age=600,
+    )
     app.mount("/static", StaticFiles(directory="static"), name="static")
 
     @app.get("/favicon.ico", include_in_schema=False)
@@ -825,6 +838,17 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=403, detail="Эта ссылка создана для другого аккаунта Telegram.")
         return user, token_data
 
+    async def _library_upload_payload(request: Request) -> dict[str, Any]:
+        content_type = str(request.headers.get("content-type") or "").lower()
+        try:
+            if "application/json" in content_type:
+                value = await request.json()
+                return dict(value) if isinstance(value, dict) else {}
+            form = await request.form()
+            return {str(key): value for key, value in form.items()}
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Не удалось прочитать запрос загрузки.") from exc
+
     @app.get("/library-import-upload", response_class=HTMLResponse)
     async def library_import_upload_page(request: Request, token: str = ""):
         if not token:
@@ -833,19 +857,24 @@ def create_app() -> FastAPI:
             verify_library_import_upload_token(token)
         except LibraryImportUploadTokenError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
-        return templates.TemplateResponse(
+        response = templates.TemplateResponse(
             request,
             "library_import_upload.html",
             common_context({"upload_token": token}),
         )
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        return response
 
     @app.post("/api/library-import-upload/start")
     async def api_library_import_upload_start(
-        payload: dict[str, Any],
+        request: Request,
         x_telegram_init_data: str | None = Header(default=None),
     ):
+        payload = await _library_upload_payload(request)
         token = str(payload.get("token") or "")
-        user, _ = await library_import_upload_session(x_telegram_init_data, token)
+        init_data = str(payload.get("init_data") or x_telegram_init_data or "")
+        user, _ = await library_import_upload_session(init_data, token)
         cfg = await get_import_settings()
         try:
             meta = create_library_import_upload(
@@ -859,7 +888,8 @@ def create_app() -> FastAPI:
         return {
             "ok": True,
             "upload_id": meta["upload_id"],
-            "chunk_size": CHUNK_SIZE_BYTES,
+            # 1 МБ надёжно проходит ограничения reverse proxy на мобильных WebView.
+            "chunk_size": LIBRARY_IMPORT_CHUNK_SIZE_BYTES,
         }
 
     @app.post("/api/library-import-upload/{upload_id}/chunk")
@@ -867,10 +897,11 @@ def create_app() -> FastAPI:
         upload_id: str,
         index: int = Form(...),
         total_chunks: int = Form(...),
+        init_data: str = Form(default=""),
         chunk: UploadFile = File(...),
         x_telegram_init_data: str | None = Header(default=None),
     ):
-        user, _, _ = await control_session(x_telegram_init_data, "library_import_manage")
+        user, _, _ = await control_session(init_data or x_telegram_init_data, "library_import_manage")
         try:
             meta = load_upload(upload_id, user_id=user.app_user_id, book_id=0)
             if str(meta.get("kind") or "") != "library_import":
@@ -890,11 +921,13 @@ def create_app() -> FastAPI:
     @app.post("/api/library-import-upload/{upload_id}/finish")
     async def api_library_import_upload_finish(
         upload_id: str,
-        payload: dict[str, Any],
+        request: Request,
         x_telegram_init_data: str | None = Header(default=None),
     ):
+        payload = await _library_upload_payload(request)
         token = str(payload.get("token") or "")
-        user, token_data = await library_import_upload_session(x_telegram_init_data, token)
+        init_data = str(payload.get("init_data") or x_telegram_init_data or "")
+        user, token_data = await library_import_upload_session(init_data, token)
         total_chunks = int(payload.get("total_chunks") or 0)
         queue_path: Path | None = None
         try:
