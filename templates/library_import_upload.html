@@ -58,6 +58,7 @@
 (() => {
   const tg = window.Telegram?.WebApp;
   if (tg) { tg.ready(); tg.expand(); }
+
   const token = {{ upload_token | tojson }};
   const input = document.getElementById('archive');
   const button = document.getElementById('uploadButton');
@@ -72,20 +73,68 @@
     const mb = Number(value || 0) / 1024 / 1024;
     return `${mb.toFixed(mb >= 10 ? 1 : 2)} МБ`;
   };
-  const initData = () => tg?.initData || '';
-  const apiError = async (response) => {
-    let message = 'Не удалось выполнить загрузку.';
-    try { const data = await response.json(); message = data.detail || message; } catch (_) {}
-    throw new Error(message);
+  const initData = () => String(tg?.initData || '');
+  const endpoint = (path) => new URL(path, window.location.origin).toString();
+
+  const errorFromXhr = (xhr, fallback) => {
+    let message = fallback || 'Не удалось выполнить загрузку.';
+    try {
+      const data = JSON.parse(xhr.responseText || '{}');
+      message = String(data.detail || data.message || message);
+    } catch (_) {
+      const text = String(xhr.responseText || '').trim();
+      if (text && text.length < 500) message = text;
+    }
+    const error = new Error(message);
+    error.status = Number(xhr.status || 0);
+    error.retryable = !xhr.status || [408, 425, 429, 500, 502, 503, 504].includes(Number(xhr.status));
+    return error;
   };
-  const jsonRequest = async (url, body) => {
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json', 'X-Telegram-Init-Data': initData()},
-      body: JSON.stringify(body),
-    });
-    if (!response.ok) await apiError(response);
-    return response.json();
+
+  const postForm = (path, form, timeoutMs = 120000) => new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', endpoint(path), true);
+    xhr.timeout = timeoutMs;
+    xhr.setRequestHeader('Accept', 'application/json');
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try { resolve(JSON.parse(xhr.responseText || '{}')); }
+        catch (_) { reject(new Error('Сервер вернул повреждённый ответ.')); }
+        return;
+      }
+      reject(errorFromXhr(xhr));
+    };
+    xhr.onerror = () => reject(errorFromXhr(xhr, 'Сервер загрузки недоступен. Повторите попытку.'));
+    xhr.ontimeout = () => {
+      const error = new Error('Сервер слишком долго не отвечает. Повторите попытку.');
+      error.status = 0;
+      error.retryable = true;
+      reject(error);
+    };
+    xhr.send(form);
+  });
+
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const postChunkWithRetry = async (path, formFactory, attempts = 5) => {
+    let lastError;
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      try {
+        return await postForm(path, formFactory(), 180000);
+      } catch (error) {
+        lastError = error;
+        if (!error?.retryable || attempt >= attempts) throw error;
+        status.textContent = `Связь прервалась. Повтор части ${attempt} из ${attempts - 1}…`;
+        await wait(Math.min(5000, 700 * attempt));
+      }
+    }
+    throw lastError || new Error('Не удалось загрузить часть файла.');
+  };
+
+  const setProgress = (uploaded, total) => {
+    const percent = total > 0 ? Math.min(100, Math.round(uploaded * 100 / total)) : 0;
+    bar.style.width = `${percent}%`;
+    progressText.textContent = `${percent}%`;
+    sizeText.textContent = total > 0 ? `${formatBytes(uploaded)} из ${formatBytes(total)}` : '';
   };
 
   input.addEventListener('change', () => {
@@ -97,60 +146,87 @@
     }
     fileName.textContent = `${file.name} · ${formatBytes(file.size)}`;
     button.disabled = !file.name.toLowerCase().endsWith('.zip');
+    button.textContent = 'Загрузить и начать импорт';
     status.className = 'status';
     status.textContent = button.disabled ? 'Нужен файл с расширением .zip' : '';
+    setProgress(0, file.size);
   });
 
   button.addEventListener('click', async () => {
     const file = input.files?.[0];
     if (!file || button.disabled) return;
-    if (!initData()) {
+    const telegramInitData = initData();
+    if (!telegramInitData) {
       status.className = 'status error';
       status.textContent = 'Откройте эту страницу кнопкой из сообщения бота в Telegram.';
       return;
     }
+    if (navigator.onLine === false) {
+      status.className = 'status error';
+      status.textContent = 'Нет подключения к интернету.';
+      return;
+    }
+
     button.disabled = true;
     input.disabled = true;
     progress.style.display = 'block';
+    setProgress(0, file.size);
     status.className = 'status';
     status.textContent = 'Подготавливаю защищённую загрузку…';
+
     try {
-      const start = await jsonRequest('/api/library-import-upload/start', {
-        token, filename: file.name, size: file.size,
-      });
-      const chunkSize = Number(start.chunk_size || 6 * 1024 * 1024);
+      const startForm = new FormData();
+      startForm.append('token', token);
+      startForm.append('filename', file.name);
+      startForm.append('size', String(file.size));
+      startForm.append('init_data', telegramInitData);
+      const start = await postForm('/api/library-import-upload/start', startForm, 60000);
+
+      const uploadId = String(start.upload_id || '');
+      if (!uploadId) throw new Error('Сервер не создал задание загрузки.');
+      const chunkSize = Math.max(256 * 1024, Number(start.chunk_size || 1024 * 1024));
       const totalChunks = Math.ceil(file.size / chunkSize);
+
       for (let index = 0; index < totalChunks; index += 1) {
         const startByte = index * chunkSize;
         const endByte = Math.min(file.size, startByte + chunkSize);
-        const form = new FormData();
-        form.append('index', String(index));
-        form.append('total_chunks', String(totalChunks));
-        form.append('chunk', file.slice(startByte, endByte), file.name);
-        const response = await fetch(`/api/library-import-upload/${start.upload_id}/chunk`, {
-          method: 'POST', headers: {'X-Telegram-Init-Data': initData()}, body: form,
-        });
-        if (!response.ok) await apiError(response);
-        const uploaded = endByte;
-        const percent = Math.min(100, Math.round(uploaded * 100 / file.size));
-        bar.style.width = `${percent}%`;
-        progressText.textContent = `${percent}%`;
-        sizeText.textContent = `${formatBytes(uploaded)} из ${formatBytes(file.size)}`;
         status.textContent = `Загружаю часть ${index + 1} из ${totalChunks}…`;
+        await postChunkWithRetry(
+          `/api/library-import-upload/${encodeURIComponent(uploadId)}/chunk`,
+          () => {
+            const form = new FormData();
+            form.append('index', String(index));
+            form.append('total_chunks', String(totalChunks));
+            form.append('init_data', telegramInitData);
+            form.append('chunk', file.slice(startByte, endByte), `${file.name}.part`);
+            return form;
+          },
+        );
+        setProgress(endByte, file.size);
       }
-      status.textContent = 'Проверяю файл и ставлю импорт в очередь…';
-      const finish = await jsonRequest(`/api/library-import-upload/${start.upload_id}/finish`, {
-        token, total_chunks: totalChunks,
-      });
-      bar.style.width = '100%';
-      progressText.textContent = '100%';
+
+      status.textContent = 'Проверяю архив и ставлю импорт в очередь…';
+      const finishForm = new FormData();
+      finishForm.append('token', token);
+      finishForm.append('total_chunks', String(totalChunks));
+      finishForm.append('init_data', telegramInitData);
+      const finish = await postForm(
+        `/api/library-import-upload/${encodeURIComponent(uploadId)}/finish`,
+        finishForm,
+        300000,
+      );
+
+      setProgress(file.size, file.size);
       status.className = 'status success';
       status.textContent = `Архив принят. Задание №${finish.job_id} поставлено в очередь. Ботом можно пользоваться.`;
       button.textContent = 'Архив принят';
       if (tg?.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
     } catch (error) {
       status.className = 'status error';
-      status.textContent = error?.message || 'Загрузка остановлена. Повторите попытку.';
+      const baseMessage = String(error?.message || 'Загрузка остановлена. Повторите попытку.');
+      status.textContent = error?.status === 0
+        ? `${baseMessage} Страница останется открытой — нажмите «Повторить загрузку».`
+        : baseMessage;
       button.disabled = false;
       input.disabled = false;
       button.textContent = 'Повторить загрузку';
