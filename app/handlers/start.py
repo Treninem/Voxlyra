@@ -17,12 +17,37 @@ from app.services.bonus_economy import load_revenue_split_settings
 
 router = Router()
 
-async def _safe_edit_text(message, text: str, *, reply_markup=None) -> None:
+async def _safe_edit_text(message: Message, text: str, *, reply_markup=None) -> None:
+    """Edit a text message or safely replace media/service messages with a new one.
+
+    Telegram cannot apply ``editMessageText`` to a photo, document, animation or
+    any other message that has no text body. Navigation buttons can legitimately
+    live under such messages, so falling back to ``answer`` is required instead of
+    letting a callback crash.
+    """
+    if message.text is None:
+        try:
+            await message.delete()
+        except TelegramBadRequest:
+            # The message may be too old, already deleted or not deletable. A new
+            # menu still has to be shown even when cleanup is impossible.
+            pass
+        await message.answer(text, reply_markup=reply_markup)
+        return
+
     try:
         await message.edit_text(text, reply_markup=reply_markup)
     except TelegramBadRequest as exc:
-        if "message is not modified" not in str(exc).lower():
+        lowered = str(exc).lower()
+        if "message is not modified" in lowered:
+            return
+        if "there is no text in the message to edit" not in lowered:
             raise
+        try:
+            await message.delete()
+        except TelegramBadRequest:
+            pass
+        await message.answer(text, reply_markup=reply_markup)
 
 
 def _bonus_reason_label(reason: object) -> str:
@@ -116,7 +141,7 @@ async def cmd_start(message: Message) -> None:
 @router.callback_query(F.data == "menu:main")
 async def callback_main_menu(call: CallbackQuery) -> None:
     is_owner, has_admin, has_author, _ = await build_context(call)
-    await call.message.edit_text(
+    await _safe_edit_text(call.message,
         "<b>✨ Вокслира</b>\n\n"
         "Ваша библиотека историй, глав и голосов.\n"
         "Выберите, куда пойдём.",
@@ -128,7 +153,7 @@ async def callback_main_menu(call: CallbackQuery) -> None:
 @router.callback_query(F.data == "main:more")
 async def callback_more(call: CallbackQuery) -> None:
     _, _, has_author, _ = await build_context(call)
-    await call.message.edit_text(
+    await _safe_edit_text(call.message,
         "<b>⚙️ Ещё</b>\n\nОформление, поддержка и правила — всё необходимое без лишних пунктов.",
         reply_markup=more_menu(has_author),
     )
@@ -146,7 +171,7 @@ async def callback_bonuses(call: CallbackQuery) -> None:
         f"До следующей целой Star скидки: <b>{points_per_star - points_remainder} бонусов</b>.\n"
         if points_remainder else ""
     )
-    await call.message.edit_text(
+    await _safe_edit_text(call.message,
         "<b>💎 Баланс и бонусы</b>\n\n"
         f"Баланс покупок: <b>{summary['wallet_stars']} Stars</b>.\n"
         f"Бонусы: <b>{summary['bonus_points']}</b>. Доступно: <b>{usable_bonus_stars} Stars</b> скидки.\n"
@@ -194,7 +219,7 @@ async def callback_bonus_history(call: CallbackQuery) -> None:
             lines.append(f"{line} · {created_at[:10]}")
         text = "\n".join(lines)
     cfg = await load_revenue_split_settings()
-    await call.message.edit_text(text, reply_markup=bonuses_menu(cfg.topup_packages))
+    await _safe_edit_text(call.message,text, reply_markup=bonuses_menu(cfg.topup_packages))
     await call.answer()
 
 
@@ -209,12 +234,12 @@ async def callback_read_fallback(call: CallbackQuery) -> None:
         )
         kb.button(text="⬅️ Назад", callback_data="menu:main")
         kb.adjust(1)
-        await call.message.edit_text(
+        await _safe_edit_text(call.message,
             "<b>📚 Читать</b>\n\nНажмите кнопку ниже — каталог откроется сразу во встроенном окне Telegram.",
             reply_markup=kb.as_markup(),
         )
     else:
-        await call.message.edit_text("<b>📚 Читать</b>\n\nКаталог временно недоступен. Попробуйте открыть его позже или напишите в поддержку.", reply_markup=back_to_main())
+        await _safe_edit_text(call.message,"<b>📚 Читать</b>\n\nКаталог временно недоступен. Попробуйте открыть его позже или напишите в поддержку.", reply_markup=back_to_main())
     await call.answer()
 
 
@@ -222,18 +247,18 @@ async def callback_read_fallback(call: CallbackQuery) -> None:
 async def callback_listen_fallback(call: CallbackQuery) -> None:
     url = settings.WEBAPP_URL.rstrip("/")
     if url:
-        await call.message.edit_text(
+        await _safe_edit_text(call.message,
             "<b>🎧 Слушать</b>\n\nАудиокниги открываются во встроенном окне Telegram. Если аудиоглав ещё нет, они появятся здесь после загрузки авторами.",
             reply_markup=back_to_main(),
         )
     else:
-        await call.message.edit_text("<b>🎧 Слушать</b>\n\nАудиораздел временно недоступен. Попробуйте открыть его позже или напишите в поддержку.", reply_markup=back_to_main())
+        await _safe_edit_text(call.message,"<b>🎧 Слушать</b>\n\nАудиораздел временно недоступен. Попробуйте открыть его позже или напишите в поддержку.", reply_markup=back_to_main())
     await call.answer()
 
 
 @router.callback_query(F.data == "main:support")
 async def callback_support(call: CallbackQuery) -> None:
-    await call.message.edit_text(
+    await _safe_edit_text(call.message,
         "<b>🛟 Поддержка</b>\n\n"
         "Напишите одним сообщением, что случилось. Для платежей укажите книгу, главу, дату оплаты и что именно не открылось. "
         "Для жалобы на книгу укажите название и причину. Обращение будет видно владельцу и администрации с доступом к поддержке.",
@@ -246,7 +271,7 @@ async def callback_support(call: CallbackQuery) -> None:
 async def callback_user_settings(call: CallbackQuery) -> None:
     _, _, _, user_id = await build_context(call)
     prefs = await get_user_preferences(user_id)
-    await call.message.edit_text(
+    await _safe_edit_text(call.message,
         "<b>⚙️ Настройки</b>\n\n"
         "Здесь можно выбрать тему, размер текста и уведомления. Настройки сохраняются и применяются при чтении.",
         reply_markup=user_settings_menu(prefs),
@@ -256,7 +281,7 @@ async def callback_user_settings(call: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "settings:theme")
 async def callback_user_settings_theme(call: CallbackQuery) -> None:
-    await call.message.edit_text("<b>🎨 Тема</b>\n\nВыберите оформление читалки.", reply_markup=user_theme_menu())
+    await _safe_edit_text(call.message,"<b>🎨 Тема</b>\n\nВыберите оформление читалки.", reply_markup=user_theme_menu())
     await call.answer()
 
 
@@ -265,13 +290,13 @@ async def callback_set_theme(call: CallbackQuery) -> None:
     _, _, _, user_id = await build_context(call)
     theme = call.data.split(":")[-1]
     prefs = await set_user_preference(user_id, "theme", theme)
-    await call.message.edit_text("<b>⚙️ Настройки</b>\n\nТема сохранена.", reply_markup=user_settings_menu(prefs))
+    await _safe_edit_text(call.message,"<b>⚙️ Настройки</b>\n\nТема сохранена.", reply_markup=user_settings_menu(prefs))
     await call.answer("Сохранено")
 
 
 @router.callback_query(F.data == "settings:font")
 async def callback_user_settings_font(call: CallbackQuery) -> None:
-    await call.message.edit_text("<b>🔠 Размер шрифта</b>\n\nВыберите размер текста для чтения.", reply_markup=user_font_menu())
+    await _safe_edit_text(call.message,"<b>🔠 Размер шрифта</b>\n\nВыберите размер текста для чтения.", reply_markup=user_font_menu())
     await call.answer()
 
 
@@ -280,7 +305,7 @@ async def callback_set_font(call: CallbackQuery) -> None:
     _, _, _, user_id = await build_context(call)
     font = call.data.split(":")[-1]
     prefs = await set_user_preference(user_id, "font_size", font)
-    await call.message.edit_text("<b>⚙️ Настройки</b>\n\nРазмер шрифта сохранён.", reply_markup=user_settings_menu(prefs))
+    await _safe_edit_text(call.message,"<b>⚙️ Настройки</b>\n\nРазмер шрифта сохранён.", reply_markup=user_settings_menu(prefs))
     await call.answer("Сохранено")
 
 
@@ -288,7 +313,7 @@ async def callback_set_font(call: CallbackQuery) -> None:
 async def callback_user_notifications(call: CallbackQuery) -> None:
     _, _, _, user_id = await build_context(call)
     prefs = await get_user_preferences(user_id)
-    await call.message.edit_text(
+    await _safe_edit_text(call.message,
         "<b>🔔 Уведомления</b>\n\nВыберите, какие события Вокслира будет присылать вам в Telegram.",
         reply_markup=user_notifications_menu(prefs),
     )
@@ -309,7 +334,7 @@ async def callback_toggle_notification_category(call: CallbackQuery) -> None:
     prefs = await get_user_preferences(user_id)
     new_value = "0" if str(prefs.get(key, "1")) != "0" else "1"
     prefs = await set_user_preference(user_id, key, new_value)
-    await call.message.edit_text(
+    await _safe_edit_text(call.message,
         "<b>🔔 Уведомления</b>\n\nВыбор сохранён.",
         reply_markup=user_notifications_menu(prefs),
     )
@@ -322,7 +347,7 @@ async def callback_toggle_notifications_legacy(call: CallbackQuery) -> None:
     prefs = await get_user_preferences(user_id)
     new_value = "0" if str(prefs.get("notifications", "1")) != "0" else "1"
     prefs = await set_user_preference(user_id, "notifications", new_value)
-    await call.message.edit_text(
+    await _safe_edit_text(call.message,
         "<b>🔔 Уведомления</b>\n\nВыбор сохранён.",
         reply_markup=user_notifications_menu(prefs),
     )
@@ -333,7 +358,7 @@ async def callback_toggle_notifications_legacy(call: CallbackQuery) -> None:
 async def callback_reset_settings(call: CallbackQuery) -> None:
     _, _, _, user_id = await build_context(call)
     prefs = await reset_user_preferences(user_id)
-    await call.message.edit_text("<b>⚙️ Настройки</b>\n\nНастройки сброшены.", reply_markup=user_settings_menu(prefs))
+    await _safe_edit_text(call.message,"<b>⚙️ Настройки</b>\n\nНастройки сброшены.", reply_markup=user_settings_menu(prefs))
     await call.answer("Сброшено")
 
 
@@ -343,7 +368,7 @@ async def callback_referral(call: CallbackQuery) -> None:
     stats = await get_referral_stats(user_id)
     bot_username = (await call.bot.get_me()).username
     link = f"https://t.me/{bot_username}?start=ref_{call.from_user.id}"
-    await call.message.edit_text(
+    await _safe_edit_text(call.message,
         "<b>👥 Пригласить друга</b>\n\n"
         f"Ваша ссылка:\n<code>{link}</code>\n\n"
         f"Приглашено: <b>{stats['invited']}</b>\n"
