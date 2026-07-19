@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import errno
 import json
 import re
 import shutil
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,10 +19,74 @@ from app.services.graphic_import import SUPPORTED_GRAPHIC_EXTENSIONS
 UPLOAD_ROOT = Path("storage/temp/chunked_book_uploads")
 CHUNK_SIZE_BYTES = 6 * 1024 * 1024
 MAX_CHUNKS = 10000
+MIN_FREE_SPACE_BYTES = 32 * 1024 * 1024
+STALE_UPLOAD_SECONDS = 6 * 60 * 60
 
 
 class ChunkedUploadError(RuntimeError):
     pass
+
+
+def _format_mb(value: int) -> str:
+    return f"{max(0, int(value)) / 1024 / 1024:.1f} МБ"
+
+
+def _ensure_upload_root() -> None:
+    UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
+
+
+def cleanup_stale_uploads(*, max_age_seconds: int = STALE_UPLOAD_SECONDS) -> int:
+    # Удаляет забытые части загрузок после обрыва или перезапуска.
+    _ensure_upload_root()
+    now = time.time()
+    removed = 0
+    for folder in UPLOAD_ROOT.iterdir():
+        if not folder.is_dir():
+            continue
+        try:
+            updated_at = folder.stat().st_mtime
+            meta_path = folder / "meta.json"
+            if meta_path.is_file():
+                try:
+                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                    raw_updated = str(meta.get("updated_at") or "")
+                    if raw_updated:
+                        updated_at = datetime.fromisoformat(
+                            raw_updated.replace("Z", "+00:00")
+                        ).timestamp()
+                except Exception:
+                    pass
+            if now - updated_at < max(300, int(max_age_seconds)):
+                continue
+            shutil.rmtree(folder, ignore_errors=True)
+            removed += 1
+        except OSError:
+            continue
+    return removed
+
+
+def _ensure_free_space(required_bytes: int, *, operation: str) -> None:
+    _ensure_upload_root()
+    try:
+        free = int(shutil.disk_usage(UPLOAD_ROOT).free)
+    except OSError:
+        return
+    required = max(0, int(required_bytes))
+    if free < required:
+        raise ChunkedUploadError(
+            f"На сервере недостаточно свободного места для {operation}. "
+            f"Свободно {_format_mb(free)}, требуется не менее {_format_mb(required)}. "
+            "Удалите старые временные файлы или увеличьте диск и повторите попытку."
+        )
+
+
+def _storage_write_error(exc: OSError) -> ChunkedUploadError:
+    if exc.errno == errno.ENOSPC or "no space left" in str(exc).lower():
+        return ChunkedUploadError(
+            "На сервере закончилось свободное место. Незавершённая загрузка будет очищена. "
+            "Освободите место или увеличьте диск и повторите попытку."
+        )
+    return ChunkedUploadError(f"Не удалось сохранить часть файла: {exc}")
 
 
 def _safe_filename(value: str) -> str:
@@ -54,6 +120,12 @@ def _create_upload(
         raise ChunkedUploadError("Не удалось определить размер файла.")
     if max_mb > 0 and total_size > max_mb * 1024 * 1024:
         raise ChunkedUploadError(f"Файл превышает допустимый размер {max_mb} МБ.")
+
+    cleanup_stale_uploads()
+    _ensure_free_space(
+        int(total_size) + MIN_FREE_SPACE_BYTES,
+        operation="загрузки архива",
+    )
 
     upload_id = uuid.uuid4().hex
     folder = _upload_dir(upload_id)
@@ -149,6 +221,7 @@ async def save_chunk(
     part_path = folder / f"{index:06d}.part"
     written = 0
     try:
+        _ensure_free_space(2 * 1024 * 1024, operation="приёма следующей части архива")
         with part_path.open("wb") as destination:
             while True:
                 data = await chunk.read(1024 * 1024)
@@ -158,6 +231,9 @@ async def save_chunk(
                 if written > CHUNK_SIZE_BYTES + 1024:
                     raise ChunkedUploadError("Часть файла оказалась слишком большой. Повторите загрузку.")
                 destination.write(data)
+    except OSError as exc:
+        part_path.unlink(missing_ok=True)
+        raise _storage_write_error(exc) from exc
     except Exception:
         part_path.unlink(missing_ok=True)
         raise
@@ -209,15 +285,33 @@ def assemble_upload(upload_id: str, *, user_id: int, book_id: int, total_chunks:
 
     folder = _upload_dir(upload_id)
     final_path = folder / _safe_filename(str(meta["filename"]))
+    final_path.unlink(missing_ok=True)
+    part_sizes: list[int] = []
+    for index in range(total_chunks):
+        part_path = folder / f"{index:06d}.part"
+        if not part_path.exists():
+            raise ChunkedUploadError("Не найдена часть файла. Повторите загрузку.")
+        part_sizes.append(int(part_path.stat().st_size))
+
+    # Части удаляются сразу после добавления в итоговый файл. Поэтому во время
+    # сборки на диске находится примерно один размер ZIP, а не две полные копии.
+    _ensure_free_space(
+        max(part_sizes or [0]) + 8 * 1024 * 1024,
+        operation="сборки архива",
+    )
     total_written = 0
-    with final_path.open("wb") as destination:
-        for index in range(total_chunks):
-            part_path = folder / f"{index:06d}.part"
-            if not part_path.exists():
-                raise ChunkedUploadError("Не найдена часть файла. Повторите загрузку.")
-            with part_path.open("rb") as source:
-                shutil.copyfileobj(source, destination, length=1024 * 1024)
-            total_written += part_path.stat().st_size
+    try:
+        with final_path.open("wb") as destination:
+            for index in range(total_chunks):
+                part_path = folder / f"{index:06d}.part"
+                part_size = int(part_path.stat().st_size)
+                with part_path.open("rb") as source:
+                    shutil.copyfileobj(source, destination, length=1024 * 1024)
+                total_written += part_size
+                part_path.unlink(missing_ok=True)
+    except OSError as exc:
+        final_path.unlink(missing_ok=True)
+        raise _storage_write_error(exc) from exc
 
     expected_size = int(meta.get("total_size") or 0)
     if expected_size and total_written != expected_size:

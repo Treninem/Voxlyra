@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import json
 import os
 import re
 import shutil
 import tempfile
+import time
 import zipfile
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
@@ -24,6 +26,9 @@ ALLOWED_LICENSES = {"public_domain", "creative_commons", "author_permission", "p
 BOOK_EXTENSIONS = {".epub", ".fb2", ".txt", ".docx", ".pdf"}
 COVER_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 DEFAULT_STORAGE_ROOT = Path("storage/library")
+IMPORT_WORK_ROOT = DEFAULT_STORAGE_ROOT / "import_work"
+MIN_IMPORT_FREE_BYTES = 32 * 1024 * 1024
+STALE_IMPORT_WORK_SECONDS = 2 * 60 * 60
 
 ProgressCallback = Callable[[dict[str, int]], Awaitable[None]]
 MAX_FILES_PER_BOOK_FOLDER = 12
@@ -80,6 +85,152 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+
+class LibraryImportStorageError(RuntimeError):
+    pass
+
+
+def _format_mb(value: int) -> str:
+    return f"{max(0, int(value)) / 1024 / 1024:.1f} МБ"
+
+
+def _is_no_space_error(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    return (
+        isinstance(exc, OSError)
+        and exc.errno == errno.ENOSPC
+    ) or any(
+        marker in message
+        for marker in ("no space left", "database or disk is full", "disk full")
+    )
+
+
+def _ensure_library_storage_root() -> None:
+    DEFAULT_STORAGE_ROOT.mkdir(parents=True, exist_ok=True)
+    IMPORT_WORK_ROOT.mkdir(parents=True, exist_ok=True)
+
+
+def cleanup_stale_import_work(*, max_age_seconds: int = STALE_IMPORT_WORK_SECONDS) -> int:
+    # После аварийного перезапуска TemporaryDirectory мог не успеть очиститься.
+    _ensure_library_storage_root()
+    now = time.time()
+    candidates = [folder for folder in IMPORT_WORK_ROOT.iterdir() if folder.is_dir()]
+    # Старые версии распаковывали весь ZIP в системный /tmp.
+    system_temp = Path(tempfile.gettempdir())
+    candidates.extend(
+        folder
+        for pattern in ("voxlyra_library_*", "voxlyra_book_*")
+        for folder in system_temp.glob(pattern)
+        if folder.is_dir()
+    )
+    removed = 0
+    for folder in candidates:
+        try:
+            if now - folder.stat().st_mtime < max(300, int(max_age_seconds)):
+                continue
+            shutil.rmtree(folder, ignore_errors=True)
+            removed += 1
+        except OSError:
+            continue
+    return removed
+
+
+def _ensure_library_free_space(required_bytes: int, *, operation: str) -> None:
+    _ensure_library_storage_root()
+    try:
+        free = int(shutil.disk_usage(DEFAULT_STORAGE_ROOT).free)
+    except OSError:
+        return
+    required = max(0, int(required_bytes))
+    if free < required:
+        raise LibraryImportStorageError(
+            f"На сервере недостаточно свободного места для {operation}. "
+            f"Свободно {_format_mb(free)}, требуется не менее {_format_mb(required)}. "
+            "Незавершённый импорт будет удалён. Освободите место или увеличьте диск и повторите загрузку."
+        )
+
+
+def _inspect_library_archive(zip_path: Path, max_unpacked: int) -> list[dict[str, Any]]:
+    folders: dict[str, dict[str, Any]] = {}
+    with zipfile.ZipFile(zip_path) as archive:
+        all_members = archive.infolist()
+        if any(not _safe_member(item.filename) for item in all_members):
+            raise ValueError("Архив содержит небезопасные пути")
+        if any((item.external_attr >> 16) & 0o170000 == 0o120000 for item in all_members):
+            raise ValueError("Архив содержит символические ссылки")
+
+        unpacked_total = 0
+        for item in all_members:
+            if item.is_dir():
+                continue
+            compressed = max(1, int(item.compress_size or 0))
+            size = max(0, int(item.file_size or 0))
+            if size > 10 * 1024 * 1024 and size / compressed > MAX_COMPRESSION_RATIO:
+                raise ValueError("Обнаружено подозрительно сильное сжатие ZIP")
+            unpacked_total += size
+            normalized = item.filename.replace("\\", "/")
+            parts = PurePosixPath(normalized).parts
+            books_index = next(
+                (index for index, part in enumerate(parts) if part.casefold() == "books"),
+                None,
+            )
+            if books_index is None or len(parts) <= books_index + 2:
+                continue
+            folder_name = str(parts[books_index + 1]).strip()
+            if not folder_name or folder_name in {".", ".."}:
+                continue
+            relative_parts = parts[books_index + 2:]
+            if not relative_parts:
+                continue
+            entry = folders.setdefault(
+                folder_name,
+                {"name": folder_name, "members": [], "unpacked_size": 0},
+            )
+            entry["members"].append(item.filename)
+            entry["unpacked_size"] += size
+
+        if unpacked_total > int(max_unpacked):
+            raise ValueError("Архив после распаковки превышает допустимый размер")
+
+    return sorted(folders.values(), key=lambda item: str(item["name"]).casefold())
+
+
+def _extract_library_folder(
+    zip_path: Path,
+    member_names: list[str],
+    destination: Path,
+) -> None:
+    destination.mkdir(parents=True, exist_ok=True)
+    destination_root = destination.resolve()
+    try:
+        with zipfile.ZipFile(zip_path) as archive:
+            for member_name in member_names:
+                info = archive.getinfo(member_name)
+                normalized = info.filename.replace("\\", "/")
+                parts = PurePosixPath(normalized).parts
+                books_index = next(
+                    (index for index, part in enumerate(parts) if part.casefold() == "books"),
+                    None,
+                )
+                if books_index is None or len(parts) <= books_index + 2:
+                    continue
+                relative_parts = parts[books_index + 2:]
+                target = destination.joinpath(*relative_parts)
+                target_parent = target.parent.resolve()
+                if target_parent != destination_root and destination_root not in target_parent.parents:
+                    raise ValueError("Архив содержит небезопасные пути")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with archive.open(info) as source, target.open("wb") as output:
+                    shutil.copyfileobj(source, output, length=1024 * 1024)
+    except OSError as exc:
+        if _is_no_space_error(exc):
+            raise LibraryImportStorageError(
+                "На сервере закончилось свободное место во время обработки книги. "
+                "Незавершённый импорт будет удалён. Освободите место или увеличьте диск."
+            ) from exc
+        raise
+
+
 def _read_text(path: Path) -> str:
     raw = path.read_bytes()
     for encoding in ("utf-8-sig", "utf-8", "cp1251", "windows-1251"):
@@ -88,6 +239,71 @@ def _read_text(path: Path) -> str:
         except UnicodeDecodeError:
             continue
     return raw.decode("utf-8", errors="replace").strip()
+
+
+
+def _revision_fingerprint(
+    book_path: Path,
+    cover_path: Path,
+    metadata: dict[str, Any],
+    description: str,
+) -> str:
+    digest = hashlib.sha256()
+    for label, path in (("book", book_path), ("cover", cover_path)):
+        digest.update(label.encode("ascii"))
+        digest.update(_sha256(path).encode("ascii"))
+    canonical_metadata = json.dumps(
+        metadata,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    digest.update(b"metadata")
+    digest.update(canonical_metadata)
+    digest.update(b"description")
+    digest.update(str(description or "").strip().encode("utf-8"))
+    return digest.hexdigest()
+
+
+def _stored_revision_fingerprint(book_path: Path, cover_path: Path) -> str | None:
+    if not book_path.is_file() or not cover_path.is_file():
+        return None
+    folder = book_path.parent
+    metadata_path = folder / "metadata.json"
+    description_path = folder / "description.txt"
+    if not metadata_path.is_file():
+        return None
+    try:
+        metadata = json.loads(_read_text(metadata_path))
+        if not isinstance(metadata, dict):
+            return None
+        description = _read_text(description_path) if description_path.is_file() else ""
+        return _revision_fingerprint(book_path, cover_path, metadata, description)
+    except Exception:
+        return None
+
+
+def _store_duplicate_candidate(
+    candidate_dir: Path,
+    book_path: Path,
+    cover_path: Path,
+    metadata: dict[str, Any],
+    description: str,
+) -> None:
+    if candidate_dir.exists():
+        shutil.rmtree(candidate_dir, ignore_errors=True)
+    candidate_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(book_path, candidate_dir / f"book{book_path.suffix.lower()}")
+    shutil.copy2(cover_path, candidate_dir / f"cover{cover_path.suffix.lower()}")
+    (candidate_dir / "metadata.json").write_text(
+        json.dumps(metadata, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (candidate_dir / "description.txt").write_text(
+        str(description or "").strip(),
+        encoding="utf-8",
+    )
 
 
 
@@ -481,7 +697,7 @@ async def import_library_zip(
     result = ImportResult(batch_id=batch_id)
     total_found = 0
 
-    async def report(processed: int, *, phase: str = 0) -> None:
+    async def report(processed: int, *, phase: int = 0) -> None:
         if progress_callback is None:
             return
         await progress_callback({
@@ -494,9 +710,6 @@ async def import_library_zip(
             "phase": phase,
         })
 
-    # Сразу связываем фоновое задание с созданным пакетом. Если сервер
-    # перезапустится во время распаковки, очередь сможет удалить только
-    # незавершённые данные и безопасно начать это же задание заново.
     await report(0, phase=0)
 
     import_settings = await get_import_settings()
@@ -504,276 +717,315 @@ async def import_library_zip(
     max_books = int(import_settings["max_books"])
     duplicate_policy = str(import_settings["duplicate_policy"] or "ask")
 
-    with tempfile.TemporaryDirectory(prefix="voxlyra_library_") as temp_name:
-        temp_root = Path(temp_name)
-        try:
-            def inspect_and_extract() -> None:
-                with zipfile.ZipFile(zip_path) as archive:
-                    all_members = archive.infolist()
-                    members = [item for item in all_members if not item.is_dir()]
-                    if any(not _safe_member(item.filename) for item in all_members):
-                        raise ValueError("Архив содержит небезопасные пути")
-                    if any((item.external_attr >> 16) & 0o170000 == 0o120000 for item in all_members):
-                        raise ValueError("Архив содержит символические ссылки")
-                    for item in members:
-                        compressed = max(1, int(item.compress_size or 0))
-                        if int(item.file_size or 0) > 10 * 1024 * 1024 and int(item.file_size or 0) / compressed > MAX_COMPRESSION_RATIO:
-                            raise ValueError("Обнаружено подозрительно сильное сжатие ZIP")
-                    unpacked = sum(max(0, int(item.file_size or 0)) for item in members)
-                    if unpacked > max_unpacked:
-                        raise ValueError("Архив после распаковки превышает допустимый размер")
-                    archive.extractall(temp_root)
+    await _run_blocking(cleanup_stale_import_work)
+    try:
+        folders = await _run_blocking(_inspect_library_archive, zip_path, max_unpacked)
+    except (zipfile.BadZipFile, ValueError) as exc:
+        result.errors.append(ImportErrorItem(folder="ZIP", reasons=[str(exc)]))
+        await _finish_batch(batch_id, result, total_found)
+        return result
+    except OSError as exc:
+        if _is_no_space_error(exc):
+            raise LibraryImportStorageError(
+                "На сервере закончилось свободное место при проверке ZIP. "
+                "Незавершённый импорт будет удалён."
+            ) from exc
+        raise
 
-            # Проверка и распаковка ZIP выполняются вне цикла Telegram-бота.
-            await _run_blocking(inspect_and_extract)
-        except (zipfile.BadZipFile, ValueError) as exc:
-            result.errors.append(ImportErrorItem(folder="ZIP", reasons=[str(exc)]))
-            await _finish_batch(batch_id, result, total_found)
-            return result
+    if not folders:
+        result.errors.append(ImportErrorItem(folder="Books", reasons=["Не найдена папка Books или папки книг"]))
+        await _finish_batch(batch_id, result, total_found)
+        return result
 
-        books_root = temp_root / "Books"
-        if not books_root.is_dir():
-            candidates = [p for p in temp_root.rglob("Books") if p.is_dir()]
-            books_root = candidates[0] if candidates else books_root
-        if not books_root.is_dir():
-            result.errors.append(ImportErrorItem(folder="Books", reasons=["Не найдена папка Books"]))
-            await _finish_batch(batch_id, result, total_found)
-            return result
+    total_found = len(folders)
+    await report(0, phase=1)
+    if max_books > 0 and len(folders) > max_books:
+        result.errors.append(
+            ImportErrorItem(
+                folder="Books",
+                reasons=[f"В архиве {len(folders)} книг; максимум {max_books}"],
+            )
+        )
+        folders = folders[:max_books]
 
-        folders = sorted([p for p in books_root.iterdir() if p.is_dir()], key=lambda p: p.name.lower())
-        total_found = len(folders)
-        await report(0, phase=1)
-        if max_books > 0 and len(folders) > max_books:
-            result.errors.append(ImportErrorItem(folder="Books", reasons=[f"В архиве {len(folders)} книг; максимум {max_books}"]))
-            folders = folders[:max_books]
-
-        for processed_index, folder in enumerate(folders, 1):
-            item = ImportErrorItem(folder=folder.name)
-            metadata_path = folder / "metadata.json"
-            description_path = folder / "description.txt"
-            files = [p for p in folder.iterdir() if p.is_file()]
-            if len(files) > MAX_FILES_PER_BOOK_FOLDER:
-                item.reasons.append(f"Слишком много файлов в папке: {len(files)}; максимум {MAX_FILES_PER_BOOK_FOLDER}")
-            book_files = [p for p in files if p.suffix.lower() in BOOK_EXTENSIONS]
-            cover_files = [p for p in files if p.suffix.lower() in COVER_EXTENSIONS and p.stem.lower().startswith("cover")]
-
-            metadata: dict[str, Any] = {}
-            metadata_error = ""
-            if metadata_path.exists():
-                try:
-                    metadata = json.loads(await _run_blocking(_read_text, metadata_path))
-                    if not isinstance(metadata, dict):
-                        raise ValueError("корневое значение должно быть объектом")
-                except Exception as exc:
-                    metadata_error = f"Ошибка metadata.json: {exc}"
-            if not book_files:
-                item.reasons.append("Нет файла книги EPUB/FB2/TXT/DOCX/PDF")
-            embedded = await _run_blocking(_embedded_book_metadata, book_files[0]) if book_files else {}
-            metadata = _merge_import_metadata(metadata, embedded, description_path)
-            item.title = str(metadata.get("title") or "Без названия").strip()
-            if metadata_error:
-                item.reasons.append(metadata_error)
-            if not cover_files:
-                item.reasons.append("Нет обложки cover.jpg/png/webp")
-            if not str(metadata.get("description") or "").strip():
-                item.reasons.append("Не найдено описание: добавьте description.txt или поле description")
-
-            title = str(metadata.get("title") or "").strip()
-            author = str(metadata.get("author") or "").strip()
-            genres = metadata.get("genre") or []
-            if isinstance(genres, str):
-                genres = [genres]
-            if not title:
-                item.reasons.append("Не указано название")
-            if not author:
-                item.reasons.append("Не указан автор")
-            if not genres:
-                item.reasons.append("Не указан жанр")
-            if not str(metadata.get("age_rating") or "").strip():
-                item.reasons.append("Не указано возрастное ограничение (0+/6+/12+/14+/16+/18+)")
-            license_type = str(metadata.get("license") or "").strip()
-            if license_type not in ALLOWED_LICENSES:
-                item.reasons.append("Недопустимый тип лицензии")
-            if metadata.get("rights_checked") is not True:
-                item.reasons.append("Права не подтверждены: rights_checked должно быть true")
-            if item.reasons:
-                result.errors.append(item)
-                await report(processed_index, phase=2)
-                continue
-
-            book_path = sorted(book_files, key=lambda p: (p.suffix.lower() != ".epub", p.name.lower()))[0]
-            cover_path = sorted(cover_files, key=lambda p: p.name.lower())[0]
-            file_hash = await _run_blocking(_sha256, book_path)
-            normalized_title = " ".join(title.casefold().replace("ё", "е").split())
-            normalized_author = " ".join(author.casefold().replace("ё", "е").split())
-
-            # Поле `id` в пакетах часто является порядковым номером папки
-            # (001, 002, ...), а не ID книги в базе VoxLyra. Используем только
-            # явно названный платформенный идентификатор, чтобы не заменить
-            # случайно чужую книгу и чтобы повтор после перезапуска был безопасен.
-            explicit_id = metadata.get("voxlyra_book_id") or metadata.get("existing_book_id")
+    for processed_index, folder_info in enumerate(folders, 1):
+        folder_name = str(folder_info["name"])
+        folder_unpacked = max(0, int(folder_info.get("unpacked_size") or 0))
+        _ensure_library_free_space(
+            folder_unpacked + MIN_IMPORT_FREE_BYTES,
+            operation=f"обработки книги {processed_index} из {len(folders)}",
+        )
+        with tempfile.TemporaryDirectory(
+            prefix=f"book_{processed_index:05d}_",
+            dir=IMPORT_WORK_ROOT,
+        ) as temp_name:
+            temp_root = Path(temp_name)
+            folder = temp_root / folder_name
             try:
-                explicit_id = int(explicit_id) if explicit_id not in (None, "") else None
-            except (TypeError, ValueError):
-                item.reasons.append("Некорректный существующий ID VoxLyra в metadata.json")
-                result.errors.append(item)
-                await report(processed_index, phase=2)
-                continue
-
-            async with connect() as db:
-                cur = await db.execute(
-                    """
-                    SELECT id FROM books
-                    WHERE publication_status!='deleted' AND (
-                        (? IS NOT NULL AND id=?) OR
-                        import_file_hash=? OR source_file_hash=? OR
-                        (normalized_title=? AND lower(COALESCE(source_author_name,''))=?)
-                    )
-                    ORDER BY CASE WHEN (? IS NOT NULL AND id=?) THEN 0 ELSE 1 END, id
-                    LIMIT 1
-                    """,
-                    (explicit_id, explicit_id, file_hash, file_hash, normalized_title, normalized_author,
-                     explicit_id, explicit_id),
+                await _run_blocking(
+                    _extract_library_folder,
+                    zip_path,
+                    list(folder_info.get("members") or []),
+                    folder,
                 )
-                duplicate = await cur.fetchone()
-            if duplicate:
-                result.duplicates += 1
-                existing_id = int(duplicate["id"])
-                if duplicate_policy == "skip":
-                    result.errors.append(ImportErrorItem(folder=folder.name, title=title, reasons=[f"Найден дубль книги ID {existing_id}; пропущено по настройке"]))
+                item = ImportErrorItem(folder=folder.name)
+                metadata_path = folder / "metadata.json"
+                description_path = folder / "description.txt"
+                files = [p for p in folder.iterdir() if p.is_file()]
+                if len(files) > MAX_FILES_PER_BOOK_FOLDER:
+                    item.reasons.append(f"Слишком много файлов в папке: {len(files)}; максимум {MAX_FILES_PER_BOOK_FOLDER}")
+                book_files = [p for p in files if p.suffix.lower() in BOOK_EXTENSIONS]
+                cover_files = [p for p in files if p.suffix.lower() in COVER_EXTENSIONS and p.stem.lower().startswith("cover")]
+
+                metadata: dict[str, Any] = {}
+                metadata_error = ""
+                if metadata_path.exists():
+                    try:
+                        metadata = json.loads(await _run_blocking(_read_text, metadata_path))
+                        if not isinstance(metadata, dict):
+                            raise ValueError("корневое значение должно быть объектом")
+                    except Exception as exc:
+                        metadata_error = f"Ошибка metadata.json: {exc}"
+                if not book_files:
+                    item.reasons.append("Нет файла книги EPUB/FB2/TXT/DOCX/PDF")
+                embedded = await _run_blocking(_embedded_book_metadata, book_files[0]) if book_files else {}
+                metadata = _merge_import_metadata(metadata, embedded, description_path)
+                item.title = str(metadata.get("title") or "Без названия").strip()
+                if metadata_error:
+                    item.reasons.append(metadata_error)
+                if not cover_files:
+                    item.reasons.append("Нет обложки cover.jpg/png/webp")
+                if not str(metadata.get("description") or "").strip():
+                    item.reasons.append("Не найдено описание: добавьте description.txt или поле description")
+
+                title = str(metadata.get("title") or "").strip()
+                author = str(metadata.get("author") or "").strip()
+                genres = metadata.get("genre") or []
+                if isinstance(genres, str):
+                    genres = [genres]
+                if not title:
+                    item.reasons.append("Не указано название")
+                if not author:
+                    item.reasons.append("Не указан автор")
+                if not genres:
+                    item.reasons.append("Не указан жанр")
+                if not str(metadata.get("age_rating") or "").strip():
+                    item.reasons.append("Не указано возрастное ограничение (0+/6+/12+/14+/16+/18+)")
+                license_type = str(metadata.get("license") or "").strip()
+                if license_type not in ALLOWED_LICENSES:
+                    item.reasons.append("Недопустимый тип лицензии")
+                if metadata.get("rights_checked") is not True:
+                    item.reasons.append("Права не подтверждены: rights_checked должно быть true")
+                if item.reasons:
+                    result.errors.append(item)
                     await report(processed_index, phase=2)
                     continue
-                candidate_dir = DEFAULT_STORAGE_ROOT / "duplicates" / str(batch_id) / folder.name
-                if candidate_dir.exists():
-                    await _run_blocking(shutil.rmtree, candidate_dir)
-                candidate_dir.parent.mkdir(parents=True, exist_ok=True)
-                await _run_blocking(shutil.copytree, folder, candidate_dir)
+
+                book_path = sorted(book_files, key=lambda p: (p.suffix.lower() != ".epub", p.name.lower()))[0]
+                cover_path = sorted(cover_files, key=lambda p: p.name.lower())[0]
+                file_hash = await _run_blocking(_sha256, book_path)
+                normalized_title = " ".join(title.casefold().replace("ё", "е").split())
+                normalized_author = " ".join(author.casefold().replace("ё", "е").split())
+                description = str(metadata.get("description") or "").strip() or _read_text(description_path)
+                incoming_revision = await _run_blocking(
+                    _revision_fingerprint,
+                    book_path,
+                    cover_path,
+                    metadata,
+                    description,
+                )
+
+                # Поле `id` в пакетах часто является порядковым номером папки
+                # (001, 002, ...), а не ID книги в базе VoxLyra. Используем только
+                # явно названный платформенный идентификатор, чтобы не заменить
+                # случайно чужую книгу и чтобы повтор после перезапуска был безопасен.
+                explicit_id = metadata.get("voxlyra_book_id") or metadata.get("existing_book_id")
+                try:
+                    explicit_id = int(explicit_id) if explicit_id not in (None, "") else None
+                except (TypeError, ValueError):
+                    item.reasons.append("Некорректный существующий ID VoxLyra в metadata.json")
+                    result.errors.append(item)
+                    await report(processed_index, phase=2)
+                    continue
+
                 async with connect() as db:
                     cur = await db.execute(
-                        """INSERT INTO library_import_duplicates(
-                               batch_id, existing_book_id, folder_name, title, author, file_hash,
-                               candidate_dir, metadata_json, status, created_at
-                           ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)""",
-                        (batch_id, existing_id, folder.name, title, author, file_hash, str(candidate_dir),
-                         json.dumps(metadata, ensure_ascii=False), utc_now()),
-                    )
-                    duplicate_id = int(cur.lastrowid)
-                    await db.commit()
-                result.duplicate_ids.append(duplicate_id)
-                if duplicate_policy == "replace":
-                    await resolve_duplicate(duplicate_id, "replace")
-                await report(processed_index, phase=2)
-                continue
-
-            try:
-                chapters = await _run_blocking(
-                    parse_book_file,
-                    book_path,
-                    original_filename=book_path.name,
-                    temp_dir=temp_root / f"parse_{folder.name}",
-                )
-                chapters = [ch for ch in chapters if (ch.text or "").strip()]
-                if not chapters:
-                    raise BookParseError("В книге не найден текст")
-            except Exception as exc:
-                item.reasons.append(f"Ошибка чтения книги: {exc}")
-                result.errors.append(item)
-                await report(processed_index, phase=2)
-                continue
-
-            description = str(metadata.get("description") or "").strip() or _read_text(description_path)
-            age = str(metadata.get("age_rating") or "12+").strip()
-            pricing = str(metadata.get("free_or_paid") or "free").strip().lower()
-            price_stars = max(0, int(metadata.get("price_stars") or 0))
-            pricing_type = "whole_book" if pricing in {"paid", "whole_book"} and price_stars > 0 else "free"
-            now = utc_now()
-            storage_dir = DEFAULT_STORAGE_ROOT / "books" / str(batch_id) / folder.name
-            stored_book = storage_dir / f"book{book_path.suffix.lower()}"
-            stored_cover = storage_dir / f"cover{cover_path.suffix.lower()}"
-
-            def store_book_files() -> None:
-                storage_dir.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(book_path, stored_book)
-                shutil.copy2(cover_path, stored_cover)
-                (storage_dir / "metadata.json").write_text(
-                    json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"
-                )
-                (storage_dir / "description.txt").write_text(description, encoding="utf-8")
-
-            await _run_blocking(store_book_files)
-
-            async with connect() as db:
-                source_name = str(metadata.get("source") or "").strip()
-                creator_id, rights_holder_id, revenue_mode, revenue_author_id = await _ensure_creator_and_rights(
-                    db, author_name=author, metadata=metadata, license_type=license_type,
-                    source_name=source_name, actor_user_id=actor_user_id, now=now,
-                )
-                cur = await db.execute(
-                    """
-                    INSERT INTO books(
-                        author_id, title, description, age_limit, writing_status, publication_status,
-                        cover_path, normalized_title, source_file_hash, source_file_name,
-                        allow_download, pricing_type, price_stars, content_type, reading_mode,
-                        license_type, source_name, rights_checked, import_batch_id, import_file_hash,
-                        source_author_name, source_year, source_language, creator_id, rights_holder_id,
-                        revenue_mode, created_at, updated_at
-                    ) VALUES(NULL, ?, ?, ?, 'finished', 'draft', ?, ?, ?, ?, 1, ?, ?, 'book', 'ltr',
-                             ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        title, description, age, str(stored_cover), normalized_title, file_hash, str(stored_book),
-                        pricing_type, price_stars, license_type, source_name,
-                        batch_id, file_hash, author, str(metadata.get("year") or "").strip(),
-                        str(metadata.get("language") or "ru").strip(), creator_id, rights_holder_id,
-                        revenue_mode, now, now,
-                    ),
-                )
-                book_id = int(cur.lastrowid)
-                await db.execute(
-                    """INSERT INTO book_rights(
-                           book_id, creator_id, rights_holder_id, license_type, revenue_mode,
-                           revenue_author_id, imported_by_user_id, source_name, rights_checked,
-                           created_at, updated_at
-                       ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)""",
-                    (book_id, creator_id, rights_holder_id, license_type, revenue_mode,
-                     revenue_author_id, actor_user_id, source_name, now, now),
-                )
-                for ch in chapters:
-                    is_free = 1 if pricing_type == "free" else 0
-                    await db.execute(
                         """
-                        INSERT INTO chapters(book_id, number, title, text, is_free, price_stars, status, created_at, updated_at)
-                        VALUES(?, ?, ?, ?, ?, 0, 'draft', ?, ?)
-                        """,
-                        (book_id, int(ch.number), str(ch.title)[:160], ch.text, is_free, now, now),
-                    )
-                for genre in genres:
-                    label = str(genre).strip()
-                    if not label:
-                        continue
-                    code = _slug(label.casefold())
-                    await db.execute(
-                        """
-                        INSERT OR IGNORE INTO book_option_values(book_id, option_group, option_code, option_label, created_at)
-                        VALUES(?, 'genres', ?, ?, ?)
-                        """,
-                        (book_id, code, label, now),
-                    )
-                tags = metadata.get("tags") or []
-                if isinstance(tags, str):
-                    tags = [tags]
-                for tag in tags:
-                    label = str(tag).strip()
-                    if label:
-                        await db.execute(
-                            """INSERT OR IGNORE INTO book_option_values(book_id, option_group, option_code, option_label, created_at)
-                               VALUES(?, 'plot_tags', ?, ?, ?)""",
-                            (book_id, _slug(label.casefold()), label, now),
+                        SELECT id, source_file_name, cover_path FROM books
+                        WHERE publication_status!='deleted' AND (
+                            (? IS NOT NULL AND id=?) OR
+                            import_file_hash=? OR source_file_hash=? OR
+                            (normalized_title=? AND lower(COALESCE(source_author_name,''))=?)
                         )
-                await db.commit()
-            result.added += 1
-            result.book_ids.append(book_id)
-            await report(processed_index, phase=2)
+                        ORDER BY CASE WHEN (? IS NOT NULL AND id=?) THEN 0 ELSE 1 END, id
+                        LIMIT 1
+                        """,
+                        (explicit_id, explicit_id, file_hash, file_hash, normalized_title, normalized_author,
+                         explicit_id, explicit_id),
+                    )
+                    duplicate = await cur.fetchone()
+                if duplicate:
+                    result.duplicates += 1
+                    existing_id = int(duplicate["id"])
+                    existing_revision = await _run_blocking(
+                        _stored_revision_fingerprint,
+                        Path(str(duplicate["source_file_name"] or "")),
+                        Path(str(duplicate["cover_path"] or "")),
+                    )
+                    # В накопительных архивах большинство старых книг полностью
+                    # совпадают. Такие дубли не копируются повторно на диск и не
+                    # требуют ручного решения. Изменённая обложка, метаданные или
+                    # текст по-прежнему создают кандидата «пропустить/заменить».
+                    if existing_revision and existing_revision == incoming_revision:
+                        await report(processed_index, phase=2)
+                        continue
+                    if duplicate_policy == "skip":
+                        result.errors.append(ImportErrorItem(folder=folder.name, title=title, reasons=[f"Найден дубль книги ID {existing_id}; пропущено по настройке"]))
+                        await report(processed_index, phase=2)
+                        continue
+                    candidate_dir = DEFAULT_STORAGE_ROOT / "duplicates" / str(batch_id) / folder.name
+                    candidate_dir.parent.mkdir(parents=True, exist_ok=True)
+                    await _run_blocking(
+                        _store_duplicate_candidate,
+                        candidate_dir,
+                        book_path,
+                        cover_path,
+                        metadata,
+                        description,
+                    )
+                    async with connect() as db:
+                        cur = await db.execute(
+                            """INSERT INTO library_import_duplicates(
+                                   batch_id, existing_book_id, folder_name, title, author, file_hash,
+                                   candidate_dir, metadata_json, status, created_at
+                               ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)""",
+                            (batch_id, existing_id, folder.name, title, author, file_hash, str(candidate_dir),
+                             json.dumps(metadata, ensure_ascii=False), utc_now()),
+                        )
+                        duplicate_id = int(cur.lastrowid)
+                        await db.commit()
+                    result.duplicate_ids.append(duplicate_id)
+                    if duplicate_policy == "replace":
+                        await resolve_duplicate(duplicate_id, "replace")
+                    await report(processed_index, phase=2)
+                    continue
+
+                try:
+                    chapters = await _run_blocking(
+                        parse_book_file,
+                        book_path,
+                        original_filename=book_path.name,
+                        temp_dir=temp_root / f"parse_{folder.name}",
+                    )
+                    chapters = [ch for ch in chapters if (ch.text or "").strip()]
+                    if not chapters:
+                        raise BookParseError("В книге не найден текст")
+                except Exception as exc:
+                    item.reasons.append(f"Ошибка чтения книги: {exc}")
+                    result.errors.append(item)
+                    await report(processed_index, phase=2)
+                    continue
+
+                age = str(metadata.get("age_rating") or "12+").strip()
+                pricing = str(metadata.get("free_or_paid") or "free").strip().lower()
+                price_stars = max(0, int(metadata.get("price_stars") or 0))
+                pricing_type = "whole_book" if pricing in {"paid", "whole_book"} and price_stars > 0 else "free"
+                now = utc_now()
+                storage_dir = DEFAULT_STORAGE_ROOT / "books" / str(batch_id) / folder.name
+                stored_book = storage_dir / f"book{book_path.suffix.lower()}"
+                stored_cover = storage_dir / f"cover{cover_path.suffix.lower()}"
+
+                def store_book_files() -> None:
+                    storage_dir.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(book_path, stored_book)
+                    shutil.copy2(cover_path, stored_cover)
+                    (storage_dir / "metadata.json").write_text(
+                        json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"
+                    )
+                    (storage_dir / "description.txt").write_text(description, encoding="utf-8")
+
+                await _run_blocking(store_book_files)
+
+                async with connect() as db:
+                    source_name = str(metadata.get("source") or "").strip()
+                    creator_id, rights_holder_id, revenue_mode, revenue_author_id = await _ensure_creator_and_rights(
+                        db, author_name=author, metadata=metadata, license_type=license_type,
+                        source_name=source_name, actor_user_id=actor_user_id, now=now,
+                    )
+                    cur = await db.execute(
+                        """
+                        INSERT INTO books(
+                            author_id, title, description, age_limit, writing_status, publication_status,
+                            cover_path, normalized_title, source_file_hash, source_file_name,
+                            allow_download, pricing_type, price_stars, content_type, reading_mode,
+                            license_type, source_name, rights_checked, import_batch_id, import_file_hash,
+                            source_author_name, source_year, source_language, creator_id, rights_holder_id,
+                            revenue_mode, created_at, updated_at
+                        ) VALUES(NULL, ?, ?, ?, 'finished', 'draft', ?, ?, ?, ?, 1, ?, ?, 'book', 'ltr',
+                                 ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            title, description, age, str(stored_cover), normalized_title, file_hash, str(stored_book),
+                            pricing_type, price_stars, license_type, source_name,
+                            batch_id, file_hash, author, str(metadata.get("year") or "").strip(),
+                            str(metadata.get("language") or "ru").strip(), creator_id, rights_holder_id,
+                            revenue_mode, now, now,
+                        ),
+                    )
+                    book_id = int(cur.lastrowid)
+                    await db.execute(
+                        """INSERT INTO book_rights(
+                               book_id, creator_id, rights_holder_id, license_type, revenue_mode,
+                               revenue_author_id, imported_by_user_id, source_name, rights_checked,
+                               created_at, updated_at
+                           ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)""",
+                        (book_id, creator_id, rights_holder_id, license_type, revenue_mode,
+                         revenue_author_id, actor_user_id, source_name, now, now),
+                    )
+                    for ch in chapters:
+                        is_free = 1 if pricing_type == "free" else 0
+                        await db.execute(
+                            """
+                            INSERT INTO chapters(book_id, number, title, text, is_free, price_stars, status, created_at, updated_at)
+                            VALUES(?, ?, ?, ?, ?, 0, 'draft', ?, ?)
+                            """,
+                            (book_id, int(ch.number), str(ch.title)[:160], ch.text, is_free, now, now),
+                        )
+                    for genre in genres:
+                        label = str(genre).strip()
+                        if not label:
+                            continue
+                        code = _slug(label.casefold())
+                        await db.execute(
+                            """
+                            INSERT OR IGNORE INTO book_option_values(book_id, option_group, option_code, option_label, created_at)
+                            VALUES(?, 'genres', ?, ?, ?)
+                            """,
+                            (book_id, code, label, now),
+                        )
+                    tags = metadata.get("tags") or []
+                    if isinstance(tags, str):
+                        tags = [tags]
+                    for tag in tags:
+                        label = str(tag).strip()
+                        if label:
+                            await db.execute(
+                                """INSERT OR IGNORE INTO book_option_values(book_id, option_group, option_code, option_label, created_at)
+                                   VALUES(?, 'plot_tags', ?, ?, ?)""",
+                                (book_id, _slug(label.casefold()), label, now),
+                            )
+                    await db.commit()
+                result.added += 1
+                result.book_ids.append(book_id)
+                await report(processed_index, phase=2)
+            except Exception as exc:
+                if _is_no_space_error(exc):
+                    raise LibraryImportStorageError(
+                        "На сервере закончилось свободное место во время импорта. "
+                        "Незавершённый пакет будет удалён автоматически. "
+                        "Освободите место или увеличьте диск и повторите загрузку."
+                    ) from exc
+                raise
 
     await _finish_batch(batch_id, result, total_found)
     await report(total_found if max_books <= 0 else min(total_found, max_books), phase=3)

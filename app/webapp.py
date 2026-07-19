@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 from html import escape
 import hmac
@@ -956,6 +957,20 @@ def create_app() -> FastAPI:
             if queue_path is not None and queue_path.exists():
                 await asyncio.to_thread(queue_path.unlink)
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except OSError as exc:
+            if queue_path is not None and queue_path.exists():
+                await asyncio.to_thread(queue_path.unlink)
+            if exc.errno == errno.ENOSPC or "no space left" in str(exc).lower():
+                raise HTTPException(
+                    status_code=507,
+                    detail=(
+                        "На сервере недостаточно свободного места. "
+                        "Незавершённая загрузка очищена. Освободите место или увеличьте диск."
+                    ),
+                ) from exc
+            raise HTTPException(
+                status_code=500, detail="Не удалось сохранить архив на сервере."
+            ) from exc
         except Exception as exc:
             if queue_path is not None and queue_path.exists():
                 await asyncio.to_thread(queue_path.unlink)

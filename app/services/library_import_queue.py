@@ -6,6 +6,7 @@ import html
 import logging
 import os
 import shutil
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -15,9 +16,11 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from app.config import settings
 from app.db import connect, utc_now
 from app.keyboards import library_batch_menu, navigation_menu
+from app.services.chunked_upload import cleanup_stale_uploads
 from app.services.library_manager import (
     DEFAULT_STORAGE_ROOT,
     ImportResult,
+    cleanup_stale_import_work,
     ensure_library_schema,
     import_library_zip,
 )
@@ -29,6 +32,46 @@ IMPORT_UPLOAD_ROOT = IMPORT_QUEUE_ROOT / "uploads"
 
 _QUEUE_SCHEMA_LOCK = asyncio.Lock()
 _QUEUE_SCHEMA_READY: set[str] = set()
+
+
+
+def _friendly_import_error(exc: BaseException) -> str:
+    message = str(exc or "").strip()
+    lowered = message.lower()
+    if any(
+        marker in lowered
+        for marker in ("no space left", "database or disk is full", "disk full")
+    ):
+        return (
+            "На сервере недостаточно свободного места. Незавершённые файлы импорта "
+            "удалены автоматически. Освободите место или увеличьте диск и загрузите архив повторно."
+        )
+    return message or "Неизвестная ошибка импорта"
+
+
+async def _cleanup_orphaned_queue_archives(*, min_age_seconds: int = 10 * 60) -> int:
+    """Удаляет ZIP, которые больше не принадлежат ожидающим или активным заданиям."""
+    await asyncio.to_thread(IMPORT_UPLOAD_ROOT.mkdir, parents=True, exist_ok=True)
+    async with connect() as db:
+        cur = await db.execute(
+            "SELECT archive_path FROM library_import_jobs WHERE status IN ('queued','processing')"
+        )
+        rows = await cur.fetchall()
+    keep = {str(Path(str(row["archive_path"])).resolve()) for row in rows}
+    now = time.time()
+    removed = 0
+    for path in IMPORT_UPLOAD_ROOT.glob("*.zip"):
+        try:
+            resolved = str(path.resolve())
+            if resolved in keep:
+                continue
+            if now - path.stat().st_mtime < max(60, int(min_age_seconds)):
+                continue
+            path.unlink(missing_ok=True)
+            removed += 1
+        except OSError:
+            continue
+    return removed
 
 
 @dataclass(slots=True)
@@ -111,6 +154,9 @@ async def ensure_import_queue_schema() -> None:
             )
             await db.commit()
         await asyncio.to_thread(IMPORT_UPLOAD_ROOT.mkdir, parents=True, exist_ok=True)
+        await asyncio.to_thread(cleanup_stale_uploads)
+        await asyncio.to_thread(cleanup_stale_import_work)
+        await _cleanup_orphaned_queue_archives()
         _QUEUE_SCHEMA_READY.add(database_key)
 
 
@@ -387,6 +433,10 @@ async def discard_incomplete_import_batch(batch_id: int) -> None:
         await db.execute("DELETE FROM library_import_batches WHERE id=?", (int(batch_id),))
         await db.commit()
 
+    # Удаляем также корни пакета напрямую. Это очищает файлы книги, которые
+    # успели записаться до неудачного коммита SQLite и поэтому ещё не видны в БД.
+    storage_paths.add(DEFAULT_STORAGE_ROOT / "books" / str(int(batch_id)))
+    candidate_paths.add(DEFAULT_STORAGE_ROOT / "duplicates" / str(int(batch_id)))
     for path in sorted(storage_paths | candidate_paths, key=lambda item: len(str(item)), reverse=True):
         if path.exists() and _is_inside(path, DEFAULT_STORAGE_ROOT):
             await asyncio.to_thread(shutil.rmtree, path, True)
@@ -476,18 +526,19 @@ async def process_next_import_job(bot) -> bool:
         return True
     except Exception as exc:
         logger.exception("Library import job #%s failed", job.id)
+        friendly_error = _friendly_import_error(exc)
         async with connect() as db:
             cur = await db.execute("SELECT batch_id FROM library_import_jobs WHERE id=?", (job.id,))
             row = await cur.fetchone()
         if row and row["batch_id"] is not None:
             await discard_incomplete_import_batch(int(row["batch_id"]))
-        await _set_job_failed(job.id, str(exc))
+        await _set_job_failed(job.id, friendly_error)
         await _safe_edit(
             bot,
             job,
             "<b>❌ Импорт остановлен</b>\n\n"
-            f"Причина: {html.escape(str(exc)[:1000])}\n\n"
-            "Архив не был опубликован. Можно исправить причину и загрузить его повторно.",
+            f"Причина: {html.escape(friendly_error[:1000])}\n\n"
+            "Архив не был опубликован. После освобождения места его можно загрузить повторно.",
             navigation_menu(cancel_callback="library:menu"),
         )
         await _cleanup_archive(job)
