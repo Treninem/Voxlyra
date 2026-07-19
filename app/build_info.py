@@ -5,12 +5,12 @@
 передаётся.
 """
 
-OWNER_BUILD_VERSION = "v1.13.12.5"
-OWNER_BUILD_NAME = "экономный импорт ZIP без переполнения диска"
+OWNER_BUILD_VERSION = "v1.13.12.6"
+OWNER_BUILD_NAME = "устойчивый импорт ZIP через Bothost"
 
 
 def owner_build_label() -> str:
     return f"{OWNER_BUILD_VERSION} · {OWNER_BUILD_NAME}"
 
 
-WORKING_BUILD_STAGE = "v1.13.12.5 · экономный импорт ZIP без переполнения диска"
+WORKING_BUILD_STAGE = "v1.13.12.6 · устойчивый импорт ZIP через Bothost"

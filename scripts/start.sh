@@ -5,6 +5,10 @@ export VOSK_MODEL_PATH=/app/storage/tts/models/vosk
 export TTS_VOSK_MODEL_DIR=/app/storage/tts/models/vosk
 mkdir -p data storage/covers storage/books storage/audio storage/tts storage/tts/models/vosk storage/comics storage/temp storage/legal
 
+# После перезапуска незавершённые части и рабочие каталоги импорта уже не используются.
+# Очищаем их до запуска SQLite/бота, чтобы старые неудачные ZIP не вызывали Bad Gateway.
+python scripts/cleanup_import_storage.py || true
+
 # Удаляем только устаревшие юридические PDF прежней редакции. Пользовательские
 # книги, база, чеки и другие файлы storage этот блок не затрагивает.
 rm -f \

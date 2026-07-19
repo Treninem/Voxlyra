@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import errno
 import json
 import re
@@ -10,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import aiofiles
 from fastapi import UploadFile
 
 from app.config import settings
@@ -33,6 +35,29 @@ def _format_mb(value: int) -> str:
 
 def _ensure_upload_root() -> None:
     UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
+
+
+def _write_meta_file(folder: Path, meta: dict[str, Any]) -> None:
+    """Atomically persist upload state and translate storage errors."""
+    temp_path = folder / "meta.json.tmp"
+    final_path = folder / "meta.json"
+    try:
+        temp_path.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+        temp_path.replace(final_path)
+    except OSError as exc:
+        temp_path.unlink(missing_ok=True)
+        raise _storage_write_error(exc) from exc
+
+
+def _read_meta_file(folder: Path) -> dict[str, Any] | None:
+    path = folder / "meta.json"
+    if not path.is_file():
+        return None
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        return dict(value) if isinstance(value, dict) else None
+    except Exception:
+        return None
 
 
 def cleanup_stale_uploads(*, max_age_seconds: int = STALE_UPLOAD_SECONDS) -> int:
@@ -129,7 +154,6 @@ def _create_upload(
 
     upload_id = uuid.uuid4().hex
     folder = _upload_dir(upload_id)
-    folder.mkdir(parents=True, exist_ok=False)
     meta = {
         "upload_id": upload_id,
         "user_id": int(user_id),
@@ -141,7 +165,15 @@ def _create_upload(
         "created_at": datetime.now(timezone.utc).isoformat(),
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
-    (folder / "meta.json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+    try:
+        folder.mkdir(parents=True, exist_ok=False)
+        _write_meta_file(folder, meta)
+    except OSError as exc:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise _storage_write_error(exc) from exc
+    except ChunkedUploadError:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise
     return meta
 
 
@@ -186,15 +218,95 @@ def create_library_import_upload(
     )
 
 
+def create_or_resume_library_import_upload(
+    *,
+    user_id: int,
+    filename: str,
+    total_size: int,
+    max_mb: int,
+    resume_upload_id: str = "",
+) -> tuple[dict[str, Any], bool]:
+    """Resume one matching upload and discard obsolete sessions for the same admin."""
+    safe_name = _safe_filename(filename)
+    requested_id = str(resume_upload_id or "").strip()
+    _ensure_upload_root()
+    cleanup_stale_uploads(max_age_seconds=30 * 60)
+
+    candidates: list[tuple[float, Path, dict[str, Any]]] = []
+    for folder in UPLOAD_ROOT.iterdir():
+        if not folder.is_dir():
+            continue
+        meta = _read_meta_file(folder)
+        if not meta:
+            continue
+        if (
+            int(meta.get("user_id") or 0) == int(user_id)
+            and int(meta.get("book_id") or 0) == 0
+            and str(meta.get("kind") or "") == "library_import"
+        ):
+            try:
+                updated = datetime.fromisoformat(
+                    str(meta.get("updated_at") or "").replace("Z", "+00:00")
+                ).timestamp()
+            except Exception:
+                try:
+                    updated = folder.stat().st_mtime
+                except OSError:
+                    updated = 0.0
+            candidates.append((updated, folder, meta))
+
+    selected: tuple[Path, dict[str, Any]] | None = None
+    for _, folder, meta in sorted(candidates, key=lambda item: item[0], reverse=True):
+        if requested_id and str(meta.get("upload_id") or "") != requested_id:
+            continue
+        if (
+            str(meta.get("filename") or "") == safe_name
+            and int(meta.get("total_size") or 0) == int(total_size)
+        ):
+            selected = (folder, meta)
+            break
+
+    if selected is None and not requested_id:
+        for _, folder, meta in sorted(candidates, key=lambda item: item[0], reverse=True):
+            if (
+                str(meta.get("filename") or "") == safe_name
+                and int(meta.get("total_size") or 0) == int(total_size)
+            ):
+                selected = (folder, meta)
+                break
+
+    keep_folder = selected[0] if selected else None
+    for _, folder, _ in candidates:
+        if keep_folder is not None and folder == keep_folder:
+            continue
+        shutil.rmtree(folder, ignore_errors=True)
+
+    if selected is not None:
+        folder, meta = selected
+        # A previously assembled file cannot be resumed as chunks.
+        assembled = folder / _safe_filename(str(meta.get("filename") or safe_name))
+        if assembled.exists():
+            shutil.rmtree(folder, ignore_errors=True)
+        else:
+            return meta, True
+
+    meta = create_library_import_upload(
+        user_id=user_id,
+        filename=safe_name,
+        total_size=total_size,
+        max_mb=max_mb,
+    )
+    return meta, False
+
+
 def load_upload(upload_id: str, *, user_id: int, book_id: int) -> dict[str, Any]:
     folder = _upload_dir(upload_id)
     path = folder / "meta.json"
     if not path.exists():
         raise ChunkedUploadError("Загрузка не найдена. Начните её заново.")
-    try:
-        meta = json.loads(path.read_text(encoding="utf-8"))
-    except Exception as exc:
-        raise ChunkedUploadError("Не удалось продолжить загрузку. Начните её заново.") from exc
+    meta = _read_meta_file(folder)
+    if meta is None:
+        raise ChunkedUploadError("Не удалось продолжить загрузку. Начните её заново.")
     if int(meta.get("user_id") or 0) != int(user_id) or int(meta.get("book_id") or 0) != int(book_id):
         raise ChunkedUploadError("Эта загрузка вам недоступна.")
     return meta
@@ -202,7 +314,7 @@ def load_upload(upload_id: str, *, user_id: int, book_id: int) -> dict[str, Any]
 
 def _save_meta(upload_id: str, meta: dict[str, Any]) -> None:
     folder = _upload_dir(upload_id)
-    (folder / "meta.json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+    _write_meta_file(folder, meta)
 
 
 async def save_chunk(
@@ -221,8 +333,12 @@ async def save_chunk(
     part_path = folder / f"{index:06d}.part"
     written = 0
     try:
-        _ensure_free_space(2 * 1024 * 1024, operation="приёма следующей части архива")
-        with part_path.open("wb") as destination:
+        await asyncio.to_thread(
+            _ensure_free_space,
+            2 * 1024 * 1024,
+            operation="приёма следующей части архива",
+        )
+        async with aiofiles.open(part_path, "wb") as destination:
             while True:
                 data = await chunk.read(1024 * 1024)
                 if not data:
@@ -230,12 +346,12 @@ async def save_chunk(
                 written += len(data)
                 if written > CHUNK_SIZE_BYTES + 1024:
                     raise ChunkedUploadError("Часть файла оказалась слишком большой. Повторите загрузку.")
-                destination.write(data)
+                await destination.write(data)
     except OSError as exc:
-        part_path.unlink(missing_ok=True)
+        await asyncio.to_thread(part_path.unlink, missing_ok=True)
         raise _storage_write_error(exc) from exc
     except Exception:
-        part_path.unlink(missing_ok=True)
+        await asyncio.to_thread(part_path.unlink, missing_ok=True)
         raise
     finally:
         await chunk.close()
@@ -245,7 +361,7 @@ async def save_chunk(
     meta["received"] = sorted(received)
     meta["total_chunks"] = int(total_chunks)
     meta["updated_at"] = datetime.now(timezone.utc).isoformat()
-    _save_meta(upload_id, meta)
+    await asyncio.to_thread(_save_meta, upload_id, meta)
     return {"received_chunks": len(received), "total_chunks": total_chunks, "chunk_bytes": written}
 
 

@@ -10,6 +10,7 @@ import shutil
 import time
 import uuid
 from contextlib import asynccontextmanager
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -269,6 +270,7 @@ from app.services.chunked_upload import (
     cleanup_upload,
     create_graphic_upload,
     create_library_import_upload,
+    create_or_resume_library_import_upload,
     create_upload,
     get_upload_status,
     load_upload,
@@ -867,6 +869,37 @@ def create_app() -> FastAPI:
         response.headers["Pragma"] = "no-cache"
         return response
 
+    async def _notify_large_library_upload_accepted(
+        *,
+        chat_id: int,
+        progress_message_id: int,
+        job_id: int,
+        position: int,
+    ) -> None:
+        if not settings.BOT_TOKEN.strip():
+            return
+        delivery_bot = Bot(token=settings.BOT_TOKEN)
+        try:
+            position_text = (
+                "начинается сейчас"
+                if int(position) == 1
+                else f"позиция в очереди: <b>{int(position)}</b>"
+            )
+            await delivery_bot.edit_message_text(
+                chat_id=int(chat_id),
+                message_id=int(progress_message_id),
+                text=(
+                    "<b>✅ Большой архив принят</b>\n\n"
+                    f"Задание: <b>#{int(job_id)}</b>\n"
+                    f"Импорт {position_text}. Прогресс будет обновляться в этом сообщении.\n\n"
+                    "Архив обрабатывается в фоне. Ботом можно пользоваться без ожидания."
+                ),
+            )
+        except Exception:
+            pass
+        finally:
+            await delivery_bot.session.close()
+
     @app.post("/api/library-import-upload/start")
     async def api_library_import_upload_start(
         request: Request,
@@ -878,17 +911,42 @@ def create_app() -> FastAPI:
         user, _ = await library_import_upload_session(init_data, token)
         cfg = await get_import_settings()
         try:
-            meta = create_library_import_upload(
-                user_id=user.app_user_id,
-                filename=str(payload.get("filename") or ""),
-                total_size=int(payload.get("size") or 0),
-                max_mb=int(cfg.get("max_archive_mb") or 0),
+            meta, resumed = await asyncio.to_thread(
+                partial(
+                    create_or_resume_library_import_upload,
+                    user_id=user.app_user_id,
+                    filename=str(payload.get("filename") or ""),
+                    total_size=int(payload.get("size") or 0),
+                    max_mb=int(cfg.get("max_archive_mb") or 0),
+                    resume_upload_id=str(payload.get("resume_upload_id") or ""),
+                )
+            )
+            status = await asyncio.to_thread(
+                partial(
+                    get_upload_status,
+                    str(meta["upload_id"]),
+                    user_id=user.app_user_id,
+                    book_id=0,
+                )
             )
         except ChunkedUploadError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+            raise HTTPException(status_code=507 if "мест" in str(exc).lower() else 400, detail=str(exc)) from exc
+        except OSError as exc:
+            if exc.errno == errno.ENOSPC or "no space left" in str(exc).lower():
+                raise HTTPException(
+                    status_code=507,
+                    detail=(
+                        "На сервере недостаточно свободного места. "
+                        "Старые незавершённые части очищаются автоматически; повторите попытку через минуту."
+                    ),
+                ) from exc
+            raise HTTPException(status_code=500, detail="Не удалось подготовить загрузку.") from exc
         return {
             "ok": True,
             "upload_id": meta["upload_id"],
+            "resumed": bool(resumed),
+            "received": status.get("received", []),
+            "received_bytes": int(status.get("received_bytes") or 0),
             # 1 МБ надёжно проходит ограничения reverse proxy на мобильных WebView.
             "chunk_size": LIBRARY_IMPORT_CHUNK_SIZE_BYTES,
         }
@@ -899,12 +957,27 @@ def create_app() -> FastAPI:
         index: int = Form(...),
         total_chunks: int = Form(...),
         init_data: str = Form(default=""),
+        token: str = Form(default=""),
         chunk: UploadFile = File(...),
         x_telegram_init_data: str | None = Header(default=None),
     ):
-        user, _, _ = await control_session(init_data or x_telegram_init_data, "library_import_manage")
+        if token:
+            user, token_data = await library_import_upload_session(
+                init_data or x_telegram_init_data,
+                token,
+            )
+            if int(user.telegram_id) != int(token_data.telegram_id):
+                raise HTTPException(status_code=403, detail="Эта загрузка создана для другого аккаунта.")
+        else:
+            # Совместимость с уже открытой страницей v1.13.12.5.
+            user, _, _ = await control_session(
+                init_data or x_telegram_init_data,
+                "library_import_manage",
+            )
         try:
-            meta = load_upload(upload_id, user_id=user.app_user_id, book_id=0)
+            meta = await asyncio.to_thread(
+                partial(load_upload, upload_id, user_id=user.app_user_id, book_id=0)
+            )
             if str(meta.get("kind") or "") != "library_import":
                 raise ChunkedUploadError("Загрузка не относится к импорту библиотеки.")
             result = await save_chunk(
@@ -916,7 +989,7 @@ def create_app() -> FastAPI:
                 chunk=chunk,
             )
         except ChunkedUploadError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+            raise HTTPException(status_code=507 if "мест" in str(exc).lower() else 400, detail=str(exc)) from exc
         return {"ok": True, **result}
 
     @app.post("/api/library-import-upload/{upload_id}/finish")
@@ -932,14 +1005,19 @@ def create_app() -> FastAPI:
         total_chunks = int(payload.get("total_chunks") or 0)
         queue_path: Path | None = None
         try:
-            meta = load_upload(upload_id, user_id=user.app_user_id, book_id=0)
+            meta = await asyncio.to_thread(
+                partial(load_upload, upload_id, user_id=user.app_user_id, book_id=0)
+            )
             if str(meta.get("kind") or "") != "library_import":
                 raise ChunkedUploadError("Загрузка не относится к импорту библиотеки.")
-            assembled_path, meta = assemble_upload(
-                upload_id,
-                user_id=user.app_user_id,
-                book_id=0,
-                total_chunks=total_chunks,
+            assembled_path, meta = await asyncio.to_thread(
+                partial(
+                    assemble_upload,
+                    upload_id,
+                    user_id=user.app_user_id,
+                    book_id=0,
+                    total_chunks=total_chunks,
+                )
             )
             await asyncio.to_thread(IMPORT_UPLOAD_ROOT.mkdir, parents=True, exist_ok=True)
             queue_path = IMPORT_UPLOAD_ROOT / f"{uuid.uuid4().hex}.zip"
@@ -956,7 +1034,10 @@ def create_app() -> FastAPI:
         except (ChunkedUploadError, ValueError) as exc:
             if queue_path is not None and queue_path.exists():
                 await asyncio.to_thread(queue_path.unlink)
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+            raise HTTPException(
+                status_code=507 if "мест" in str(exc).lower() else 400,
+                detail=str(exc),
+            ) from exc
         except OSError as exc:
             if queue_path is not None and queue_path.exists():
                 await asyncio.to_thread(queue_path.unlink)
@@ -978,26 +1059,16 @@ def create_app() -> FastAPI:
                 status_code=500, detail="Не удалось поставить архив в очередь. Повторите загрузку."
             ) from exc
         finally:
-            cleanup_upload(upload_id)
+            await asyncio.to_thread(cleanup_upload, upload_id)
 
-        if settings.BOT_TOKEN.strip():
-            delivery_bot = Bot(token=settings.BOT_TOKEN)
-            try:
-                position_text = "начинается сейчас" if position == 1 else f"позиция в очереди: <b>{position}</b>"
-                await delivery_bot.edit_message_text(
-                    chat_id=int(token_data.chat_id),
-                    message_id=int(token_data.progress_message_id),
-                    text=(
-                        "<b>✅ Большой архив принят</b>\n\n"
-                        f"Задание: <b>#{job_id}</b>\n"
-                        f"Импорт {position_text}. Прогресс будет обновляться в этом сообщении.\n\n"
-                        "Архив обрабатывается в фоне. Ботом можно пользоваться без ожидания."
-                    ),
-                )
-            except Exception:
-                pass
-            finally:
-                await delivery_bot.session.close()
+        asyncio.create_task(
+            _notify_large_library_upload_accepted(
+                chat_id=int(token_data.chat_id),
+                progress_message_id=int(token_data.progress_message_id),
+                job_id=int(job_id),
+                position=int(position),
+            )
+        )
         return {"ok": True, "job_id": job_id, "position": position}
 
     async def premium_invoice_link(plan: dict[str, Any]) -> str:
