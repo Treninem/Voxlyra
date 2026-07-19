@@ -39,6 +39,11 @@ from app.services.library_import_queue import (
     enqueue_import_job,
 )
 from app.services.library_import_upload import create_library_import_upload_token
+from app.services.moderation_learning import (
+    get_moderation_learning_summary,
+    is_auto_moderation_enabled,
+    set_auto_moderation_enabled,
+)
 from app.services.library_manager import (
     audit_batch_publication,
     build_batch_report,
@@ -132,15 +137,23 @@ class LibraryImportFlow(StatesGroup):
     waiting_setting_value = State()
 
 
-async def _allowed(telegram_id: int) -> bool:
+async def _allowed(telegram_id: int, permission: str = "library_import_manage") -> bool:
     if telegram_id in settings.owner_ids:
         return True
     user = await upsert_user(telegram_id, None, None)
-    return "library_import_manage" in await get_admin_permissions(int(user["id"]))
+    return permission in await get_admin_permissions(int(user["id"]))
 
 
-async def _deny(call: CallbackQuery) -> bool:
-    if not await _allowed(call.from_user.id):
+async def _allowed_any(telegram_id: int, *permissions: str) -> bool:
+    if telegram_id in settings.owner_ids:
+        return True
+    user = await upsert_user(telegram_id, None, None)
+    current = await get_admin_permissions(int(user["id"]))
+    return any(permission in current for permission in permissions)
+
+
+async def _deny(call: CallbackQuery, permission: str = "library_import_manage") -> bool:
+    if not await _allowed(call.from_user.id, permission):
         await call.answer("Недоступно", show_alert=True)
         return True
     return False
@@ -156,7 +169,11 @@ async def _safe_edit(call: CallbackQuery, text: str, reply_markup=None) -> None:
 
 @router.callback_query(F.data == "library:menu")
 async def library_menu_handler(call: CallbackQuery) -> None:
-    if await _deny(call): return
+    if not await _allowed_any(call.from_user.id, "library_import_manage", "library_bulk_import"):
+        await call.answer("Недоступно", show_alert=True)
+        return
+    can_manage = await _allowed(call.from_user.id, "library_import_manage")
+    can_bulk_import = await _allowed(call.from_user.id, "library_bulk_import")
     total = await count_library_books()
     drafts = await count_library_books("draft")
     published = await count_library_books("published")
@@ -166,14 +183,18 @@ async def library_menu_handler(call: CallbackQuery) -> None:
         f"Всего импортировано: <b>{total}</b>\n"
         f"Ожидают проверки: <b>{drafts}</b>\n"
         f"Опубликовано: <b>{published}</b>",
-        library_manager_menu(),
+        library_manager_menu(
+            can_bulk_import=can_bulk_import,
+            can_manage=can_manage,
+            back_callback="owner:menu" if call.from_user.id in settings.owner_ids else "mod:menu",
+        ),
     )
     await call.answer()
 
 
 @router.callback_query(F.data == "library:import")
 async def library_import_start(call: CallbackQuery, state: FSMContext) -> None:
-    if await _deny(call): return
+    if await _deny(call, "library_bulk_import"): return
     cfg = await get_import_settings()
     await state.set_state(LibraryImportFlow.waiting_zip)
     await _safe_edit(
@@ -191,7 +212,7 @@ async def library_import_start(call: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(LibraryImportFlow.waiting_zip, F.document)
 async def library_import_receive(message: Message, state: FSMContext) -> None:
-    if not await _allowed(message.from_user.id):
+    if not await _allowed(message.from_user.id, "library_bulk_import"):
         await state.clear()
         return
     document = message.document
@@ -282,6 +303,8 @@ async def library_import_receive(message: Message, state: FSMContext) -> None:
 
 @router.message(LibraryImportFlow.waiting_zip)
 async def library_import_wrong(message: Message) -> None:
+    if not await _allowed(message.from_user.id, "library_bulk_import"):
+        return
     await message.answer("Отправьте ZIP-файл как документ.", reply_markup=navigation_menu(cancel_callback="library:menu"))
 
 
@@ -390,10 +413,21 @@ async def library_batches(call: CallbackQuery) -> None:
         for row in batches[:15]:
             lines.append(
                 f"<b>#{row['id']}</b> · {html.escape(str(row['archive_name']))}\n"
-                f"добавлено {row['imported_count']}, дублей {row['duplicate_count']}, ошибок {row['error_count']}"
+                f"добавлено {row['imported_count']}, заменено {row['replaced_count']}, "
+                f"перенумеровано {row['renumbered_count']}, дублей {row['duplicate_count']}, "
+                f"ошибок {row['error_count']}"
             )
         text = "\n\n".join(lines)
-    await _safe_edit(call, text, library_manager_menu())
+    can_bulk_import = await _allowed(call.from_user.id, "library_bulk_import")
+    await _safe_edit(
+        call,
+        text,
+        library_manager_menu(
+            can_bulk_import=can_bulk_import,
+            can_manage=True,
+            back_callback="owner:menu" if call.from_user.id in settings.owner_ids else "mod:menu",
+        ),
+    )
     await call.answer()
 
 
@@ -411,6 +445,8 @@ async def library_batch_details(call: CallbackQuery) -> None:
         f"Архив: <b>{html.escape(str(row['archive_name']))}</b>",
         f"Найдено папок: <b>{row['total_found']}</b>",
         f"Добавлено: <b>{row['imported_count']}</b>",
+        f"Заменено: <b>{row['replaced_count']}</b>",
+        f"Перенумеровано: <b>{row['renumbered_count']}</b>",
         f"Дублей: <b>{row['duplicate_count']}</b>",
         f"Ошибок: <b>{row['error_count']}</b>",
         f"Дублей без решения: <b>{len(pending)}</b>",
@@ -539,8 +575,9 @@ async def library_rollback_confirm(call: CallbackQuery) -> None:
     await _safe_edit(
         call,
         "<b>Удалить черновики этого пакета?</b>\n\n"
-        "Будут удалены только ещё не опубликованные книги, их главы и файлы. "
-        "Опубликованные книги, покупки и книги авторов не затрагиваются.",
+        "Будут удалены только новые, ещё не опубликованные книги, их главы и файлы. "
+        "Существующие книги, автоматически заменённые этим импортом, опубликованные книги, "
+        "покупки и книги авторов не затрагиваются.",
         library_rollback_confirm_menu(batch_id),
     )
     await call.answer()
@@ -686,11 +723,12 @@ async def library_set_limit_receive(message: Message, state: FSMContext) -> None
             ),
         )
     else:
+        auto_enabled = await is_auto_moderation_enabled()
         await message.answer(
             "✅ Лимит сохранён.\n\n"
             f"Книг: <b>{'без ограничения' if int(cfg['max_books']) == 0 else cfg['max_books']}</b>\nZIP: <b>{cfg['max_archive_mb']} МБ</b>\n"
             f"После распаковки: <b>{cfg['max_unpacked_mb']} МБ</b>",
-            reply_markup=library_settings_menu(str(cfg['duplicate_policy'])),
+            reply_markup=library_settings_menu(str(cfg['duplicate_policy']), auto_enabled),
         )
 
 
@@ -758,6 +796,7 @@ async def library_channel_retry_failed(call: CallbackQuery) -> None:
 async def library_settings(call: CallbackQuery) -> None:
     if await _deny(call): return
     cfg = await get_import_settings()
+    learning = await get_moderation_learning_summary()
     policy = {"ask": "спрашивать", "skip": "пропускать", "replace": "заменять"}.get(cfg["duplicate_policy"], cfg["duplicate_policy"])
     await _safe_edit(
         call,
@@ -766,8 +805,12 @@ async def library_settings(call: CallbackQuery) -> None:
         f"Размер ZIP: до <b>{cfg['max_archive_mb']} МБ</b>\n"
         f"После распаковки: до <b>{cfg['max_unpacked_mb']} МБ</b>\n"
         f"Дубли: <b>{policy}</b>\n\n"
-        "Безопасный режим «спрашивать» позволяет решить судьбу каждого дубля после импорта.",
-        library_settings_menu(str(cfg["duplicate_policy"])),
+        f"Автомодерация: <b>{'включена' if learning['enabled'] else 'выключена'}</b>\n"
+        f"Ручных решений для обучения: <b>{learning['approved'] + learning['rejected']}</b>\n"
+        f"Доверенных мягких категорий: <b>{len(learning['trusted_categories'])}</b>\n\n"
+        "Изменённая версия той же книги заменяется автоматически. "
+        "Опасные категории никогда не отключаются обучением.",
+        library_settings_menu(str(cfg["duplicate_policy"]), bool(learning["enabled"])),
     )
     await call.answer()
 
@@ -778,4 +821,14 @@ async def library_set_duplicate_policy(call: CallbackQuery) -> None:
     policy = call.data.rsplit(":", 1)[1]
     await update_import_settings(duplicate_policy=policy)
     await call.answer("Настройка сохранена")
+    await library_settings(call)
+
+
+@router.callback_query(F.data == "library:auto_moderation_toggle")
+async def library_auto_moderation_toggle(call: CallbackQuery) -> None:
+    if await _deny(call):
+        return
+    enabled = await is_auto_moderation_enabled()
+    await set_auto_moderation_enabled(not enabled)
+    await call.answer("Автомодерация включена" if not enabled else "Автомодерация выключена")
     await library_settings(call)

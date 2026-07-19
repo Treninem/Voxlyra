@@ -35,6 +35,7 @@ from app.services.automatic_moderation import (
     count_book_moderation_findings, list_book_moderation_findings, resolve_book_moderation_findings,
 )
 from app.services.moderation_alerts import notify_moderation_resolved
+from app.services.moderation_learning import record_moderation_decision
 from app.services.notifications import (
     book_moderation_message,
     book_revision_markup,
@@ -194,6 +195,12 @@ async def moderation_book_publish(call: CallbackQuery) -> None:
     if not result.published:
         await call.answer("Не удалось опубликовать книгу", show_alert=True)
         return
+    await record_moderation_decision(
+        book_id,
+        "approve",
+        actor_user_id=int(user["id"]),
+        note="Опубликовано после ручной проверки",
+    )
     await _notify(
         call,
         actor_user_id=int(user["id"]),
@@ -277,6 +284,12 @@ async def moderation_book_revision_reason(message: Message, state: FSMContext) -
         await message.answer("Книга уже обработана или не найдена.")
         return
     await set_book_publication_status(book_id, "draft")
+    await record_moderation_decision(
+        book_id,
+        "reject",
+        actor_user_id=int(user["id"]),
+        note=reason,
+    )
     await resolve_book_moderation(
         book_id,
         resolution="revision",

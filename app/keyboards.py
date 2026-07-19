@@ -1069,17 +1069,24 @@ def user_font_menu() -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-def library_manager_menu() -> InlineKeyboardMarkup:
+def library_manager_menu(
+    *,
+    can_bulk_import: bool = True,
+    can_manage: bool = True,
+    back_callback: str = "owner:menu",
+) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.button(text="📥 Импорт книг", callback_data="library:import")
-    kb.button(text="📖 Все книги", callback_data="library:list:all:0")
-    kb.button(text="⏳ Книги на проверке", callback_data="library:list:drafts:0")
-    kb.button(text="✅ Опубликованные", callback_data="library:list:published:0")
-    kb.button(text="📦 Экспорт библиотеки", callback_data="library:export")
-    kb.button(text="🗂 История импортов", callback_data="library:batches")
-    kb.button(text="⏱ Публикация в канал", callback_data="library:channel_schedule")
-    kb.button(text="⚙️ Настройки импорта", callback_data="library:settings")
-    kb.button(text="⬅️ Назад", callback_data="owner:menu")
+    if can_bulk_import:
+        kb.button(text="📥 Массовый импорт книг", callback_data="library:import")
+    if can_manage:
+        kb.button(text="📖 Все книги", callback_data="library:list:all:0")
+        kb.button(text="⏳ Книги на проверке", callback_data="library:list:drafts:0")
+        kb.button(text="✅ Опубликованные", callback_data="library:list:published:0")
+        kb.button(text="📦 Экспорт библиотеки", callback_data="library:export")
+        kb.button(text="🗂 История импортов", callback_data="library:batches")
+        kb.button(text="⏱ Публикация в канал", callback_data="library:channel_schedule")
+        kb.button(text="⚙️ Настройки импорта", callback_data="library:settings")
+    kb.button(text="⬅️ Назад", callback_data=back_callback)
     kb.adjust(1, 2, 2, 1, 1, 1, 1)
     return kb.as_markup()
 
@@ -1163,7 +1170,7 @@ def library_channel_schedule_menu(enabled: bool, author_enabled: bool = True) ->
     kb.adjust(1)
     return kb.as_markup()
 
-def library_settings_menu(current_policy: str) -> InlineKeyboardMarkup:
+def library_settings_menu(current_policy: str, auto_moderation_enabled: bool = True) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     labels = {"ask": "Спрашивать", "skip": "Пропускать", "replace": "Заменять"}
     for value in ("ask", "skip", "replace"):
@@ -1172,6 +1179,10 @@ def library_settings_menu(current_policy: str) -> InlineKeyboardMarkup:
     kb.button(text="🔢 Изменить лимит книг", callback_data="library:set_limit:max_books")
     kb.button(text="📦 Изменить лимит ZIP", callback_data="library:set_limit:max_archive_mb")
     kb.button(text="🗜 Изменить лимит распаковки", callback_data="library:set_limit:max_unpacked_mb")
+    kb.button(
+        text=("🤖 Автомодерация: включена" if auto_moderation_enabled else "🤖 Автомодерация: выключена"),
+        callback_data="library:auto_moderation_toggle",
+    )
     kb.button(text="⬅️ Управление библиотекой", callback_data="library:menu")
     kb.adjust(1)
     return kb.as_markup()

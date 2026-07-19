@@ -88,6 +88,8 @@ class ImportQueueJob:
     processed: int = 0
     total: int = 0
     added: int = 0
+    replaced: int = 0
+    renumbered: int = 0
     duplicates: int = 0
     error_count: int = 0
     phase: int = 0
@@ -107,6 +109,8 @@ def _row_to_job(row: Any) -> ImportQueueJob:
         processed=int(row["processed"] or 0),
         total=int(row["total"] or 0),
         added=int(row["added"] or 0),
+        replaced=int(row["replaced_count"] or 0),
+        renumbered=int(row["renumbered_count"] or 0),
         duplicates=int(row["duplicate_count"] or 0),
         error_count=int(row["error_count"] or 0),
         phase=int(row["phase"] or 0),
@@ -137,6 +141,8 @@ async def ensure_import_queue_schema() -> None:
                     processed INTEGER NOT NULL DEFAULT 0,
                     total INTEGER NOT NULL DEFAULT 0,
                     added INTEGER NOT NULL DEFAULT 0,
+                    replaced_count INTEGER NOT NULL DEFAULT 0,
+                    renumbered_count INTEGER NOT NULL DEFAULT 0,
                     duplicate_count INTEGER NOT NULL DEFAULT 0,
                     error_count INTEGER NOT NULL DEFAULT 0,
                     phase INTEGER NOT NULL DEFAULT 0,
@@ -152,6 +158,14 @@ async def ensure_import_queue_schema() -> None:
                     ON library_import_jobs(archive_hash, status);
                 """
             )
+            cur = await db.execute("PRAGMA table_info(library_import_jobs)")
+            columns = {row[1] for row in await cur.fetchall()}
+            for name, ddl in {
+                "replaced_count": "ALTER TABLE library_import_jobs ADD COLUMN replaced_count INTEGER NOT NULL DEFAULT 0",
+                "renumbered_count": "ALTER TABLE library_import_jobs ADD COLUMN renumbered_count INTEGER NOT NULL DEFAULT 0",
+            }.items():
+                if name not in columns:
+                    await db.execute(ddl)
             await db.commit()
         await asyncio.to_thread(IMPORT_UPLOAD_ROOT.mkdir, parents=True, exist_ok=True)
         await asyncio.to_thread(cleanup_stale_uploads)
@@ -264,14 +278,16 @@ async def _update_job_progress(job_id: int, data: dict[str, int]) -> None:
     async with connect() as db:
         await db.execute(
             """UPDATE library_import_jobs
-               SET batch_id=?, processed=?, total=?, added=?, duplicate_count=?,
-                   error_count=?, phase=?, heartbeat_at=?
+               SET batch_id=?, processed=?, total=?, added=?, replaced_count=?,
+                   renumbered_count=?, duplicate_count=?, error_count=?, phase=?, heartbeat_at=?
                WHERE id=?""",
             (
                 int(data.get("batch_id", 0)) or None,
                 int(data.get("processed", 0)),
                 int(data.get("total", 0)),
                 int(data.get("added", 0)),
+                int(data.get("replaced", 0)),
+                int(data.get("renumbered", 0)),
                 int(data.get("duplicates", 0)),
                 int(data.get("errors", 0)),
                 int(data.get("phase", 0)),
@@ -286,12 +302,15 @@ async def _set_job_completed(job_id: int, result: ImportResult) -> None:
     async with connect() as db:
         await db.execute(
             """UPDATE library_import_jobs
-               SET status='completed', batch_id=?, added=?, duplicate_count=?,
-                   error_count=?, phase=3, heartbeat_at=?, completed_at=?
+               SET status='completed', batch_id=?, added=?, replaced_count=?,
+                   renumbered_count=?, duplicate_count=?, error_count=?, phase=3,
+                   heartbeat_at=?, completed_at=?
                WHERE id=?""",
             (
                 int(result.batch_id),
                 int(result.added),
+                int(result.replaced),
+                int(result.renumbered),
                 int(result.duplicates),
                 len(result.errors),
                 utc_now(),
@@ -349,6 +368,8 @@ def _progress_text(job_id: int, data: dict[str, int]) -> str:
         + (f" ({percent}%)" if total else "")
         + "\n"
         f"Добавлено: <b>{int(data.get('added', 0))}</b>\n"
+        f"Заменено: <b>{int(data.get('replaced', 0))}</b>\n"
+        f"Перенумеровано: <b>{int(data.get('renumbered', 0))}</b>\n"
         f"Дублей: <b>{int(data.get('duplicates', 0))}</b>\n"
         f"Ошибок: <b>{int(data.get('errors', 0))}</b>\n\n"
         "Бот продолжает работать — можно пользоваться другими разделами."
@@ -360,6 +381,8 @@ def _completed_text(result: ImportResult) -> str:
         "<b>✅ Импорт завершён</b>",
         "",
         f"📚 Добавлено: <b>{result.added}</b>",
+        f"🔄 Заменено: <b>{result.replaced}</b>",
+        f"🔢 Перенумеровано: <b>{result.renumbered}</b>",
         f"⚠️ Найдено дублей: <b>{result.duplicates}</b>",
         f"❌ Ошибок: <b>{len(result.errors)}</b>",
         "",
@@ -411,7 +434,8 @@ async def discard_incomplete_import_batch(batch_id: int) -> None:
         if batch is None or str(batch["status"]) not in {"processing", "failed"}:
             return
         cur = await db.execute(
-            "SELECT source_file_name, cover_path FROM books WHERE import_batch_id=?",
+            """SELECT source_file_name, cover_path FROM books
+               WHERE import_batch_id=? AND COALESCE(import_was_replacement, 0)=0""",
             (int(batch_id),),
         )
         for row in await cur.fetchall():
@@ -428,7 +452,15 @@ async def discard_incomplete_import_batch(batch_id: int) -> None:
             path = Path(str(row["candidate_dir"] or ""))
             if path.exists():
                 candidate_paths.add(path)
-        await db.execute("DELETE FROM books WHERE import_batch_id=?", (int(batch_id),))
+        await db.execute(
+            "DELETE FROM books WHERE import_batch_id=? AND COALESCE(import_was_replacement, 0)=0",
+            (int(batch_id),),
+        )
+        await db.execute(
+            """UPDATE books SET import_batch_id=NULL, import_was_replacement=0
+               WHERE import_batch_id=? AND COALESCE(import_was_replacement, 0)=1""",
+            (int(batch_id),),
+        )
         await db.execute("DELETE FROM library_import_duplicates WHERE batch_id=?", (int(batch_id),))
         await db.execute("DELETE FROM library_import_batches WHERE id=?", (int(batch_id),))
         await db.commit()
@@ -462,7 +494,8 @@ async def recover_interrupted_import_jobs() -> int:
             await db.execute(
                 """UPDATE library_import_jobs
                    SET status=?, batch_id=NULL, processed=0, total=0, added=0,
-                       duplicate_count=0, error_count=0, phase=0, last_error=?,
+                       replaced_count=0, renumbered_count=0, duplicate_count=0,
+                       error_count=0, phase=0, last_error=?,
                        started_at=NULL, heartbeat_at=?
                    WHERE id=?""",
                 (status, error, utc_now(), int(row["id"])),

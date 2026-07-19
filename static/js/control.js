@@ -73,6 +73,9 @@
       sections.push(sectionButton('payouts', 'Выплаты авторам', 'Stars и точная сумма в рублях', (q.payouts_new || 0) + (q.payouts_approved || 0)));
     }
     if (can('grant_access')) sections.push(sectionButton('access', 'Выдать доступ', 'Главы и Premium по ID или username', 0));
+    if (can('library_bulk_import') || can('library_import_manage')) {
+      sections.push(sectionButton('library_import', 'Импорт библиотеки', 'ZIP, замена версий и автомодерация', 0));
+    }
     if (data.role === 'owner') {
       sections.push(sectionButton('tts', 'Озвучивание', 'Движки, голоса и очередь', 0));
       sections.push(sectionButton('payments', 'Stars и курсы', 'Оплата, расчёты автора и защита', 0));
@@ -107,6 +110,63 @@
       <div class="control-item-main"><span>${item.content_type && item.content_type !== 'book' ? 'Графическое произведение' : 'Книга'} #${item.id}</span><h3>${esc(item.title)}</h3><p>${esc(item.pen_name || 'Автор')} · ${esc(item.age_limit || '')}</p><small>${esc((item.description || '').slice(0, 240))}</small></div>
       <div class="control-actions">${item.first_graphic_chapter_id ? actionLink('Проверить страницы', `/comic/${Number(item.first_graphic_chapter_id)}?moderation=1`) : item.first_chapter_id ? actionLink('Читать книгу', `/reader/${Number(item.first_chapter_id)}?moderation=1`) : ''}${actionButton('Опубликовать', `book:publish:${item.id}`, 'approve')}${actionButton('На доработку', `book:reject:${item.id}`, 'danger')}</div>
     </article>`).join('');
+  }
+
+  async function loadLibraryImport() {
+    openWorkspace('Импорт библиотеки', 'Загружайте накопительные ZIP прямо из Mini App. Все книги остаются черновиками.', 'Библиотека');
+    $('workspaceTabs').innerHTML = '';
+    const data = await apiFetch('/api/control/library-import');
+    const settings = data.settings || {};
+    const learning = data.learning || {};
+    const queue = data.queue || {};
+    const batches = data.batches || [];
+    const queueCount = Number(queue.queued || 0) + Number(queue.processing || 0);
+    const history = batches.length ? batches.map((item) => `<article class="control-item">
+      <div class="control-item-main">
+        <span>Пакет #${Number(item.id)} · ${esc(item.status || '')}</span>
+        <h3>${esc(item.archive_name || 'Архив библиотеки')}</h3>
+        <p>Добавлено: ${Number(item.imported_count || 0)} · заменено: ${Number(item.replaced_count || 0)} · перенумеровано: ${Number(item.renumbered_count || 0)}</p>
+        <small>Дублей: ${Number(item.duplicate_count || 0)} · ошибок: ${Number(item.error_count || 0)} · ${esc(dateText(item.completed_at || item.created_at))}</small>
+      </div>
+    </article>`).join('') : '<article class="empty-card"><h3>История пока пуста</h3><p>Первый импорт появится здесь после завершения.</p></article>';
+    const importButton = data.can_bulk_import
+      ? '<button type="button" id="libraryImportStart" class="approve">Выбрать ZIP и импортировать</button>'
+      : '';
+    const moderationButton = data.can_manage
+      ? `<button type="button" id="libraryAutoModerationToggle" class="${learning.enabled ? 'secondary' : 'approve'}">${learning.enabled ? 'Выключить автомодерацию' : 'Включить автомодерацию'}</button>`
+      : '';
+    $('workspaceList').innerHTML = `<div class="control-stat-grid">
+      ${statCard('В очереди', queueCount)}
+      ${statCard('Автомодерация', learning.enabled ? 'Включена' : 'Выключена')}
+      ${statCard('Решений для обучения', Number(learning.approved || 0) + Number(learning.rejected || 0))}
+      ${statCard('Доверенных категорий', (learning.trusted_categories || []).length)}
+    </div>
+    <article class="control-item payment-settings-card">
+      <div class="control-item-main"><span>Массовый импорт</span><h3>Books/001/...</h3><p>Изменённая книга заменяет старую версию автоматически. При занятом ID новая книга получает первый свободный номер.</p><small>Лимит: ${Number(settings.max_books || 0) ? `до ${Number(settings.max_books)} книг` : 'без ограничения по количеству'} · ZIP до ${Number(settings.max_archive_mb || 0)} МБ. Публикация после импорта не выполняется.</small></div>
+      <div class="control-actions">${importButton}${moderationButton}</div>
+    </article>
+    <div class="section-title"><div><span class="eyebrow">Последние пакеты</span><h2>История импорта</h2></div></div>${history}`;
+    $('libraryImportStart')?.addEventListener('click', async () => {
+      const button = $('libraryImportStart');
+      button.disabled = true;
+      button.textContent = 'Открываем загрузку…';
+      try {
+        const session = await apiFetch('/api/control/library-import/session', { method: 'POST' });
+        window.location.assign(session.upload_url);
+      } catch (error) {
+        button.disabled = false;
+        button.textContent = 'Выбрать ZIP и импортировать';
+        throw error;
+      }
+    });
+    $('libraryAutoModerationToggle')?.addEventListener('click', async () => {
+      await apiFetch('/api/control/library-import/auto-moderation', {
+        method: 'PATCH',
+        body: JSON.stringify({ enabled: !Boolean(learning.enabled) }),
+      });
+      notify(!learning.enabled ? 'Автомодерация включена' : 'Автомодерация выключена');
+      await loadLibraryImport();
+    });
   }
 
   async function loadGraphicPages(status = 'new') {
@@ -721,7 +781,7 @@
     const section = event.target.closest('[data-section]');
     if (section) {
       state.active = section.dataset.section;
-      const loaders = { books: loadBooks, graphic_pages: loadGraphicPages, comments: loadComments, complaints: loadComplaints, refunds: loadRefunds, payouts: loadPayouts, rub_profiles: loadRubProfiles, rub_payouts: loadRubPayouts, tts: loadTtsDiagnostics, payments: loadPaymentSettings, premium: loadPremiumSettings, access: loadAccessManagement };
+      const loaders = { books: loadBooks, graphic_pages: loadGraphicPages, comments: loadComments, complaints: loadComplaints, refunds: loadRefunds, payouts: loadPayouts, rub_profiles: loadRubProfiles, rub_payouts: loadRubPayouts, tts: loadTtsDiagnostics, payments: loadPaymentSettings, premium: loadPremiumSettings, access: loadAccessManagement, library_import: loadLibraryImport };
       loaders[state.active]?.().catch(handleError);
       return;
     }
@@ -752,6 +812,10 @@
     if (requested === 'access' && can('grant_access')) {
       state.active = 'access';
       loadAccessManagement().catch(handleError);
+    }
+    if (requested === 'library_import' && (can('library_bulk_import') || can('library_import_manage'))) {
+      state.active = 'library_import';
+      loadLibraryImport().catch(handleError);
     }
   }).catch((error) => showError(error.message));
 })();

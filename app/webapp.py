@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 from functools import partial
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -44,6 +45,7 @@ from app.db import (
     create_graphic_chapter_record,
     delete_graphic_chapter_for_author,
     count_chapters_for_book,
+    connect,
     get_adjacent_audio_chapters,
     get_adjacent_chapters,
     get_adjacent_chapters_for_moderation,
@@ -279,13 +281,20 @@ from app.services.chunked_upload import (
 from app.services.library_import_queue import (
     IMPORT_UPLOAD_ROOT,
     calculate_archive_hash,
+    ensure_import_queue_schema,
     enqueue_import_job,
 )
 from app.services.library_import_upload import (
     LibraryImportUploadTokenError,
+    create_library_import_upload_token,
     verify_library_import_upload_token,
 )
 from app.services.library_manager import get_import_settings
+from app.services.moderation_learning import (
+    get_moderation_learning_summary,
+    record_moderation_decision,
+    set_auto_moderation_enabled,
+)
 from app.services.notifications import (
     book_moderation_message,
     book_revision_markup,
@@ -742,7 +751,7 @@ def create_app() -> FastAPI:
         CORSMiddleware,
         allow_origins=["*"],
         allow_credentials=False,
-        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+        allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["*"],
         max_age=600,
     )
@@ -836,7 +845,7 @@ def create_app() -> FastAPI:
             token_data = verify_library_import_upload_token(token)
         except LibraryImportUploadTokenError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
-        user, _, _ = await control_session(init_data, "library_import_manage")
+        user, _, _ = await control_session(init_data, "library_bulk_import")
         if int(user.telegram_id) != int(token_data.telegram_id):
             raise HTTPException(status_code=403, detail="Эта ссылка создана для другого аккаунта Telegram.")
         return user, token_data
@@ -851,6 +860,96 @@ def create_app() -> FastAPI:
             return {str(key): value for key, value in form.items()}
         except Exception as exc:
             raise HTTPException(status_code=400, detail="Не удалось прочитать запрос загрузки.") from exc
+
+    @app.get("/api/control/library-import")
+    async def api_control_library_import(
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user, is_owner, permissions = await control_session(
+            x_telegram_init_data,
+            "library_import_manage",
+            "library_bulk_import",
+        )
+        await ensure_import_queue_schema()
+        cfg = await get_import_settings()
+        learning = await get_moderation_learning_summary()
+        async with connect() as db:
+            cur = await db.execute(
+                """SELECT status, COUNT(*) AS count FROM library_import_jobs
+                   GROUP BY status"""
+            )
+            queue = {str(row["status"]): int(row["count"] or 0) for row in await cur.fetchall()}
+            cur = await db.execute(
+                """SELECT id, archive_name, status, total_found, imported_count,
+                          replaced_count, renumbered_count, duplicate_count,
+                          error_count, created_at, completed_at
+                   FROM library_import_batches ORDER BY id DESC LIMIT 8"""
+            )
+            batches = [dict(row) for row in await cur.fetchall()]
+        return {
+            "can_bulk_import": bool(is_owner or "library_bulk_import" in permissions),
+            "can_manage": bool(is_owner or "library_import_manage" in permissions),
+            "settings": dict(cfg),
+            "learning": learning,
+            "queue": queue,
+            "batches": batches,
+            "telegram_id": int(user.telegram_id),
+        }
+
+    @app.post("/api/control/library-import/session")
+    async def api_control_library_import_session(
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user, _, _ = await control_session(x_telegram_init_data, "library_bulk_import")
+        if not settings.BOT_TOKEN.strip():
+            raise HTTPException(status_code=503, detail="Токен бота не настроен для уведомлений импорта.")
+        delivery_bot = Bot(token=settings.BOT_TOKEN)
+        try:
+            progress = await delivery_bot.send_message(
+                chat_id=int(user.telegram_id),
+                text=(
+                    "<b>📤 Импорт из Mini App</b>\n\n"
+                    "Выберите ZIP в открывшемся окне. После загрузки архив автоматически "
+                    "попадёт в фоновую очередь, а прогресс будет обновляться здесь."
+                ),
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail="Не удалось создать сообщение прогресса. Откройте чат с ботом и повторите.",
+            ) from exc
+        finally:
+            await delivery_bot.session.close()
+        token = create_library_import_upload_token(
+            telegram_id=int(user.telegram_id),
+            chat_id=int(user.telegram_id),
+            progress_message_id=int(progress.message_id),
+        )
+        return {
+            "ok": True,
+            "upload_url": f"/library-import-upload?token={quote(token, safe='')}",
+        }
+
+    @app.patch("/api/control/library-import/auto-moderation")
+    async def api_control_library_import_auto_moderation(
+        request: Request,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user, _, _ = await control_session(x_telegram_init_data, "library_import_manage")
+        payload = await request.json()
+        if not isinstance(payload, dict) or not isinstance(payload.get("enabled"), bool):
+            raise HTTPException(status_code=400, detail="Передайте enabled: true или false.")
+        enabled = await set_auto_moderation_enabled(bool(payload["enabled"]))
+        await add_audit(
+            user.app_user_id,
+            "auto_moderation_enabled" if enabled else "auto_moderation_disabled",
+            "settings",
+            "auto_moderation_enabled",
+            None,
+            "1" if enabled else "0",
+        )
+        return {"ok": True, "enabled": enabled}
 
     @app.get("/library-import-upload", response_class=HTMLResponse)
     async def library_import_upload_page(request: Request, token: str = ""):
@@ -972,7 +1071,7 @@ def create_app() -> FastAPI:
             # Совместимость с уже открытой страницей v1.13.12.5.
             user, _, _ = await control_session(
                 init_data or x_telegram_init_data,
-                "library_import_manage",
+                "library_bulk_import",
             )
         try:
             meta = await asyncio.to_thread(
@@ -5101,6 +5200,12 @@ def create_app() -> FastAPI:
                 if not result.published:
                     raise HTTPException(status_code=409, detail=result.channel_error or "Книгу не удалось опубликовать.")
                 channel_status = result.channel_status
+                await record_moderation_decision(
+                    book_id,
+                    "approve",
+                    actor_user_id=user.app_user_id,
+                    note="Опубликовано после ручной проверки в Mini App",
+                )
                 await resolve_book_moderation(
                     book_id,
                     resolution="published",
@@ -5130,6 +5235,12 @@ def create_app() -> FastAPI:
             if len(reason) < 8:
                 raise HTTPException(status_code=400, detail="Укажите понятную причину возврата на доработку.")
             await set_book_publication_status(book_id, "draft")
+            await record_moderation_decision(
+                book_id,
+                "reject",
+                actor_user_id=user.app_user_id,
+                note=reason,
+            )
             await resolve_book_moderation(
                 book_id,
                 resolution="revision",

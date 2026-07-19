@@ -10,7 +10,8 @@ class Permission:
 
 PERMISSIONS = [
     Permission("mod_books", "📚 Модерация книг"),
-    Permission("library_import_manage", "📥 Массовый импорт библиотеки"),
+    Permission("library_import_manage", "⚙️ Управление импортом библиотеки"),
+    Permission("library_bulk_import", "📥 Массовый импорт книг"),
     Permission("mod_comments", "💬 Модерация комментариев"),
     Permission("complaints", "🧾 Работа с жалобами"),
     Permission("authors", "✍️ Работа с авторами"),
@@ -38,6 +39,7 @@ MODERATION_BUTTONS = {
     # Показываем только те разделы, где уже есть рабочая логика.
     "mod_books": ("📚 Книги на проверке", "mod:books"),
     "library_import_manage": ("📚 Управление библиотекой", "library:menu"),
+    "library_bulk_import": ("📥 Массовый импорт книг", "library:import"),
     "mod_comments": ("💬 Комментарии и отзывы", "mod:comments"),
     "complaints": ("🧾 Жалобы", "mod:complaints"),
     "refunds": ("↩️ Возвраты", "mod:refunds"),

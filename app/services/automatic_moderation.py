@@ -15,6 +15,10 @@ from app.db import (
     utc_now,
 )
 from app.services.duplicate_books import duplicate_warning_text, find_book_duplicates
+from app.services.moderation_learning import (
+    get_trusted_moderation_categories,
+    is_auto_moderation_enabled,
+)
 
 _URL_RE = re.compile(r"(?:https?://|www\.|t\.me/|telegram\.me/)[^\s<>{}\[\]]+", re.IGNORECASE)
 _ALLOWED_INTERNAL_URL_RE = re.compile(r"https?://(?:t\.me/)?(?:voxlyrabot|voxlyra\.bothost\.tech)(?:/|$)", re.IGNORECASE)
@@ -161,26 +165,36 @@ async def evaluate_book_for_auto_publication(book_id: int, *, actor_telegram_id:
     total_characters = sum(len(text.strip()) for text in texts)
     total_graphic_pages = sum(int(row["pages_count"] or row["actual_pages_count"] or 0) for row in graphics)
     hard_reasons: list[str] = []
-    review_reasons: list[str] = []
+    review_signals: list[tuple[str, str]] = []
     findings: list[ModerationFinding] = []
 
     is_graphic = str(book["content_type"] or "book") != "book"
     if is_graphic:
-        if not graphics or total_graphic_pages < 1: hard_reasons.append("В графическом произведении нет страниц для проверки.")
-        if any(int(row["pages_count"] or row["actual_pages_count"] or 0) < 1 for row in graphics): hard_reasons.append("Есть пустая графическая глава.")
-        if total_graphic_pages < 3: review_reasons.append("Слишком мало страниц для надёжной автоматической проверки.")
+        if not graphics or total_graphic_pages < 1:
+            hard_reasons.append("В графическом произведении нет страниц для проверки.")
+        if any(int(row["pages_count"] or row["actual_pages_count"] or 0) < 1 for row in graphics):
+            hard_reasons.append("Есть пустая графическая глава.")
+        if total_graphic_pages < 3:
+            review_signals.append(("short_graphic", "Слишком мало страниц для надёжной автоматической проверки."))
     else:
-        if not texts: hard_reasons.append("В книге нет глав для проверки.")
-        elif total_characters < 2000: review_reasons.append("Объём книги слишком мал для надёжной автоматической проверки.")
-        if any(0 < len(text.strip()) < 300 for text in texts): review_reasons.append("Есть слишком короткая глава — нужна ручная проверка структуры.")
+        if not texts:
+            hard_reasons.append("В книге нет глав для проверки.")
+        elif total_characters < 2000:
+            review_signals.append(("short_book", "Объём книги слишком мал для надёжной автоматической проверки."))
+        if any(0 < len(text.strip()) < 300 for text in texts):
+            review_signals.append(("short_chapter", "Есть слишком короткая глава — нужна ручная проверка структуры."))
 
-    if len(str(book["title"] or "").strip()) < 2: hard_reasons.append("Название книги не заполнено.")
-    if len(str(book["description"] or "").strip()) < 60: review_reasons.append("Описание слишком короткое или отсутствует.")
-    if not str(book["cover_path"] or "").strip() and not str(book["cover_file_id"] or "").strip(): review_reasons.append("Обложка не загружена.")
+    if len(str(book["title"] or "").strip()) < 2:
+        hard_reasons.append("Название книги не заполнено.")
+    if len(str(book["description"] or "").strip()) < 60:
+        review_signals.append(("short_description", "Описание слишком короткое или отсутствует."))
+    if not str(book["cover_path"] or "").strip() and not str(book["cover_file_id"] or "").strip():
+        review_signals.append(("missing_cover", "Обложка не загружена."))
 
     age_digits = int(re.sub(r"\D", "", str(book["age_limit"] or "0+")) or 0)
     for chapter, text in zip(active_chapters, texts):
-        if not text: continue
+        if not text:
+            continue
         findings += _finding(_URL_RE, text, category="external_link", severity="block",
             reason="Внешняя ссылка", chapter=chapter, allow_internal=True)
         findings += _finding(_EXTERNAL_PAYMENT_RE, text, category="external_payment", severity="block",
@@ -189,36 +203,82 @@ async def evaluate_book_for_auto_publication(book_id: int, *, actor_telegram_id:
             reason="Реклама или запрещённый призыв", chapter=chapter, limit=30)
         findings += _finding(_LONG_REPEAT_RE, text, category="damaged_text", severity="block",
             reason="Повреждённый текст или спам", chapter=chapter, limit=10)
+        profanity_category = "profanity_underage" if age_digits < 18 else "profanity"
         profanity_severity = "block" if age_digits < 18 else "review"
-        findings += _finding(_PROFANITY_RE, text, category="profanity", severity=profanity_severity,
+        findings += _finding(_PROFANITY_RE, text, category=profanity_category, severity=profanity_severity,
             reason=("Ненормативная лексика при рейтинге ниже 18+" if age_digits < 18 else "Высокая плотность ненормативной лексики"),
             chapter=chapter, limit=50)
 
     categories = {f.category for f in findings}
-    if "external_link" in categories: hard_reasons.append("В тексте найдены внешние ссылки. Откройте список совпадений.")
-    if "external_payment" in categories: hard_reasons.append("Найдена возможная просьба об оплате вне платформы. Откройте список совпадений.")
-    if "promotion" in categories: hard_reasons.append("Обнаружены рекламные или запрещённые призывы. Откройте список совпадений.")
-    if "damaged_text" in categories: hard_reasons.append("Обнаружен повреждённый текст или спам. Откройте список совпадений.")
-    profanity = [f for f in findings if f.category == "profanity"]
-    if profanity and age_digits < 18: hard_reasons.append("Обнаружена ненормативная лексика при возрастном ограничении ниже 18+. Откройте список совпадений.")
-    elif len(profanity) > max(30, total_characters // 1500): review_reasons.append("Слишком высокая плотность ненормативной лексики — нужна ручная проверка контекста.")
+    if "external_link" in categories:
+        hard_reasons.append("В тексте найдены внешние ссылки. Откройте список совпадений.")
+    if "external_payment" in categories:
+        hard_reasons.append("Найдена возможная просьба об оплате вне платформы. Откройте список совпадений.")
+    if "promotion" in categories:
+        hard_reasons.append("Обнаружены рекламные или запрещённые призывы. Откройте список совпадений.")
+    if "damaged_text" in categories:
+        hard_reasons.append("Обнаружен повреждённый текст или спам. Откройте список совпадений.")
+    profanity = [f for f in findings if f.category in {"profanity", "profanity_underage"}]
+    if profanity and age_digits < 18:
+        hard_reasons.append("Обнаружена ненормативная лексика при возрастном ограничении ниже 18+. Откройте список совпадений.")
+    elif len(profanity) > max(30, total_characters // 1500):
+        review_signals.append(("profanity", "Слишком высокая плотность ненормативной лексики — нужна ручная проверка контекста."))
 
-    matches = await find_book_duplicates(title=str(book["title"] or ""), author_id=int(book["author_id"]) if book["author_id"] is not None else None,
-        exclude_book_id=int(book_id), source_file_hash=str(book["source_file_hash"] or ""))
-    if matches and not bool(book["duplicate_override"]): hard_reasons.append(duplicate_warning_text(matches))
-    stats = await get_author_auto_moderation_stats(int(book["author_id"]) if book["author_id"] is not None else None, int(book_id))
-    if stats["open_complaints"] > 0: hard_reasons.append("У автора есть незавершённые жалобы.")
+    matches = await find_book_duplicates(
+        title=str(book["title"] or ""),
+        author_id=int(book["author_id"]) if book["author_id"] is not None else None,
+        exclude_book_id=int(book_id),
+        source_file_hash=str(book["source_file_hash"] or ""),
+    )
+    if matches and not bool(book["duplicate_override"]):
+        hard_reasons.append(duplicate_warning_text(matches))
+    stats = await get_author_auto_moderation_stats(
+        int(book["author_id"]) if book["author_id"] is not None else None,
+        int(book_id),
+    )
+    if stats["open_complaints"] > 0:
+        hard_reasons.append("У автора есть незавершённые жалобы.")
 
-    await replace_book_moderation_findings(int(book_id), findings)
+    trusted_categories = await get_trusted_moderation_categories()
+    visible_findings = [
+        item for item in findings
+        if item.severity == "block" or item.category not in trusted_categories
+    ]
+    for category, reason in review_signals:
+        if category in trusted_categories:
+            continue
+        visible_findings.append(ModerationFinding(
+            category=category,
+            severity="review",
+            reason=reason,
+            matched_text="",
+            context=reason,
+        ))
+    await replace_book_moderation_findings(int(book_id), visible_findings)
+    review_reasons = [reason for category, reason in review_signals if category not in trusted_categories]
+    enabled = await is_auto_moderation_enabled()
     is_owner_upload = actor_telegram_id is not None and int(actor_telegram_id) in settings.owner_ids
-    if is_owner_upload:
+
+    if not enabled:
+        reasons = hard_reasons + review_reasons + ["Автомодерация отключена владельцем. Требуется ручная проверка."]
+        can_auto_publish = False
+    elif is_owner_upload:
         reasons = hard_reasons
+        can_auto_publish = not reasons
     else:
         reasons = hard_reasons + review_reasons
-        if not revision_mode: reasons.append("Требуется подтверждение модератора перед первой публикацией этой версии книги.")
+        if not revision_mode:
+            reasons.append("Требуется подтверждение модератора перед первой публикацией этой версии книги.")
+        can_auto_publish = not reasons
+
     unique_reasons = list(dict.fromkeys(item.strip() for item in reasons if item.strip()))
-    return AutoModerationResult(is_owner_upload and not unique_reasons, unique_reasons,
-        checked_chapters=len(texts) + len(graphics), total_characters=total_characters, findings=findings)
+    return AutoModerationResult(
+        can_auto_publish and not unique_reasons,
+        unique_reasons,
+        checked_chapters=len(texts) + len(graphics),
+        total_characters=total_characters,
+        findings=visible_findings,
+    )
 
 
 def evaluate_metadata_text(value: str, *, age_limit: str = "0+", field_name: str = "поле") -> list[str]:

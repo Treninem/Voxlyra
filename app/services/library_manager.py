@@ -65,10 +65,13 @@ class ImportErrorItem:
 class ImportResult:
     batch_id: int
     added: int = 0
+    replaced: int = 0
+    renumbered: int = 0
     duplicates: int = 0
     errors: list[ImportErrorItem] = field(default_factory=list)
     book_ids: list[int] = field(default_factory=list)
     duplicate_ids: list[int] = field(default_factory=list)
+    id_changes: list[dict[str, int | str]] = field(default_factory=list)
 
 
 def _safe_member(name: str) -> bool:
@@ -420,6 +423,8 @@ async def ensure_library_schema() -> None:
                 status TEXT NOT NULL DEFAULT 'processing',
                 total_found INTEGER NOT NULL DEFAULT 0,
                 imported_count INTEGER NOT NULL DEFAULT 0,
+                replaced_count INTEGER NOT NULL DEFAULT 0,
+                renumbered_count INTEGER NOT NULL DEFAULT 0,
                 duplicate_count INTEGER NOT NULL DEFAULT 0,
                 error_count INTEGER NOT NULL DEFAULT 0,
                 errors_json TEXT NOT NULL DEFAULT '[]',
@@ -537,6 +542,14 @@ async def ensure_library_schema() -> None:
         }.items():
             if name not in setting_columns:
                 await db.execute(ddl)
+        cur = await db.execute("PRAGMA table_info(library_import_batches)")
+        batch_columns = {row[1] for row in await cur.fetchall()}
+        for name, ddl in {
+            "replaced_count": "ALTER TABLE library_import_batches ADD COLUMN replaced_count INTEGER NOT NULL DEFAULT 0",
+            "renumbered_count": "ALTER TABLE library_import_batches ADD COLUMN renumbered_count INTEGER NOT NULL DEFAULT 0",
+        }.items():
+            if name not in batch_columns:
+                await db.execute(ddl)
         # v1.13.12.1: старое значение 500 было заводским ограничением, а не
         # осознанной настройкой владельца. Один раз переводим его в режим без
         # ограничения; любые другие уже выбранные значения сохраняем.
@@ -560,6 +573,7 @@ async def ensure_library_schema() -> None:
             "creator_id": "ALTER TABLE books ADD COLUMN creator_id INTEGER",
             "rights_holder_id": "ALTER TABLE books ADD COLUMN rights_holder_id INTEGER",
             "revenue_mode": "ALTER TABLE books ADD COLUMN revenue_mode TEXT NOT NULL DEFAULT 'none'",
+            "import_was_replacement": "ALTER TABLE books ADD COLUMN import_was_replacement INTEGER NOT NULL DEFAULT 0",
         }
         for column, sql in migrations.items():
             if column not in existing:
@@ -577,6 +591,87 @@ def _normalize_person_name(value: str) -> str:
     value = value.casefold().replace("ё", "е")
     value = re.sub(r"[^a-zа-я0-9]+", " ", value)
     return " ".join(value.split())[:180]
+
+
+def _normalize_work_title(value: str) -> str:
+    value = str(value or "").casefold().replace("ё", "е")
+    value = re.sub(r"[^a-zа-я0-9]+", " ", value)
+    return " ".join(value.split())[:240]
+
+
+def _requested_book_id(metadata: dict[str, Any], folder_name: str) -> int | None:
+    """Возвращает желаемый ID из метаданных или числового имени папки.
+
+    Для старых пакетов поддерживаются оба явных поля VoxLyra, а также
+    общеупотребительные id/book_id. Числовая папка используется только как
+    пожелание: при конфликте книга безопасно получает первый свободный ID.
+    """
+    value: Any = None
+    for key in ("voxlyra_book_id", "existing_book_id", "book_id", "id"):
+        if metadata.get(key) not in (None, ""):
+            value = metadata.get(key)
+            break
+    if value in (None, "") and re.fullmatch(r"\d+", str(folder_name or "").strip()):
+        value = str(folder_name).strip()
+    if value in (None, ""):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Некорректный ID книги в metadata.json или имени папки") from exc
+    if parsed <= 0:
+        raise ValueError("ID книги должен быть положительным числом")
+    return parsed
+
+
+
+
+def _same_logical_work(
+    *,
+    existing_title: str,
+    existing_author: str,
+    incoming_title: str,
+    incoming_author: str,
+    existing_source: str = "",
+    incoming_source: str = "",
+) -> bool:
+    """Консервативно отличает новую редакцию от чужой книги с тем же ID."""
+    old_title = _normalize_work_title(existing_title)
+    new_title = _normalize_work_title(incoming_title)
+    old_author = _normalize_person_name(existing_author)
+    new_author = _normalize_person_name(incoming_author)
+    old_source = str(existing_source or "").strip().casefold()
+    new_source = str(incoming_source or "").strip().casefold()
+
+    if old_source and new_source and old_source == new_source:
+        return True
+    if old_title and new_title and old_title == new_title and old_author == new_author:
+        return True
+    if not old_author or old_author != new_author or not old_title or not new_title:
+        return False
+    if old_title in new_title or new_title in old_title:
+        return min(len(old_title), len(new_title)) >= 5
+    old_tokens = set(old_title.split())
+    new_tokens = set(new_title.split())
+    if not old_tokens or not new_tokens:
+        return False
+    shared_ratio = len(old_tokens & new_tokens) / min(len(old_tokens), len(new_tokens))
+    return shared_ratio >= 0.67
+
+
+async def _first_free_book_id(db, *, start_at: int = 1) -> int:
+    candidate = max(1, int(start_at))
+    cur = await db.execute(
+        "SELECT id FROM books WHERE id>=? ORDER BY id",
+        (candidate,),
+    )
+    for row in await cur.fetchall():
+        current = int(row["id"])
+        if current > candidate:
+            break
+        if current == candidate:
+            candidate += 1
+    return candidate
 
 
 async def _ensure_creator_and_rights(
@@ -664,11 +759,21 @@ async def _finish_batch(batch_id: int, result: ImportResult, total_found: int) -
         await db.execute(
             """
             UPDATE library_import_batches
-            SET status='completed', total_found=?, imported_count=?, duplicate_count=?,
-                error_count=?, errors_json=?, completed_at=?
+            SET status='completed', total_found=?, imported_count=?, replaced_count=?,
+                renumbered_count=?, duplicate_count=?, error_count=?, errors_json=?, completed_at=?
             WHERE id=?
             """,
-            (total_found, result.added, result.duplicates, len(result.errors), json.dumps(errors, ensure_ascii=False), utc_now(), batch_id),
+            (
+                total_found,
+                result.added,
+                result.replaced,
+                result.renumbered,
+                result.duplicates,
+                len(result.errors),
+                json.dumps(errors, ensure_ascii=False),
+                utc_now(),
+                batch_id,
+            ),
         )
         await db.commit()
 
@@ -705,6 +810,8 @@ async def import_library_zip(
             "processed": processed,
             "total": total_found,
             "added": result.added,
+            "replaced": result.replaced,
+            "renumbered": result.renumbered,
             "duplicates": result.duplicates,
             "errors": len(result.errors),
             "phase": phase,
@@ -835,52 +942,116 @@ async def import_library_zip(
                     description,
                 )
 
-                # Поле `id` в пакетах часто является порядковым номером папки
-                # (001, 002, ...), а не ID книги в базе VoxLyra. Используем только
-                # явно названный платформенный идентификатор, чтобы не заменить
-                # случайно чужую книгу и чтобы повтор после перезапуска был безопасен.
-                explicit_id = metadata.get("voxlyra_book_id") or metadata.get("existing_book_id")
+                authoritative_update_id = any(
+                    metadata.get(key) not in (None, "")
+                    for key in ("voxlyra_book_id", "existing_book_id")
+                ) or metadata.get("replace_existing") is True
                 try:
-                    explicit_id = int(explicit_id) if explicit_id not in (None, "") else None
-                except (TypeError, ValueError):
-                    item.reasons.append("Некорректный существующий ID VoxLyra в metadata.json")
+                    requested_id = _requested_book_id(metadata, folder.name)
+                except ValueError as exc:
+                    item.reasons.append(str(exc))
                     result.errors.append(item)
                     await report(processed_index, phase=2)
                     continue
 
+                logical_duplicate = None
+                hash_duplicate = None
+                assigned_id = requested_id
                 async with connect() as db:
-                    cur = await db.execute(
-                        """
-                        SELECT id, source_file_name, cover_path FROM books
-                        WHERE publication_status!='deleted' AND (
-                            (? IS NOT NULL AND id=?) OR
-                            import_file_hash=? OR source_file_hash=? OR
-                            (normalized_title=? AND lower(COALESCE(source_author_name,''))=?)
+                    occupied = None
+                    if requested_id is not None:
+                        cur = await db.execute(
+                            """SELECT id, title, source_author_name, source_name, source_file_name, cover_path
+                               FROM books WHERE id=? LIMIT 1""",
+                            (requested_id,),
                         )
-                        ORDER BY CASE WHEN (? IS NOT NULL AND id=?) THEN 0 ELSE 1 END, id
-                        LIMIT 1
-                        """,
-                        (explicit_id, explicit_id, file_hash, file_hash, normalized_title, normalized_author,
-                         explicit_id, explicit_id),
-                    )
-                    duplicate = await cur.fetchone()
-                if duplicate:
+                        occupied = await cur.fetchone()
+
+                    # Экспортный VoxLyra-ID однозначно указывает обновляемую книгу.
+                    # Обычный id/book_id и номер папки являются желаемым номером:
+                    # при совпадении произведения версия заменяется, при настоящем
+                    # конфликте новая книга получает первый свободный ID.
+                    if occupied is not None and authoritative_update_id:
+                        logical_duplicate = occupied
+                    elif occupied is not None:
+                        same_work = _same_logical_work(
+                            existing_title=str(occupied["title"] or ""),
+                            existing_author=str(occupied["source_author_name"] or ""),
+                            incoming_title=title,
+                            incoming_author=author,
+                            existing_source=str(occupied["source_name"] or ""),
+                            incoming_source=str(metadata.get("source") or ""),
+                        )
+                        if same_work:
+                            logical_duplicate = occupied
+                        else:
+                            assigned_id = await _first_free_book_id(db)
+
+                    if logical_duplicate is None:
+                        cur = await db.execute(
+                            """SELECT id, title, source_author_name, source_name, source_file_name, cover_path
+                               FROM books
+                               WHERE publication_status!='deleted' AND normalized_title=?
+                               ORDER BY id LIMIT 100""",
+                            (normalized_title,),
+                        )
+                        for row in await cur.fetchall():
+                            if _normalize_person_name(str(row["source_author_name"] or "")) == _normalize_person_name(author):
+                                logical_duplicate = row
+                                break
+
+                    if logical_duplicate is None:
+                        cur = await db.execute(
+                            """SELECT id, title, source_author_name, source_name, source_file_name, cover_path
+                               FROM books
+                               WHERE publication_status!='deleted'
+                                 AND (import_file_hash=? OR source_file_hash=?)
+                               ORDER BY id LIMIT 1""",
+                            (file_hash, file_hash),
+                        )
+                        hash_duplicate = await cur.fetchone()
+
+                if logical_duplicate is not None:
                     result.duplicates += 1
-                    existing_id = int(duplicate["id"])
+                    existing_id = int(logical_duplicate["id"])
                     existing_revision = await _run_blocking(
                         _stored_revision_fingerprint,
-                        Path(str(duplicate["source_file_name"] or "")),
-                        Path(str(duplicate["cover_path"] or "")),
+                        Path(str(logical_duplicate["source_file_name"] or "")),
+                        Path(str(logical_duplicate["cover_path"] or "")),
                     )
-                    # В накопительных архивах большинство старых книг полностью
-                    # совпадают. Такие дубли не копируются повторно на диск и не
-                    # требуют ручного решения. Изменённая обложка, метаданные или
-                    # текст по-прежнему создают кандидата «пропустить/заменить».
+                    if existing_revision and existing_revision == incoming_revision:
+                        await report(processed_index, phase=2)
+                        continue
+                    await _replace_book_from_candidate(
+                        existing_id,
+                        folder,
+                        metadata,
+                        file_hash,
+                        batch_id=batch_id,
+                        actor_user_id=actor_user_id,
+                    )
+                    result.replaced += 1
+                    result.book_ids.append(existing_id)
+                    await report(processed_index, phase=2)
+                    continue
+
+                if hash_duplicate is not None:
+                    result.duplicates += 1
+                    existing_id = int(hash_duplicate["id"])
+                    existing_revision = await _run_blocking(
+                        _stored_revision_fingerprint,
+                        Path(str(hash_duplicate["source_file_name"] or "")),
+                        Path(str(hash_duplicate["cover_path"] or "")),
+                    )
                     if existing_revision and existing_revision == incoming_revision:
                         await report(processed_index, phase=2)
                         continue
                     if duplicate_policy == "skip":
-                        result.errors.append(ImportErrorItem(folder=folder.name, title=title, reasons=[f"Найден дубль книги ID {existing_id}; пропущено по настройке"]))
+                        result.errors.append(ImportErrorItem(
+                            folder=folder.name,
+                            title=title,
+                            reasons=[f"Найден дубль файла книги ID {existing_id}; пропущено по настройке"],
+                        ))
                         await report(processed_index, phase=2)
                         continue
                     candidate_dir = DEFAULT_STORAGE_ROOT / "duplicates" / str(batch_id) / folder.name
@@ -899,8 +1070,17 @@ async def import_library_zip(
                                    batch_id, existing_book_id, folder_name, title, author, file_hash,
                                    candidate_dir, metadata_json, status, created_at
                                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)""",
-                            (batch_id, existing_id, folder.name, title, author, file_hash, str(candidate_dir),
-                             json.dumps(metadata, ensure_ascii=False), utc_now()),
+                            (
+                                batch_id,
+                                existing_id,
+                                folder.name,
+                                title,
+                                author,
+                                file_hash,
+                                str(candidate_dir),
+                                json.dumps(metadata, ensure_ascii=False),
+                                utc_now(),
+                            ),
                         )
                         duplicate_id = int(cur.lastrowid)
                         await db.commit()
@@ -909,6 +1089,14 @@ async def import_library_zip(
                         await resolve_duplicate(duplicate_id, "replace")
                     await report(processed_index, phase=2)
                     continue
+
+                if requested_id is not None and assigned_id != requested_id:
+                    result.renumbered += 1
+                    result.id_changes.append({
+                        "folder": folder.name,
+                        "requested_id": requested_id,
+                        "assigned_id": int(assigned_id),
+                    })
 
                 try:
                     chapters = await _run_blocking(
@@ -952,19 +1140,21 @@ async def import_library_zip(
                         db, author_name=author, metadata=metadata, license_type=license_type,
                         source_name=source_name, actor_user_id=actor_user_id, now=now,
                     )
+                    id_column = "id, " if assigned_id is not None else ""
+                    id_placeholder = "?, " if assigned_id is not None else ""
                     cur = await db.execute(
-                        """
+                        f"""
                         INSERT INTO books(
-                            author_id, title, description, age_limit, writing_status, publication_status,
+                            {id_column}author_id, title, description, age_limit, writing_status, publication_status,
                             cover_path, normalized_title, source_file_hash, source_file_name,
                             allow_download, pricing_type, price_stars, content_type, reading_mode,
                             license_type, source_name, rights_checked, import_batch_id, import_file_hash,
                             source_author_name, source_year, source_language, creator_id, rights_holder_id,
                             revenue_mode, created_at, updated_at
-                        ) VALUES(NULL, ?, ?, ?, 'finished', 'draft', ?, ?, ?, ?, 1, ?, ?, 'book', 'ltr',
+                        ) VALUES({id_placeholder}NULL, ?, ?, ?, 'finished', 'draft', ?, ?, ?, ?, 1, ?, ?, 'book', 'ltr',
                                  ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
-                        (
+                        ((int(assigned_id),) if assigned_id is not None else ()) + (
                             title, description, age, str(stored_cover), normalized_title, file_hash, str(stored_book),
                             pricing_type, price_stars, license_type, source_name,
                             batch_id, file_hash, author, str(metadata.get("year") or "").strip(),
@@ -1526,87 +1716,244 @@ async def list_batch_duplicates(batch_id: int, *, pending_only: bool = True):
         return await cur.fetchall()
 
 
-async def _replace_book_from_candidate(existing_book_id: int, candidate_dir: Path, metadata: dict[str, Any], file_hash: str) -> None:
+async def _replace_book_from_candidate(
+    existing_book_id: int,
+    candidate_dir: Path,
+    metadata: dict[str, Any],
+    file_hash: str,
+    *,
+    batch_id: int | None = None,
+    actor_user_id: int = 0,
+) -> None:
+    """Заменяет содержимое существующей книги, сохраняя ID книги и глав.
+
+    Совпадающие номера глав обновляются на месте, поэтому прогресс чтения,
+    покупки и связанные записи не теряют ссылки. Удалённые из новой версии
+    главы переводятся в статус deleted, а новые получают новые ID.
+    """
     files = [p for p in candidate_dir.iterdir() if p.is_file()]
     book_files = [p for p in files if p.suffix.lower() in BOOK_EXTENSIONS]
-    cover_files = [p for p in files if p.suffix.lower() in COVER_EXTENSIONS and p.stem.lower().startswith("cover")]
+    cover_files = [
+        p for p in files
+        if p.suffix.lower() in COVER_EXTENSIONS and p.stem.lower().startswith("cover")
+    ]
     if not book_files or not cover_files:
         raise ValueError("В кандидате отсутствует книга или обложка")
     book_path = sorted(book_files, key=lambda p: (p.suffix.lower() != ".epub", p.name.lower()))[0]
     cover_path = sorted(cover_files, key=lambda p: p.name.lower())[0]
-    chapters = parse_book_file(book_path, original_filename=book_path.name, temp_dir=candidate_dir / "_parse")
+    chapters = parse_book_file(
+        book_path,
+        original_filename=book_path.name,
+        temp_dir=candidate_dir / "_parse",
+    )
     chapters = [ch for ch in chapters if (ch.text or "").strip()]
     if not chapters:
         raise ValueError("В книге не найден текст")
+
     title = str(metadata.get("title") or "").strip()
     author = str(metadata.get("author") or "").strip()
+    if not title or not author:
+        raise ValueError("В изменённой книге не указано название или автор")
     genres = metadata.get("genre") or []
-    if isinstance(genres, str): genres = [genres]
+    if isinstance(genres, str):
+        genres = [genres]
     tags = metadata.get("tags") or []
-    if isinstance(tags, str): tags = [tags]
+    if isinstance(tags, str):
+        tags = [tags]
     description_path = candidate_dir / "description.txt"
-    description = str(metadata.get("description") or "").strip() or (_read_text(description_path) if description_path.exists() else "")
+    description = str(metadata.get("description") or "").strip()
+    if not description and description_path.exists():
+        description = _read_text(description_path)
+
     now = utc_now()
-    final_dir = DEFAULT_STORAGE_ROOT / "books" / "replaced" / str(existing_book_id)
-    final_dir.mkdir(parents=True, exist_ok=True)
+    storage_batch = str(int(batch_id)) if batch_id is not None else "manual_replacements"
+    final_dir = DEFAULT_STORAGE_ROOT / "books" / storage_batch / f"replacement_{int(existing_book_id)}"
     stored_book = final_dir / f"book{book_path.suffix.lower()}"
     stored_cover = final_dir / f"cover{cover_path.suffix.lower()}"
-    shutil.copy2(book_path, stored_book)
-    shutil.copy2(cover_path, stored_cover)
-    (final_dir / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
-    (final_dir / "description.txt").write_text(description, encoding="utf-8")
+
+    def store_replacement_files() -> None:
+        if final_dir.exists():
+            shutil.rmtree(final_dir, ignore_errors=True)
+        final_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(book_path, stored_book)
+        shutil.copy2(cover_path, stored_cover)
+        (final_dir / "metadata.json").write_text(
+            json.dumps(metadata, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        (final_dir / "description.txt").write_text(description, encoding="utf-8")
+
+    await _run_blocking(store_replacement_files)
+
     pricing = str(metadata.get("free_or_paid") or "free").strip().lower()
     price_stars = max(0, int(metadata.get("price_stars") or 0))
     pricing_type = "whole_book" if pricing in {"paid", "whole_book"} and price_stars > 0 else "free"
-    normalized_title = " ".join(title.casefold().replace("ё", "е").split())
+    normalized_title = _normalize_work_title(title)
+    license_type = str(metadata.get("license") or "platform_original")
+    source_name = str(metadata.get("source") or "").strip()
+    rights_checked = 1 if metadata.get("rights_checked") is True else 0
+    previous_storage_dirs: set[Path] = set()
+
     async with connect() as db:
-        license_type = str(metadata.get("license") or "platform_original")
-        source_name = str(metadata.get("source") or "")
+        cur = await db.execute(
+            "SELECT source_file_name, cover_path FROM books WHERE id=?",
+            (int(existing_book_id),),
+        )
+        previous_book = await cur.fetchone()
+        if previous_book:
+            for value in (previous_book["source_file_name"], previous_book["cover_path"]):
+                if value:
+                    previous_storage_dirs.add(Path(str(value)).parent)
         creator_id, rights_holder_id, revenue_mode, revenue_author_id = await _ensure_creator_and_rights(
-            db, author_name=author, metadata=metadata, license_type=license_type,
-            source_name=source_name, actor_user_id=0, now=now,
+            db,
+            author_name=author,
+            metadata=metadata,
+            license_type=license_type,
+            source_name=source_name,
+            actor_user_id=actor_user_id,
+            now=now,
         )
         await db.execute(
-            """UPDATE books SET title=?, description=?, age_limit=?, cover_path=?, normalized_title=?,
-               source_file_hash=?, source_file_name=?, pricing_type=?, price_stars=?, license_type=?,
-               source_name=?, rights_checked=?, import_file_hash=?, source_author_name=?, source_year=?,
-               source_language=?, creator_id=?, rights_holder_id=?, revenue_mode=?, updated_at=? WHERE id=?""",
-            (title, description, str(metadata.get("age_rating") or "12+"), str(stored_cover), normalized_title,
-             file_hash, str(stored_book), pricing_type, price_stars, license_type,
-             source_name, 1 if metadata.get("rights_checked") is True else 0, file_hash,
-             author, str(metadata.get("year") or ""), str(metadata.get("language") or "ru"),
-             creator_id, rights_holder_id, revenue_mode, now, existing_book_id),
+            """UPDATE books SET
+                   title=?, description=?, age_limit=?, writing_status='finished',
+                   publication_status='draft', cover_path=?, normalized_title=?,
+                   source_file_hash=?, source_file_name=?, duplicate_override=0,
+                   allow_download=1, pricing_type=?, price_stars=?, license_type=?,
+                   source_name=?, rights_checked=?, import_batch_id=?, import_file_hash=?,
+                   source_author_name=?, source_year=?, source_language=?, creator_id=?,
+                   rights_holder_id=?, revenue_mode=?, import_was_replacement=1, updated_at=?
+               WHERE id=?""",
+            (
+                title,
+                description,
+                str(metadata.get("age_rating") or "12+"),
+                str(stored_cover),
+                normalized_title,
+                file_hash,
+                str(stored_book),
+                pricing_type,
+                price_stars,
+                license_type,
+                source_name,
+                rights_checked,
+                batch_id,
+                file_hash,
+                author,
+                str(metadata.get("year") or "").strip(),
+                str(metadata.get("language") or "ru").strip(),
+                creator_id,
+                rights_holder_id,
+                revenue_mode,
+                now,
+                int(existing_book_id),
+            ),
         )
         await db.execute(
-            """INSERT INTO book_rights(book_id, creator_id, rights_holder_id, license_type, revenue_mode,
-                   revenue_author_id, imported_by_user_id, source_name, rights_checked, created_at, updated_at)
-               VALUES(?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)
-               ON CONFLICT(book_id) DO UPDATE SET creator_id=excluded.creator_id,
-                   rights_holder_id=excluded.rights_holder_id, license_type=excluded.license_type,
-                   revenue_mode=excluded.revenue_mode, revenue_author_id=excluded.revenue_author_id,
-                   source_name=excluded.source_name, rights_checked=excluded.rights_checked,
+            """INSERT INTO book_rights(
+                   book_id, creator_id, rights_holder_id, license_type, revenue_mode,
+                   revenue_author_id, imported_by_user_id, source_name, rights_checked,
+                   created_at, updated_at
+               ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(book_id) DO UPDATE SET
+                   creator_id=excluded.creator_id,
+                   rights_holder_id=excluded.rights_holder_id,
+                   license_type=excluded.license_type,
+                   revenue_mode=excluded.revenue_mode,
+                   revenue_author_id=excluded.revenue_author_id,
+                   imported_by_user_id=excluded.imported_by_user_id,
+                   source_name=excluded.source_name,
+                   rights_checked=excluded.rights_checked,
                    updated_at=excluded.updated_at""",
-            (existing_book_id, creator_id, rights_holder_id, license_type, revenue_mode,
-             revenue_author_id, source_name, 1 if metadata.get("rights_checked") is True else 0, now, now),
+            (
+                int(existing_book_id),
+                creator_id,
+                rights_holder_id,
+                license_type,
+                revenue_mode,
+                revenue_author_id,
+                actor_user_id or None,
+                source_name,
+                rights_checked,
+                now,
+                now,
+            ),
         )
-        await db.execute("DELETE FROM chapters WHERE book_id=?", (existing_book_id,))
-        await db.execute("DELETE FROM book_option_values WHERE book_id=? AND option_group IN ('genres','plot_tags')", (existing_book_id,))
-        for ch in chapters:
+
+        cur = await db.execute(
+            "SELECT id, number FROM chapters WHERE book_id=? ORDER BY number",
+            (int(existing_book_id),),
+        )
+        existing_chapters = {int(row["number"]): int(row["id"]) for row in await cur.fetchall()}
+        incoming_numbers: set[int] = set()
+        for chapter in chapters:
+            number = int(chapter.number)
+            incoming_numbers.add(number)
+            is_free = 1 if pricing_type == "free" else 0
+            chapter_id = existing_chapters.get(number)
+            if chapter_id is not None:
+                await db.execute(
+                    """UPDATE chapters SET title=?, text=?, is_free=?, price_stars=0,
+                           status='draft', updated_at=? WHERE id=?""",
+                    (str(chapter.title)[:160], chapter.text, is_free, now, chapter_id),
+                )
+                await db.execute(
+                    "UPDATE audio_chapters SET status='draft', updated_at=? WHERE chapter_id=?",
+                    (now, chapter_id),
+                )
+            else:
+                await db.execute(
+                    """INSERT INTO chapters(
+                           book_id, number, title, text, is_free, price_stars, status, created_at, updated_at
+                       ) VALUES(?, ?, ?, ?, ?, 0, 'draft', ?, ?)""",
+                    (
+                        int(existing_book_id),
+                        number,
+                        str(chapter.title)[:160],
+                        chapter.text,
+                        is_free,
+                        now,
+                        now,
+                    ),
+                )
+
+        removed_ids = [
+            chapter_id for number, chapter_id in existing_chapters.items()
+            if number not in incoming_numbers
+        ]
+        if removed_ids:
+            placeholders = ",".join("?" for _ in removed_ids)
             await db.execute(
-                """INSERT INTO chapters(book_id, number, title, text, is_free, price_stars, status, created_at, updated_at)
-                   VALUES(?, ?, ?, ?, ?, 0, 'draft', ?, ?)""",
-                (existing_book_id, int(ch.number), str(ch.title)[:160], ch.text, 1 if pricing_type == "free" else 0, now, now),
+                f"UPDATE chapters SET status='deleted', updated_at=? WHERE id IN ({placeholders})",
+                (now, *removed_ids),
             )
+            await db.execute(
+                f"UPDATE audio_chapters SET status='deleted', updated_at=? WHERE chapter_id IN ({placeholders})",
+                (now, *removed_ids),
+            )
+
+        await db.execute(
+            "DELETE FROM book_option_values WHERE book_id=? AND option_group IN ('genres','plot_tags')",
+            (int(existing_book_id),),
+        )
         for group, values in (("genres", genres), ("plot_tags", tags)):
             for value in values:
                 label = str(value).strip()
                 if label:
                     await db.execute(
-                        """INSERT OR IGNORE INTO book_option_values(book_id, option_group, option_code, option_label, created_at)
-                           VALUES(?, ?, ?, ?, ?)""",
-                        (existing_book_id, group, _slug(label.casefold()), label, now),
+                        """INSERT OR IGNORE INTO book_option_values(
+                               book_id, option_group, option_code, option_label, created_at
+                           ) VALUES(?, ?, ?, ?, ?)""",
+                        (int(existing_book_id), group, _slug(label.casefold()), label, now),
                     )
         await db.commit()
+    for old_dir in previous_storage_dirs:
+        try:
+            if old_dir.resolve() == final_dir.resolve():
+                continue
+            if DEFAULT_STORAGE_ROOT.resolve() in old_dir.resolve().parents:
+                shutil.rmtree(old_dir, ignore_errors=True)
+        except OSError:
+            continue
 
 
 async def resolve_duplicate(duplicate_id: int, action: str) -> dict[str, Any]:
@@ -1623,7 +1970,21 @@ async def resolve_duplicate(duplicate_id: int, action: str) -> dict[str, Any]:
     candidate_dir = Path(str(row["candidate_dir"]))
     if action == "replace":
         metadata = json.loads(str(row["metadata_json"] or "{}"))
-        await _replace_book_from_candidate(int(row["existing_book_id"]), candidate_dir, metadata, str(row["file_hash"]))
+        async with connect() as db:
+            cur = await db.execute(
+                "SELECT imported_by_user_id FROM library_import_batches WHERE id=?",
+                (int(row["batch_id"]),),
+            )
+            batch = await cur.fetchone()
+        actor_user_id = int(batch["imported_by_user_id"] or 0) if batch else 0
+        await _replace_book_from_candidate(
+            int(row["existing_book_id"]),
+            candidate_dir,
+            metadata,
+            str(row["file_hash"]),
+            batch_id=int(row["batch_id"]),
+            actor_user_id=actor_user_id,
+        )
     async with connect() as db:
         await db.execute(
             "UPDATE library_import_duplicates SET status='resolved', resolution=?, resolved_at=? WHERE id=?",
@@ -1673,7 +2034,9 @@ async def rollback_batch_drafts(batch_id: int) -> dict[str, int]:
     storage_paths: list[Path] = []
     async with connect() as db:
         cur = await db.execute(
-            "SELECT id, source_file_name, cover_path FROM books WHERE import_batch_id=? AND publication_status='draft'",
+            """SELECT id, source_file_name, cover_path FROM books
+               WHERE import_batch_id=? AND publication_status='draft'
+                 AND COALESCE(import_was_replacement, 0)=0""",
             (int(batch_id),),
         )
         rows = await cur.fetchall()
