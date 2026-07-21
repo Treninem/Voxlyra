@@ -4549,3 +4549,16 @@ body.light-theme .journal-import-select-item + .journal-import-select-item, body
   .journal-import-selection-head > strong { justify-self: start; }
   .journal-import-selection-tools button { flex: 1 1 130px; }
 }
+
+/* v1.13.30 — поиск, фильтры и массовый выбор в большом предпросмотре. */
+.journal-import-filter-bar { display: grid; grid-template-columns: minmax(220px,1.6fr) repeat(2,minmax(150px,.7fr)); gap: 9px; margin: 12px 0 8px; }
+.journal-import-filter-bar label { display: grid; gap: 5px; min-width: 0; color: var(--muted); font-size: 11px; }
+.journal-import-filter-bar input, .journal-import-filter-bar select { width: 100%; min-width: 0; height: 42px; padding: 0 11px; border-radius: 12px; border: 1px solid rgba(255,255,255,.1); background: rgba(8,6,22,.52); color: var(--text); }
+.journal-import-filter-bar input:focus, .journal-import-filter-bar select:focus { outline: 2px solid rgba(161,129,255,.28); border-color: rgba(161,129,255,.45); }
+.journal-import-filter-summary { margin: 0 0 10px; color: var(--muted); font-size: 11px; }
+.journal-import-filter-summary strong { color: var(--text); }
+.journal-import-filter-empty { margin: 10px 0; padding: 11px 12px; border-radius: 13px; background: rgba(255,190,80,.08); border: 1px solid rgba(255,190,80,.18); color: var(--muted); }
+.journal-import-select-item[hidden], .journal-import-select-section[hidden], .journal-import-filter-empty[hidden] { display: none !important; }
+body.light-theme .journal-import-filter-bar input, body.light-theme .journal-import-filter-bar select,
+body.sepia-theme .journal-import-filter-bar input, body.sepia-theme .journal-import-filter-bar select { background: rgba(255,255,255,.82); border-color: rgba(65,45,105,.14); }
+@media (max-width: 760px) { .journal-import-filter-bar { grid-template-columns: 1fr; } }

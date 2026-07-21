@@ -2543,49 +2543,130 @@ function journalImportListLabel(code) {
 
 function journalImportSelectionItemMarkup(item) {
   const id = escapeHtml(item.selection_id || '');
-  const action = journalImportActionLabel(item.action);
+  const actionCode = String(item.action || '');
+  const kind = String(item.kind || '');
+  const action = journalImportActionLabel(actionCode);
   const author = item.author ? ` · ${escapeHtml(item.author)}` : '';
   let meta = action;
-  if (item.kind === 'journal') {
+  if (kind === 'journal') {
     meta += item.status ? ` · ${escapeHtml(journalImportStatusLabel(item.status))}` : '';
     if (Number(item.private_rating || 0) > 0) meta += ` · оценка ${Number(item.private_rating)}/5`;
     if (item.has_impression) meta += ' · есть впечатление';
-  } else if (item.kind === 'cycle') {
+  } else if (kind === 'cycle') {
     meta = `Цикл №${Number(item.cycle_number || 1)} · ${action}`;
     if (item.status) meta += ` · ${escapeHtml(journalImportStatusLabel(item.status))}`;
     if (item.started_on) meta += ` · с ${escapeHtml(item.started_on)}`;
     if (item.finished_on) meta += ` по ${escapeHtml(item.finished_on)}`;
     if (item.has_note) meta += ' · есть заметка';
-  } else if (item.kind === 'year_list') {
+  } else if (kind === 'year_list') {
     meta = `${escapeHtml(journalImportListLabel(item.list_code))} · ${Number(item.year || 0)} · ${action}`;
     if (item.has_note) meta += ' · есть заметка';
   }
   const dependency = item.requires_journal ? ` data-journal-import-depends="${escapeHtml(item.requires_journal)}"` : '';
-  return `<label class="journal-import-select-item"><input type="checkbox" data-journal-import-select value="${id}"${dependency} checked><span><strong>${escapeHtml(item.title || 'Без названия')}</strong><small>${meta}${author}</small></span></label>`;
+  const searchText = escapeHtml([item.title, item.author, meta, journalImportActionLabel(actionCode), journalImportListLabel(item.list_code)].filter(Boolean).join(' ').toLocaleLowerCase('ru-RU'));
+  return `<label class="journal-import-select-item" data-journal-import-item data-import-kind="${escapeHtml(kind)}" data-import-action="${escapeHtml(actionCode)}" data-import-search="${searchText}"><input type="checkbox" data-journal-import-select value="${id}"${dependency} checked><span><strong>${escapeHtml(item.title || 'Без названия')}</strong><small>${meta}${author}</small></span></label>`;
 }
 
 function journalImportSelectionSection(title, items, open = false) {
   const list = Array.isArray(items) ? items : [];
   if (!list.length) return '';
-  return `<details class="journal-import-select-section" ${open ? 'open' : ''}><summary><span>${escapeHtml(title)}</span><b>${list.length}</b></summary><div class="journal-import-select-list">${list.map(journalImportSelectionItemMarkup).join('')}</div></details>`;
+  return `<details class="journal-import-select-section" data-journal-import-group ${open ? 'open' : ''}><summary><span>${escapeHtml(title)}</span><b data-journal-import-group-count>${list.length}</b></summary><div class="journal-import-select-list">${list.map(journalImportSelectionItemMarkup).join('')}</div></details>`;
+}
+
+function readingJournalImportRoot() {
+  return document.getElementById('readingJournalImportPreview');
+}
+
+function readingJournalImportItems(root = readingJournalImportRoot()) {
+  return root ? [...root.querySelectorAll('[data-journal-import-item]')] : [];
 }
 
 function selectedReadingJournalImportIds() {
-  return [...document.querySelectorAll('#readingJournalImportPreview [data-journal-import-select]:checked')].map((input) => String(input.value || '')).filter(Boolean);
+  const root = readingJournalImportRoot();
+  return root ? [...root.querySelectorAll('[data-journal-import-select]:checked')].map((input) => String(input.value || '')).filter(Boolean) : [];
+}
+
+function enforceReadingJournalImportDependencies(root = readingJournalImportRoot()) {
+  if (!root) return;
+  const inputs = [...root.querySelectorAll('[data-journal-import-select]')];
+  inputs.filter((input) => input.checked && input.dataset.journalImportDepends).forEach((input) => {
+    const dependency = String(input.dataset.journalImportDepends || '');
+    const dependencyInput = inputs.find((candidate) => String(candidate.value || '') === dependency);
+    if (dependencyInput) dependencyInput.checked = true;
+  });
+  inputs.filter((input) => !input.checked && String(input.value || '').startsWith('journal:')).forEach((input) => {
+    inputs.forEach((candidate) => {
+      if (String(candidate.dataset.journalImportDepends || '') === String(input.value || '')) candidate.checked = false;
+    });
+  });
+}
+
+function applyReadingJournalImportFilters(root = readingJournalImportRoot()) {
+  if (!root) return;
+  const query = String(root.querySelector('[data-journal-import-search]')?.value || '').trim().toLocaleLowerCase('ru-RU');
+  const kind = String(root.querySelector('[data-journal-import-kind-filter]')?.value || 'all');
+  const action = String(root.querySelector('[data-journal-import-action-filter]')?.value || 'all');
+  const filtering = Boolean(query || kind !== 'all' || action !== 'all');
+  let visible = 0;
+  readingJournalImportItems(root).forEach((item) => {
+    const matchesQuery = !query || String(item.dataset.importSearch || '').includes(query);
+    const matchesKind = kind === 'all' || String(item.dataset.importKind || '') === kind;
+    const matchesAction = action === 'all' || String(item.dataset.importAction || '') === action || (action === 'update_or_fill' && ['update', 'fill'].includes(String(item.dataset.importAction || '')));
+    item.hidden = !(matchesQuery && matchesKind && matchesAction);
+    if (!item.hidden) visible += 1;
+  });
+  root.querySelectorAll('[data-journal-import-group]').forEach((group) => {
+    const groupItems = [...group.querySelectorAll('[data-journal-import-item]')];
+    const groupVisible = groupItems.filter((item) => !item.hidden).length;
+    const groupSelected = groupItems.filter((item) => !item.hidden && item.querySelector('[data-journal-import-select]')?.checked).length;
+    group.hidden = groupVisible <= 0;
+    if (filtering && groupVisible > 0) group.open = true;
+    const count = group.querySelector('[data-journal-import-group-count]');
+    if (count) count.textContent = `${groupSelected}/${groupVisible}`;
+  });
+  const visibleCounter = root.querySelector('[data-journal-import-visible-count]');
+  if (visibleCounter) visibleCounter.textContent = String(visible);
+  const empty = root.querySelector('[data-journal-import-filter-empty]');
+  if (empty) empty.hidden = visible > 0;
 }
 
 function updateReadingJournalImportSelection() {
-  const root = document.getElementById('readingJournalImportPreview');
+  const root = readingJournalImportRoot();
   if (!root) return;
+  enforceReadingJournalImportDependencies(root);
+  applyReadingJournalImportFilters(root);
   const selected = selectedReadingJournalImportIds();
   const total = root.querySelectorAll('[data-journal-import-select]').length;
+  const visibleSelected = readingJournalImportItems(root).filter((item) => !item.hidden && item.querySelector('[data-journal-import-select]')?.checked).length;
   const counter = root.querySelector('[data-journal-import-selected-count]');
   const apply = root.querySelector('[data-journal-import-apply]');
   if (counter) counter.textContent = `${selected.length} из ${total}`;
+  const visibleSelection = root.querySelector('[data-journal-import-visible-selected]');
+  if (visibleSelection) visibleSelection.textContent = String(visibleSelected);
   if (apply) {
     apply.disabled = selected.length <= 0;
     apply.textContent = `Применить выбранное: ${selected.length}`;
   }
+}
+
+function selectReadingJournalImportPreset(preset) {
+  const root = readingJournalImportRoot();
+  if (!root) return;
+  const items = readingJournalImportItems(root);
+  items.forEach((item) => {
+    const input = item.querySelector('[data-journal-import-select]');
+    if (!input) return;
+    const action = String(item.dataset.importAction || '');
+    const kind = String(item.dataset.importKind || '');
+    if (preset === 'all') input.checked = true;
+    else if (preset === 'none') input.checked = false;
+    else if (preset === 'visible') { if (!item.hidden) input.checked = true; }
+    else if (preset === 'visible-none') { if (!item.hidden) input.checked = false; }
+    else if (preset === 'new') input.checked = action === 'add';
+    else if (preset === 'updates') input.checked = action === 'update' || action === 'fill';
+    else if (preset === 'cycles') input.checked = kind === 'cycle';
+  });
+  updateReadingJournalImportSelection();
 }
 
 function readingJournalImportPreviewMarkup(preview) {
@@ -2612,7 +2693,7 @@ function readingJournalImportPreviewMarkup(preview) {
     journalImportSelectionSection('Отметки в списках года', selectable.year_lists || []),
   ].join('');
   const selectionTotal = Number(preview.total_changes || 0);
-  const selectionBlock = selectionTotal > 0 ? `<section class="journal-import-selection"><div class="journal-import-selection-head"><div><span class="eyebrow">Выборочное восстановление</span><h4>Что применить</h4><p>${escapeHtml(preview.selection_note || 'Отметьте только нужные записи.')}</p></div><strong data-journal-import-selected-count>${selectionTotal} из ${selectionTotal}</strong></div><div class="journal-import-selection-tools"><button type="button" class="secondary compact-button" data-journal-import-select-all>Выбрать всё</button><button type="button" class="secondary compact-button" data-journal-import-select-none>Снять всё</button></div>${selectionSections}<p class="journal-import-dependency-note">При выборе цикла базовая запись произведения включается автоматически, только если без неё цикл не сможет отображаться в дневнике.</p></section>` : '';
+  const selectionBlock = selectionTotal > 0 ? `<section class="journal-import-selection"><div class="journal-import-selection-head"><div><span class="eyebrow">Выборочное восстановление</span><h4>Что применить</h4><p>${escapeHtml(preview.selection_note || 'Отметьте только нужные записи.')}</p></div><strong data-journal-import-selected-count>${selectionTotal} из ${selectionTotal}</strong></div><div class="journal-import-filter-bar"><label class="journal-import-search"><span>Поиск</span><input type="search" data-journal-import-search placeholder="Название, автор, список или статус" autocomplete="off"></label><label><span>Тип записи</span><select data-journal-import-kind-filter><option value="all">Все типы</option><option value="journal">Произведения</option><option value="cycle">Циклы</option><option value="year_list">Списки года</option></select></label><label><span>Действие</span><select data-journal-import-action-filter><option value="all">Все действия</option><option value="add">Только новые</option><option value="update_or_fill">Только обновления</option><option value="fill">Только заполнение пустого</option></select></label></div><div class="journal-import-filter-summary">Показано <strong data-journal-import-visible-count>${selectionTotal}</strong> · выбрано среди показанных <strong data-journal-import-visible-selected>${selectionTotal}</strong></div><div class="journal-import-selection-tools"><button type="button" class="secondary compact-button" data-journal-import-preset="all">Выбрать всё</button><button type="button" class="secondary compact-button" data-journal-import-preset="none">Снять всё</button><button type="button" class="secondary compact-button" data-journal-import-preset="new">Только новые</button><button type="button" class="secondary compact-button" data-journal-import-preset="updates">Только обновления</button><button type="button" class="secondary compact-button" data-journal-import-preset="cycles">Только циклы</button><button type="button" class="secondary compact-button" data-journal-import-preset="visible">Выбрать показанные</button><button type="button" class="secondary compact-button" data-journal-import-preset="visible-none">Снять показанные</button></div><p class="journal-import-filter-empty" data-journal-import-filter-empty hidden>По заданным фильтрам ничего не найдено. Уже выбранные записи при этом сохранены.</p>${selectionSections}<p class="journal-import-dependency-note">Поиск и фильтры не сбрасывают выбор. При выборе цикла базовая запись произведения включается автоматически, только если без неё цикл не сможет отображаться в дневнике.</p></section>` : '';
   return `<section class="journal-import-preview" id="readingJournalImportPreview">
     <div class="journal-import-preview-head"><div><span class="eyebrow">Предварительная проверка</span><h3>Восстановление дневника</h3><p>Экспорт ${escapeHtml(preview.source_version || '')} · записей ${Number(source.journal || 0)}, циклов ${Number(source.cycles || 0)}, отметок списков ${Number(source.year_lists || 0)}</p></div><span class="journal-import-safe">Без перезаписи новых данных</span></div>
     <div class="journal-import-stats">
@@ -2926,6 +3007,7 @@ function renderLibraryTab(tab, data) {
     const context = { summary, yearLists: data.year_lists || {} };
     const exportButtons = `<div class="reading-journal-export"><button type="button" class="secondary compact-button" data-journal-import>Восстановить из JSON</button><input type="file" id="readingJournalImportFile" accept="application/json,.json" hidden><button type="button" class="secondary compact-button" data-journal-export="json">Экспорт всей истории JSON</button><button type="button" class="secondary compact-button" data-journal-export="csv">Экспорт дневника CSV</button></div>`;
     content.innerHTML = `<div class="section-title split-title slim"><div><span class="eyebrow">Только для вас</span><h2>Читательский дневник</h2><p>${escapeHtml(summary.privacy_note || 'Даты, оценки, циклы и списки не публикуются как отзывы.')}</p></div>${exportButtons}</div>${readingJournalImportPreviewMarkup(data.journal_import_preview)}${readingJournalImportHistoryMarkup(data.journal_import_history || [])}${readingJournalSummaryMarkup(summary)}${completionCalendarMarkup(data.completion_calendar || {}, data.year_lists || {})}${items.length ? `<div class="reading-journal-list">${items.map((item) => readingJournalCard(item, context)).join('')}</div>` : emptyStateMarkup('history-empty', 'Дневник пока пуст', 'Откройте произведение или добавьте его в библиотеку — первая запись появится автоматически.', '/catalog', 'Выбрать произведение')}`;
+    updateReadingJournalImportSelection();
     return;
   }
   if (tab === 'saved') {
@@ -3437,8 +3519,15 @@ async function openChapterByNumber(form) {
 }
 
 function bindEvents() {
-  document.addEventListener('input', (event) => { if (event.target.id === 'catalogSearch') applyCatalogFilter(); });
+  document.addEventListener('input', (event) => {
+    if (event.target.id === 'catalogSearch') applyCatalogFilter();
+    if (event.target.matches('[data-journal-import-search]')) updateReadingJournalImportSelection();
+  });
   document.addEventListener('change', async (event) => {
+    if (event.target.matches('[data-journal-import-kind-filter], [data-journal-import-action-filter]')) {
+      updateReadingJournalImportSelection();
+      return;
+    }
     if (event.target.matches('[data-journal-import-select]')) {
       const input = event.target;
       const dependency = String(input.dataset.journalImportDepends || '');
@@ -3813,11 +3902,9 @@ function bindEvents() {
       }
       return;
     }
-    if (target.matches('[data-journal-import-select-all], [data-journal-import-select-none]')) {
+    if (target.matches('[data-journal-import-preset]')) {
       event.preventDefault();
-      const checked = target.matches('[data-journal-import-select-all]');
-      document.querySelectorAll('#readingJournalImportPreview [data-journal-import-select]').forEach((input) => { input.checked = checked; });
-      updateReadingJournalImportSelection();
+      selectReadingJournalImportPreset(String(target.dataset.journalImportPreset || ''));
       return;
     }
     if (target.matches('[data-journal-import-apply]')) {
