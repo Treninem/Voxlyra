@@ -495,6 +495,13 @@ function fillBookEditor(data) {
   const type = String(book.content_type || 'book');
   document.getElementById('editorBookTitle').textContent = book.title;
   document.getElementById('editorBookStatus').textContent = `${contentTypeLabels[type] || 'Произведение'} · ${statusLabels[book.publication_status] || book.publication_status} · ${writingLabels[book.writing_status] || book.writing_status}`;
+  const openPublishedBook = document.getElementById('openPublishedBook');
+  if (openPublishedBook) {
+    const published = String(book.publication_status || '') === 'published';
+    openPublishedBook.hidden = !published;
+    openPublishedBook.href = published ? `/book/${Number(book.id)}` : '#';
+    openPublishedBook.textContent = isGraphicType(type) ? 'Открыть произведение' : 'Открыть книгу';
+  }
   const editorCover = document.getElementById('editorBookCoverImage');
   const editorLetter = document.getElementById('editorBookCoverLetter');
   if (editorCover && editorLetter) {

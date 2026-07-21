@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import errno
 import hashlib
+import gzip
 import json
 import os
 import re
@@ -501,6 +502,20 @@ async def ensure_library_schema() -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_library_duplicates_batch_status
                 ON library_import_duplicates(batch_id, status);
+
+            CREATE TABLE IF NOT EXISTS library_import_replacement_backups (
+                batch_id INTEGER NOT NULL,
+                book_id INTEGER NOT NULL,
+                backup_path TEXT NOT NULL,
+                old_storage_json TEXT NOT NULL DEFAULT '[]',
+                new_storage_path TEXT,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(batch_id, book_id),
+                FOREIGN KEY(batch_id) REFERENCES library_import_batches(id) ON DELETE CASCADE,
+                FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_library_replacement_backups_batch
+                ON library_import_replacement_backups(batch_id);
 
             CREATE TABLE IF NOT EXISTS library_import_settings (
                 id INTEGER PRIMARY KEY CHECK(id=1),
@@ -1222,10 +1237,11 @@ async def import_library_zip(
     return result
 
 
-async def _inspect_book_quality(row: Any, chapters: list[Any]) -> tuple[list[str], list[str], int]:
+async def _inspect_book_quality(row: Any, chapters: list[Any]) -> tuple[list[str], list[str], list[dict[str, Any]], int]:
     """Глубокая проверка файла, глав, языка и обложки без изменения книги."""
     blockers: list[str] = []
     warnings: list[str] = []
+    evidence: list[dict[str, Any]] = []
     score = 100
 
     source_path = Path(str(row["source_file_name"] or ""))
@@ -1280,7 +1296,27 @@ async def _inspect_book_quality(row: Any, chapters: list[Any]) -> tuple[list[str
         if len(text) < 80:
             short_count += 1
         replacement_count += text.count("�")
-        control_count += sum(1 for ch in text if ord(ch) < 32 and ch not in "\n\r\t")
+        control_chars = [ch for ch in text if ord(ch) < 32 and ch not in "\n\r\t"]
+        control_count += len(control_chars)
+        if "�" in text and len(evidence) < 12:
+            index = text.index("�")
+            excerpt = " ".join(text[max(0, index - 70): index + 71].split())
+            evidence.append({
+                "kind": "encoding",
+                "chapter": number,
+                "label": "Повреждённая кодировка",
+                "excerpt": excerpt[:220],
+            })
+        if control_chars and len(evidence) < 12:
+            bad = control_chars[0]
+            index = text.index(bad)
+            excerpt = " ".join(text[max(0, index - 70): index + 71].replace(bad, f"[U+{ord(bad):04X}]").split())
+            evidence.append({
+                "kind": "control_character",
+                "chapter": number,
+                "label": f"Управляющий символ U+{ord(bad):04X}",
+                "excerpt": excerpt[:220],
+            })
         normalized = re.sub(r"\s+", " ", text).strip().casefold()
         digest = hashlib.sha256(normalized.encode("utf-8", errors="ignore")).hexdigest()
         if len(normalized) >= 300 and digest in seen_hashes:
@@ -1305,6 +1341,15 @@ async def _inspect_book_quality(row: Any, chapters: list[Any]) -> tuple[list[str
     if duplicate_pairs:
         preview = ", ".join(f"{a}={b}" for a, b in duplicate_pairs[:4])
         blockers.append(f"точные дубли глав: {preview}")
+        for original, duplicate in duplicate_pairs[:8]:
+            if len(evidence) >= 12:
+                break
+            evidence.append({
+                "kind": "duplicate_chapter",
+                "chapter": duplicate,
+                "label": f"Глава {duplicate} полностью совпадает с главой {original}",
+                "excerpt": "",
+            })
         score -= min(30, len(duplicate_pairs) * 6)
     if replacement_count:
         warnings.append(f"символов повреждённой кодировки: {replacement_count}")
@@ -1324,7 +1369,7 @@ async def _inspect_book_quality(row: Any, chapters: list[Any]) -> tuple[list[str
             warnings.append(f"язык текста не похож на английский: латиница {round(lat_share * 100)}%")
             score -= 10
 
-    return blockers, warnings, max(0, score)
+    return blockers, warnings, evidence, max(0, score)
 
 
 async def audit_batch_publication(batch_id: int) -> dict[str, Any]:
@@ -1375,7 +1420,7 @@ async def audit_batch_publication(batch_id: int) -> dict[str, Any]:
         if str(row["pricing_type"] or "free") != "free" and int(row["price_stars"] or 0) > 0 and str(row["revenue_mode"] or "none") == "none":
             reasons.append("для платной книги не указан получатель дохода")
 
-        deep_blockers, deep_warnings, score = await _inspect_book_quality(row, chapter_map.get(int(row["id"]), []))
+        deep_blockers, deep_warnings, evidence, score = await _inspect_book_quality(row, chapter_map.get(int(row["id"]), []))
         reasons.extend(deep_blockers)
         warnings.extend(deep_warnings)
         item = {
@@ -1383,6 +1428,7 @@ async def audit_batch_publication(batch_id: int) -> dict[str, Any]:
             "title": str(row["title"] or "Без названия"),
             "reasons": reasons,
             "warnings": warnings,
+            "evidence": evidence,
             "quality_score": score,
         }
         checked_items.append(item)
@@ -1437,6 +1483,19 @@ async def publish_batch(batch_id: int) -> dict[str, Any]:
                     (int(batch_id),),
                 )
                 queued = int((await cur.fetchone())[0] or 0)
+            cur = await db.execute(
+                """SELECT
+                       SUM(CASE WHEN publication_status='draft' THEN 1 ELSE 0 END) AS drafts,
+                       SUM(CASE WHEN publication_status='published' THEN 1 ELSE 0 END) AS published
+                   FROM books WHERE import_batch_id=?""",
+                (int(batch_id),),
+            )
+            batch_counts = await cur.fetchone()
+            if int(batch_counts["drafts"] or 0) == 0 and int(batch_counts["published"] or 0) > 0:
+                await db.execute(
+                    "UPDATE library_import_batches SET status='published' WHERE id=?",
+                    (int(batch_id),),
+                )
             await db.commit()
     return {
         "published": len(ready_ids),
@@ -1716,6 +1775,245 @@ async def list_batch_duplicates(batch_id: int, *, pending_only: bool = True):
         return await cur.fetchall()
 
 
+
+def _jsonable_row(row: Any) -> dict[str, Any]:
+    return {str(key): row[key] for key in row.keys()}
+
+
+def _write_replacement_backup(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(path.suffix + ".tmp")
+    with gzip.open(temp_path, "wt", encoding="utf-8", compresslevel=6) as handle:
+        json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"), default=str)
+    temp_path.replace(path)
+
+
+def _read_replacement_backup(path: Path) -> dict[str, Any]:
+    with gzip.open(path, "rt", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if not isinstance(payload, dict):
+        raise ValueError("Повреждён резерв заменяемой книги")
+    return payload
+
+
+async def _snapshot_replacement_before_update(
+    db,
+    *,
+    batch_id: int,
+    book_id: int,
+    new_storage_path: Path,
+) -> bool:
+    """Сохраняет исходное состояние заменяемой книги до первого изменения в пакете."""
+    cur = await db.execute(
+        "SELECT backup_path FROM library_import_replacement_backups WHERE batch_id=? AND book_id=?",
+        (int(batch_id), int(book_id)),
+    )
+    if await cur.fetchone() is not None:
+        return True
+
+    cur = await db.execute("SELECT * FROM books WHERE id=?", (int(book_id),))
+    book = await cur.fetchone()
+    if book is None:
+        return False
+    cur = await db.execute("SELECT * FROM chapters WHERE book_id=? ORDER BY id", (int(book_id),))
+    chapters = [_jsonable_row(row) for row in await cur.fetchall()]
+    cur = await db.execute("SELECT * FROM book_rights WHERE book_id=?", (int(book_id),))
+    rights = await cur.fetchone()
+    cur = await db.execute("SELECT * FROM book_option_values WHERE book_id=? ORDER BY id", (int(book_id),))
+    options = [_jsonable_row(row) for row in await cur.fetchall()]
+    chapter_ids = [int(row["id"]) for row in chapters]
+    audio: list[dict[str, Any]] = []
+    if chapter_ids:
+        placeholders = ",".join("?" for _ in chapter_ids)
+        cur = await db.execute(
+            f"SELECT id, status, updated_at FROM audio_chapters WHERE chapter_id IN ({placeholders}) ORDER BY id",
+            chapter_ids,
+        )
+        audio = [_jsonable_row(row) for row in await cur.fetchall()]
+
+    old_storage: list[str] = []
+    for value in (book["source_file_name"], book["cover_path"]):
+        if value:
+            candidate = Path(str(value)).parent
+            if str(candidate) not in old_storage:
+                old_storage.append(str(candidate))
+
+    backup_path = DEFAULT_STORAGE_ROOT / "replacement_backups" / str(int(batch_id)) / f"{int(book_id)}.json.gz"
+    payload = {
+        "book": _jsonable_row(book),
+        "chapters": chapters,
+        "rights": _jsonable_row(rights) if rights is not None else None,
+        "options": options,
+        "audio": audio,
+    }
+    await _run_blocking(_write_replacement_backup, backup_path, payload)
+    await db.execute(
+        """INSERT INTO library_import_replacement_backups(
+               batch_id, book_id, backup_path, old_storage_json, new_storage_path, created_at
+           ) VALUES(?, ?, ?, ?, ?, ?)""",
+        (
+            int(batch_id),
+            int(book_id),
+            str(backup_path),
+            json.dumps(old_storage, ensure_ascii=False),
+            str(new_storage_path),
+            utc_now(),
+        ),
+    )
+    return True
+
+
+async def _restore_table_row(db, table: str, row: dict[str, Any], *, primary_key: str = "id") -> None:
+    columns = [key for key in row.keys() if key != primary_key]
+    if not columns:
+        return
+    assignments = ", ".join(f"{key}=?" for key in columns)
+    await db.execute(
+        f"UPDATE {table} SET {assignments} WHERE {primary_key}=?",
+        tuple(row[key] for key in columns) + (row[primary_key],),
+    )
+
+
+async def restore_import_replacement_backups(batch_id: int) -> int:
+    """Возвращает заменённые книги в состояние до незавершённого импорта."""
+    await ensure_library_schema()
+    async with connect() as db:
+        cur = await db.execute(
+            "SELECT * FROM library_import_replacement_backups WHERE batch_id=? ORDER BY book_id",
+            (int(batch_id),),
+        )
+        rows = await cur.fetchall()
+
+    restored = 0
+    cleanup_paths: set[Path] = set()
+    for backup in rows:
+        backup_path = Path(str(backup["backup_path"] or ""))
+        if not backup_path.is_file():
+            continue
+        payload = await _run_blocking(_read_replacement_backup, backup_path)
+        book = payload.get("book") or {}
+        chapters = payload.get("chapters") or []
+        rights = payload.get("rights")
+        options = payload.get("options") or []
+        audio = payload.get("audio") or []
+        book_id = int(backup["book_id"])
+        chapter_ids = [int(row["id"]) for row in chapters if isinstance(row, dict) and row.get("id") is not None]
+
+        async with connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            if chapter_ids:
+                placeholders = ",".join("?" for _ in chapter_ids)
+                await db.execute(
+                    f"DELETE FROM chapters WHERE book_id=? AND id NOT IN ({placeholders})",
+                    (book_id, *chapter_ids),
+                )
+            else:
+                await db.execute("DELETE FROM chapters WHERE book_id=?", (book_id,))
+            for chapter in chapters:
+                if isinstance(chapter, dict):
+                    await _restore_table_row(db, "chapters", chapter)
+            if isinstance(book, dict) and book:
+                await _restore_table_row(db, "books", book)
+            await db.execute("DELETE FROM book_option_values WHERE book_id=?", (book_id,))
+            for option in options:
+                if not isinstance(option, dict):
+                    continue
+                columns = [key for key in option.keys() if key != "id"]
+                placeholders = ",".join("?" for _ in columns)
+                await db.execute(
+                    f"INSERT INTO book_option_values({','.join(columns)}) VALUES({placeholders})",
+                    tuple(option[key] for key in columns),
+                )
+            if rights is None:
+                await db.execute("DELETE FROM book_rights WHERE book_id=?", (book_id,))
+            elif isinstance(rights, dict):
+                columns = list(rights.keys())
+                placeholders = ",".join("?" for _ in columns)
+                await db.execute(
+                    f"INSERT OR REPLACE INTO book_rights({','.join(columns)}) VALUES({placeholders})",
+                    tuple(rights[key] for key in columns),
+                )
+            for item in audio:
+                if isinstance(item, dict) and item.get("id") is not None:
+                    await db.execute(
+                        "UPDATE audio_chapters SET status=?, updated_at=? WHERE id=?",
+                        (item.get("status"), item.get("updated_at"), int(item["id"])),
+                    )
+            await db.execute(
+                "DELETE FROM library_import_replacement_backups WHERE batch_id=? AND book_id=?",
+                (int(batch_id), book_id),
+            )
+            await db.commit()
+        new_storage = Path(str(backup["new_storage_path"] or ""))
+        if new_storage.exists():
+            cleanup_paths.add(new_storage)
+        cleanup_paths.add(backup_path)
+        restored += 1
+
+    for path in sorted(cleanup_paths, key=lambda item: len(str(item)), reverse=True):
+        try:
+            if path.is_dir() and DEFAULT_STORAGE_ROOT.resolve() in path.resolve().parents:
+                await asyncio.to_thread(shutil.rmtree, path, True)
+            elif path.is_file() and DEFAULT_STORAGE_ROOT.resolve() in path.resolve().parents:
+                await asyncio.to_thread(path.unlink, missing_ok=True)
+        except OSError:
+            continue
+    backup_root = DEFAULT_STORAGE_ROOT / "replacement_backups" / str(int(batch_id))
+    try:
+        if backup_root.is_dir():
+            await asyncio.to_thread(shutil.rmtree, backup_root, True)
+    except OSError:
+        pass
+    return restored
+
+
+async def finalize_import_replacement_backups(batch_id: int) -> int:
+    """Удаляет старые файлы после окончательного успешного завершения задания."""
+    await ensure_library_schema()
+    async with connect() as db:
+        cur = await db.execute(
+            "SELECT * FROM library_import_replacement_backups WHERE batch_id=?",
+            (int(batch_id),),
+        )
+        rows = await cur.fetchall()
+        await db.execute(
+            "DELETE FROM library_import_replacement_backups WHERE batch_id=?",
+            (int(batch_id),),
+        )
+        await db.commit()
+    cleanup_paths: set[Path] = set()
+    for row in rows:
+        try:
+            old_storage = json.loads(str(row["old_storage_json"] or "[]"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            old_storage = []
+        for value in old_storage if isinstance(old_storage, list) else []:
+            path = Path(str(value))
+            new_path = Path(str(row["new_storage_path"] or ""))
+            try:
+                if path.resolve() != new_path.resolve():
+                    cleanup_paths.add(path)
+            except OSError:
+                continue
+        backup_path = Path(str(row["backup_path"] or ""))
+        cleanup_paths.add(backup_path)
+    for path in sorted(cleanup_paths, key=lambda item: len(str(item)), reverse=True):
+        try:
+            if path.is_dir() and DEFAULT_STORAGE_ROOT.resolve() in path.resolve().parents:
+                await asyncio.to_thread(shutil.rmtree, path, True)
+            elif path.is_file() and DEFAULT_STORAGE_ROOT.resolve() in path.resolve().parents:
+                await asyncio.to_thread(path.unlink, missing_ok=True)
+        except OSError:
+            continue
+    backup_root = DEFAULT_STORAGE_ROOT / "replacement_backups" / str(int(batch_id))
+    try:
+        if backup_root.is_dir():
+            await asyncio.to_thread(shutil.rmtree, backup_root, True)
+    except OSError:
+        pass
+    return len(rows)
+
+
 async def _replace_book_from_candidate(
     existing_book_id: int,
     candidate_dir: Path,
@@ -1793,8 +2091,23 @@ async def _replace_book_from_candidate(
     source_name = str(metadata.get("source") or "").strip()
     rights_checked = 1 if metadata.get("rights_checked") is True else 0
     previous_storage_dirs: set[Path] = set()
+    protect_replacement = False
 
     async with connect() as db:
+        if batch_id is not None:
+            cur = await db.execute(
+                "SELECT status FROM library_import_batches WHERE id=?",
+                (int(batch_id),),
+            )
+            batch_row = await cur.fetchone()
+            protect_replacement = bool(batch_row and str(batch_row["status"]) == "processing")
+            if protect_replacement:
+                await _snapshot_replacement_before_update(
+                    db,
+                    batch_id=int(batch_id),
+                    book_id=int(existing_book_id),
+                    new_storage_path=final_dir,
+                )
         cur = await db.execute(
             "SELECT source_file_name, cover_path FROM books WHERE id=?",
             (int(existing_book_id),),
@@ -1946,14 +2259,15 @@ async def _replace_book_from_candidate(
                         (int(existing_book_id), group, _slug(label.casefold()), label, now),
                     )
         await db.commit()
-    for old_dir in previous_storage_dirs:
-        try:
-            if old_dir.resolve() == final_dir.resolve():
+    if not protect_replacement:
+        for old_dir in previous_storage_dirs:
+            try:
+                if old_dir.resolve() == final_dir.resolve():
+                    continue
+                if DEFAULT_STORAGE_ROOT.resolve() in old_dir.resolve().parents:
+                    shutil.rmtree(old_dir, ignore_errors=True)
+            except OSError:
                 continue
-            if DEFAULT_STORAGE_ROOT.resolve() in old_dir.resolve().parents:
-                shutil.rmtree(old_dir, ignore_errors=True)
-        except OSError:
-            continue
 
 
 async def resolve_duplicate(duplicate_id: int, action: str) -> dict[str, Any]:

@@ -24,6 +24,7 @@ from app.keyboards import (
     library_channel_schedule_menu,
     library_book_list_menu,
     library_duplicate_menu,
+    library_import_active_menu,
     library_manager_menu,
     library_publish_confirm_menu,
     library_rollback_confirm_menu,
@@ -36,7 +37,9 @@ from app.services.author_channel_queue import (
 from app.services.library_import_queue import (
     IMPORT_UPLOAD_ROOT,
     calculate_archive_hash,
+    cancel_import_job,
     enqueue_import_job,
+    retry_import_job,
 )
 from app.services.library_import_upload import create_library_import_upload_token
 from app.services.moderation_learning import (
@@ -192,6 +195,96 @@ async def library_menu_handler(call: CallbackQuery) -> None:
     await call.answer()
 
 
+@router.callback_query(F.data.startswith("library:cancel_job:"))
+async def library_import_cancel(call: CallbackQuery) -> None:
+    if not await _allowed_any(call.from_user.id, "library_import_manage", "library_bulk_import"):
+        await call.answer("Недоступно", show_alert=True)
+        return
+    try:
+        job_id = int(str(call.data or "").rsplit(":", 1)[1])
+    except (TypeError, ValueError, IndexError):
+        await call.answer("Некорректное задание", show_alert=True)
+        return
+    actor = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
+    result = await cancel_import_job(
+        job_id,
+        actor_user_id=int(actor["id"]),
+        allow_any=await _allowed(call.from_user.id, "library_import_manage"),
+    )
+    reason = str(result.get("reason") or "")
+    if reason == "not_found":
+        await call.answer("Задание не найдено", show_alert=True)
+        return
+    if reason == "forbidden":
+        await call.answer("Можно остановить только своё задание", show_alert=True)
+        return
+    if reason in {"not_cancellable", "race"}:
+        await call.answer("Задание уже завершено или остановлено", show_alert=True)
+        return
+    if bool(result.get("pending")):
+        await _safe_edit(
+            call,
+            "<b>⏹ Запрошена безопасная остановка</b>\n\n"
+            "Бот завершит текущую целостную операцию, откатит незавершённый пакет "
+            "и сохранит ZIP для повторного запуска.",
+            navigation_menu(cancel_callback="library:menu"),
+        )
+        await call.answer("Остановка запрошена")
+        return
+    await _safe_edit(
+        call,
+        "<b>⛔ Импорт отменён</b>\n\nЗадание не успело начаться, загруженный ZIP удалён.",
+        navigation_menu(cancel_callback="library:menu"),
+    )
+    await call.answer("Задание отменено")
+
+
+@router.callback_query(F.data.startswith("library:retry_job:"))
+async def library_import_retry(call: CallbackQuery) -> None:
+    if not await _allowed_any(call.from_user.id, "library_import_manage", "library_bulk_import"):
+        await call.answer("Недоступно", show_alert=True)
+        return
+    try:
+        job_id = int(str(call.data or "").rsplit(":", 1)[1])
+    except (TypeError, ValueError, IndexError):
+        await call.answer("Некорректное задание", show_alert=True)
+        return
+    actor = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
+    result = await retry_import_job(
+        job_id,
+        actor_user_id=int(actor["id"]),
+        allow_any=await _allowed(call.from_user.id, "library_import_manage"),
+    )
+    reason = str(result.get("reason") or "")
+    if reason == "not_found":
+        await call.answer("Задание не найдено", show_alert=True)
+        return
+    if reason == "forbidden":
+        await call.answer("Можно повторить только своё задание", show_alert=True)
+        return
+    if reason in {"not_failed", "not_retryable", "race"}:
+        await call.answer("Задание уже запущено или завершено", show_alert=True)
+        return
+    if reason == "archive_expired":
+        await _safe_edit(
+            call,
+            "<b>⌛ Срок хранения ZIP истёк</b>\n\nЗагрузите исходный архив повторно.",
+            navigation_menu(cancel_callback="library:menu"),
+        )
+        await call.answer("Архив уже удалён", show_alert=True)
+        return
+    position = int(result.get("position") or 1)
+    position_text = "начинается сейчас" if position == 1 else f"позиция в очереди: <b>{position}</b>"
+    await _safe_edit(
+        call,
+        "<b>🔄 Импорт поставлен повторно</b>\n\n"
+        f"Задание: <b>#{job_id}</b>\n"
+        f"Импорт {position_text}. Новая загрузка ZIP не потребовалась.",
+        navigation_menu(cancel_callback="library:menu"),
+    )
+    await call.answer("Задание возвращено в очередь")
+
+
 @router.callback_query(F.data == "library:import")
 async def library_import_start(call: CallbackQuery, state: FSMContext) -> None:
     if await _deny(call, "library_bulk_import"): return
@@ -297,7 +390,7 @@ async def library_import_receive(message: Message, state: FSMContext) -> None:
         f"Задание: <b>#{job_id}</b>\n"
         f"Импорт {position_text}. Прогресс будет обновляться в этом сообщении.\n\n"
         "Во время импорта можно пользоваться ботом, читать книги и открывать другие разделы.",
-        reply_markup=navigation_menu(cancel_callback="library:menu"),
+        reply_markup=library_import_active_menu(job_id, processing=False),
     )
 
 

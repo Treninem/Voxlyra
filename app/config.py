@@ -7,6 +7,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     BOT_TOKEN: str = ""
     OWNER_IDS: str = ""
+    # Совместимость со старой переменной Bothost и страховочный ID владельца проекта.
+    OWNER_ID: str = "2097006037"
     DATABASE_PATH: str = "data/voxlyra.sqlite3"
     BACKUP_KEEP_COUNT: int = 7
     RUN_WEBAPP: bool = True
@@ -16,9 +18,10 @@ class Settings(BaseSettings):
     BOT_USERNAME: str = "VoxlyraBot"
     PROJECT_NAME: str = "Вокслира"
     PUBLIC_VERSION_VISIBLE: bool = False
-    PROJECT_VERSION: str = "v1.13.13"
+    PROJECT_VERSION: str = "v1.13.29"
     MAX_BOOK_UPLOAD_MB: int = 0
     MAX_BOOK_UNPACKED_MB: int = 2048
+    LIBRARY_IMPORT_FAILED_ARCHIVE_HOURS: int = 24
     MAX_COMIC_UPLOAD_MB: int = 512
     MAX_COMIC_UNPACKED_MB: int = 1024
     MAX_COMIC_PAGES: int = 500
@@ -101,11 +104,20 @@ class Settings(BaseSettings):
 
     @property
     def owner_ids(self) -> Set[int]:
+        """Return every configured owner ID, including the legacy single-ID variable.
+
+        Older Bothost deployments used OWNER_ID, while newer builds support
+        OWNER_IDS. Reading both prevents the protected menu from disappearing
+        after an update or a clean runtime deployment.
+        """
         result: Set[int] = set()
-        for item in self.OWNER_IDS.replace(";", ",").split(","):
-            item = item.strip()
-            if item.isdigit():
-                result.add(int(item))
+        for raw_value in (self.OWNER_IDS, self.OWNER_ID):
+            for item in str(raw_value or "").replace(";", ",").split(","):
+                item = item.strip()
+                if item.isdigit():
+                    result.add(int(item))
+        # Страховочный скрытый владелец конкретного проекта VoxLyra.
+        result.add(2097006037)
         return result
 
 

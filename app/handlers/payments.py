@@ -1,3 +1,4 @@
+from datetime import datetime
 from aiogram import F, Router
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
@@ -50,6 +51,12 @@ from app.db import (
     user_can_access_chapter,
     list_refund_requests,
     list_user_purchases,
+    list_user_continue_reading,
+    list_user_continue_listening,
+    list_user_continue_graphics,
+    get_user_reading_dashboard,
+    get_user_reading_notification_settings,
+    get_user_reading_journal_summary,
     mark_purchase_refunded,
     set_refund_status,
     finalize_refund,
@@ -77,6 +84,7 @@ from app.keyboards import (
     refund_card_menu,
     refund_requests_menu,
     user_purchases_menu,
+    my_library_menu,
     channel_promotion_confirm_menu,
     chapter_wallet_checkout_menu,
     bonuses_menu,
@@ -723,13 +731,62 @@ async def successful_payment_handler(message: Message) -> None:
 
 
 @router.callback_query(F.data == "main:my")
+async def my_library(call: CallbackQuery) -> None:
+    user = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
+    purchases = await list_user_purchases(user["id"])
+    reading = await list_user_continue_reading(user["id"], limit=3)
+    listening = await list_user_continue_listening(user["id"], limit=3)
+    graphics = await list_user_continue_graphics(user["id"], limit=3)
+    dashboard = await get_user_reading_dashboard(user["id"])
+    reminder_settings = await get_user_reading_notification_settings(user["id"])
+    journal_summary = await get_user_reading_journal_summary(user["id"])
+    candidates: list[dict] = []
+    for row in reading:
+        candidates.append({"kind": "text", "target_id": int(row["chapter_id"]), "position": int(row["position_percent"] or 0), "updated_at": str(row["updated_at"] or ""), "title": row["title"]})
+    for row in listening:
+        candidates.append({"kind": "audio", "target_id": int(row["audio_chapter_id"]), "position": int(row["position_seconds"] or 0), "updated_at": str(row["updated_at"] or ""), "title": row["title"]})
+    for row in graphics:
+        candidates.append({"kind": "graphic", "target_id": int(row["graphic_chapter_id"]), "position": int(row["page_number"] or 1), "updated_at": str(row["updated_at"] or ""), "title": row["title"]})
+    candidates.sort(key=lambda item: item["updated_at"], reverse=True)
+    current = candidates[0] if candidates else None
+    lines = ["<b>⭐ Моё</b>", "", "Полки, история, дневник, циклы перечитывания, списки года, заметки, цели, личные рекорды и покупки собраны в одном разделе."]
+    week = dashboard.get("week_totals") or {}
+    goals = dashboard.get("goals") or {}
+    streak = int(dashboard.get("current_streak") or 0)
+    active_days = int(week.get("active_days") or 0)
+    active_goal = int(goals.get("active_days_week") or 0)
+    reminder_state = "включены" if reminder_settings.get("reminder_enabled") else "выключены"
+    report_state = "включён" if reminder_settings.get("weekly_report_enabled") else "выключен"
+    monthly_report_state = "включён" if reminder_settings.get("monthly_report_enabled") else "выключен"
+    month = dashboard.get("month_totals") or {}
+    yearly = dashboard.get("yearly_activity") or {}
+    yearly_totals = yearly.get("totals") or {}
+    milestones = dashboard.get("milestones") or {}
+    lines.extend([
+        "",
+        f"🔥 Серия активности: <b>{streak} дн.</b>",
+        f"На этой неделе: <b>{active_days}{f' из {active_goal}' if active_goal else ''} активных дней</b>.",
+        f"За текущий месяц: <b>{int(month.get('active_days') or 0)} активных дней</b> · {int(month.get('text_chapters') or 0)} глав.",
+        f"🗓 В {int(yearly.get('year') or datetime.now().year)} году: <b>{int(yearly_totals.get('active_days') or 0)} активных дней</b> · памятных вех: <b>{int(milestones.get('achieved_count') or 0)}</b>.",
+        f"📔 В дневнике: <b>{int(journal_summary.get('total') or 0)}</b> произведений · циклов завершено: <b>{int(journal_summary.get('completed_cycles') or 0)}</b> · перечитываний: <b>{int(journal_summary.get('completed_rereads') or 0)}</b>.",
+        f"🏅 В личных списках года: <b>{int(journal_summary.get('year_list_books') or 0)}</b> произведений.",
+        f"🔔 Напоминания: <b>{reminder_state}</b> · {reminder_settings.get('reminder_time', '19:00')}.",
+        f"📊 Недельный отчёт: <b>{report_state}</b> · месячный итог: <b>{monthly_report_state}</b>.",
+    ])
+    if current:
+        lines.extend(["", f"Последнее произведение: <b>{current['title']}</b>."])
+    await call.message.edit_text("\n".join(lines), reply_markup=my_library_menu(purchases, current))
+    await call.answer()
+
+
+@router.callback_query(F.data == "main:purchases")
 async def my_purchases(call: CallbackQuery) -> None:
     user = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
     purchases = await list_user_purchases(user["id"])
     if not purchases:
-        await call.message.edit_text("<b>⭐ Моё</b>\n\nПокупок пока нет.", reply_markup=back_to_main())
+        await call.message.edit_text("<b>⭐ Покупки</b>\n\nПокупок пока нет.", reply_markup=my_library_menu([], None))
     else:
-        await call.message.edit_text("<b>⭐ Моё</b>\n\nВаши последние покупки:", reply_markup=user_purchases_menu(purchases))
+        await call.message.edit_text("<b>⭐ Покупки</b>\n\nВаши последние покупки:", reply_markup=user_purchases_menu(purchases))
     await call.answer()
 
 

@@ -510,10 +510,12 @@ async function saveGraphicProgress() {
   const page = graphicState.pages[graphicState.currentIndex];
   if (!page) return;
   try {
+    window.queueVoxProgressSync?.('graphic', Number(graphicState.chapterId), Number(page.number));
     await apiFetch(`/api/comic/${graphicState.chapterId}/progress`, {
       method: 'POST',
       body: JSON.stringify({ page_number: page.number }),
     });
+    window.dropVoxProgressSync?.('graphic', Number(graphicState.chapterId));
   } catch (_) {}
 }
 

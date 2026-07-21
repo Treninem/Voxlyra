@@ -1,4 +1,5 @@
 from aiogram import F, Router
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message, FSInputFile
@@ -119,6 +120,22 @@ class OwnerBackupRestore(StatesGroup):
 
 def is_owner_tg(telegram_id: int) -> bool:
     return telegram_id in settings.owner_ids
+
+
+@router.message(Command("owner"))
+async def owner_direct_menu(message: Message) -> None:
+    """Emergency owner entry that does not depend on the visible main-menu button."""
+    if not is_owner_tg(message.from_user.id):
+        return
+    today = await get_owner_today_stats()
+    await message.answer(
+        "<b>👑 Центр управления</b>\n\n"
+        f"Пользователей сегодня: <b>{today.get('new_users', 0)}</b>\n"
+        f"Покупок сегодня: <b>{today.get('purchases', 0)}</b>\n"
+        f"Stars сегодня: <b>{today.get('stars', 0)}</b>\n\n"
+        f"🔖 Версия сборки: <b>{owner_build_label()}</b>",
+        reply_markup=owner_menu(),
+    )
 
 
 async def deny_if_not_owner(call: CallbackQuery) -> bool:
@@ -504,7 +521,7 @@ async def owner_books(call: CallbackQuery, state: FSMContext) -> None:
     await call.message.edit_text(
         "<b>📚 Книги</b>\n\n"
         f"На проверке: <b>{len(review_books)}</b>\n\n"
-        "Введите название книги, часть описания или псевдоним автора для поиска.",
+        "Введите название, ID книги, часть описания, псевдоним или имя автора. Импортированные книги также ищутся по автору из metadata.json.",
         reply_markup=navigation_menu(cancel_callback="owner:cancel_search"),
     )
     await call.answer()
@@ -727,7 +744,7 @@ async def owner_search_book_start(call: CallbackQuery, state: FSMContext) -> Non
         return
     await state.set_state(OwnerSearch.book_query)
     await call.message.edit_text(
-        "<b>📚 Поиск книги</b>\n\nВведите название книги или псевдоним автора.",
+        "<b>📚 Поиск книги</b>\n\nВведите название, ID книги, псевдоним или имя автора.",
         reply_markup=navigation_menu(cancel_callback="owner:cancel_search"),
     )
     await call.answer()

@@ -53,7 +53,7 @@ def collect_diagnostics() -> list[DiagnosticItem]:
         ),
         DiagnosticItem(
             "owners",
-            "OWNER_IDS указан",
+            "OWNER_IDS/OWNER_ID указан",
             bool(settings.owner_ids),
             "Укажите свой Telegram ID. Можно несколько через запятую.",
         ),

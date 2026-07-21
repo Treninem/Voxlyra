@@ -26,6 +26,9 @@ async def connect():
         os.makedirs(folder, exist_ok=True)
     db = await aiosqlite.connect(db_path)
     db.row_factory = aiosqlite.Row
+    # SQLite lower()/NOCASE handle ASCII only. The project stores Russian,
+    # Japanese and other author names, so searches need a Unicode-aware fold.
+    await db.create_function("unicode_casefold", 1, lambda value: str(value or "").casefold())
     await db.execute("PRAGMA foreign_keys = ON")
     try:
         yield db
@@ -466,6 +469,15 @@ async def _init_db_impl() -> None:
         await _ensure_v1114_access_schema(db)
         await _ensure_v1118_premium_revenue_schema(db)
         await _ensure_v1200_bonus_wallet_schema(db)
+        await _ensure_v11319_reader_subscription_schema(db)
+        await _ensure_v11320_library_schema(db)
+        await _ensure_v11321_reading_stats_schema(db)
+        await _ensure_v11322_reading_notification_schema(db)
+        await _ensure_v11323_monthly_reading_schema(db)
+        await _ensure_v11325_reading_journal_schema(db)
+        await _ensure_v11326_reread_schema(db)
+        await _ensure_v11327_journal_import_schema(db)
+        await _ensure_v11328_journal_import_history_schema(db)
         await db.commit()
 
 
@@ -963,6 +975,57 @@ async def _ensure_v1110_analytics_schema(db: aiosqlite.Connection) -> None:
             ON user_achievements(user_id, awarded_at DESC);
         CREATE INDEX IF NOT EXISTS idx_smart_notifications_last_sent
             ON smart_notification_state(notification_code, last_sent_at);
+        """
+    )
+
+
+async def _ensure_v11319_reader_subscription_schema(db: aiosqlite.Connection) -> None:
+    """v1.13.19: явные подписки читателей и режим уведомлений только по подпискам."""
+    cur = await db.execute("PRAGMA table_info(user_preferences)")
+    existing = {row[1] for row in await cur.fetchall()}
+    if "notifications_followed_only" not in existing:
+        await _execute_schema_ddl(
+            db,
+            "ALTER TABLE user_preferences ADD COLUMN notifications_followed_only INTEGER NOT NULL DEFAULT 1",
+        )
+
+    await db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS book_subscriptions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            book_id INTEGER NOT NULL,
+            notify_chapters INTEGER NOT NULL DEFAULT 1,
+            notify_audio INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(user_id, book_id),
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS author_subscriptions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            author_id INTEGER NOT NULL,
+            notify_new_books INTEGER NOT NULL DEFAULT 1,
+            notify_chapters INTEGER NOT NULL DEFAULT 1,
+            notify_audio INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(user_id, author_id),
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY(author_id) REFERENCES author_profiles(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_book_subscriptions_book
+            ON book_subscriptions(book_id, notify_chapters, notify_audio);
+        CREATE INDEX IF NOT EXISTS idx_book_subscriptions_user
+            ON book_subscriptions(user_id, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_author_subscriptions_author
+            ON author_subscriptions(author_id, notify_new_books, notify_chapters, notify_audio);
+        CREATE INDEX IF NOT EXISTS idx_author_subscriptions_user
+            ON author_subscriptions(user_id, updated_at DESC);
         """
     )
 
@@ -2814,6 +2877,7 @@ async def set_audio_chapter_status(audio_id: int, status: str) -> bool:
 async def save_listening_progress(user_id: int, audio_chapter_id: int, position_seconds: int) -> None:
     now = utc_now()
     async with connect() as db:
+        position = max(0, int(position_seconds))
         await db.execute(
             """
             INSERT INTO listening_progress(user_id, audio_chapter_id, position_seconds, updated_at)
@@ -2822,8 +2886,20 @@ async def save_listening_progress(user_id: int, audio_chapter_id: int, position_
                 position_seconds=excluded.position_seconds,
                 updated_at=excluded.updated_at
             """,
-            (user_id, audio_chapter_id, max(0, int(position_seconds)), now),
+            (user_id, audio_chapter_id, position, now),
         )
+        cur = await db.execute("SELECT book_id FROM audio_chapters WHERE id=?", (int(audio_chapter_id),))
+        audio = await cur.fetchone()
+        if audio:
+            await _record_history_db(
+                db, user_id=int(user_id), content_type="audio", target_id=int(audio_chapter_id),
+                book_id=int(audio["book_id"]), position_value=position, updated_at=now,
+            )
+            await _record_reader_activity_db(
+                db, user_id=int(user_id), content_type="audio", target_id=int(audio_chapter_id),
+                position_value=position, updated_at=now,
+            )
+            await _touch_progress_revision_db(db, int(user_id), now)
         await db.commit()
 
 
@@ -2992,11 +3068,18 @@ async def publish_book_content(book_id: int) -> dict[str, int]:
         return result
 
 
-async def list_book_notification_recipients(book_id: int, limit: int = 5000) -> list[aiosqlite.Row]:
-    """Читатели, которые сохранили, открывали, оценивали или покупали книгу."""
+async def list_book_notification_recipients(
+    book_id: int,
+    category: str = "chapters",
+    limit: int = 5000,
+) -> list[aiosqlite.Row]:
+    """Получатели события: явные подписчики, либо прежние читатели при разрешённом широком режиме."""
+    normalized_category = str(category or "chapters").strip().lower()
+    book_flag = "notify_audio" if normalized_category == "audio" else "notify_chapters"
+    author_flag = "notify_audio" if normalized_category == "audio" else "notify_chapters"
     async with connect() as db:
         cur = await db.execute(
-            """
+            f"""
             SELECT DISTINCT u.id, u.telegram_id, u.username, u.full_name,
                    (
                        SELECT c.number
@@ -3013,8 +3096,18 @@ async def list_book_notification_recipients(book_id: int, limit: int = 5000) -> 
                        ORDER BY rp.updated_at DESC
                        LIMIT 1
                    ) AS last_position_percent,
-                   (SELECT bm.status FROM bookmarks bm WHERE bm.user_id=u.id AND bm.book_id=? LIMIT 1) AS bookmark_status
+                   (SELECT bm.status FROM bookmarks bm WHERE bm.user_id=u.id AND bm.book_id=? LIMIT 1) AS bookmark_status,
+                   EXISTS(
+                       SELECT 1 FROM book_subscriptions bs
+                       WHERE bs.user_id=u.id AND bs.book_id=? AND bs.{book_flag}=1
+                   ) AS book_subscribed,
+                   EXISTS(
+                       SELECT 1 FROM author_subscriptions aus
+                       JOIN books source_book ON source_book.author_id=aus.author_id
+                       WHERE aus.user_id=u.id AND source_book.id=? AND aus.{author_flag}=1
+                   ) AS author_subscribed
             FROM users u
+            LEFT JOIN user_preferences pref ON pref.user_id=u.id
             WHERE u.is_blocked=0
               AND u.id != COALESCE((
                   SELECT ap.user_id FROM books b
@@ -3022,28 +3115,63 @@ async def list_book_notification_recipients(book_id: int, limit: int = 5000) -> 
                   WHERE b.id=?
               ), -1)
               AND (
-                  EXISTS(SELECT 1 FROM bookmarks bm WHERE bm.user_id=u.id AND bm.book_id=?)
-                  OR EXISTS(SELECT 1 FROM reading_progress rp WHERE rp.user_id=u.id AND rp.book_id=?)
-                  OR EXISTS(
-                      SELECT 1 FROM listening_progress lp
-                      JOIN audio_chapters ac ON ac.id=lp.audio_chapter_id
-                      WHERE lp.user_id=u.id AND ac.book_id=?
+                  EXISTS(
+                      SELECT 1 FROM book_subscriptions bs
+                      WHERE bs.user_id=u.id AND bs.book_id=? AND bs.{book_flag}=1
                   )
-                  OR EXISTS(SELECT 1 FROM reviews r WHERE r.user_id=u.id AND r.book_id=?)
                   OR EXISTS(
-                      SELECT 1 FROM purchases p
-                      WHERE p.user_id=u.id AND p.status='paid' AND (
-                          p.book_id=?
-                          OR p.chapter_id IN (SELECT id FROM chapters WHERE book_id=?)
-                          OR p.audio_chapter_id IN (SELECT id FROM audio_chapters WHERE book_id=?)
-                          OR p.graphic_chapter_id IN (SELECT id FROM graphic_chapters WHERE book_id=?)
+                      SELECT 1 FROM author_subscriptions aus
+                      JOIN books source_book ON source_book.author_id=aus.author_id
+                      WHERE aus.user_id=u.id AND source_book.id=? AND aus.{author_flag}=1
+                  )
+                  OR (
+                      COALESCE(pref.notifications_followed_only, 1)=0
+                      AND (
+                          EXISTS(SELECT 1 FROM bookmarks bm WHERE bm.user_id=u.id AND bm.book_id=?)
+                          OR EXISTS(SELECT 1 FROM reading_progress rp WHERE rp.user_id=u.id AND rp.book_id=?)
+                          OR EXISTS(
+                              SELECT 1 FROM listening_progress lp
+                              JOIN audio_chapters ac ON ac.id=lp.audio_chapter_id
+                              WHERE lp.user_id=u.id AND ac.book_id=?
+                          )
+                          OR EXISTS(SELECT 1 FROM reviews r WHERE r.user_id=u.id AND r.book_id=?)
+                          OR EXISTS(
+                              SELECT 1 FROM purchases p
+                              WHERE p.user_id=u.id AND p.status='paid' AND (
+                                  p.book_id=?
+                                  OR p.chapter_id IN (SELECT id FROM chapters WHERE book_id=?)
+                                  OR p.audio_chapter_id IN (SELECT id FROM audio_chapters WHERE book_id=?)
+                                  OR p.graphic_chapter_id IN (SELECT id FROM graphic_chapters WHERE book_id=?)
+                              )
+                          )
                       )
                   )
               )
             ORDER BY u.id
             LIMIT ?
             """,
-            (book_id, book_id, book_id, book_id, book_id, book_id, book_id, book_id, book_id, book_id, book_id, book_id, int(limit)),
+            (
+                int(book_id), int(book_id), int(book_id), int(book_id), int(book_id), int(book_id),
+                int(book_id), int(book_id), int(book_id), int(book_id), int(book_id), int(book_id),
+                int(book_id), int(book_id), int(book_id), int(book_id), int(limit),
+            ),
+        )
+        return await cur.fetchall()
+
+
+async def list_author_notification_recipients(author_id: int, limit: int = 5000) -> list[aiosqlite.Row]:
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT DISTINCT u.id, u.telegram_id, u.username, u.full_name
+            FROM author_subscriptions aus
+            JOIN users u ON u.id=aus.user_id AND u.is_blocked=0
+            JOIN author_profiles ap ON ap.id=aus.author_id
+            WHERE aus.author_id=? AND aus.notify_new_books=1 AND u.id != ap.user_id
+            ORDER BY u.id
+            LIMIT ?
+            """,
+            (int(author_id), int(limit)),
         )
         return await cur.fetchall()
 
@@ -3328,6 +3456,7 @@ async def save_reading_progress(user_id: int, chapter_id: int, position_percent:
         chapter = await cur.fetchone()
         if not chapter:
             return
+        book_id = int(chapter["book_id"])
         await db.execute(
             """
             INSERT INTO reading_progress(user_id, book_id, chapter_id, position_percent, updated_at)
@@ -3336,8 +3465,17 @@ async def save_reading_progress(user_id: int, chapter_id: int, position_percent:
                 position_percent=excluded.position_percent,
                 updated_at=excluded.updated_at
             """,
-            (user_id, int(chapter["book_id"]), chapter_id, position_percent, now),
+            (user_id, book_id, chapter_id, position_percent, now),
         )
+        await _record_history_db(
+            db, user_id=int(user_id), content_type="text", target_id=int(chapter_id),
+            book_id=book_id, position_value=position_percent, updated_at=now,
+        )
+        await _record_reader_activity_db(
+            db, user_id=int(user_id), content_type="text", target_id=int(chapter_id),
+            position_value=position_percent, updated_at=now,
+        )
+        await _touch_progress_revision_db(db, int(user_id), now)
         await db.commit()
 
 
@@ -3365,6 +3503,46 @@ async def set_bookmark(user_id: int, book_id: int, status: str = "reading") -> N
             """,
             (user_id, book_id, status, now, now),
         )
+        journal_status = "reading" if status == "favorite" else status
+        started_on = None if status == "planned" else now[:10]
+        finished_on = now[:10] if status == "finished" else None
+        await db.execute(
+            """
+            INSERT INTO reader_book_journal(
+                user_id, book_id, status, started_on, finished_on, impression,
+                private_rating, last_activity_at, created_at, updated_at
+            ) VALUES(?,?,?,?,?,'',0,NULL,?,?)
+            ON CONFLICT(user_id, book_id) DO UPDATE SET
+                status=CASE WHEN ?=1 THEN reader_book_journal.status ELSE excluded.status END,
+                started_on=COALESCE(reader_book_journal.started_on, excluded.started_on),
+                finished_on=CASE
+                    WHEN excluded.status='finished' THEN COALESCE(reader_book_journal.finished_on, excluded.finished_on)
+                    ELSE reader_book_journal.finished_on
+                END,
+                updated_at=excluded.updated_at
+            """,
+            (user_id, book_id, journal_status, started_on, finished_on, now, now, 1 if status == "favorite" else 0),
+        )
+        if status != 'favorite' and status != 'planned':
+            cur = await db.execute(
+                'SELECT * FROM reader_book_cycles WHERE user_id=? AND book_id=? ORDER BY cycle_number DESC LIMIT 1',
+                (int(user_id), int(book_id)),
+            )
+            latest_cycle = await cur.fetchone()
+            cycle_status = journal_status if journal_status in {'reading','finished','dropped'} else 'reading'
+            if latest_cycle:
+                await db.execute(
+                    """UPDATE reader_book_cycles SET status=?, finished_on=CASE WHEN ?='finished' THEN COALESCE(finished_on, ?) ELSE finished_on END, updated_at=? WHERE id=?""",
+                    (cycle_status, cycle_status, finished_on, now, int(latest_cycle['id'])),
+                )
+            else:
+                await db.execute(
+                    """
+                    INSERT INTO reader_book_cycles(user_id,book_id,cycle_number,status,started_on,finished_on,note,created_at,updated_at)
+                    VALUES(?,?,1,?,?,?,?,?,?)
+                    """,
+                    (int(user_id), int(book_id), cycle_status, started_on, finished_on if cycle_status == 'finished' else None, '', now, now),
+                )
         await db.commit()
 
 
@@ -3458,6 +3636,167 @@ async def list_user_continue_listening(user_id: int, limit: int = 12) -> list[ai
             (user_id, int(limit)),
         )
         return await cur.fetchall()
+
+
+async def list_user_continue_graphics(user_id: int, limit: int = 12) -> list[aiosqlite.Row]:
+    """Последняя открытая опубликованная графическая глава каждой книги."""
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT grp.*, gc.book_id, gc.title AS graphic_title, gc.number AS graphic_number,
+                   gc.pages_count, b.title, b.cover_path, b.cover_file_id, b.updated_at AS book_updated_at, ap.pen_name
+            FROM graphic_reading_progress grp
+            JOIN graphic_chapters gc ON gc.id=grp.graphic_chapter_id AND gc.status='published'
+            JOIN books b ON b.id=gc.book_id AND b.publication_status='published'
+            LEFT JOIN author_profiles ap ON ap.id=b.author_id
+            WHERE grp.user_id=?
+              AND grp.updated_at=(
+                SELECT MAX(grp2.updated_at)
+                FROM graphic_reading_progress grp2
+                JOIN graphic_chapters gc2 ON gc2.id=grp2.graphic_chapter_id
+                WHERE grp2.user_id=grp.user_id AND gc2.book_id=gc.book_id
+              )
+            ORDER BY grp.updated_at DESC
+            LIMIT ?
+            """,
+            (int(user_id), int(limit)),
+        )
+        return await cur.fetchall()
+
+
+async def get_book_subscription(user_id: int, book_id: int) -> aiosqlite.Row | None:
+    async with connect() as db:
+        cur = await db.execute(
+            "SELECT * FROM book_subscriptions WHERE user_id=? AND book_id=?",
+            (int(user_id), int(book_id)),
+        )
+        return await cur.fetchone()
+
+
+async def set_book_subscription(
+    user_id: int,
+    book_id: int,
+    *,
+    enabled: bool,
+    notify_chapters: bool = True,
+    notify_audio: bool = True,
+) -> aiosqlite.Row | None:
+    now = utc_now()
+    async with connect() as db:
+        if not enabled:
+            await db.execute(
+                "DELETE FROM book_subscriptions WHERE user_id=? AND book_id=?",
+                (int(user_id), int(book_id)),
+            )
+            await db.commit()
+            return None
+        await db.execute(
+            """
+            INSERT INTO book_subscriptions(
+                user_id, book_id, notify_chapters, notify_audio, created_at, updated_at
+            ) VALUES(?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, book_id) DO UPDATE SET
+                notify_chapters=excluded.notify_chapters,
+                notify_audio=excluded.notify_audio,
+                updated_at=excluded.updated_at
+            """,
+            (
+                int(user_id), int(book_id), 1 if notify_chapters else 0,
+                1 if notify_audio else 0, now, now,
+            ),
+        )
+        await db.commit()
+        cur = await db.execute(
+            "SELECT * FROM book_subscriptions WHERE user_id=? AND book_id=?",
+            (int(user_id), int(book_id)),
+        )
+        return await cur.fetchone()
+
+
+async def get_author_subscription(user_id: int, author_id: int) -> aiosqlite.Row | None:
+    async with connect() as db:
+        cur = await db.execute(
+            "SELECT * FROM author_subscriptions WHERE user_id=? AND author_id=?",
+            (int(user_id), int(author_id)),
+        )
+        return await cur.fetchone()
+
+
+async def set_author_subscription(
+    user_id: int,
+    author_id: int,
+    *,
+    enabled: bool,
+    notify_new_books: bool = True,
+    notify_chapters: bool = True,
+    notify_audio: bool = True,
+) -> aiosqlite.Row | None:
+    now = utc_now()
+    async with connect() as db:
+        if not enabled:
+            await db.execute(
+                "DELETE FROM author_subscriptions WHERE user_id=? AND author_id=?",
+                (int(user_id), int(author_id)),
+            )
+            await db.commit()
+            return None
+        await db.execute(
+            """
+            INSERT INTO author_subscriptions(
+                user_id, author_id, notify_new_books, notify_chapters, notify_audio, created_at, updated_at
+            ) VALUES(?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, author_id) DO UPDATE SET
+                notify_new_books=excluded.notify_new_books,
+                notify_chapters=excluded.notify_chapters,
+                notify_audio=excluded.notify_audio,
+                updated_at=excluded.updated_at
+            """,
+            (
+                int(user_id), int(author_id), 1 if notify_new_books else 0,
+                1 if notify_chapters else 0, 1 if notify_audio else 0, now, now,
+            ),
+        )
+        await db.commit()
+        cur = await db.execute(
+            "SELECT * FROM author_subscriptions WHERE user_id=? AND author_id=?",
+            (int(user_id), int(author_id)),
+        )
+        return await cur.fetchone()
+
+
+async def list_user_subscriptions(user_id: int, limit: int = 100) -> dict[str, list[aiosqlite.Row]]:
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT bs.*, b.title, b.description, b.age_limit, b.cover_path, b.cover_file_id,
+                   b.updated_at AS book_updated_at, ap.pen_name, b.author_id,
+                   (SELECT COUNT(*) FROM chapters c WHERE c.book_id=b.id AND c.status='published') AS chapters_count,
+                   (SELECT COUNT(*) FROM audio_chapters ac WHERE ac.book_id=b.id AND ac.status='published') AS audio_count,
+                   (SELECT COUNT(*) FROM graphic_chapters gc WHERE gc.book_id=b.id AND gc.status='published') AS graphic_count
+            FROM book_subscriptions bs
+            JOIN books b ON b.id=bs.book_id AND b.publication_status='published'
+            LEFT JOIN author_profiles ap ON ap.id=b.author_id
+            WHERE bs.user_id=?
+            ORDER BY bs.updated_at DESC
+            LIMIT ?
+            """,
+            (int(user_id), int(limit)),
+        )
+        books = await cur.fetchall()
+        cur = await db.execute(
+            """
+            SELECT aus.*, ap.pen_name, ap.avatar_file_id, ap.bio,
+                   (SELECT COUNT(*) FROM books b WHERE b.author_id=ap.id AND b.publication_status='published') AS books_count
+            FROM author_subscriptions aus
+            JOIN author_profiles ap ON ap.id=aus.author_id AND ap.status IN ('active', 'approved')
+            WHERE aus.user_id=?
+            ORDER BY aus.updated_at DESC
+            LIMIT ?
+            """,
+            (int(user_id), int(limit)),
+        )
+        authors = await cur.fetchall()
+        return {"books": books, "authors": authors}
 
 
 async def upsert_review(user_id: int, book_id: int, rating: int, text: str) -> None:
@@ -4593,38 +4932,49 @@ async def set_complaint_status(complaint_id: int, status: str, handled_by_user_i
 
 
 async def search_users(query: str, limit: int = 20) -> list[aiosqlite.Row]:
-    q = f"%{query.strip().lstrip('@').lower()}%"
+    clean = query.strip().lstrip("@")
+    q = f"%{clean.casefold()}%"
+    exact_database_id = int(clean) if clean.isdigit() else -1
     async with connect() as db:
         cur = await db.execute(
             """
             SELECT u.*, ap.pen_name
             FROM users u
             LEFT JOIN author_profiles ap ON ap.user_id = u.id
-            WHERE lower(COALESCE(u.username,'')) LIKE ?
-               OR lower(COALESCE(u.full_name,'')) LIKE ?
+            WHERE u.id = ?
+               OR unicode_casefold(COALESCE(u.username,'')) LIKE ?
+               OR unicode_casefold(COALESCE(u.full_name,'')) LIKE ?
                OR CAST(u.telegram_id AS TEXT) LIKE ?
-               OR lower(COALESCE(ap.pen_name,'')) LIKE ?
-            ORDER BY u.id DESC
+               OR unicode_casefold(COALESCE(ap.pen_name,'')) LIKE ?
+            ORDER BY CASE WHEN u.id=? THEN 0 ELSE 1 END, u.id DESC
             LIMIT ?
             """,
-            (q, q, q, q, limit),
+            (exact_database_id, q, q, q, q, exact_database_id, limit),
         )
         return await cur.fetchall()
 
 
 async def search_books(query: str, limit: int = 20) -> list[aiosqlite.Row]:
-    q = f"%{query.strip().lower()}%"
+    clean = query.strip().lstrip("@")
+    q = f"%{clean.casefold()}%"
+    exact_book_id = int(clean) if clean.isdigit() else -1
     async with connect() as db:
         cur = await db.execute(
             """
-            SELECT b.*, ap.pen_name
+            SELECT b.*, COALESCE(ap.pen_name, b.source_author_name) AS pen_name,
+                   (SELECT c.id FROM chapters c WHERE c.book_id=b.id ORDER BY c.number, c.id LIMIT 1) AS first_chapter_id,
+                   (SELECT gc.id FROM graphic_chapters gc WHERE gc.book_id=b.id ORDER BY gc.number, gc.id LIMIT 1) AS first_graphic_chapter_id
             FROM books b
             LEFT JOIN author_profiles ap ON ap.id = b.author_id
-            WHERE lower(b.title) LIKE ? OR lower(COALESCE(b.description,'')) LIKE ? OR lower(COALESCE(ap.pen_name,'')) LIKE ?
-            ORDER BY b.id DESC
+            WHERE b.id = ?
+               OR unicode_casefold(COALESCE(b.title,'')) LIKE ?
+               OR unicode_casefold(COALESCE(b.description,'')) LIKE ?
+               OR unicode_casefold(COALESCE(ap.pen_name,'')) LIKE ?
+               OR unicode_casefold(COALESCE(b.source_author_name,'')) LIKE ?
+            ORDER BY CASE WHEN b.id=? THEN 0 ELSE 1 END, b.id DESC
             LIMIT ?
             """,
-            (q, q, q, limit),
+            (exact_book_id, q, q, q, q, exact_book_id, limit),
         )
         return await cur.fetchall()
 
@@ -5120,6 +5470,7 @@ DEFAULT_USER_PREFERENCES = {
     "notifications_discounts": "1",
     "notifications_reminders": "1",
     "notifications_achievements": "1",
+    "notifications_followed_only": "1",
 }
 
 
@@ -5129,7 +5480,8 @@ async def get_user_preferences(user_id: int) -> dict[str, str]:
             """
             SELECT theme, font_size, notifications, notifications_chapters,
                    notifications_audio, notifications_discounts,
-                   notifications_reminders, notifications_achievements
+                   notifications_reminders, notifications_achievements,
+                   notifications_followed_only
             FROM user_preferences WHERE user_id=?
             """,
             (user_id,),
@@ -5151,9 +5503,9 @@ async def set_user_preference(user_id: int, key: str, value: str) -> dict[str, s
             INSERT INTO user_preferences(
                 user_id, theme, font_size, notifications, notifications_chapters,
                 notifications_audio, notifications_discounts, notifications_reminders,
-                notifications_achievements, updated_at
+                notifications_achievements, notifications_followed_only, updated_at
             )
-            VALUES(?, 'system', 'normal', 1, 1, 1, 1, 1, 1, ?)
+            VALUES(?, 'system', 'normal', 1, 1, 1, 1, 1, 1, 1, ?)
             ON CONFLICT(user_id) DO NOTHING
             """,
             (user_id, now),
@@ -6949,6 +7301,7 @@ async def get_adjacent_graphic_chapters(graphic_chapter_id: int) -> dict[str, ai
 async def save_graphic_reading_progress(user_id: int, graphic_chapter_id: int, page_number: int) -> None:
     now = utc_now()
     async with connect() as db:
+        page = max(1, int(page_number or 1))
         await db.execute(
             """
             INSERT INTO graphic_reading_progress(user_id, graphic_chapter_id, page_number, updated_at)
@@ -6957,8 +7310,20 @@ async def save_graphic_reading_progress(user_id: int, graphic_chapter_id: int, p
                 page_number=excluded.page_number,
                 updated_at=excluded.updated_at
             """,
-            (int(user_id), int(graphic_chapter_id), max(1, int(page_number or 1)), now),
+            (int(user_id), int(graphic_chapter_id), page, now),
         )
+        cur = await db.execute("SELECT book_id FROM graphic_chapters WHERE id=?", (int(graphic_chapter_id),))
+        graphic = await cur.fetchone()
+        if graphic:
+            await _record_history_db(
+                db, user_id=int(user_id), content_type="graphic", target_id=int(graphic_chapter_id),
+                book_id=int(graphic["book_id"]), position_value=page, updated_at=now,
+            )
+            await _record_reader_activity_db(
+                db, user_id=int(user_id), content_type="graphic", target_id=int(graphic_chapter_id),
+                position_value=page, updated_at=now,
+            )
+            await _touch_progress_revision_db(db, int(user_id), now)
         await db.commit()
 
 
@@ -10425,11 +10790,13 @@ async def sync_user_achievements(user_id: int) -> dict[str, list[dict[str, Any]]
     return {"new": new_items, "items": all_items}
 
 
-async def list_smart_reader_reminder_candidates(limit: int = 100) -> list[aiosqlite.Row]:
-    """Возвращает только давно не продолженные активные книги, не чаще одного раза в неделю."""
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=3)).isoformat()
-    recent = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
-    repeat_cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+async def list_smart_reader_reminder_candidates(limit: int = 100, now_utc: datetime | None = None) -> list[dict[str, Any]]:
+    """Выбирает не более одного мягкого напоминания на читателя по его локальному расписанию."""
+    now_value = now_utc or datetime.now(timezone.utc)
+    if now_value.tzinfo is None:
+        now_value = now_value.replace(tzinfo=timezone.utc)
+    recent = (now_value - timedelta(days=90)).isoformat()
+    repeat_cutoff = (now_value - timedelta(days=7)).isoformat()
     async with connect() as db:
         cur = await db.execute(
             """
@@ -10438,25 +10805,58 @@ async def list_smart_reader_reminder_candidates(limit: int = 100) -> list[aiosql
                 FROM reading_progress rp GROUP BY rp.user_id, rp.book_id
             )
             SELECT u.id AS user_id, u.telegram_id, u.full_name, b.id AS book_id, b.title AS book_title,
-                   c.number AS chapter_number, c.title AS chapter_title, latest.last_read_at
+                   c.number AS chapter_number, c.title AS chapter_title, latest.last_read_at,
+                   rns.reminder_hour, rns.reminder_minute, rns.reminder_weekdays,
+                   rns.inactive_days, rns.timezone_offset_minutes
             FROM latest
             JOIN users u ON u.id=latest.user_id AND u.is_blocked=0
             JOIN books b ON b.id=latest.book_id AND b.publication_status='published'
             JOIN reading_progress rp ON rp.user_id=latest.user_id AND rp.book_id=latest.book_id AND rp.updated_at=latest.last_read_at
             JOIN chapters c ON c.id=rp.chapter_id
+            JOIN reader_notification_settings rns ON rns.user_id=u.id AND rns.reminder_enabled=1
             LEFT JOIN bookmarks bm ON bm.user_id=u.id AND bm.book_id=b.id
             LEFT JOIN user_preferences pref ON pref.user_id=u.id
             LEFT JOIN smart_notification_state sns ON sns.user_id=u.id AND sns.notification_code='continue_reading' AND sns.context_key=CAST(b.id AS TEXT)
-            WHERE latest.last_read_at<=? AND latest.last_read_at>=?
+            WHERE latest.last_read_at>=?
               AND COALESCE(pref.notifications,1)=1 AND COALESCE(pref.notifications_reminders,1)=1
               AND COALESCE(bm.status,'reading') NOT IN ('finished','dropped')
               AND (sns.last_sent_at IS NULL OR sns.last_sent_at<?)
-            ORDER BY latest.last_read_at ASC
+            ORDER BY latest.user_id, latest.last_read_at DESC
             LIMIT ?
             """,
-            (cutoff, recent, repeat_cutoff, int(limit)),
+            (recent, repeat_cutoff, max(1, min(5000, int(limit) * 12))),
         )
-        return await cur.fetchall()
+        rows = [dict(row) for row in await cur.fetchall()]
+
+    result: list[dict[str, Any]] = []
+    selected_users: set[int] = set()
+    for row in rows:
+        user_id = int(row["user_id"])
+        if user_id in selected_users:
+            continue
+        local_now = _local_datetime(now_value, int(row.get("timezone_offset_minutes") or 0))
+        weekdays = _parse_weekdays(row.get("reminder_weekdays") or "1,2,3,4,5,6,7")
+        if local_now.isoweekday() not in weekdays:
+            continue
+        if not _schedule_hour_due(local_now, int(row.get("reminder_hour") or 19), int(row.get("reminder_minute") or 0)):
+            continue
+        try:
+            last_read = datetime.fromisoformat(str(row.get("last_read_at") or "").replace("Z", "+00:00"))
+            if last_read.tzinfo is None:
+                last_read = last_read.replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        if now_value - last_read.astimezone(timezone.utc) < timedelta(days=max(1, int(row.get("inactive_days") or 3))):
+            continue
+        local_context = local_now.date().isoformat()
+        if await was_smart_notification_sent(user_id, "continue_reading_daily", local_context):
+            continue
+        row["daily_context_key"] = local_context
+        result.append(row)
+        selected_users.add(user_id)
+        if len(result) >= max(1, int(limit)):
+            break
+    return result
 
 
 async def mark_smart_notification_sent(user_id: int, code: str, context_key: str) -> None:
@@ -12563,3 +12963,3832 @@ async def get_platform_finance_summary() -> dict[str, int]:
 async def claim_daily_bonus(user_id: int) -> tuple[bool, int, int]:
     """Compatibility stub: daily rewards were permanently removed in v1.12.0."""
     return False, 0, await get_bonus_balance(int(user_id))
+
+
+# v1.13.20 — расширенные полки, история, заметки, цитаты и синхронизация прогресса.
+async def _ensure_v11320_library_schema(db: aiosqlite.Connection) -> None:
+    await db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS user_shelves (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            icon TEXT NOT NULL DEFAULT '📚',
+            position INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(user_id, name),
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS user_shelf_books (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            shelf_id INTEGER NOT NULL,
+            book_id INTEGER NOT NULL,
+            position INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(shelf_id, book_id),
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY(shelf_id) REFERENCES user_shelves(id) ON DELETE CASCADE,
+            FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS reading_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            content_type TEXT NOT NULL,
+            target_id INTEGER NOT NULL,
+            book_id INTEGER NOT NULL,
+            position_value INTEGER NOT NULL DEFAULT 0,
+            open_count INTEGER NOT NULL DEFAULT 1,
+            first_opened_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(user_id, content_type, target_id),
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS reader_annotations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            book_id INTEGER NOT NULL,
+            chapter_id INTEGER NOT NULL,
+            annotation_type TEXT NOT NULL DEFAULT 'note',
+            selected_text TEXT NOT NULL DEFAULT '',
+            note_text TEXT NOT NULL DEFAULT '',
+            color TEXT NOT NULL DEFAULT 'violet',
+            position_percent INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE,
+            FOREIGN KEY(chapter_id) REFERENCES chapters(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS progress_sync_state (
+            user_id INTEGER PRIMARY KEY,
+            revision INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_user_shelves_user_position
+            ON user_shelves(user_id, position, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_user_shelf_books_user
+            ON user_shelf_books(user_id, shelf_id, position, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_reading_history_user_updated
+            ON reading_history(user_id, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_reader_annotations_user_updated
+            ON reader_annotations(user_id, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_reader_annotations_chapter
+            ON reader_annotations(user_id, chapter_id, position_percent);
+        """
+    )
+
+
+async def _touch_progress_revision_db(db: aiosqlite.Connection, user_id: int, updated_at: str | None = None) -> None:
+    now = updated_at or utc_now()
+    await db.execute(
+        """
+        INSERT INTO progress_sync_state(user_id, revision, updated_at)
+        VALUES(?, 1, ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+            revision=progress_sync_state.revision + 1,
+            updated_at=excluded.updated_at
+        """,
+        (int(user_id), now),
+    )
+
+
+async def _record_history_db(
+    db: aiosqlite.Connection,
+    *,
+    user_id: int,
+    content_type: str,
+    target_id: int,
+    book_id: int,
+    position_value: int,
+    updated_at: str | None = None,
+) -> None:
+    kind = str(content_type or "text")
+    if kind not in {"text", "audio", "graphic"}:
+        return
+    now = updated_at or utc_now()
+    await db.execute(
+        """
+        INSERT INTO reading_history(
+            user_id, content_type, target_id, book_id, position_value,
+            open_count, first_opened_at, updated_at
+        ) VALUES(?, ?, ?, ?, ?, 1, ?, ?)
+        ON CONFLICT(user_id, content_type, target_id) DO UPDATE SET
+            book_id=excluded.book_id,
+            position_value=excluded.position_value,
+            open_count=reading_history.open_count + 1,
+            updated_at=excluded.updated_at
+        """,
+        (int(user_id), kind, int(target_id), int(book_id), max(0, int(position_value)), now, now),
+    )
+    # Личный дневник создаётся при первом реальном открытии произведения.
+    # Ручной статус, впечатление и оценка никогда не перезаписываются историей.
+    await db.execute(
+        """
+        INSERT INTO reader_book_journal(
+            user_id, book_id, status, started_on, finished_on, impression,
+            private_rating, last_activity_at, created_at, updated_at
+        ) VALUES(?, ?, 'reading', substr(?,1,10), NULL, '', 0, ?, ?, ?)
+        ON CONFLICT(user_id, book_id) DO UPDATE SET
+            started_on=COALESCE(reader_book_journal.started_on, excluded.started_on),
+            last_activity_at=excluded.last_activity_at
+        """,
+        (int(user_id), int(book_id), now, now, now, now),
+    )
+    await db.execute(
+        """
+        INSERT OR IGNORE INTO reader_book_cycles(
+            user_id, book_id, cycle_number, status, started_on, finished_on,
+            note, created_at, updated_at
+        ) VALUES(?, ?, 1, 'reading', substr(?,1,10), NULL, '', ?, ?)
+        """,
+        (int(user_id), int(book_id), now, now, now),
+    )
+
+
+async def list_user_shelves(user_id: int, limit: int = 30) -> list[dict[str, Any]]:
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT us.*, COUNT(usb.id) AS books_count
+            FROM user_shelves us
+            LEFT JOIN user_shelf_books usb ON usb.shelf_id=us.id
+            WHERE us.user_id=?
+            GROUP BY us.id
+            ORDER BY us.position, us.updated_at DESC, us.id DESC
+            LIMIT ?
+            """,
+            (int(user_id), max(1, min(100, int(limit)))),
+        )
+        shelves = [dict(row) for row in await cur.fetchall()]
+        for shelf in shelves:
+            cur = await db.execute(
+                """
+                SELECT usb.id AS shelf_book_id, usb.shelf_id, usb.book_id, usb.position,
+                       usb.created_at, usb.updated_at, b.title, b.description, b.age_limit,
+                       b.cover_path, b.cover_file_id, b.content_type, ap.pen_name,
+                       (SELECT COUNT(*) FROM chapters c WHERE c.book_id=b.id AND c.status='published') AS chapters_count,
+                       (SELECT COUNT(*) FROM graphic_chapters gc WHERE gc.book_id=b.id AND gc.status='published') AS graphic_chapters_count
+                FROM user_shelf_books usb
+                JOIN books b ON b.id=usb.book_id AND b.publication_status='published'
+                LEFT JOIN author_profiles ap ON ap.id=b.author_id
+                WHERE usb.user_id=? AND usb.shelf_id=?
+                ORDER BY usb.position, usb.updated_at DESC, usb.id DESC
+                LIMIT 100
+                """,
+                (int(user_id), int(shelf["id"])),
+            )
+            shelf["books"] = [dict(row) for row in await cur.fetchall()]
+        return shelves
+
+
+async def create_user_shelf(user_id: int, name: str, icon: str = "📚") -> aiosqlite.Row:
+    clean_name = " ".join(str(name or "").split())[:60]
+    if len(clean_name) < 2:
+        raise ValueError("Название полки должно содержать не менее 2 символов.")
+    clean_icon = str(icon or "📚").strip()[:8] or "📚"
+    now = utc_now()
+    async with connect() as db:
+        cur = await db.execute("SELECT COALESCE(MAX(position), -1)+1 AS next_position FROM user_shelves WHERE user_id=?", (int(user_id),))
+        row = await cur.fetchone()
+        try:
+            cur = await db.execute(
+                "INSERT INTO user_shelves(user_id,name,icon,position,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+                (int(user_id), clean_name, clean_icon, int(row["next_position"] or 0), now, now),
+            )
+        except aiosqlite.IntegrityError as exc:
+            raise ValueError("Полка с таким названием уже существует.") from exc
+        await db.commit()
+        cur = await db.execute("SELECT * FROM user_shelves WHERE id=?", (int(cur.lastrowid),))
+        return await cur.fetchone()
+
+
+async def update_user_shelf(user_id: int, shelf_id: int, *, name: str | None = None, icon: str | None = None, position: int | None = None) -> aiosqlite.Row | None:
+    async with connect() as db:
+        cur = await db.execute("SELECT * FROM user_shelves WHERE id=? AND user_id=?", (int(shelf_id), int(user_id)))
+        current = await cur.fetchone()
+        if not current:
+            return None
+        clean_name = " ".join(str(name if name is not None else current["name"]).split())[:60]
+        if len(clean_name) < 2:
+            raise ValueError("Название полки должно содержать не менее 2 символов.")
+        clean_icon = str(icon if icon is not None else current["icon"]).strip()[:8] or "📚"
+        clean_position = max(0, int(position if position is not None else current["position"] or 0))
+        try:
+            await db.execute(
+                "UPDATE user_shelves SET name=?, icon=?, position=?, updated_at=? WHERE id=? AND user_id=?",
+                (clean_name, clean_icon, clean_position, utc_now(), int(shelf_id), int(user_id)),
+            )
+        except aiosqlite.IntegrityError as exc:
+            raise ValueError("Полка с таким названием уже существует.") from exc
+        await db.commit()
+        cur = await db.execute("SELECT * FROM user_shelves WHERE id=?", (int(shelf_id),))
+        return await cur.fetchone()
+
+
+async def delete_user_shelf(user_id: int, shelf_id: int) -> bool:
+    async with connect() as db:
+        cur = await db.execute("DELETE FROM user_shelves WHERE id=? AND user_id=?", (int(shelf_id), int(user_id)))
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def set_user_shelf_book(user_id: int, shelf_id: int, book_id: int, *, enabled: bool = True) -> bool:
+    now = utc_now()
+    async with connect() as db:
+        cur = await db.execute("SELECT 1 FROM user_shelves WHERE id=? AND user_id=?", (int(shelf_id), int(user_id)))
+        if not await cur.fetchone():
+            raise ValueError("Полка не найдена.")
+        cur = await db.execute("SELECT 1 FROM books WHERE id=? AND publication_status='published'", (int(book_id),))
+        if not await cur.fetchone():
+            raise ValueError("Книга не найдена.")
+        if not enabled:
+            cur = await db.execute(
+                "DELETE FROM user_shelf_books WHERE user_id=? AND shelf_id=? AND book_id=?",
+                (int(user_id), int(shelf_id), int(book_id)),
+            )
+            await db.commit()
+            return cur.rowcount > 0
+        cur = await db.execute(
+            "SELECT COALESCE(MAX(position), -1)+1 AS next_position FROM user_shelf_books WHERE shelf_id=?",
+            (int(shelf_id),),
+        )
+        row = await cur.fetchone()
+        await db.execute(
+            """
+            INSERT INTO user_shelf_books(user_id,shelf_id,book_id,position,created_at,updated_at)
+            VALUES(?,?,?,?,?,?)
+            ON CONFLICT(shelf_id,book_id) DO UPDATE SET updated_at=excluded.updated_at
+            """,
+            (int(user_id), int(shelf_id), int(book_id), int(row["next_position"] or 0), now, now),
+        )
+        await db.commit()
+        return True
+
+
+async def list_user_reading_history(user_id: int, limit: int = 100) -> list[aiosqlite.Row]:
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT rh.*, b.title, b.cover_path, b.cover_file_id, b.content_type AS book_content_type,
+                   ap.pen_name,
+                   c.title AS chapter_title, c.number AS chapter_number,
+                   ac.title AS audio_title, ac.number AS audio_number, ac.duration_seconds,
+                   gc.title AS graphic_title, gc.number AS graphic_number, gc.pages_count
+            FROM reading_history rh
+            JOIN books b ON b.id=rh.book_id AND b.publication_status='published'
+            LEFT JOIN author_profiles ap ON ap.id=b.author_id
+            LEFT JOIN chapters c ON rh.content_type='text' AND c.id=rh.target_id
+            LEFT JOIN audio_chapters ac ON rh.content_type='audio' AND ac.id=rh.target_id
+            LEFT JOIN graphic_chapters gc ON rh.content_type='graphic' AND gc.id=rh.target_id
+            WHERE rh.user_id=?
+            ORDER BY rh.updated_at DESC, rh.id DESC
+            LIMIT ?
+            """,
+            (int(user_id), max(1, min(500, int(limit)))),
+        )
+        return await cur.fetchall()
+
+
+async def delete_user_reading_history(user_id: int, history_id: int | None = None) -> int:
+    async with connect() as db:
+        if history_id is None:
+            cur = await db.execute("DELETE FROM reading_history WHERE user_id=?", (int(user_id),))
+        else:
+            cur = await db.execute("DELETE FROM reading_history WHERE id=? AND user_id=?", (int(history_id), int(user_id)))
+        await db.commit()
+        return max(0, int(cur.rowcount or 0))
+
+
+async def create_reader_annotation(
+    user_id: int,
+    chapter_id: int,
+    *,
+    annotation_type: str = "note",
+    selected_text: str = "",
+    note_text: str = "",
+    color: str = "violet",
+    position_percent: int = 0,
+) -> aiosqlite.Row:
+    kind = str(annotation_type or "note")
+    if kind not in {"note", "quote"}:
+        raise ValueError("Неизвестный тип записи.")
+    selected = str(selected_text or "").strip()[:1200]
+    note = str(note_text or "").strip()[:4000]
+    if kind == "quote" and len(selected) < 3:
+        raise ValueError("Выберите текст цитаты.")
+    if kind == "note" and len(note) < 1:
+        raise ValueError("Введите текст заметки.")
+    clean_color = str(color or "violet")[:24]
+    now = utc_now()
+    async with connect() as db:
+        cur = await db.execute("SELECT book_id FROM chapters WHERE id=?", (int(chapter_id),))
+        chapter = await cur.fetchone()
+        if not chapter:
+            raise ValueError("Глава не найдена.")
+        cur = await db.execute(
+            """
+            INSERT INTO reader_annotations(
+                user_id,book_id,chapter_id,annotation_type,selected_text,note_text,color,
+                position_percent,created_at,updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                int(user_id), int(chapter["book_id"]), int(chapter_id), kind, selected, note,
+                clean_color, max(0, min(100, int(position_percent))), now, now,
+            ),
+        )
+        await db.commit()
+        cur = await db.execute("SELECT * FROM reader_annotations WHERE id=?", (int(cur.lastrowid),))
+        return await cur.fetchone()
+
+
+async def update_reader_annotation(user_id: int, annotation_id: int, *, note_text: str | None = None, color: str | None = None) -> aiosqlite.Row | None:
+    async with connect() as db:
+        cur = await db.execute("SELECT * FROM reader_annotations WHERE id=? AND user_id=?", (int(annotation_id), int(user_id)))
+        row = await cur.fetchone()
+        if not row:
+            return None
+        note = str(note_text if note_text is not None else row["note_text"]).strip()[:4000]
+        clean_color = str(color if color is not None else row["color"])[:24]
+        if str(row["annotation_type"]) == "note" and not note:
+            raise ValueError("Заметка не может быть пустой.")
+        await db.execute(
+            "UPDATE reader_annotations SET note_text=?, color=?, updated_at=? WHERE id=? AND user_id=?",
+            (note, clean_color, utc_now(), int(annotation_id), int(user_id)),
+        )
+        await db.commit()
+        cur = await db.execute("SELECT * FROM reader_annotations WHERE id=?", (int(annotation_id),))
+        return await cur.fetchone()
+
+
+async def delete_reader_annotation(user_id: int, annotation_id: int) -> bool:
+    async with connect() as db:
+        cur = await db.execute("DELETE FROM reader_annotations WHERE id=? AND user_id=?", (int(annotation_id), int(user_id)))
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def list_reader_annotations(user_id: int, *, chapter_id: int | None = None, limit: int = 200) -> list[aiosqlite.Row]:
+    query = """
+        SELECT ra.*, b.title, b.cover_path, b.cover_file_id, ap.pen_name,
+               c.title AS chapter_title, c.number AS chapter_number
+        FROM reader_annotations ra
+        JOIN books b ON b.id=ra.book_id AND b.publication_status='published'
+        JOIN chapters c ON c.id=ra.chapter_id
+        LEFT JOIN author_profiles ap ON ap.id=b.author_id
+        WHERE ra.user_id=?
+    """
+    params: list[Any] = [int(user_id)]
+    if chapter_id is not None:
+        query += " AND ra.chapter_id=?"
+        params.append(int(chapter_id))
+    query += " ORDER BY ra.updated_at DESC, ra.id DESC LIMIT ?"
+    params.append(max(1, min(500, int(limit))))
+    async with connect() as db:
+        cur = await db.execute(query, tuple(params))
+        return await cur.fetchall()
+
+
+async def get_progress_sync_snapshot(user_id: int, limit: int = 300) -> dict[str, Any]:
+    cap = max(1, min(1000, int(limit)))
+    async with connect() as db:
+        cur = await db.execute("SELECT revision, updated_at FROM progress_sync_state WHERE user_id=?", (int(user_id),))
+        state = await cur.fetchone()
+        cur = await db.execute(
+            "SELECT chapter_id AS target_id, position_percent AS position, updated_at FROM reading_progress WHERE user_id=? ORDER BY updated_at DESC LIMIT ?",
+            (int(user_id), cap),
+        )
+        text_rows = [dict(row) for row in await cur.fetchall()]
+        cur = await db.execute(
+            "SELECT audio_chapter_id AS target_id, position_seconds AS position, updated_at FROM listening_progress WHERE user_id=? ORDER BY updated_at DESC LIMIT ?",
+            (int(user_id), cap),
+        )
+        audio_rows = [dict(row) for row in await cur.fetchall()]
+        cur = await db.execute(
+            "SELECT graphic_chapter_id AS target_id, page_number AS position, updated_at FROM graphic_reading_progress WHERE user_id=? ORDER BY updated_at DESC LIMIT ?",
+            (int(user_id), cap),
+        )
+        graphic_rows = [dict(row) for row in await cur.fetchall()]
+        return {
+            "revision": int(state["revision"] or 0) if state else 0,
+            "updated_at": str(state["updated_at"] or "") if state else "",
+            "text": text_rows,
+            "audio": audio_rows,
+            "graphic": graphic_rows,
+        }
+
+
+# v1.13.21 — статистика чтения, личные цели, серии и календарь активности.
+async def _ensure_v11321_reading_stats_schema(db: aiosqlite.Connection) -> None:
+    await db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS reader_activity_daily (
+            user_id INTEGER NOT NULL,
+            activity_date TEXT NOT NULL,
+            text_chapters INTEGER NOT NULL DEFAULT 0,
+            text_progress_points INTEGER NOT NULL DEFAULT 0,
+            audio_seconds INTEGER NOT NULL DEFAULT 0,
+            graphic_pages INTEGER NOT NULL DEFAULT 0,
+            sessions INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(user_id, activity_date),
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS reader_activity_targets (
+            user_id INTEGER NOT NULL,
+            activity_date TEXT NOT NULL,
+            content_type TEXT NOT NULL,
+            target_id INTEGER NOT NULL,
+            first_position INTEGER NOT NULL DEFAULT 0,
+            last_position INTEGER NOT NULL DEFAULT 0,
+            accumulated_value INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(user_id, activity_date, content_type, target_id),
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS reader_goal_settings (
+            user_id INTEGER PRIMARY KEY,
+            active_days_week INTEGER NOT NULL DEFAULT 5,
+            text_chapters_week INTEGER NOT NULL DEFAULT 7,
+            audio_minutes_week INTEGER NOT NULL DEFAULT 120,
+            graphic_pages_week INTEGER NOT NULL DEFAULT 100,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_reader_activity_daily_user_date
+            ON reader_activity_daily(user_id, activity_date DESC);
+        CREATE INDEX IF NOT EXISTS idx_reader_activity_targets_user_date
+            ON reader_activity_targets(user_id, activity_date DESC, content_type);
+        """
+    )
+
+    # Однократная мягкая отправная точка из уже существующей истории v1.13.20.
+    # Она создаёт только факт активности по последнему известному дню и не
+    # приписывает пользователю минуты, страницы или проценты задним числом.
+    cur = await db.execute("SELECT value FROM settings WHERE key='v11321_activity_backfill_done'")
+    if not await cur.fetchone():
+        now = utc_now()
+        await db.execute(
+            """
+            INSERT OR IGNORE INTO reader_activity_targets(
+                user_id, activity_date, content_type, target_id,
+                first_position, last_position, accumulated_value, created_at, updated_at
+            )
+            SELECT user_id, substr(updated_at, 1, 10), content_type, target_id,
+                   position_value, position_value, 0, updated_at, updated_at
+            FROM reading_history
+            WHERE length(updated_at) >= 10
+              AND content_type IN ('text','audio','graphic')
+            """
+        )
+        await db.execute(
+            """
+            INSERT INTO reader_activity_daily(
+                user_id, activity_date, text_chapters, text_progress_points,
+                audio_seconds, graphic_pages, sessions, created_at, updated_at
+            )
+            SELECT user_id, activity_date,
+                   SUM(CASE WHEN content_type='text' THEN 1 ELSE 0 END),
+                   0, 0, 0, COUNT(*), MIN(created_at), MAX(updated_at)
+            FROM reader_activity_targets
+            GROUP BY user_id, activity_date
+            ON CONFLICT(user_id, activity_date) DO NOTHING
+            """
+        )
+        await db.execute(
+            "INSERT OR IGNORE INTO settings(key,value,updated_at) VALUES('v11321_activity_backfill_done','1',?)",
+            (now,),
+        )
+
+
+# v1.13.22 — персональное расписание чтения и недельные отчёты.
+async def _ensure_v11322_reading_notification_schema(db: aiosqlite.Connection) -> None:
+    await db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS reader_notification_settings (
+            user_id INTEGER PRIMARY KEY,
+            reminder_enabled INTEGER NOT NULL DEFAULT 1,
+            reminder_hour INTEGER NOT NULL DEFAULT 19,
+            reminder_minute INTEGER NOT NULL DEFAULT 0,
+            reminder_weekdays TEXT NOT NULL DEFAULT '1,2,3,4,5,6,7',
+            inactive_days INTEGER NOT NULL DEFAULT 3,
+            weekly_report_enabled INTEGER NOT NULL DEFAULT 1,
+            weekly_report_weekday INTEGER NOT NULL DEFAULT 7,
+            weekly_report_hour INTEGER NOT NULL DEFAULT 20,
+            weekly_report_minute INTEGER NOT NULL DEFAULT 0,
+            timezone_offset_minutes INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_reader_notification_schedule
+            ON reader_notification_settings(reminder_enabled, reminder_hour, weekly_report_enabled, weekly_report_hour);
+        """
+    )
+    now = utc_now()
+    await db.execute(
+        """
+        INSERT OR IGNORE INTO reader_notification_settings(user_id, updated_at)
+        SELECT id, ? FROM users
+        """,
+        (now,),
+    )
+
+
+# v1.13.23 — месячные итоги, сравнение периодов и мягкие рекомендации по ритму.
+async def _ensure_v11323_monthly_reading_schema(db: aiosqlite.Connection) -> None:
+    cur = await db.execute("PRAGMA table_info(reader_notification_settings)")
+    existing = {row[1] for row in await cur.fetchall()}
+    migrations = {
+        "monthly_report_enabled": "ALTER TABLE reader_notification_settings ADD COLUMN monthly_report_enabled INTEGER NOT NULL DEFAULT 1",
+        "monthly_report_day": "ALTER TABLE reader_notification_settings ADD COLUMN monthly_report_day INTEGER NOT NULL DEFAULT 1",
+        "monthly_report_hour": "ALTER TABLE reader_notification_settings ADD COLUMN monthly_report_hour INTEGER NOT NULL DEFAULT 20",
+        "monthly_report_minute": "ALTER TABLE reader_notification_settings ADD COLUMN monthly_report_minute INTEGER NOT NULL DEFAULT 0",
+    }
+    for column, sql in migrations.items():
+        if column not in existing:
+            await _execute_schema_ddl(db, sql)
+
+    await db.execute(
+        """
+        UPDATE reader_notification_settings
+        SET monthly_report_day=CASE WHEN monthly_report_day<1 THEN 1 WHEN monthly_report_day>7 THEN 7 ELSE monthly_report_day END,
+            monthly_report_hour=CASE WHEN monthly_report_hour<0 THEN 20 WHEN monthly_report_hour>23 THEN 20 ELSE monthly_report_hour END,
+            monthly_report_minute=CASE WHEN monthly_report_minute<0 THEN 0 WHEN monthly_report_minute>59 THEN 0 ELSE monthly_report_minute END
+        """
+    )
+
+
+
+# v1.13.25 — приватный читательский дневник и безопасный экспорт истории.
+async def _ensure_v11325_reading_journal_schema(db: aiosqlite.Connection) -> None:
+    await db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS reader_book_journal (
+            user_id INTEGER NOT NULL,
+            book_id INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'reading',
+            started_on TEXT,
+            finished_on TEXT,
+            impression TEXT NOT NULL DEFAULT '',
+            private_rating INTEGER NOT NULL DEFAULT 0,
+            last_activity_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(user_id, book_id),
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_reader_book_journal_user_updated
+            ON reader_book_journal(user_id, updated_at DESC, book_id);
+        CREATE INDEX IF NOT EXISTS idx_reader_book_journal_user_status
+            ON reader_book_journal(user_id, status, finished_on DESC);
+        """
+    )
+    now = utc_now()
+    # Переносим уже существующую историю один раз на каждое произведение.
+    await db.execute(
+        """
+        INSERT OR IGNORE INTO reader_book_journal(
+            user_id, book_id, status, started_on, finished_on, impression,
+            private_rating, last_activity_at, created_at, updated_at
+        )
+        SELECT rh.user_id, rh.book_id,
+               CASE
+                   WHEN bm.status='finished' THEN 'finished'
+                   WHEN bm.status='dropped' THEN 'dropped'
+                   WHEN bm.status='planned' THEN 'planned'
+                   ELSE 'reading'
+               END,
+               substr(MIN(rh.first_opened_at),1,10),
+               CASE WHEN bm.status='finished' THEN substr(MAX(bm.updated_at),1,10) ELSE NULL END,
+               '', 0, MAX(rh.updated_at), MIN(rh.first_opened_at), MAX(rh.updated_at)
+        FROM reading_history rh
+        LEFT JOIN bookmarks bm ON bm.user_id=rh.user_id AND bm.book_id=rh.book_id
+        GROUP BY rh.user_id, rh.book_id
+        """
+    )
+    await db.execute(
+        """
+        INSERT OR IGNORE INTO reader_book_journal(
+            user_id, book_id, status, started_on, finished_on, impression,
+            private_rating, last_activity_at, created_at, updated_at
+        )
+        SELECT bm.user_id, bm.book_id,
+               CASE
+                   WHEN bm.status='finished' THEN 'finished'
+                   WHEN bm.status='dropped' THEN 'dropped'
+                   WHEN bm.status='planned' THEN 'planned'
+                   ELSE 'reading'
+               END,
+               CASE WHEN bm.status='planned' THEN NULL ELSE substr(bm.created_at,1,10) END,
+               CASE WHEN bm.status='finished' THEN substr(bm.updated_at,1,10) ELSE NULL END,
+               '', 0, NULL, bm.created_at, bm.updated_at
+        FROM bookmarks bm
+        """
+    )
+    await db.execute(
+        """
+        INSERT OR IGNORE INTO reader_book_journal(
+            user_id, book_id, status, started_on, finished_on, impression,
+            private_rating, last_activity_at, created_at, updated_at
+        )
+        SELECT ra.user_id, ra.book_id, 'reading', substr(MIN(ra.created_at),1,10), NULL,
+               '', 0, MAX(ra.updated_at), MIN(ra.created_at), MAX(ra.updated_at)
+        FROM reader_annotations ra
+        GROUP BY ra.user_id, ra.book_id
+        """
+    )
+    await db.execute(
+        """
+        UPDATE reader_book_journal
+        SET status=CASE WHEN status IN ('planned','reading','paused','finished','dropped') THEN status ELSE 'reading' END,
+            private_rating=CASE WHEN private_rating<0 THEN 0 WHEN private_rating>5 THEN 5 ELSE private_rating END,
+            updated_at=COALESCE(NULLIF(updated_at,''), ?),
+            created_at=COALESCE(NULLIF(created_at,''), ?)
+        """,
+        (now, now),
+    )
+
+
+
+# v1.13.26 — циклы чтения, личные списки года и календарь завершений.
+async def _ensure_v11326_reread_schema(db: aiosqlite.Connection) -> None:
+    await db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS reader_book_cycles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            book_id INTEGER NOT NULL,
+            cycle_number INTEGER NOT NULL DEFAULT 1,
+            status TEXT NOT NULL DEFAULT 'reading',
+            started_on TEXT,
+            finished_on TEXT,
+            note TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(user_id, book_id, cycle_number),
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS reader_year_list_items (
+            user_id INTEGER NOT NULL,
+            book_id INTEGER NOT NULL,
+            list_year INTEGER NOT NULL,
+            list_code TEXT NOT NULL,
+            note TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(user_id, book_id, list_year, list_code),
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_reader_book_cycles_user_book
+            ON reader_book_cycles(user_id, book_id, cycle_number DESC);
+        CREATE INDEX IF NOT EXISTS idx_reader_book_cycles_finished
+            ON reader_book_cycles(user_id, finished_on, status);
+        CREATE INDEX IF NOT EXISTS idx_reader_year_lists_user_year
+            ON reader_year_list_items(user_id, list_year DESC, list_code, updated_at DESC);
+        """
+    )
+    now = utc_now()
+    # Существующий дневник становится первым циклом. INSERT OR IGNORE делает
+    # миграцию безопасной при каждом Redeploy и не создаёт повторов.
+    await db.execute(
+        """
+        INSERT OR IGNORE INTO reader_book_cycles(
+            user_id, book_id, cycle_number, status, started_on, finished_on,
+            note, created_at, updated_at
+        )
+        SELECT user_id, book_id, 1,
+               CASE
+                   WHEN status='finished' THEN 'finished'
+                   WHEN status='paused' THEN 'paused'
+                   WHEN status='dropped' THEN 'dropped'
+                   ELSE 'reading'
+               END,
+               started_on,
+               CASE WHEN status='finished' THEN finished_on ELSE NULL END,
+               '', created_at, updated_at
+        FROM reader_book_journal
+        WHERE status!='planned' OR started_on IS NOT NULL OR finished_on IS NOT NULL
+        """
+    )
+    await db.execute(
+        """
+        UPDATE reader_book_cycles
+        SET cycle_number=CASE WHEN cycle_number<1 THEN 1 ELSE cycle_number END,
+            status=CASE WHEN status IN ('reading','paused','finished','dropped') THEN status ELSE 'reading' END,
+            note=COALESCE(note,''),
+            created_at=COALESCE(NULLIF(created_at,''), ?),
+            updated_at=COALESCE(NULLIF(updated_at,''), ?)
+        """,
+        (now, now),
+    )
+    await db.execute(
+        """
+        DELETE FROM reader_year_list_items
+        WHERE list_code NOT IN ('best','discovery','emotional','reread')
+           OR list_year<1900 OR list_year>9999
+        """
+    )
+
+
+
+# v1.13.27 — безопасный двухэтапный импорт личного дневника из JSON.
+async def _ensure_v11327_journal_import_schema(db: aiosqlite.Connection) -> None:
+    await db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS reader_journal_import_previews (
+            token TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            source_version TEXT NOT NULL,
+            source_generated_at TEXT,
+            normalized_json TEXT NOT NULL,
+            preview_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            applied_at TEXT,
+            result_json TEXT,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_reader_journal_import_user_created
+            ON reader_journal_import_previews(user_id, created_at DESC);
+        """
+    )
+    # Предпросмотры одноразовые и короткоживущие. Старые записи не содержат
+    # читательских данных после очистки и не раздувают рабочую базу.
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+    await db.execute(
+        "DELETE FROM reader_journal_import_previews WHERE created_at<? OR (applied_at IS NOT NULL AND applied_at<?)",
+        (cutoff, cutoff),
+    )
+
+
+
+# v1.13.28 — резервные точки, история восстановлений и безопасный откат.
+async def _ensure_v11328_journal_import_history_schema(db: aiosqlite.Connection) -> None:
+    await db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS reader_journal_import_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            preview_token TEXT NOT NULL UNIQUE,
+            source_version TEXT NOT NULL,
+            source_generated_at TEXT,
+            backup_json TEXT NOT NULL,
+            before_snapshot_json TEXT NOT NULL,
+            after_snapshot_json TEXT NOT NULL,
+            result_json TEXT NOT NULL,
+            applied_at TEXT NOT NULL,
+            rolled_back_at TEXT,
+            rollback_result_json TEXT,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_reader_journal_import_runs_user_applied
+            ON reader_journal_import_runs(user_id, applied_at DESC, id DESC);
+        """
+    )
+
+
+_JOURNAL_SNAPSHOT_FIELDS = (
+    'status', 'started_on', 'finished_on', 'impression', 'private_rating',
+    'last_activity_at', 'created_at', 'updated_at',
+)
+_CYCLE_SNAPSHOT_FIELDS = (
+    'cycle_number', 'status', 'started_on', 'finished_on', 'note',
+    'created_at', 'updated_at',
+)
+_YEAR_LIST_SNAPSHOT_FIELDS = (
+    'list_year', 'list_code', 'note', 'created_at', 'updated_at',
+)
+
+
+def _snapshot_row(row: Any, fields: tuple[str, ...]) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    data = dict(row)
+    return {field: data.get(field) for field in fields}
+
+
+def _snapshot_key_parts(value: str, expected: int) -> tuple[str, ...]:
+    parts = tuple(str(value or '').split(':'))
+    if len(parts) != expected:
+        raise ValueError('Резервная точка повреждена.')
+    return parts
+
+
+async def _capture_user_import_snapshot(
+    db: aiosqlite.Connection,
+    user_id: int,
+    operations: list[dict[str, Any]],
+) -> dict[str, Any]:
+    journal_ids = sorted({
+        int(op['source']['book_id'])
+        for op in operations
+        if op.get('kind') in {'journal', 'cycle'}
+    })
+    cycle_keys = sorted({
+        (int(op['source']['book_id']), int(op['source']['cycle_number']))
+        for op in operations if op.get('kind') == 'cycle'
+    })
+    year_keys = sorted({
+        (int(op['source']['book_id']), int(op['source']['year']), str(op['source']['list_code']))
+        for op in operations if op.get('kind') == 'year_list'
+    })
+    snapshot: dict[str, Any] = {'journal': {}, 'cycles': {}, 'year_lists': {}}
+    for book_id in journal_ids:
+        cur = await db.execute(
+            'SELECT * FROM reader_book_journal WHERE user_id=? AND book_id=?',
+            (int(user_id), book_id),
+        )
+        snapshot['journal'][str(book_id)] = _snapshot_row(await cur.fetchone(), _JOURNAL_SNAPSHOT_FIELDS)
+    for book_id, cycle_number in cycle_keys:
+        cur = await db.execute(
+            'SELECT * FROM reader_book_cycles WHERE user_id=? AND book_id=? AND cycle_number=?',
+            (int(user_id), book_id, cycle_number),
+        )
+        snapshot['cycles'][f'{book_id}:{cycle_number}'] = _snapshot_row(await cur.fetchone(), _CYCLE_SNAPSHOT_FIELDS)
+    for book_id, list_year, list_code in year_keys:
+        cur = await db.execute(
+            'SELECT * FROM reader_year_list_items WHERE user_id=? AND book_id=? AND list_year=? AND list_code=?',
+            (int(user_id), book_id, list_year, list_code),
+        )
+        snapshot['year_lists'][f'{book_id}:{list_year}:{list_code}'] = _snapshot_row(await cur.fetchone(), _YEAR_LIST_SNAPSHOT_FIELDS)
+    return snapshot
+
+
+async def _build_user_journal_backup(db: aiosqlite.Connection, user_id: int, generated_at: str) -> dict[str, Any]:
+    cur = await db.execute(
+        """
+        SELECT rbj.book_id, rbj.status, rbj.started_on, rbj.finished_on,
+               rbj.impression, rbj.private_rating, rbj.last_activity_at,
+               rbj.created_at, rbj.updated_at, b.title, b.content_type, ap.pen_name
+        FROM reader_book_journal rbj
+        JOIN books b ON b.id=rbj.book_id
+        LEFT JOIN author_profiles ap ON ap.id=b.author_id
+        WHERE rbj.user_id=? ORDER BY rbj.book_id
+        """,
+        (int(user_id),),
+    )
+    journal_rows = [dict(row) for row in await cur.fetchall()]
+    cur = await db.execute(
+        """
+        SELECT rbc.book_id, rbc.cycle_number, rbc.status, rbc.started_on,
+               rbc.finished_on, rbc.note, rbc.created_at, rbc.updated_at,
+               b.title, ap.pen_name
+        FROM reader_book_cycles rbc
+        JOIN books b ON b.id=rbc.book_id
+        LEFT JOIN author_profiles ap ON ap.id=b.author_id
+        WHERE rbc.user_id=? ORDER BY rbc.book_id, rbc.cycle_number
+        """,
+        (int(user_id),),
+    )
+    cycle_rows = [dict(row) for row in await cur.fetchall()]
+    cur = await db.execute(
+        """
+        SELECT ryli.book_id, ryli.list_year, ryli.list_code, ryli.note,
+               ryli.created_at, ryli.updated_at, b.title, ap.pen_name
+        FROM reader_year_list_items ryli
+        JOIN books b ON b.id=ryli.book_id
+        LEFT JOIN author_profiles ap ON ap.id=b.author_id
+        WHERE ryli.user_id=? ORDER BY ryli.list_year, ryli.list_code, ryli.book_id
+        """,
+        (int(user_id),),
+    )
+    list_rows = [dict(row) for row in await cur.fetchall()]
+    return {
+        'export_version': '1.2',
+        'generated_at': generated_at,
+        'privacy': 'Автоматическая приватная резервная точка перед восстановлением дневника.',
+        'backup_reason': 'before_journal_import',
+        'journal': [{
+            'book_id': int(item.get('book_id') or 0),
+            'title': str(item.get('title') or ''),
+            'author': str(item.get('pen_name') or ''),
+            'content_type': str(item.get('content_type') or 'book'),
+            'status': str(item.get('status') or 'reading'),
+            'started_on': str(item.get('started_on') or ''),
+            'finished_on': str(item.get('finished_on') or ''),
+            'private_rating': int(item.get('private_rating') or 0),
+            'impression': str(item.get('impression') or ''),
+            'last_activity_at': str(item.get('last_activity_at') or ''),
+            'created_at': str(item.get('created_at') or ''),
+            'updated_at': str(item.get('updated_at') or ''),
+        } for item in journal_rows],
+        'reading_cycles': [{
+            'book_id': int(item.get('book_id') or 0),
+            'title': str(item.get('title') or ''),
+            'author': str(item.get('pen_name') or ''),
+            'cycle_number': int(item.get('cycle_number') or 1),
+            'status': str(item.get('status') or 'reading'),
+            'started_on': str(item.get('started_on') or ''),
+            'finished_on': str(item.get('finished_on') or ''),
+            'note': str(item.get('note') or ''),
+            'created_at': str(item.get('created_at') or ''),
+            'updated_at': str(item.get('updated_at') or ''),
+        } for item in cycle_rows],
+        'year_lists': [{
+            'book_id': int(item.get('book_id') or 0),
+            'title': str(item.get('title') or ''),
+            'author': str(item.get('pen_name') or ''),
+            'year': int(item.get('list_year') or 0),
+            'list_code': str(item.get('list_code') or ''),
+            'note': str(item.get('note') or ''),
+            'created_at': str(item.get('created_at') or ''),
+            'updated_at': str(item.get('updated_at') or ''),
+        } for item in list_rows],
+        'history': [],
+        'annotations': [],
+        'daily_activity': [],
+    }
+
+
+def _import_result_counts(raw: object) -> dict[str, int]:
+    if not isinstance(raw, dict):
+        return {'journal': 0, 'cycles': 0, 'year_lists': 0, 'total': 0}
+    applied = raw.get('applied') if isinstance(raw.get('applied'), dict) else {}
+    journal = int(applied.get('journal') or 0)
+    cycles = int(applied.get('cycles') or 0)
+    year_lists = int(applied.get('year_lists') or 0)
+    return {'journal': journal, 'cycles': cycles, 'year_lists': year_lists, 'total': int(raw.get('total_applied') or journal + cycles + year_lists)}
+
+
+def _rollback_result_counts(raw: object) -> dict[str, int]:
+    if not isinstance(raw, dict):
+        return {'restored': 0, 'protected': 0}
+    return {
+        'restored': int(raw.get('total_restored') or 0),
+        'protected': int(raw.get('total_protected') or 0),
+    }
+
+
+async def list_user_reading_import_history(user_id: int, limit: int = 20) -> list[dict[str, Any]]:
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT id, source_version, source_generated_at, result_json, applied_at,
+                   rolled_back_at, rollback_result_json
+            FROM reader_journal_import_runs
+            WHERE user_id=? ORDER BY applied_at DESC, id DESC LIMIT ?
+            """,
+            (int(user_id), max(1, min(50, int(limit)))),
+        )
+        rows = [dict(row) for row in await cur.fetchall()]
+    history: list[dict[str, Any]] = []
+    chain_clear = True
+    rollback_slot_used = False
+    for row in rows:
+        try:
+            result = json.loads(str(row.get('result_json') or '{}'))
+        except json.JSONDecodeError:
+            result = {}
+        try:
+            rollback_result = json.loads(str(row.get('rollback_result_json') or '{}'))
+        except json.JSONDecodeError:
+            rollback_result = {}
+        rollback_counts = _rollback_result_counts(rollback_result)
+        rolled_back = bool(row.get('rolled_back_at'))
+        can_rollback = bool(chain_clear and not rollback_slot_used and not rolled_back)
+        if can_rollback:
+            rollback_slot_used = True
+        if rolled_back and rollback_counts['protected'] > 0:
+            chain_clear = False
+        history.append({
+            'id': int(row['id']),
+            'source_version': str(row.get('source_version') or ''),
+            'source_generated_at': str(row.get('source_generated_at') or ''),
+            'applied_at': str(row.get('applied_at') or ''),
+            'rolled_back_at': str(row.get('rolled_back_at') or ''),
+            'status': 'rolled_back_partial' if rolled_back and rollback_counts['protected'] else ('rolled_back' if rolled_back else 'applied'),
+            'counts': _import_result_counts(result),
+            'rollback_counts': rollback_counts,
+            'can_rollback': can_rollback,
+            'backup_available': True,
+        })
+    return history
+
+
+async def get_user_reading_import_backup(user_id: int, run_id: int) -> dict[str, Any]:
+    async with connect() as db:
+        cur = await db.execute(
+            'SELECT backup_json FROM reader_journal_import_runs WHERE id=? AND user_id=?',
+            (int(run_id), int(user_id)),
+        )
+        row = await cur.fetchone()
+    if not row:
+        raise ValueError('Резервная точка не найдена.')
+    try:
+        payload = json.loads(str(row['backup_json'] or '{}'))
+    except json.JSONDecodeError as exc:
+        raise ValueError('Резервная точка повреждена.') from exc
+    if not isinstance(payload, dict):
+        raise ValueError('Резервная точка повреждена.')
+    return payload
+
+
+async def _rollback_import_row(
+    db: aiosqlite.Connection,
+    *,
+    table: str,
+    user_id: int,
+    key: str,
+    before: dict[str, Any] | None,
+    after: dict[str, Any] | None,
+) -> tuple[bool, str]:
+    if table == 'journal':
+        (book_raw,) = _snapshot_key_parts(key, 1)
+        book_id = int(book_raw)
+        cur = await db.execute('SELECT * FROM reader_book_journal WHERE user_id=? AND book_id=?', (int(user_id), book_id))
+        current = _snapshot_row(await cur.fetchone(), _JOURNAL_SNAPSHOT_FIELDS)
+        if current != after:
+            return False, f'Дневник · книга {book_id}'
+        if before is None:
+            await db.execute('DELETE FROM reader_book_journal WHERE user_id=? AND book_id=?', (int(user_id), book_id))
+        else:
+            await db.execute(
+                """
+                UPDATE reader_book_journal SET status=?, started_on=?, finished_on=?, impression=?,
+                    private_rating=?, last_activity_at=?, created_at=?, updated_at=?
+                WHERE user_id=? AND book_id=?
+                """,
+                tuple(before.get(field) for field in _JOURNAL_SNAPSHOT_FIELDS) + (int(user_id), book_id),
+            )
+        return True, ''
+    if table == 'cycles':
+        book_raw, cycle_raw = _snapshot_key_parts(key, 2)
+        book_id, cycle_number = int(book_raw), int(cycle_raw)
+        cur = await db.execute(
+            'SELECT * FROM reader_book_cycles WHERE user_id=? AND book_id=? AND cycle_number=?',
+            (int(user_id), book_id, cycle_number),
+        )
+        current = _snapshot_row(await cur.fetchone(), _CYCLE_SNAPSHOT_FIELDS)
+        if current != after:
+            return False, f'Цикл №{cycle_number} · книга {book_id}'
+        if before is None:
+            await db.execute(
+                'DELETE FROM reader_book_cycles WHERE user_id=? AND book_id=? AND cycle_number=?',
+                (int(user_id), book_id, cycle_number),
+            )
+        else:
+            await db.execute(
+                """
+                UPDATE reader_book_cycles SET cycle_number=?, status=?, started_on=?, finished_on=?,
+                    note=?, created_at=?, updated_at=?
+                WHERE user_id=? AND book_id=? AND cycle_number=?
+                """,
+                tuple(before.get(field) for field in _CYCLE_SNAPSHOT_FIELDS) + (int(user_id), book_id, cycle_number),
+            )
+        return True, ''
+    if table == 'year_lists':
+        book_raw, year_raw, list_code = _snapshot_key_parts(key, 3)
+        book_id, list_year = int(book_raw), int(year_raw)
+        cur = await db.execute(
+            'SELECT * FROM reader_year_list_items WHERE user_id=? AND book_id=? AND list_year=? AND list_code=?',
+            (int(user_id), book_id, list_year, list_code),
+        )
+        current = _snapshot_row(await cur.fetchone(), _YEAR_LIST_SNAPSHOT_FIELDS)
+        if current != after:
+            return False, f'Список года · книга {book_id}'
+        if before is None:
+            await db.execute(
+                'DELETE FROM reader_year_list_items WHERE user_id=? AND book_id=? AND list_year=? AND list_code=?',
+                (int(user_id), book_id, list_year, list_code),
+            )
+        else:
+            await db.execute(
+                """
+                UPDATE reader_year_list_items SET note=?, created_at=?, updated_at=?
+                WHERE user_id=? AND book_id=? AND list_year=? AND list_code=?
+                """,
+                (before.get('note'), before.get('created_at'), before.get('updated_at'), int(user_id), book_id, list_year, list_code),
+            )
+        return True, ''
+    raise ValueError('Неизвестный раздел резервной точки.')
+
+
+async def rollback_user_reading_import(user_id: int, run_id: int) -> dict[str, Any]:
+    now = utc_now()
+    async with connect() as db:
+        await db.execute('BEGIN IMMEDIATE')
+        cur = await db.execute(
+            'SELECT * FROM reader_journal_import_runs WHERE id=? AND user_id=?',
+            (int(run_id), int(user_id)),
+        )
+        run = await cur.fetchone()
+        if not run:
+            raise ValueError('Импорт не найден.')
+        if run['rolled_back_at']:
+            raise ValueError('Этот импорт уже отменён.')
+        cur = await db.execute(
+            """
+            SELECT rolled_back_at, rollback_result_json
+            FROM reader_journal_import_runs
+            WHERE user_id=? AND (applied_at>? OR (applied_at=? AND id>?))
+            ORDER BY applied_at DESC, id DESC
+            """,
+            (int(user_id), run['applied_at'], run['applied_at'], int(run_id)),
+        )
+        newer = [dict(row) for row in await cur.fetchall()]
+        for item in newer:
+            if not item.get('rolled_back_at'):
+                raise ValueError('Сначала отмените более новый импорт.')
+            try:
+                newer_result = json.loads(str(item.get('rollback_result_json') or '{}'))
+            except json.JSONDecodeError:
+                newer_result = {}
+            if _rollback_result_counts(newer_result)['protected'] > 0:
+                raise ValueError('Более новый импорт отменён частично. Старую точку откатывать небезопасно.')
+        try:
+            before = json.loads(str(run['before_snapshot_json'] or '{}'))
+            after = json.loads(str(run['after_snapshot_json'] or '{}'))
+        except json.JSONDecodeError as exc:
+            raise ValueError('Резервная точка повреждена.') from exc
+        restored = {'journal': 0, 'cycles': 0, 'year_lists': 0}
+        protected: list[str] = []
+        protected_count = 0
+        for table in ('year_lists', 'cycles', 'journal'):
+            before_rows = before.get(table) if isinstance(before.get(table), dict) else {}
+            after_rows = after.get(table) if isinstance(after.get(table), dict) else {}
+            for key in sorted(set(before_rows) | set(after_rows)):
+                ok, label = await _rollback_import_row(
+                    db,
+                    table=table,
+                    user_id=int(user_id),
+                    key=key,
+                    before=before_rows.get(key),
+                    after=after_rows.get(key),
+                )
+                if ok:
+                    restored[table] += 1
+                else:
+                    protected_count += 1
+                    if len(protected) < 30:
+                        protected.append(label)
+        result = {
+            'restored': restored,
+            'total_restored': sum(restored.values()),
+            'total_protected': protected_count,
+            'protected_examples': protected,
+            'rolled_back_at': now,
+            'safety_note': 'Ручные изменения после импорта сохранены и не были перезаписаны.',
+        }
+        await db.execute(
+            'UPDATE reader_journal_import_runs SET rolled_back_at=?, rollback_result_json=? WHERE id=? AND user_id=?',
+            (now, json.dumps(result, ensure_ascii=False, separators=(',', ':')), int(run_id), int(user_id)),
+        )
+        await db.commit()
+    return result
+
+
+def _reading_cycle_status(value: object) -> str:
+    status = str(value or 'reading').strip().lower()
+    if status not in {'reading', 'paused', 'finished', 'dropped'}:
+        raise ValueError('Неизвестный статус цикла чтения.')
+    return status
+
+
+def _year_list_codes(value: object) -> list[str]:
+    if isinstance(value, (list, tuple, set)):
+        raw = list(value)
+    else:
+        raw = str(value or '').replace(';', ',').split(',')
+    allowed = {'best', 'discovery', 'emotional', 'reread'}
+    result = []
+    for item in raw:
+        code = str(item or '').strip().lower()
+        if not code:
+            continue
+        if code not in allowed:
+            raise ValueError('Неизвестный личный список года.')
+        if code not in result:
+            result.append(code)
+    return result
+
+
+async def list_user_reading_cycles(user_id: int, book_id: int | None = None) -> list[dict[str, Any]]:
+    query = """
+        SELECT rbc.*, b.title, b.content_type, ap.pen_name
+        FROM reader_book_cycles rbc
+        JOIN books b ON b.id=rbc.book_id
+        LEFT JOIN author_profiles ap ON ap.id=b.author_id
+        WHERE rbc.user_id=?
+    """
+    params: list[Any] = [int(user_id)]
+    if book_id is not None:
+        query += ' AND rbc.book_id=?'
+        params.append(int(book_id))
+    query += ' ORDER BY rbc.book_id, rbc.cycle_number DESC, rbc.id DESC'
+    async with connect() as db:
+        cur = await db.execute(query, tuple(params))
+        return [dict(row) for row in await cur.fetchall()]
+
+
+async def get_user_reread_summary(user_id: int) -> dict[str, Any]:
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT COUNT(*) AS total_cycles,
+                   SUM(CASE WHEN status='finished' THEN 1 ELSE 0 END) AS completed_cycles,
+                   SUM(CASE WHEN cycle_number>1 THEN 1 ELSE 0 END) AS reread_cycles,
+                   SUM(CASE WHEN cycle_number>1 AND status='finished' THEN 1 ELSE 0 END) AS completed_rereads,
+                   SUM(CASE WHEN status IN ('reading','paused') THEN 1 ELSE 0 END) AS active_cycles,
+                   COUNT(DISTINCT CASE WHEN cycle_number>1 THEN book_id END) AS books_reread
+            FROM reader_book_cycles WHERE user_id=?
+            """,
+            (int(user_id),),
+        )
+        row = await cur.fetchone()
+    return {
+        'total_cycles': int(row['total_cycles'] or 0),
+        'completed_cycles': int(row['completed_cycles'] or 0),
+        'reread_cycles': int(row['reread_cycles'] or 0),
+        'completed_rereads': int(row['completed_rereads'] or 0),
+        'active_cycles': int(row['active_cycles'] or 0),
+        'books_reread': int(row['books_reread'] or 0),
+    }
+
+
+async def start_user_reread_cycle(
+    user_id: int,
+    book_id: int,
+    *,
+    started_on: object = None,
+    note: object = '',
+) -> dict[str, Any]:
+    clean_started = _parse_journal_date(started_on, 'Дата начала перечитывания') or datetime.now(timezone.utc).date().isoformat()
+    clean_note = str(note or '').strip()[:2000]
+    now = utc_now()
+    async with connect() as db:
+        cur = await db.execute(
+            "SELECT id FROM books WHERE id=? AND publication_status='published'",
+            (int(book_id),),
+        )
+        if not await cur.fetchone():
+            raise ValueError('Произведение не найдено.')
+        cur = await db.execute(
+            """
+            SELECT COUNT(*) AS total,
+                   SUM(CASE WHEN status='finished' THEN 1 ELSE 0 END) AS completed,
+                   SUM(CASE WHEN status IN ('reading','paused') THEN 1 ELSE 0 END) AS active,
+                   COALESCE(MAX(cycle_number),0) AS max_cycle
+            FROM reader_book_cycles WHERE user_id=? AND book_id=?
+            """,
+            (int(user_id), int(book_id)),
+        )
+        state = await cur.fetchone()
+        if int(state['active'] or 0) > 0:
+            raise ValueError('Сначала завершите или остановите текущий цикл чтения.')
+        if int(state['completed'] or 0) <= 0:
+            raise ValueError('Перечитывание можно начать после завершения первого чтения.')
+        next_cycle = int(state['max_cycle'] or 0) + 1
+        cur = await db.execute(
+            """
+            INSERT INTO reader_book_cycles(
+                user_id, book_id, cycle_number, status, started_on, finished_on,
+                note, created_at, updated_at
+            ) VALUES(?,?,?,'reading',?,NULL,?,?,?)
+            """,
+            (int(user_id), int(book_id), next_cycle, clean_started, clean_note, now, now),
+        )
+        cycle_id = int(cur.lastrowid)
+        await db.execute(
+            """
+            UPDATE reader_book_journal
+            SET status='reading', started_on=COALESCE(started_on, ?), updated_at=?
+            WHERE user_id=? AND book_id=?
+            """,
+            (clean_started, now, int(user_id), int(book_id)),
+        )
+        await db.commit()
+        cur = await db.execute('SELECT * FROM reader_book_cycles WHERE id=?', (cycle_id,))
+        row = await cur.fetchone()
+    return dict(row) if row else {}
+
+
+async def update_user_reading_cycle(
+    user_id: int,
+    cycle_id: int,
+    *,
+    status: object,
+    started_on: object,
+    finished_on: object,
+    note: object = '',
+) -> dict[str, Any]:
+    clean_status = _reading_cycle_status(status)
+    clean_started = _parse_journal_date(started_on, 'Дата начала цикла')
+    clean_finished = _parse_journal_date(finished_on, 'Дата завершения цикла')
+    clean_note = str(note or '').strip()[:2000]
+    today = datetime.now(timezone.utc).date().isoformat()
+    now = utc_now()
+    async with connect() as db:
+        cur = await db.execute(
+            'SELECT * FROM reader_book_cycles WHERE id=? AND user_id=?',
+            (int(cycle_id), int(user_id)),
+        )
+        current = await cur.fetchone()
+        if not current:
+            raise ValueError('Цикл чтения не найден.')
+        if not clean_started:
+            clean_started = str(current['started_on'] or '') or today
+        if clean_status == 'finished':
+            clean_finished = clean_finished or str(current['finished_on'] or '') or today
+        else:
+            clean_finished = None
+        if clean_started and clean_finished and clean_started > clean_finished:
+            raise ValueError('Дата завершения не может быть раньше даты начала.')
+        await db.execute(
+            """
+            UPDATE reader_book_cycles
+            SET status=?, started_on=?, finished_on=?, note=?, updated_at=?
+            WHERE id=? AND user_id=?
+            """,
+            (clean_status, clean_started, clean_finished, clean_note, now, int(cycle_id), int(user_id)),
+        )
+        book_id = int(current['book_id'])
+        cur = await db.execute(
+            """
+            SELECT status, started_on, finished_on, cycle_number
+            FROM reader_book_cycles
+            WHERE user_id=? AND book_id=?
+            ORDER BY cycle_number DESC, id DESC LIMIT 1
+            """,
+            (int(user_id), book_id),
+        )
+        latest = await cur.fetchone()
+        cur = await db.execute(
+            """
+            SELECT MIN(started_on) AS first_started, MAX(CASE WHEN status='finished' THEN finished_on END) AS last_finished
+            FROM reader_book_cycles WHERE user_id=? AND book_id=?
+            """,
+            (int(user_id), book_id),
+        )
+        aggregate = await cur.fetchone()
+        await db.execute(
+            """
+            UPDATE reader_book_journal
+            SET status=?, started_on=COALESCE(?, started_on), finished_on=?, updated_at=?
+            WHERE user_id=? AND book_id=?
+            """,
+            (
+                str(latest['status'] or 'reading') if latest else clean_status,
+                str(aggregate['first_started'] or '') or None,
+                str(aggregate['last_finished'] or '') or None,
+                now, int(user_id), book_id,
+            ),
+        )
+        await db.commit()
+        cur = await db.execute('SELECT * FROM reader_book_cycles WHERE id=?', (int(cycle_id),))
+        row = await cur.fetchone()
+    return dict(row) if row else {}
+
+
+async def set_user_year_lists(
+    user_id: int,
+    book_id: int,
+    *,
+    list_year: int,
+    list_codes: object,
+) -> list[dict[str, Any]]:
+    year = int(list_year)
+    current_year = datetime.now(timezone.utc).year
+    if year < 1900 or year > current_year:
+        raise ValueError('Год списка указан неверно.')
+    codes = _year_list_codes(list_codes)
+    now = utc_now()
+    async with connect() as db:
+        cur = await db.execute(
+            "SELECT id FROM books WHERE id=? AND publication_status='published'",
+            (int(book_id),),
+        )
+        if not await cur.fetchone():
+            raise ValueError('Произведение не найдено.')
+        await db.execute(
+            'DELETE FROM reader_year_list_items WHERE user_id=? AND book_id=? AND list_year=?',
+            (int(user_id), int(book_id), year),
+        )
+        for code in codes:
+            await db.execute(
+                """
+                INSERT INTO reader_year_list_items(
+                    user_id, book_id, list_year, list_code, note, created_at, updated_at
+                ) VALUES(?,?,?,?,'',?,?)
+                """,
+                (int(user_id), int(book_id), year, code, now, now),
+            )
+        await db.commit()
+        cur = await db.execute(
+            """
+            SELECT list_year, list_code, note, created_at, updated_at
+            FROM reader_year_list_items
+            WHERE user_id=? AND book_id=?
+            ORDER BY list_year DESC, list_code
+            """,
+            (int(user_id), int(book_id)),
+        )
+        return [dict(row) for row in await cur.fetchall()]
+
+
+async def get_user_year_lists(user_id: int, list_year: int | None = None) -> dict[str, Any]:
+    current_year = datetime.now(timezone.utc).year
+    selected_year = int(list_year or current_year)
+    if selected_year < 1900 or selected_year > current_year:
+        selected_year = current_year
+    labels = {
+        'best': 'Лучшее за год',
+        'discovery': 'Открытие года',
+        'emotional': 'Самое эмоциональное',
+        'reread': 'Хочу перечитать',
+    }
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT ryli.book_id, ryli.list_year, ryli.list_code, ryli.note,
+                   ryli.created_at, ryli.updated_at, b.title, b.content_type,
+                   b.cover_path, b.cover_file_id, ap.pen_name
+            FROM reader_year_list_items ryli
+            JOIN books b ON b.id=ryli.book_id AND b.publication_status='published'
+            LEFT JOIN author_profiles ap ON ap.id=b.author_id
+            WHERE ryli.user_id=? AND ryli.list_year=?
+            ORDER BY ryli.list_code, ryli.updated_at DESC, ryli.book_id DESC
+            """,
+            (int(user_id), selected_year),
+        )
+        items = [dict(row) for row in await cur.fetchall()]
+        cur = await db.execute(
+            'SELECT DISTINCT list_year FROM reader_year_list_items WHERE user_id=? ORDER BY list_year DESC',
+            (int(user_id),),
+        )
+        years = [int(row['list_year']) for row in await cur.fetchall()]
+    if current_year not in years:
+        years.insert(0, current_year)
+    if selected_year not in years:
+        years.append(selected_year)
+    groups = []
+    for code, label in labels.items():
+        group_items = [item for item in items if str(item.get('list_code')) == code]
+        groups.append({'code': code, 'label': label, 'count': len(group_items), 'items': group_items})
+    return {
+        'year': selected_year,
+        'available_years': sorted(set(years), reverse=True),
+        'groups': groups,
+        'total_items': len({int(item.get('book_id') or 0) for item in items}),
+        'total_marks': len(items),
+        'privacy_note': 'Личные списки года видны только вам.',
+    }
+
+
+async def get_user_completion_calendar(user_id: int, year: int | None = None) -> dict[str, Any]:
+    today = datetime.now(timezone.utc).date()
+    selected_year = int(year or today.year)
+    if selected_year < 1900 or selected_year > today.year:
+        selected_year = today.year
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT rbc.id AS cycle_id, rbc.book_id, rbc.cycle_number, rbc.finished_on,
+                   b.title, b.content_type, b.cover_path, b.cover_file_id, ap.pen_name
+            FROM reader_book_cycles rbc
+            JOIN books b ON b.id=rbc.book_id AND b.publication_status='published'
+            LEFT JOIN author_profiles ap ON ap.id=b.author_id
+            WHERE rbc.user_id=? AND rbc.status='finished'
+              AND substr(rbc.finished_on,1,4)=?
+            ORDER BY rbc.finished_on, rbc.cycle_number, rbc.id
+            """,
+            (int(user_id), str(selected_year)),
+        )
+        completions = [dict(row) for row in await cur.fetchall()]
+        cur = await db.execute(
+            """
+            SELECT DISTINCT CAST(substr(finished_on,1,4) AS INTEGER) AS year
+            FROM reader_book_cycles
+            WHERE user_id=? AND status='finished' AND finished_on IS NOT NULL
+            ORDER BY year DESC
+            """,
+            (int(user_id),),
+        )
+        years = [int(row['year']) for row in await cur.fetchall() if int(row['year'] or 0) >= 1900]
+    if today.year not in years:
+        years.insert(0, today.year)
+    if selected_year not in years:
+        years.append(selected_year)
+    by_date: dict[str, list[dict[str, Any]]] = {}
+    for item in completions:
+        key = str(item.get('finished_on') or '')[:10]
+        if key:
+            by_date.setdefault(key, []).append(item)
+    start = datetime(selected_year, 1, 1).date()
+    end = datetime(selected_year, 12, 31).date()
+    days: list[dict[str, Any]] = []
+    cursor = start
+    while cursor <= end:
+        key = cursor.isoformat()
+        items = by_date.get(key, [])
+        days.append({
+            'date': key,
+            'future': cursor > today,
+            'count': len(items),
+            'items': [{
+                'cycle_id': int(item.get('cycle_id') or 0),
+                'book_id': int(item.get('book_id') or 0),
+                'cycle_number': int(item.get('cycle_number') or 1),
+                'title': str(item.get('title') or ''),
+                'author': str(item.get('pen_name') or ''),
+            } for item in items],
+        })
+        cursor += timedelta(days=1)
+    months = []
+    for month in range(1, 13):
+        key = f'{selected_year:04d}-{month:02d}'
+        month_items = [item for item in completions if str(item.get('finished_on') or '').startswith(key)]
+        months.append({
+            'month': key,
+            'count': len(month_items),
+            'unique_books': len({int(item.get('book_id') or 0) for item in month_items}),
+            'rereads': sum(1 for item in month_items if int(item.get('cycle_number') or 1) > 1),
+        })
+    return {
+        'year': selected_year,
+        'available_years': sorted(set(years), reverse=True),
+        'days': days,
+        'months': months,
+        'total_completions': len(completions),
+        'unique_books': len({int(item.get('book_id') or 0) for item in completions}),
+        'rereads': sum(1 for item in completions if int(item.get('cycle_number') or 1) > 1),
+        'privacy_note': 'Календарь завершений виден только владельцу профиля.',
+    }
+
+
+def _parse_journal_date(value: object, field_name: str) -> str | None:
+    raw = str(value or '').strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.strptime(raw, '%Y-%m-%d').date()
+    except ValueError as exc:
+        raise ValueError(f'{field_name} должна быть указана в формате ГГГГ-ММ-ДД.') from exc
+    if parsed > datetime.now(timezone.utc).date():
+        raise ValueError(f'{field_name} не может быть в будущем.')
+    if parsed.year < 1900:
+        raise ValueError(f'{field_name} указана слишком давно.')
+    return parsed.isoformat()
+
+
+def _journal_status(value: object) -> str:
+    status = str(value or 'reading').strip().lower()
+    allowed = {'planned', 'reading', 'paused', 'finished', 'dropped'}
+    if status not in allowed:
+        raise ValueError('Неизвестный статус записи дневника.')
+    return status
+
+
+async def list_user_reading_journal(user_id: int, limit: int = 250) -> list[dict[str, Any]]:
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT rbj.user_id, rbj.book_id, rbj.status, rbj.started_on, rbj.finished_on,
+                   rbj.impression, rbj.private_rating, rbj.last_activity_at,
+                   rbj.created_at, rbj.updated_at,
+                   b.title, b.description, b.age_limit, b.content_type,
+                   b.cover_path, b.cover_file_id, ap.pen_name,
+                   (SELECT COUNT(*) FROM reading_history rh WHERE rh.user_id=rbj.user_id AND rh.book_id=rbj.book_id) AS history_items,
+                   (SELECT COUNT(*) FROM reader_annotations ra WHERE ra.user_id=rbj.user_id AND ra.book_id=rbj.book_id) AS annotation_items,
+                   (SELECT MAX(rh.updated_at) FROM reading_history rh WHERE rh.user_id=rbj.user_id AND rh.book_id=rbj.book_id) AS history_updated_at
+            FROM reader_book_journal rbj
+            JOIN books b ON b.id=rbj.book_id AND b.publication_status='published'
+            LEFT JOIN author_profiles ap ON ap.id=b.author_id
+            WHERE rbj.user_id=?
+            ORDER BY COALESCE(rbj.finished_on, substr(rbj.last_activity_at,1,10), rbj.started_on, substr(rbj.updated_at,1,10)) DESC,
+                     rbj.updated_at DESC, rbj.book_id DESC
+            LIMIT ?
+            """,
+            (int(user_id), max(1, min(1000, int(limit)))),
+        )
+        entries = [dict(row) for row in await cur.fetchall()]
+        if not entries:
+            return []
+        book_ids = [int(item['book_id']) for item in entries]
+        placeholders = ','.join('?' for _ in book_ids)
+        cur = await db.execute(
+            f"""
+            SELECT id, book_id, cycle_number, status, started_on, finished_on,
+                   note, created_at, updated_at
+            FROM reader_book_cycles
+            WHERE user_id=? AND book_id IN ({placeholders})
+            ORDER BY book_id, cycle_number DESC, id DESC
+            """,
+            (int(user_id), *book_ids),
+        )
+        cycles_by_book: dict[int, list[dict[str, Any]]] = {}
+        for row in await cur.fetchall():
+            item = dict(row)
+            cycles_by_book.setdefault(int(item['book_id']), []).append(item)
+        cur = await db.execute(
+            f"""
+            SELECT book_id, list_year, list_code, note, created_at, updated_at
+            FROM reader_year_list_items
+            WHERE user_id=? AND book_id IN ({placeholders})
+            ORDER BY book_id, list_year DESC, list_code
+            """,
+            (int(user_id), *book_ids),
+        )
+        lists_by_book: dict[int, list[dict[str, Any]]] = {}
+        for row in await cur.fetchall():
+            item = dict(row)
+            lists_by_book.setdefault(int(item['book_id']), []).append(item)
+    for entry in entries:
+        book_id = int(entry['book_id'])
+        cycles = cycles_by_book.get(book_id, [])
+        entry['cycles'] = cycles
+        entry['completed_cycles'] = sum(1 for item in cycles if str(item.get('status')) == 'finished')
+        entry['reread_count'] = sum(1 for item in cycles if int(item.get('cycle_number') or 1) > 1 and str(item.get('status')) == 'finished')
+        entry['active_cycle'] = next((item for item in cycles if str(item.get('status')) in {'reading', 'paused'}), None)
+        entry['year_lists'] = lists_by_book.get(book_id, [])
+    return entries
+
+
+async def get_user_reading_journal_summary(user_id: int) -> dict[str, Any]:
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT COUNT(*) AS total,
+                   SUM(CASE WHEN status='planned' THEN 1 ELSE 0 END) AS planned,
+                   SUM(CASE WHEN status IN ('reading','paused') THEN 1 ELSE 0 END) AS in_progress,
+                   SUM(CASE WHEN status='finished' THEN 1 ELSE 0 END) AS finished,
+                   SUM(CASE WHEN status='dropped' THEN 1 ELSE 0 END) AS dropped,
+                   SUM(CASE WHEN trim(impression)!='' THEN 1 ELSE 0 END) AS with_impressions,
+                   SUM(CASE WHEN private_rating>0 THEN 1 ELSE 0 END) AS rated,
+                   MIN(started_on) AS first_started_on,
+                   MAX(finished_on) AS last_finished_on
+            FROM reader_book_journal
+            WHERE user_id=?
+            """,
+            (int(user_id),),
+        )
+        row = await cur.fetchone()
+        cur = await db.execute(
+            """
+            SELECT substr(COALESCE(finished_on, started_on),1,4) AS year, COUNT(*) AS total
+            FROM reader_book_journal
+            WHERE user_id=? AND COALESCE(finished_on, started_on) IS NOT NULL
+            GROUP BY year ORDER BY year DESC
+            """,
+            (int(user_id),),
+        )
+        years = [dict(item) for item in await cur.fetchall() if item['year']]
+        cur = await db.execute(
+            """
+            SELECT COUNT(*) AS total_cycles,
+                   SUM(CASE WHEN status='finished' THEN 1 ELSE 0 END) AS completed_cycles,
+                   SUM(CASE WHEN cycle_number>1 THEN 1 ELSE 0 END) AS reread_cycles,
+                   SUM(CASE WHEN cycle_number>1 AND status='finished' THEN 1 ELSE 0 END) AS completed_rereads,
+                   SUM(CASE WHEN status IN ('reading','paused') THEN 1 ELSE 0 END) AS active_cycles,
+                   COUNT(DISTINCT CASE WHEN cycle_number>1 THEN book_id END) AS books_reread
+            FROM reader_book_cycles WHERE user_id=?
+            """,
+            (int(user_id),),
+        )
+        cycles = await cur.fetchone()
+        cur = await db.execute(
+            'SELECT COUNT(*) AS marks, COUNT(DISTINCT book_id) AS books FROM reader_year_list_items WHERE user_id=?',
+            (int(user_id),),
+        )
+        lists = await cur.fetchone()
+    return {
+        'total': int(row['total'] or 0),
+        'planned': int(row['planned'] or 0),
+        'in_progress': int(row['in_progress'] or 0),
+        'finished': int(row['finished'] or 0),
+        'dropped': int(row['dropped'] or 0),
+        'with_impressions': int(row['with_impressions'] or 0),
+        'rated': int(row['rated'] or 0),
+        'first_started_on': str(row['first_started_on'] or ''),
+        'last_finished_on': str(row['last_finished_on'] or ''),
+        'years': years,
+        'total_cycles': int(cycles['total_cycles'] or 0),
+        'completed_cycles': int(cycles['completed_cycles'] or 0),
+        'reread_cycles': int(cycles['reread_cycles'] or 0),
+        'completed_rereads': int(cycles['completed_rereads'] or 0),
+        'active_cycles': int(cycles['active_cycles'] or 0),
+        'books_reread': int(cycles['books_reread'] or 0),
+        'year_list_marks': int(lists['marks'] or 0),
+        'year_list_books': int(lists['books'] or 0),
+        'current_year': datetime.now(timezone.utc).year,
+        'privacy_note': 'Записи дневника, циклы и личные списки видны только вам.',
+    }
+
+
+async def update_user_reading_journal(
+    user_id: int,
+    book_id: int,
+    *,
+    status: object,
+    started_on: object,
+    finished_on: object,
+    impression: object,
+    private_rating: int,
+) -> dict[str, Any]:
+    clean_status = _journal_status(status)
+    clean_started = _parse_journal_date(started_on, 'Дата начала')
+    clean_finished = _parse_journal_date(finished_on, 'Дата завершения')
+    clean_impression = str(impression or '').strip()[:6000]
+    rating = max(0, min(5, int(private_rating or 0)))
+    today = datetime.now(timezone.utc).date().isoformat()
+    now = utc_now()
+    async with connect() as db:
+        cur = await db.execute(
+            "SELECT id FROM books WHERE id=? AND publication_status='published'",
+            (int(book_id),),
+        )
+        if not await cur.fetchone():
+            raise ValueError('Произведение не найдено.')
+        cur = await db.execute(
+            "SELECT * FROM reader_book_journal WHERE user_id=? AND book_id=?",
+            (int(user_id), int(book_id)),
+        )
+        current = await cur.fetchone()
+        if not clean_started and clean_status != 'planned':
+            if current and current['started_on']:
+                clean_started = str(current['started_on'])
+            else:
+                cur = await db.execute(
+                    "SELECT substr(MIN(first_opened_at),1,10) AS started_on FROM reading_history WHERE user_id=? AND book_id=?",
+                    (int(user_id), int(book_id)),
+                )
+                history_start = await cur.fetchone()
+                clean_started = str(history_start['started_on'] or '') if history_start else ''
+                clean_started = clean_started or today
+        if clean_status == 'finished' and not clean_finished:
+            clean_finished = str(current['finished_on'] or '') if current and current['finished_on'] else today
+        if clean_started and clean_finished and clean_started > clean_finished:
+            raise ValueError('Дата завершения не может быть раньше даты начала.')
+        last_activity = str(current['last_activity_at'] or '') if current else ''
+        created_at = str(current['created_at'] or now) if current else now
+        await db.execute(
+            """
+            INSERT INTO reader_book_journal(
+                user_id, book_id, status, started_on, finished_on, impression,
+                private_rating, last_activity_at, created_at, updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(user_id, book_id) DO UPDATE SET
+                status=excluded.status,
+                started_on=excluded.started_on,
+                finished_on=excluded.finished_on,
+                impression=excluded.impression,
+                private_rating=excluded.private_rating,
+                updated_at=excluded.updated_at
+            """,
+            (
+                int(user_id), int(book_id), clean_status, clean_started, clean_finished,
+                clean_impression, rating, last_activity or None, created_at, now,
+            ),
+        )
+        cur = await db.execute(
+            "SELECT * FROM reader_book_cycles WHERE user_id=? AND book_id=? ORDER BY cycle_number DESC LIMIT 1",
+            (int(user_id), int(book_id)),
+        )
+        latest_cycle = await cur.fetchone()
+        cycle_status = clean_status if clean_status in {'reading','paused','finished','dropped'} else 'reading'
+        if clean_status != 'planned':
+            if latest_cycle:
+                cycle_started = str(latest_cycle['started_on'] or '') or clean_started
+                cycle_finished = clean_finished if cycle_status == 'finished' else None
+                await db.execute(
+                    """
+                    UPDATE reader_book_cycles
+                    SET status=?, started_on=?, finished_on=?, updated_at=?
+                    WHERE id=?
+                    """,
+                    (cycle_status, cycle_started, cycle_finished, now, int(latest_cycle['id'])),
+                )
+            else:
+                await db.execute(
+                    """
+                    INSERT INTO reader_book_cycles(
+                        user_id, book_id, cycle_number, status, started_on, finished_on,
+                        note, created_at, updated_at
+                    ) VALUES(?,?,?,?,?,?,'',?,?)
+                    """,
+                    (int(user_id), int(book_id), 1, cycle_status, clean_started, clean_finished if cycle_status == 'finished' else None, created_at, now),
+                )
+        await db.commit()
+    entries = await list_user_reading_journal(user_id, limit=1000)
+    return next((item for item in entries if int(item['book_id']) == int(book_id)), {})
+
+
+async def delete_user_reading_journal_entry(user_id: int, book_id: int) -> bool:
+    async with connect() as db:
+        cur = await db.execute(
+            'DELETE FROM reader_book_journal WHERE user_id=? AND book_id=?',
+            (int(user_id), int(book_id)),
+        )
+        deleted = bool(cur.rowcount)
+        await db.execute(
+            'DELETE FROM reader_book_cycles WHERE user_id=? AND book_id=?',
+            (int(user_id), int(book_id)),
+        )
+        await db.execute(
+            'DELETE FROM reader_year_list_items WHERE user_id=? AND book_id=?',
+            (int(user_id), int(book_id)),
+        )
+        await db.commit()
+        return deleted
+
+
+async def get_user_reading_export_data(user_id: int) -> dict[str, Any]:
+    summary = await get_user_reading_journal_summary(user_id)
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT rbj.book_id, rbj.status, rbj.started_on, rbj.finished_on,
+                   rbj.impression, rbj.private_rating, rbj.last_activity_at,
+                   rbj.created_at, rbj.updated_at,
+                   b.title, b.content_type, ap.pen_name
+            FROM reader_book_journal rbj
+            JOIN books b ON b.id=rbj.book_id
+            LEFT JOIN author_profiles ap ON ap.id=b.author_id
+            WHERE rbj.user_id=?
+            ORDER BY COALESCE(rbj.finished_on, substr(rbj.last_activity_at,1,10), rbj.started_on, substr(rbj.updated_at,1,10)) DESC,
+                     rbj.updated_at DESC, rbj.book_id DESC
+            """,
+            (int(user_id),),
+        )
+        journal_rows = [dict(row) for row in await cur.fetchall()]
+        cur = await db.execute(
+            """
+            SELECT rh.book_id, rh.content_type, rh.position_value, rh.first_opened_at, rh.updated_at,
+                   b.title, ap.pen_name,
+                   c.title AS chapter_title, c.number AS chapter_number,
+                   ac.title AS audio_title, ac.number AS audio_number,
+                   gc.title AS graphic_title, gc.number AS graphic_number
+            FROM reading_history rh
+            JOIN books b ON b.id=rh.book_id
+            LEFT JOIN author_profiles ap ON ap.id=b.author_id
+            LEFT JOIN chapters c ON rh.content_type='text' AND c.id=rh.target_id
+            LEFT JOIN audio_chapters ac ON rh.content_type='audio' AND ac.id=rh.target_id
+            LEFT JOIN graphic_chapters gc ON rh.content_type='graphic' AND gc.id=rh.target_id
+            WHERE rh.user_id=?
+            ORDER BY rh.updated_at ASC, rh.id ASC
+            """,
+            (int(user_id),),
+        )
+        history_rows = [dict(row) for row in await cur.fetchall()]
+        cur = await db.execute(
+            """
+            SELECT ra.book_id, ra.annotation_type, ra.selected_text, ra.note_text,
+                   ra.position_percent, ra.created_at, ra.updated_at,
+                   b.title, ap.pen_name, c.title AS chapter_title, c.number AS chapter_number
+            FROM reader_annotations ra
+            JOIN books b ON b.id=ra.book_id
+            JOIN chapters c ON c.id=ra.chapter_id
+            LEFT JOIN author_profiles ap ON ap.id=b.author_id
+            WHERE ra.user_id=?
+            ORDER BY ra.created_at ASC, ra.id ASC
+            """,
+            (int(user_id),),
+        )
+        annotation_rows = [dict(row) for row in await cur.fetchall()]
+        cur = await db.execute(
+            """
+            SELECT activity_date, text_chapters, audio_seconds, graphic_pages, sessions
+            FROM reader_activity_daily
+            WHERE user_id=? ORDER BY activity_date ASC
+            """,
+            (int(user_id),),
+        )
+        activity_rows = [dict(row) for row in await cur.fetchall()]
+        cur = await db.execute(
+            """
+            SELECT rbc.book_id, rbc.cycle_number, rbc.status, rbc.started_on,
+                   rbc.finished_on, rbc.note, rbc.created_at, rbc.updated_at,
+                   b.title, ap.pen_name
+            FROM reader_book_cycles rbc
+            JOIN books b ON b.id=rbc.book_id
+            LEFT JOIN author_profiles ap ON ap.id=b.author_id
+            WHERE rbc.user_id=?
+            ORDER BY rbc.book_id, rbc.cycle_number
+            """,
+            (int(user_id),),
+        )
+        cycle_rows = [dict(row) for row in await cur.fetchall()]
+        cur = await db.execute(
+            """
+            SELECT ryli.book_id, ryli.list_year, ryli.list_code, ryli.note,
+                   ryli.created_at, ryli.updated_at, b.title, ap.pen_name
+            FROM reader_year_list_items ryli
+            JOIN books b ON b.id=ryli.book_id
+            LEFT JOIN author_profiles ap ON ap.id=b.author_id
+            WHERE ryli.user_id=?
+            ORDER BY ryli.list_year, ryli.list_code, b.title
+            """,
+            (int(user_id),),
+        )
+        year_list_rows = [dict(row) for row in await cur.fetchall()]
+    safe_journal = [{
+        'book_id': int(item.get('book_id') or 0),
+        'title': str(item.get('title') or ''),
+        'author': str(item.get('pen_name') or ''),
+        'content_type': str(item.get('content_type') or 'book'),
+        'status': str(item.get('status') or 'reading'),
+        'started_on': str(item.get('started_on') or ''),
+        'finished_on': str(item.get('finished_on') or ''),
+        'private_rating': int(item.get('private_rating') or 0),
+        'impression': str(item.get('impression') or ''),
+        'last_activity_at': str(item.get('last_activity_at') or ''),
+        'created_at': str(item.get('created_at') or ''),
+        'updated_at': str(item.get('updated_at') or ''),
+    } for item in journal_rows]
+    safe_history = [{
+        'book_id': int(item.get('book_id') or 0),
+        'title': str(item.get('title') or ''),
+        'author': str(item.get('pen_name') or ''),
+        'content_type': str(item.get('content_type') or ''),
+        'chapter_number': item.get('chapter_number') or item.get('audio_number') or item.get('graphic_number'),
+        'chapter_title': str(item.get('chapter_title') or item.get('audio_title') or item.get('graphic_title') or ''),
+        'position': int(item.get('position_value') or 0),
+        'first_opened_at': str(item.get('first_opened_at') or ''),
+        'updated_at': str(item.get('updated_at') or ''),
+    } for item in history_rows]
+    safe_annotations = [{
+        'book_id': int(item.get('book_id') or 0),
+        'title': str(item.get('title') or ''),
+        'author': str(item.get('pen_name') or ''),
+        'chapter_number': item.get('chapter_number'),
+        'chapter_title': str(item.get('chapter_title') or ''),
+        'type': str(item.get('annotation_type') or 'note'),
+        'selected_text': str(item.get('selected_text') or ''),
+        'note_text': str(item.get('note_text') or ''),
+        'position_percent': int(item.get('position_percent') or 0),
+        'created_at': str(item.get('created_at') or ''),
+        'updated_at': str(item.get('updated_at') or ''),
+    } for item in annotation_rows]
+    safe_activity = [{
+        'date': str(item.get('activity_date') or ''),
+        'text_chapters': int(item.get('text_chapters') or 0),
+        'audio_minutes': int(item.get('audio_seconds') or 0) // 60,
+        'graphic_pages': int(item.get('graphic_pages') or 0),
+        'sessions': int(item.get('sessions') or 0),
+    } for item in activity_rows]
+    safe_cycles = [{
+        'book_id': int(item.get('book_id') or 0),
+        'title': str(item.get('title') or ''),
+        'author': str(item.get('pen_name') or ''),
+        'cycle_number': int(item.get('cycle_number') or 1),
+        'status': str(item.get('status') or 'reading'),
+        'started_on': str(item.get('started_on') or ''),
+        'finished_on': str(item.get('finished_on') or ''),
+        'note': str(item.get('note') or ''),
+        'created_at': str(item.get('created_at') or ''),
+        'updated_at': str(item.get('updated_at') or ''),
+    } for item in cycle_rows]
+    safe_year_lists = [{
+        'book_id': int(item.get('book_id') or 0),
+        'title': str(item.get('title') or ''),
+        'author': str(item.get('pen_name') or ''),
+        'year': int(item.get('list_year') or 0),
+        'list_code': str(item.get('list_code') or ''),
+        'note': str(item.get('note') or ''),
+        'created_at': str(item.get('created_at') or ''),
+        'updated_at': str(item.get('updated_at') or ''),
+    } for item in year_list_rows]
+    return {
+        'export_version': '1.2',
+        'generated_at': utc_now(),
+        'privacy': 'Экспорт содержит только личную читательскую историю владельца профиля.',
+        'summary': summary,
+        'journal': safe_journal,
+        'reading_cycles': safe_cycles,
+        'year_lists': safe_year_lists,
+        'history': safe_history,
+        'annotations': safe_annotations,
+        'daily_activity': safe_activity,
+    }
+
+
+
+
+def _import_timestamp(value: object) -> datetime | None:
+    raw = str(value or '').strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace('Z', '+00:00'))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _import_timestamp_text(value: object) -> str:
+    parsed = _import_timestamp(value)
+    return parsed.isoformat() if parsed else ''
+
+
+def _import_is_newer(source_value: object, current_value: object) -> bool:
+    source = _import_timestamp(source_value)
+    current = _import_timestamp(current_value)
+    return bool(source and (not current or source > current))
+
+
+def _import_book_key(title: object, author: object) -> tuple[str, str]:
+    return (str(title or '').strip().casefold(), str(author or '').strip().casefold())
+
+
+def _import_operation_selection_id(operation: dict[str, Any]) -> str:
+    source = dict(operation.get('source') or {})
+    kind = str(operation.get('kind') or '')
+    book_id = int(source.get('book_id') or 0)
+    if kind == 'journal':
+        return f'journal:{book_id}'
+    if kind == 'cycle':
+        return f"cycle:{book_id}:{int(source.get('cycle_number') or 1)}"
+    if kind == 'year_list':
+        return f"year_list:{book_id}:{int(source.get('year') or 0)}:{str(source.get('list_code') or '')}"
+    raise ValueError('Неизвестный раздел импорта дневника.')
+
+
+def _import_selectable_item(operation: dict[str, Any]) -> dict[str, Any]:
+    source = dict(operation.get('source') or {})
+    kind = str(operation.get('kind') or '')
+    item = {
+        'selection_id': _import_operation_selection_id(operation),
+        'kind': kind,
+        'action': str(operation.get('action') or ''),
+        'book_id': int(source.get('book_id') or 0),
+        'title': str(source.get('title') or ''),
+        'author': str(source.get('author') or ''),
+    }
+    if kind == 'journal':
+        item.update({
+            'status': str(source.get('status') or ''),
+            'started_on': str(source.get('started_on') or ''),
+            'finished_on': str(source.get('finished_on') or ''),
+            'private_rating': int(source.get('private_rating') or 0),
+            'has_impression': bool(str(source.get('impression') or '').strip()),
+        })
+    elif kind == 'cycle':
+        item.update({
+            'cycle_number': int(source.get('cycle_number') or 1),
+            'status': str(source.get('status') or ''),
+            'started_on': str(source.get('started_on') or ''),
+            'finished_on': str(source.get('finished_on') or ''),
+            'has_note': bool(str(source.get('note') or '').strip()),
+            'requires_journal': f"journal:{int(source.get('book_id') or 0)}",
+        })
+    elif kind == 'year_list':
+        item.update({
+            'year': int(source.get('year') or 0),
+            'list_code': str(source.get('list_code') or ''),
+            'has_note': bool(str(source.get('note') or '').strip()),
+        })
+    return item
+
+
+def _normalize_import_selection(value: object) -> list[str] | None:
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise ValueError('Выбор записей импорта должен быть списком.')
+    if len(value) > 18000:
+        raise ValueError('Выбрано слишком много записей импорта.')
+    result: list[str] = []
+    seen: set[str] = set()
+    for raw in value:
+        item = str(raw or '').strip()
+        if not item or len(item) > 120 or item in seen:
+            continue
+        if not item.startswith(('journal:', 'cycle:', 'year_list:')):
+            raise ValueError('В выборе импорта обнаружена неизвестная запись.')
+        seen.add(item)
+        result.append(item)
+    return result
+
+
+def _public_import_preview(plan: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in plan.items() if key != '_operations'}
+
+
+async def _normalize_user_reading_import(
+    db: aiosqlite.Connection,
+    raw_data: object,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    if not isinstance(raw_data, dict):
+        raise ValueError('Файл должен содержать JSON-объект экспорта VoxLyra.')
+    source_version = str(raw_data.get('export_version') or '').strip()
+    if source_version not in {'1.1', '1.2'}:
+        raise ValueError('Поддерживаются экспорты VoxLyra версий 1.1 и 1.2.')
+    journal_raw = raw_data.get('journal') or []
+    cycles_raw = raw_data.get('reading_cycles') or []
+    lists_raw = raw_data.get('year_lists') or []
+    if not isinstance(journal_raw, list) or not isinstance(cycles_raw, list) or not isinstance(lists_raw, list):
+        raise ValueError('Разделы journal, reading_cycles и year_lists должны быть списками.')
+    if len(journal_raw) > 2000 or len(cycles_raw) > 6000 or len(lists_raw) > 10000:
+        raise ValueError('Экспорт слишком большой для безопасного восстановления.')
+
+    cur = await db.execute(
+        """
+        SELECT b.id, b.title, b.content_type, ap.pen_name
+        FROM books b
+        LEFT JOIN author_profiles ap ON ap.id=b.author_id
+        WHERE b.publication_status='published'
+        """
+    )
+    books = [dict(row) for row in await cur.fetchall()]
+    by_id = {int(item['id']): item for item in books}
+    by_key: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    by_title: dict[str, list[dict[str, Any]]] = {}
+    for item in books:
+        key = _import_book_key(item.get('title'), item.get('pen_name'))
+        by_key.setdefault(key, []).append(item)
+        by_title.setdefault(key[0], []).append(item)
+
+    stats: dict[str, Any] = {
+        'invalid_records': 0,
+        'duplicate_records': 0,
+        'missing_books': [],
+        'missing_book_count': 0,
+        'ignored_history': len(raw_data.get('history') or []) if isinstance(raw_data.get('history') or [], list) else 0,
+        'ignored_annotations': len(raw_data.get('annotations') or []) if isinstance(raw_data.get('annotations') or [], list) else 0,
+        'ignored_daily_activity': len(raw_data.get('daily_activity') or []) if isinstance(raw_data.get('daily_activity') or [], list) else 0,
+    }
+
+    def resolve_book(item: dict[str, Any]) -> dict[str, Any] | None:
+        source_id = int(item.get('book_id') or 0)
+        title = str(item.get('title') or '').strip()
+        author = str(item.get('author') or '').strip()
+        candidate = by_id.get(source_id)
+        if candidate:
+            source_key = _import_book_key(title, author)
+            candidate_key = _import_book_key(candidate.get('title'), candidate.get('pen_name'))
+            # Старые экспорты могли не содержать автора. ID принимается, если
+            # название совпадает или название отсутствует.
+            if not title or source_key[0] == candidate_key[0]:
+                return candidate
+        key = _import_book_key(title, author)
+        matches = by_key.get(key, []) if title and author else []
+        if len(matches) == 1:
+            return matches[0]
+        title_matches = by_title.get(key[0], []) if title else []
+        if len(title_matches) == 1:
+            return title_matches[0]
+        stats['missing_book_count'] = int(stats.get('missing_book_count') or 0) + 1
+        if len(stats['missing_books']) < 30:
+            stats['missing_books'].append({'book_id': source_id, 'title': title or 'Без названия', 'author': author})
+        return None
+
+    normalized_journal: dict[int, dict[str, Any]] = {}
+    for raw in journal_raw:
+        if not isinstance(raw, dict):
+            stats['invalid_records'] += 1
+            continue
+        book = resolve_book(raw)
+        if not book:
+            continue
+        try:
+            status = _journal_status(raw.get('status') or 'reading')
+            started_on = _parse_journal_date(raw.get('started_on'), 'Дата начала')
+            finished_on = _parse_journal_date(raw.get('finished_on'), 'Дата завершения')
+            if status == 'finished' and not finished_on:
+                status = 'reading'
+            if started_on and finished_on and finished_on < started_on:
+                raise ValueError('Дата завершения раньше даты начала.')
+            rating = max(0, min(5, int(raw.get('private_rating') or 0)))
+        except (TypeError, ValueError):
+            stats['invalid_records'] += 1
+            continue
+        book_id = int(book['id'])
+        item = {
+            'book_id': book_id,
+            'title': str(book.get('title') or ''),
+            'author': str(book.get('pen_name') or ''),
+            'content_type': str(book.get('content_type') or 'book'),
+            'status': status,
+            'started_on': started_on or '',
+            'finished_on': finished_on or '',
+            'private_rating': rating,
+            'impression': str(raw.get('impression') or '').strip()[:6000],
+            'last_activity_at': _import_timestamp_text(raw.get('last_activity_at')),
+            'created_at': _import_timestamp_text(raw.get('created_at')),
+            'updated_at': _import_timestamp_text(raw.get('updated_at')),
+        }
+        existing = normalized_journal.get(book_id)
+        if existing:
+            stats['duplicate_records'] += 1
+            if _import_is_newer(item.get('updated_at'), existing.get('updated_at')):
+                normalized_journal[book_id] = item
+        else:
+            normalized_journal[book_id] = item
+
+    normalized_cycles: dict[tuple[int, int], dict[str, Any]] = {}
+    for raw in cycles_raw:
+        if not isinstance(raw, dict):
+            stats['invalid_records'] += 1
+            continue
+        book = resolve_book(raw)
+        if not book:
+            continue
+        try:
+            cycle_number = int(raw.get('cycle_number') or 1)
+            if cycle_number < 1 or cycle_number > 10000:
+                raise ValueError
+            status = _reading_cycle_status(raw.get('status') or 'reading')
+            started_on = _parse_journal_date(raw.get('started_on'), 'Дата начала цикла')
+            finished_on = _parse_journal_date(raw.get('finished_on'), 'Дата завершения цикла')
+            if status == 'finished' and not finished_on:
+                raise ValueError
+            if status != 'finished':
+                finished_on = None
+            if started_on and finished_on and finished_on < started_on:
+                raise ValueError
+        except (TypeError, ValueError):
+            stats['invalid_records'] += 1
+            continue
+        key = (int(book['id']), cycle_number)
+        item = {
+            'book_id': key[0],
+            'title': str(book.get('title') or ''),
+            'author': str(book.get('pen_name') or ''),
+            'cycle_number': cycle_number,
+            'status': status,
+            'started_on': started_on or '',
+            'finished_on': finished_on or '',
+            'note': str(raw.get('note') or '').strip()[:2000],
+            'created_at': _import_timestamp_text(raw.get('created_at')),
+            'updated_at': _import_timestamp_text(raw.get('updated_at')),
+        }
+        existing = normalized_cycles.get(key)
+        if existing:
+            stats['duplicate_records'] += 1
+            if _import_is_newer(item.get('updated_at'), existing.get('updated_at')):
+                normalized_cycles[key] = item
+        else:
+            normalized_cycles[key] = item
+
+    normalized_lists: dict[tuple[int, int, str], dict[str, Any]] = {}
+    current_year = datetime.now(timezone.utc).year
+    for raw in lists_raw:
+        if not isinstance(raw, dict):
+            stats['invalid_records'] += 1
+            continue
+        book = resolve_book(raw)
+        if not book:
+            continue
+        try:
+            year = int(raw.get('year') or raw.get('list_year') or 0)
+            if year < 1900 or year > current_year:
+                raise ValueError
+            code = _year_list_codes([raw.get('list_code')])[0]
+        except (TypeError, ValueError, IndexError):
+            stats['invalid_records'] += 1
+            continue
+        key = (int(book['id']), year, code)
+        item = {
+            'book_id': key[0],
+            'title': str(book.get('title') or ''),
+            'author': str(book.get('pen_name') or ''),
+            'year': year,
+            'list_code': code,
+            'note': str(raw.get('note') or '').strip()[:1000],
+            'created_at': _import_timestamp_text(raw.get('created_at')),
+            'updated_at': _import_timestamp_text(raw.get('updated_at')),
+        }
+        existing = normalized_lists.get(key)
+        if existing:
+            stats['duplicate_records'] += 1
+            if _import_is_newer(item.get('updated_at'), existing.get('updated_at')):
+                normalized_lists[key] = item
+        else:
+            normalized_lists[key] = item
+
+    # Повреждённый или сокращённый экспорт может содержать циклы без общей
+    # записи дневника. Создаём безопасную сводную запись, чтобы циклы не стали
+    # невидимыми после восстановления.
+    cycles_by_book: dict[int, list[dict[str, Any]]] = {}
+    for item in normalized_cycles.values():
+        cycles_by_book.setdefault(int(item['book_id']), []).append(item)
+    for book_id, book_cycles in cycles_by_book.items():
+        if book_id in normalized_journal:
+            continue
+        ordered = sorted(book_cycles, key=lambda item: int(item.get('cycle_number') or 1))
+        latest = ordered[-1]
+        first_started = min((str(item.get('started_on') or '') for item in ordered if item.get('started_on')), default='')
+        last_finished = max((str(item.get('finished_on') or '') for item in ordered if item.get('finished_on')), default='')
+        normalized_journal[book_id] = {
+            'book_id': book_id,
+            'title': str(latest.get('title') or ''),
+            'author': str(latest.get('author') or ''),
+            'content_type': 'book',
+            'status': str(latest.get('status') or 'reading'),
+            'started_on': first_started,
+            'finished_on': last_finished if str(latest.get('status')) == 'finished' else '',
+            'private_rating': 0,
+            'impression': '',
+            'last_activity_at': '',
+            'created_at': str(ordered[0].get('created_at') or ''),
+            'updated_at': str(latest.get('updated_at') or ''),
+        }
+
+    normalized = {
+        'source_version': source_version,
+        'source_generated_at': _import_timestamp_text(raw_data.get('generated_at')),
+        'journal': list(normalized_journal.values()),
+        'reading_cycles': list(normalized_cycles.values()),
+        'year_lists': list(normalized_lists.values()),
+    }
+    return normalized, stats
+
+
+async def _build_user_reading_import_plan(
+    db: aiosqlite.Connection,
+    user_id: int,
+    normalized: dict[str, Any],
+    normalization_stats: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    cur = await db.execute('SELECT * FROM reader_book_journal WHERE user_id=?', (int(user_id),))
+    current_journal = {int(row['book_id']): dict(row) for row in await cur.fetchall()}
+    cur = await db.execute('SELECT * FROM reader_book_cycles WHERE user_id=?', (int(user_id),))
+    current_cycles = {(int(row['book_id']), int(row['cycle_number'])): dict(row) for row in await cur.fetchall()}
+    active_by_book: dict[int, list[dict[str, Any]]] = {}
+    for row in current_cycles.values():
+        if str(row.get('status')) in {'reading', 'paused'}:
+            active_by_book.setdefault(int(row['book_id']), []).append(row)
+    cur = await db.execute('SELECT * FROM reader_year_list_items WHERE user_id=?', (int(user_id),))
+    current_lists = {
+        (int(row['book_id']), int(row['list_year']), str(row['list_code'])): dict(row)
+        for row in await cur.fetchall()
+    }
+
+    operations: list[dict[str, Any]] = []
+    counts = {
+        'journal_add': 0, 'journal_update': 0, 'journal_fill': 0, 'journal_protected': 0, 'journal_unchanged': 0,
+        'cycles_add': 0, 'cycles_update': 0, 'cycles_fill': 0, 'cycles_protected': 0, 'cycles_unchanged': 0,
+        'year_lists_add': 0, 'year_lists_update': 0, 'year_lists_fill': 0, 'year_lists_protected': 0, 'year_lists_unchanged': 0,
+    }
+    protected: list[dict[str, Any]] = []
+
+    for source in normalized.get('journal') or []:
+        book_id = int(source['book_id'])
+        current = current_journal.get(book_id)
+        if not current:
+            operations.append({'kind': 'journal', 'action': 'add', 'source': source})
+            counts['journal_add'] += 1
+            continue
+        if _import_is_newer(source.get('updated_at'), current.get('updated_at')):
+            operations.append({'kind': 'journal', 'action': 'update', 'source': source})
+            counts['journal_update'] += 1
+            continue
+        fill: dict[str, Any] = {}
+        # У старого экспорта нет точной даты изменения каждой записи. Поэтому
+        # он может заполнить только явно пустое личное впечатление и оценку, но
+        # никогда не меняет статусные даты и прогресс более новой записи.
+        if not str(current.get('impression') or '').strip() and str(source.get('impression') or '').strip():
+            fill['impression'] = source.get('impression')
+        if int(current.get('private_rating') or 0) <= 0 and int(source.get('private_rating') or 0) > 0:
+            fill['private_rating'] = int(source.get('private_rating') or 0)
+        if fill:
+            operations.append({'kind': 'journal', 'action': 'fill', 'source': source, 'fields': fill})
+            counts['journal_fill'] += 1
+        else:
+            comparable = ('status', 'started_on', 'finished_on', 'impression', 'private_rating')
+            differs = any(str(current.get(field) or '') != str(source.get(field) or '') for field in comparable)
+            if differs:
+                counts['journal_protected'] += 1
+                if len(protected) < 30:
+                    protected.append({'title': source.get('title') or '', 'section': 'Дневник', 'reason': 'Текущая запись новее или не имеет точной даты изменения.'})
+            else:
+                counts['journal_unchanged'] += 1
+
+    planned_active: dict[int, int] = {}
+    for source in sorted(normalized.get('reading_cycles') or [], key=lambda item: (int(item['book_id']), int(item['cycle_number']))):
+        key = (int(source['book_id']), int(source['cycle_number']))
+        current = current_cycles.get(key)
+        source_active = str(source.get('status')) in {'reading', 'paused'}
+        conflicting_active = [row for row in active_by_book.get(key[0], []) if int(row.get('cycle_number') or 0) != key[1]]
+        if source_active and (conflicting_active or (key[0] in planned_active and planned_active[key[0]] != key[1])):
+            counts['cycles_protected'] += 1
+            if len(protected) < 30:
+                protected.append({'title': source.get('title') or '', 'section': 'Циклы', 'reason': 'Не создан второй одновременный активный цикл.'})
+            continue
+        if not current:
+            operations.append({'kind': 'cycle', 'action': 'add', 'source': source})
+            counts['cycles_add'] += 1
+            if source_active:
+                planned_active[key[0]] = key[1]
+            continue
+        if _import_is_newer(source.get('updated_at'), current.get('updated_at')):
+            operations.append({'kind': 'cycle', 'action': 'update', 'source': source})
+            counts['cycles_update'] += 1
+            if source_active:
+                planned_active[key[0]] = key[1]
+            continue
+        fill: dict[str, Any] = {}
+        # Без доказательства, что импортированный цикл новее, не меняем его
+        # даты или статус. Разрешено только вернуть отсутствующую личную заметку.
+        if not str(current.get('note') or '').strip() and str(source.get('note') or '').strip():
+            fill['note'] = source.get('note')
+        if fill:
+            operations.append({'kind': 'cycle', 'action': 'fill', 'source': source, 'fields': fill})
+            counts['cycles_fill'] += 1
+        else:
+            comparable = ('status', 'started_on', 'finished_on', 'note')
+            differs = any(str(current.get(field) or '') != str(source.get(field) or '') for field in comparable)
+            if differs:
+                counts['cycles_protected'] += 1
+                if len(protected) < 30:
+                    protected.append({'title': source.get('title') or '', 'section': f"Цикл №{int(source.get('cycle_number') or 1)}", 'reason': 'Существующий цикл сохранён без перезаписи.'})
+            else:
+                counts['cycles_unchanged'] += 1
+
+    for source in normalized.get('year_lists') or []:
+        key = (int(source['book_id']), int(source['year']), str(source['list_code']))
+        current = current_lists.get(key)
+        if not current:
+            operations.append({'kind': 'year_list', 'action': 'add', 'source': source})
+            counts['year_lists_add'] += 1
+            continue
+        if _import_is_newer(source.get('updated_at'), current.get('updated_at')):
+            operations.append({'kind': 'year_list', 'action': 'update', 'source': source})
+            counts['year_lists_update'] += 1
+            continue
+        if not str(current.get('note') or '').strip() and str(source.get('note') or '').strip():
+            operations.append({'kind': 'year_list', 'action': 'fill', 'source': source, 'fields': {'note': source.get('note')}})
+            counts['year_lists_fill'] += 1
+        elif str(current.get('note') or '') != str(source.get('note') or ''):
+            counts['year_lists_protected'] += 1
+        else:
+            counts['year_lists_unchanged'] += 1
+
+    for operation in operations:
+        operation['selection_id'] = _import_operation_selection_id(operation)
+    selectable_items = {'journal': [], 'cycles': [], 'year_lists': []}
+    for operation in operations:
+        public_item = _import_selectable_item(operation)
+        if operation.get('kind') == 'journal':
+            selectable_items['journal'].append(public_item)
+        elif operation.get('kind') == 'cycle':
+            selectable_items['cycles'].append(public_item)
+        elif operation.get('kind') == 'year_list':
+            selectable_items['year_lists'].append(public_item)
+
+    stats = normalization_stats or {}
+    total_changes = sum(value for key, value in counts.items() if key.endswith(('_add', '_update', '_fill')))
+    total_protected = sum(value for key, value in counts.items() if key.endswith('_protected'))
+    preview = {
+        'source_version': str(normalized.get('source_version') or ''),
+        'source_generated_at': str(normalized.get('source_generated_at') or ''),
+        'source_counts': {
+            'journal': len(normalized.get('journal') or []),
+            'cycles': len(normalized.get('reading_cycles') or []),
+            'year_lists': len(normalized.get('year_lists') or []),
+        },
+        'changes': counts,
+        'total_changes': total_changes,
+        'total_protected': total_protected,
+        'invalid_records': int(stats.get('invalid_records') or 0),
+        'duplicate_records': int(stats.get('duplicate_records') or 0),
+        'missing_book_count': int(stats.get('missing_book_count') or 0),
+        'missing_books': list(stats.get('missing_books') or [])[:30],
+        'ignored_sections': {
+            'history': int(stats.get('ignored_history') or 0),
+            'annotations': int(stats.get('ignored_annotations') or 0),
+            'daily_activity': int(stats.get('ignored_daily_activity') or 0),
+        },
+        'protected_examples': protected,
+        'selectable_items': selectable_items,
+        'default_selected': [str(operation.get('selection_id') or '') for operation in operations],
+        'selection_note': 'Можно восстановить только выбранные произведения, циклы и отметки списков года.',
+        'safety_note': 'Новые записи добавятся. Более новые или не датированные текущие данные не будут перезаписаны.',
+        '_operations': operations,
+    }
+    return preview
+
+
+async def prepare_user_reading_import(user_id: int, raw_data: object) -> dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    expires = now + timedelta(minutes=30)
+    token = uuid.uuid4().hex
+    async with connect() as db:
+        normalized, stats = await _normalize_user_reading_import(db, raw_data)
+        plan = await _build_user_reading_import_plan(db, user_id, normalized, stats)
+        public_preview = _public_import_preview(plan)
+        public_preview['preview_token'] = token
+        public_preview['expires_at'] = expires.isoformat()
+        await db.execute(
+            """
+            INSERT INTO reader_journal_import_previews(
+                token, user_id, source_version, source_generated_at, normalized_json,
+                preview_json, created_at, expires_at, applied_at, result_json
+            ) VALUES(?,?,?,?,?,?,?,?,NULL,NULL)
+            """,
+            (
+                token, int(user_id), str(normalized.get('source_version') or ''),
+                str(normalized.get('source_generated_at') or '') or None,
+                json.dumps(normalized, ensure_ascii=False, separators=(',', ':')),
+                json.dumps(public_preview, ensure_ascii=False, separators=(',', ':')),
+                now.isoformat(), expires.isoformat(),
+            ),
+        )
+        await db.commit()
+    return public_preview
+
+
+async def apply_user_reading_import(
+    user_id: int,
+    preview_token: object,
+    selected_items: object = None,
+) -> dict[str, Any]:
+    token = str(preview_token or '').strip()
+    if len(token) != 32 or any(char not in '0123456789abcdef' for char in token.lower()):
+        raise ValueError('Предпросмотр импорта недействителен.')
+    now_dt = datetime.now(timezone.utc)
+    now = now_dt.isoformat()
+    async with connect() as db:
+        cur = await db.execute(
+            'SELECT * FROM reader_journal_import_previews WHERE token=? AND user_id=?',
+            (token, int(user_id)),
+        )
+        preview_row = await cur.fetchone()
+        if not preview_row:
+            raise ValueError('Предпросмотр импорта не найден.')
+        if preview_row['applied_at']:
+            raise ValueError('Этот импорт уже был применён.')
+        expires = _import_timestamp(preview_row['expires_at'])
+        if not expires or expires < now_dt:
+            raise ValueError('Предпросмотр устарел. Выберите файл повторно.')
+        try:
+            normalized = json.loads(str(preview_row['normalized_json'] or '{}'))
+            stored_preview = json.loads(str(preview_row['preview_json'] or '{}'))
+        except json.JSONDecodeError as exc:
+            raise ValueError('Сохранённый предпросмотр повреждён.') from exc
+        requested_selection = _normalize_import_selection(selected_items)
+        if requested_selection is not None:
+            stored_ids = {
+                str(item.get('selection_id') or '')
+                for section in (stored_preview.get('selectable_items') or {}).values()
+                if isinstance(section, list)
+                for item in section if isinstance(item, dict)
+            }
+            if not stored_ids:
+                raise ValueError('Этот предпросмотр создан старой версией. Выберите файл повторно.')
+            unknown = [item for item in requested_selection if item not in stored_ids]
+            if unknown:
+                raise ValueError('Выбор импорта не соответствует проверенному файлу.')
+            if not requested_selection:
+                raise ValueError('Выберите хотя бы одну запись для восстановления.')
+        # План пересчитывается непосредственно перед записью. Это защищает
+        # изменения, сделанные пользователем после открытия предпросмотра.
+        await db.execute('BEGIN IMMEDIATE')
+        # После получения блокировки перечитываем одноразовый токен. Два
+        # одновременных нажатия не смогут применить один импорт дважды.
+        cur = await db.execute(
+            'SELECT applied_at, expires_at FROM reader_journal_import_previews WHERE token=? AND user_id=?',
+            (token, int(user_id)),
+        )
+        locked_preview = await cur.fetchone()
+        if not locked_preview or locked_preview['applied_at']:
+            raise ValueError('Этот импорт уже был применён.')
+        locked_expires = _import_timestamp(locked_preview['expires_at'])
+        if not locked_expires or locked_expires < datetime.now(timezone.utc):
+            raise ValueError('Предпросмотр устарел. Выберите файл повторно.')
+        plan = await _build_user_reading_import_plan(db, user_id, normalized, {})
+        all_operations = list(plan.get('_operations') or [])
+        requested_set = set(requested_selection or [])
+        operations = all_operations if requested_selection is None else [
+            operation for operation in all_operations
+            if str(operation.get('selection_id') or '') in requested_set
+        ]
+        auto_included: list[str] = []
+        if requested_selection is not None:
+            cycle_book_ids = {
+                int(operation['source']['book_id'])
+                for operation in operations if operation.get('kind') == 'cycle'
+            }
+            if cycle_book_ids:
+                placeholders = ','.join('?' for _ in cycle_book_ids)
+                cur = await db.execute(
+                    f'SELECT book_id FROM reader_book_journal WHERE user_id=? AND book_id IN ({placeholders})',
+                    (int(user_id), *sorted(cycle_book_ids)),
+                )
+                existing_journal_ids = {int(row['book_id']) for row in await cur.fetchall()}
+                selected_ids = {str(operation.get('selection_id') or '') for operation in operations}
+                for book_id in sorted(cycle_book_ids - existing_journal_ids):
+                    dependency = next((
+                        operation for operation in all_operations
+                        if operation.get('kind') == 'journal' and int(operation['source']['book_id']) == book_id
+                    ), None)
+                    if dependency and str(dependency.get('selection_id') or '') not in selected_ids:
+                        operations.append(dependency)
+                        dependency_id = str(dependency.get('selection_id') or '')
+                        selected_ids.add(dependency_id)
+                        auto_included.append(dependency_id)
+        if not operations:
+            raise ValueError('Выбранные записи больше не требуют восстановления. Проверьте файл повторно.')
+        backup = await _build_user_journal_backup(db, user_id, now)
+        before_snapshot = await _capture_user_import_snapshot(db, user_id, operations)
+        applied = {'journal': 0, 'cycles': 0, 'year_lists': 0}
+        for operation in operations:
+            source = operation['source']
+            action = operation['action']
+            kind = operation['kind']
+            created_at = str(source.get('created_at') or '') or now
+            updated_at = str(source.get('updated_at') or '') or now
+            if kind == 'journal':
+                if action == 'add':
+                    await db.execute(
+                        """
+                        INSERT INTO reader_book_journal(
+                            user_id, book_id, status, started_on, finished_on, impression,
+                            private_rating, last_activity_at, created_at, updated_at
+                        ) VALUES(?,?,?,?,?,?,?,?,?,?)
+                        """,
+                        (
+                            int(user_id), int(source['book_id']), source['status'],
+                            source.get('started_on') or None, source.get('finished_on') or None,
+                            source.get('impression') or '', int(source.get('private_rating') or 0),
+                            source.get('last_activity_at') or None, created_at, updated_at,
+                        ),
+                    )
+                elif action == 'update':
+                    await db.execute(
+                        """
+                        UPDATE reader_book_journal
+                        SET status=?, started_on=?, finished_on=?, impression=?, private_rating=?,
+                            last_activity_at=?, updated_at=?
+                        WHERE user_id=? AND book_id=?
+                        """,
+                        (
+                            source['status'], source.get('started_on') or None, source.get('finished_on') or None,
+                            source.get('impression') or '', int(source.get('private_rating') or 0),
+                            source.get('last_activity_at') or None, updated_at,
+                            int(user_id), int(source['book_id']),
+                        ),
+                    )
+                else:
+                    fields = dict(operation.get('fields') or {})
+                    assignments = ', '.join(f'{field}=?' for field in fields)
+                    if assignments:
+                        await db.execute(
+                            f'UPDATE reader_book_journal SET {assignments}, updated_at=? WHERE user_id=? AND book_id=?',
+                            (*fields.values(), now, int(user_id), int(source['book_id'])),
+                        )
+                applied['journal'] += 1
+            elif kind == 'cycle':
+                if action == 'add':
+                    await db.execute(
+                        """
+                        INSERT INTO reader_book_cycles(
+                            user_id, book_id, cycle_number, status, started_on, finished_on,
+                            note, created_at, updated_at
+                        ) VALUES(?,?,?,?,?,?,?,?,?)
+                        """,
+                        (
+                            int(user_id), int(source['book_id']), int(source['cycle_number']), source['status'],
+                            source.get('started_on') or None, source.get('finished_on') or None,
+                            source.get('note') or '', created_at, updated_at,
+                        ),
+                    )
+                elif action == 'update':
+                    await db.execute(
+                        """
+                        UPDATE reader_book_cycles
+                        SET status=?, started_on=?, finished_on=?, note=?, updated_at=?
+                        WHERE user_id=? AND book_id=? AND cycle_number=?
+                        """,
+                        (
+                            source['status'], source.get('started_on') or None, source.get('finished_on') or None,
+                            source.get('note') or '', updated_at, int(user_id), int(source['book_id']),
+                            int(source['cycle_number']),
+                        ),
+                    )
+                else:
+                    fields = dict(operation.get('fields') or {})
+                    assignments = ', '.join(f'{field}=?' for field in fields)
+                    if assignments:
+                        await db.execute(
+                            f'UPDATE reader_book_cycles SET {assignments}, updated_at=? WHERE user_id=? AND book_id=? AND cycle_number=?',
+                            (*fields.values(), now, int(user_id), int(source['book_id']), int(source['cycle_number'])),
+                        )
+                applied['cycles'] += 1
+            elif kind == 'year_list':
+                if action == 'add':
+                    await db.execute(
+                        """
+                        INSERT INTO reader_year_list_items(
+                            user_id, book_id, list_year, list_code, note, created_at, updated_at
+                        ) VALUES(?,?,?,?,?,?,?)
+                        """,
+                        (
+                            int(user_id), int(source['book_id']), int(source['year']), source['list_code'],
+                            source.get('note') or '', created_at, updated_at,
+                        ),
+                    )
+                elif action == 'update':
+                    await db.execute(
+                        """
+                        UPDATE reader_year_list_items SET note=?, updated_at=?
+                        WHERE user_id=? AND book_id=? AND list_year=? AND list_code=?
+                        """,
+                        (
+                            source.get('note') or '', updated_at, int(user_id), int(source['book_id']),
+                            int(source['year']), source['list_code'],
+                        ),
+                    )
+                else:
+                    await db.execute(
+                        """
+                        UPDATE reader_year_list_items SET note=?, updated_at=?
+                        WHERE user_id=? AND book_id=? AND list_year=? AND list_code=?
+                        """,
+                        (
+                            source.get('note') or '', now, int(user_id), int(source['book_id']),
+                            int(source['year']), source['list_code'],
+                        ),
+                    )
+                applied['year_lists'] += 1
+
+        # Если импорт добавил циклы, но дневник уже существовал, приводим общие
+        # даты к безопасной сводке, не стирая впечатления и личную оценку.
+        touched_books = sorted({int(op['source']['book_id']) for op in operations if op['kind'] in {'journal', 'cycle'}})
+        for book_id in touched_books:
+            cur = await db.execute(
+                """
+                SELECT MIN(started_on) AS first_started,
+                       MAX(CASE WHEN status='finished' THEN finished_on END) AS last_finished,
+                       SUM(CASE WHEN status IN ('reading','paused') THEN 1 ELSE 0 END) AS active
+                FROM reader_book_cycles WHERE user_id=? AND book_id=?
+                """,
+                (int(user_id), book_id),
+            )
+            aggregate = await cur.fetchone()
+            if aggregate and (aggregate['first_started'] or aggregate['last_finished']):
+                await db.execute(
+                    """
+                    UPDATE reader_book_journal
+                    SET started_on=COALESCE(started_on, ?),
+                        finished_on=COALESCE(finished_on, ?),
+                        updated_at=CASE WHEN updated_at>? THEN updated_at ELSE ? END
+                    WHERE user_id=? AND book_id=?
+                    """,
+                    (
+                        aggregate['first_started'], aggregate['last_finished'], now, now,
+                        int(user_id), book_id,
+                    ),
+                )
+        after_snapshot = await _capture_user_import_snapshot(db, user_id, operations)
+        applied_ids = [str(operation.get('selection_id') or '') for operation in operations]
+        result = {
+            'applied': applied,
+            'total_applied': sum(applied.values()),
+            'requested_selection_count': len(requested_selection or []) if requested_selection is not None else len(all_operations),
+            'applied_selection_ids': applied_ids,
+            'auto_included_selection_ids': auto_included,
+            'skipped_after_recheck': max(0, (len(requested_selection or []) if requested_selection is not None else len(all_operations)) - len([item for item in applied_ids if item not in auto_included])),
+            'selective_import': requested_selection is not None,
+            'rechecked_preview': _public_import_preview(plan),
+            'applied_at': now,
+            'rollback_available': bool(operations),
+        }
+        if operations:
+            cur = await db.execute(
+                """
+                INSERT INTO reader_journal_import_runs(
+                    user_id, preview_token, source_version, source_generated_at,
+                    backup_json, before_snapshot_json, after_snapshot_json,
+                    result_json, applied_at, rolled_back_at, rollback_result_json
+                ) VALUES(?,?,?,?,?,?,?,?,?,NULL,NULL)
+                """,
+                (
+                    int(user_id), token, str(preview_row['source_version'] or ''),
+                    str(preview_row['source_generated_at'] or '') or None,
+                    json.dumps(backup, ensure_ascii=False, separators=(',', ':')),
+                    json.dumps(before_snapshot, ensure_ascii=False, separators=(',', ':')),
+                    json.dumps(after_snapshot, ensure_ascii=False, separators=(',', ':')),
+                    json.dumps(result, ensure_ascii=False, separators=(',', ':')), now,
+                ),
+            )
+            result['import_run_id'] = int(cur.lastrowid)
+            await db.execute(
+                'UPDATE reader_journal_import_runs SET result_json=? WHERE id=?',
+                (json.dumps(result, ensure_ascii=False, separators=(',', ':')), int(cur.lastrowid)),
+            )
+        await db.execute(
+            'UPDATE reader_journal_import_previews SET applied_at=?, result_json=? WHERE token=? AND user_id=?',
+            (now, json.dumps(result, ensure_ascii=False, separators=(',', ':')), token, int(user_id)),
+        )
+        await db.commit()
+    return result
+
+def _parse_hhmm(value: object, *, default_hour: int, default_minute: int = 0) -> tuple[int, int]:
+    raw = str(value or "").strip()
+    if not raw:
+        return int(default_hour), int(default_minute)
+    try:
+        hour_raw, minute_raw = raw.split(":", 1)
+        hour, minute = int(hour_raw), int(minute_raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Время должно быть указано в формате ЧЧ:ММ.") from exc
+    if not 0 <= hour <= 23 or not 0 <= minute <= 59:
+        raise ValueError("Время должно быть указано в формате ЧЧ:ММ.")
+    return hour, minute
+
+
+def _parse_weekdays(value: object) -> list[int]:
+    if isinstance(value, (list, tuple, set)):
+        parts = list(value)
+    else:
+        parts = str(value or "").replace(";", ",").split(",")
+    result = sorted({int(item) for item in parts if str(item).strip()})
+    if any(day < 1 or day > 7 for day in result):
+        raise ValueError("Дни недели должны быть от 1 до 7.")
+    return result
+
+
+def _notification_settings_public(row: Any) -> dict[str, Any]:
+    weekdays = _parse_weekdays(row["reminder_weekdays"] or "1,2,3,4,5,6,7")
+    keys = set(row.keys()) if hasattr(row, "keys") else set()
+    monthly_enabled = bool(int(row["monthly_report_enabled"] or 0)) if "monthly_report_enabled" in keys else True
+    monthly_day = max(1, min(7, int(row["monthly_report_day"] or 1))) if "monthly_report_day" in keys else 1
+    monthly_hour = int(row["monthly_report_hour"] or 20) if "monthly_report_hour" in keys else 20
+    monthly_minute = int(row["monthly_report_minute"] or 0) if "monthly_report_minute" in keys else 0
+    return {
+        "reminder_enabled": bool(int(row["reminder_enabled"] or 0)),
+        "reminder_time": f"{int(row['reminder_hour'] or 0):02d}:{int(row['reminder_minute'] or 0):02d}",
+        "reminder_weekdays": weekdays,
+        "inactive_days": max(1, int(row["inactive_days"] or 3)),
+        "weekly_report_enabled": bool(int(row["weekly_report_enabled"] or 0)),
+        "weekly_report_weekday": max(1, min(7, int(row["weekly_report_weekday"] or 7))),
+        "weekly_report_time": f"{int(row['weekly_report_hour'] or 0):02d}:{int(row['weekly_report_minute'] or 0):02d}",
+        "monthly_report_enabled": monthly_enabled,
+        "monthly_report_day": monthly_day,
+        "monthly_report_time": f"{monthly_hour:02d}:{monthly_minute:02d}",
+        "timezone_offset_minutes": max(-720, min(840, int(row["timezone_offset_minutes"] or 0))),
+        "updated_at": str(row["updated_at"] or ""),
+    }
+
+
+async def get_user_reading_notification_settings(user_id: int) -> dict[str, Any]:
+    now = utc_now()
+    async with connect() as db:
+        await db.execute(
+            """
+            INSERT INTO reader_notification_settings(user_id, updated_at)
+            VALUES(?, ?) ON CONFLICT(user_id) DO NOTHING
+            """,
+            (int(user_id), now),
+        )
+        cur = await db.execute("SELECT * FROM reader_notification_settings WHERE user_id=?", (int(user_id),))
+        row = await cur.fetchone()
+        await db.commit()
+    return _notification_settings_public(row)
+
+
+async def set_user_reading_notification_settings(
+    user_id: int,
+    *,
+    reminder_enabled: bool,
+    reminder_time: object,
+    reminder_weekdays: object,
+    inactive_days: int,
+    weekly_report_enabled: bool,
+    weekly_report_weekday: int,
+    weekly_report_time: object,
+    monthly_report_enabled: bool,
+    monthly_report_day: int,
+    monthly_report_time: object,
+    timezone_offset_minutes: int,
+) -> dict[str, Any]:
+    reminder_hour, reminder_minute = _parse_hhmm(reminder_time, default_hour=19)
+    report_hour, report_minute = _parse_hhmm(weekly_report_time, default_hour=20)
+    monthly_hour, monthly_minute = _parse_hhmm(monthly_report_time, default_hour=20)
+    weekdays = _parse_weekdays(reminder_weekdays)
+    if reminder_enabled and not weekdays:
+        raise ValueError("Выберите хотя бы один день для напоминаний.")
+    inactive = max(1, min(30, int(inactive_days)))
+    report_weekday = max(1, min(7, int(weekly_report_weekday)))
+    monthly_day = max(1, min(7, int(monthly_report_day)))
+    timezone_offset = max(-720, min(840, int(timezone_offset_minutes)))
+    now = utc_now()
+    async with connect() as db:
+        await db.execute(
+            """
+            INSERT INTO reader_notification_settings(
+                user_id, reminder_enabled, reminder_hour, reminder_minute,
+                reminder_weekdays, inactive_days, weekly_report_enabled,
+                weekly_report_weekday, weekly_report_hour, weekly_report_minute,
+                monthly_report_enabled, monthly_report_day, monthly_report_hour, monthly_report_minute,
+                timezone_offset_minutes, updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                reminder_enabled=excluded.reminder_enabled,
+                reminder_hour=excluded.reminder_hour,
+                reminder_minute=excluded.reminder_minute,
+                reminder_weekdays=excluded.reminder_weekdays,
+                inactive_days=excluded.inactive_days,
+                weekly_report_enabled=excluded.weekly_report_enabled,
+                weekly_report_weekday=excluded.weekly_report_weekday,
+                weekly_report_hour=excluded.weekly_report_hour,
+                weekly_report_minute=excluded.weekly_report_minute,
+                monthly_report_enabled=excluded.monthly_report_enabled,
+                monthly_report_day=excluded.monthly_report_day,
+                monthly_report_hour=excluded.monthly_report_hour,
+                monthly_report_minute=excluded.monthly_report_minute,
+                timezone_offset_minutes=excluded.timezone_offset_minutes,
+                updated_at=excluded.updated_at
+            """,
+            (
+                int(user_id), 1 if reminder_enabled else 0, reminder_hour, reminder_minute,
+                ",".join(str(day) for day in weekdays), inactive, 1 if weekly_report_enabled else 0,
+                report_weekday, report_hour, report_minute, 1 if monthly_report_enabled else 0,
+                monthly_day, monthly_hour, monthly_minute, timezone_offset, now,
+            ),
+        )
+        await db.commit()
+        cur = await db.execute("SELECT * FROM reader_notification_settings WHERE user_id=?", (int(user_id),))
+        row = await cur.fetchone()
+    return _notification_settings_public(row)
+
+
+def _local_datetime(now_utc: datetime, offset_minutes: int) -> datetime:
+    base = now_utc if now_utc.tzinfo else now_utc.replace(tzinfo=timezone.utc)
+    return base.astimezone(timezone.utc) + timedelta(minutes=max(-720, min(840, int(offset_minutes))))
+
+
+def _schedule_hour_due(local_now: datetime, hour: int, minute: int, *, window_minutes: int = 59) -> bool:
+    scheduled = local_now.replace(hour=int(hour), minute=int(minute), second=0, microsecond=0)
+    delta_minutes = (local_now - scheduled).total_seconds() / 60
+    return 0 <= delta_minutes <= max(5, int(window_minutes))
+
+
+async def was_smart_notification_sent(user_id: int, code: str, context_key: str) -> bool:
+    async with connect() as db:
+        cur = await db.execute(
+            "SELECT 1 FROM smart_notification_state WHERE user_id=? AND notification_code=? AND context_key=?",
+            (int(user_id), str(code)[:60], str(context_key)[:120]),
+        )
+        return bool(await cur.fetchone())
+
+
+async def list_weekly_reader_report_candidates(limit: int = 100, now_utc: datetime | None = None) -> list[dict[str, Any]]:
+    now_value = now_utc or datetime.now(timezone.utc)
+    if now_value.tzinfo is None:
+        now_value = now_value.replace(tzinfo=timezone.utc)
+    recent_activity_date = (now_value - timedelta(days=14)).date().isoformat()
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT u.id AS user_id, u.telegram_id, u.full_name,
+                   rns.weekly_report_weekday, rns.weekly_report_hour, rns.weekly_report_minute,
+                   rns.timezone_offset_minutes
+            FROM users u
+            JOIN reader_notification_settings rns ON rns.user_id=u.id
+            LEFT JOIN user_preferences pref ON pref.user_id=u.id
+            WHERE u.is_blocked=0
+              AND rns.weekly_report_enabled=1
+              AND COALESCE(pref.notifications,1)=1
+              AND COALESCE(pref.notifications_reminders,1)=1
+              AND EXISTS (
+                  SELECT 1 FROM reader_activity_daily rad
+                  WHERE rad.user_id=u.id AND rad.activity_date>=? AND rad.sessions>0
+              )
+            ORDER BY u.id
+            LIMIT ?
+            """,
+            (recent_activity_date, max(1, min(1000, int(limit) * 5))),
+        )
+        rows = [dict(row) for row in await cur.fetchall()]
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        local_now = _local_datetime(now_value, int(row.get("timezone_offset_minutes") or 0))
+        if local_now.isoweekday() != int(row.get("weekly_report_weekday") or 7):
+            continue
+        if not _schedule_hour_due(local_now, int(row.get("weekly_report_hour") or 20), int(row.get("weekly_report_minute") or 0)):
+            continue
+        iso_year, iso_week, _ = local_now.isocalendar()
+        context_key = f"{iso_year}-W{iso_week:02d}"
+        if await was_smart_notification_sent(int(row["user_id"]), "weekly_reading_report", context_key):
+            continue
+        row["context_key"] = context_key
+        result.append(row)
+        if len(result) >= max(1, int(limit)):
+            break
+    return result
+
+
+async def list_monthly_reader_report_candidates(limit: int = 100, now_utc: datetime | None = None) -> list[dict[str, Any]]:
+    """Выбирает пользователей для одного личного итога за завершённый месяц."""
+    now_value = now_utc or datetime.now(timezone.utc)
+    if now_value.tzinfo is None:
+        now_value = now_value.replace(tzinfo=timezone.utc)
+    recent_activity_date = (now_value - timedelta(days=75)).date().isoformat()
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT u.id AS user_id, u.telegram_id, u.full_name,
+                   rns.monthly_report_day, rns.monthly_report_hour, rns.monthly_report_minute,
+                   rns.timezone_offset_minutes, recent.active_months
+            FROM users u
+            JOIN reader_notification_settings rns ON rns.user_id=u.id
+            JOIN (
+                SELECT user_id, GROUP_CONCAT(DISTINCT substr(activity_date,1,7)) AS active_months
+                FROM reader_activity_daily
+                WHERE activity_date>=? AND sessions>0
+                GROUP BY user_id
+            ) recent ON recent.user_id=u.id
+            LEFT JOIN user_preferences pref ON pref.user_id=u.id
+            WHERE u.is_blocked=0
+              AND rns.monthly_report_enabled=1
+              AND COALESCE(pref.notifications,1)=1
+              AND COALESCE(pref.notifications_reminders,1)=1
+            ORDER BY u.id
+            LIMIT ?
+            """,
+            (recent_activity_date, max(1, min(1000, int(limit) * 5))),
+        )
+        rows = [dict(row) for row in await cur.fetchall()]
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        local_now = _local_datetime(now_value, int(row.get("timezone_offset_minutes") or 0))
+        if local_now.day != max(1, min(7, int(row.get("monthly_report_day") or 1))):
+            continue
+        if not _schedule_hour_due(local_now, int(row.get("monthly_report_hour") or 20), int(row.get("monthly_report_minute") or 0)):
+            continue
+        current_month_start = local_now.date().replace(day=1)
+        report_month_end = current_month_start - timedelta(days=1)
+        report_month = report_month_end.strftime("%Y-%m")
+        active_months = {item for item in str(row.get("active_months") or "").split(",") if item}
+        if report_month not in active_months:
+            continue
+        if await was_smart_notification_sent(int(row["user_id"]), "monthly_reading_report", report_month):
+            continue
+        row["context_key"] = report_month
+        row["report_month"] = report_month
+        result.append(row)
+        if len(result) >= max(1, int(limit)):
+            break
+    return result
+
+
+async def _record_reader_activity_db(
+    db: aiosqlite.Connection,
+    *,
+    user_id: int,
+    content_type: str,
+    target_id: int,
+    position_value: int,
+    updated_at: str | None = None,
+) -> None:
+    kind = str(content_type or "text")
+    if kind not in {"text", "audio", "graphic"}:
+        return
+    now = str(updated_at or utc_now())
+    try:
+        parsed_now = datetime.fromisoformat(now.replace("Z", "+00:00"))
+        if parsed_now.tzinfo is None:
+            parsed_now = parsed_now.replace(tzinfo=timezone.utc)
+    except ValueError:
+        parsed_now = datetime.now(timezone.utc)
+    cur = await db.execute(
+        "SELECT timezone_offset_minutes FROM reader_notification_settings WHERE user_id=?",
+        (int(user_id),),
+    )
+    timezone_row = await cur.fetchone()
+    local_now = _local_datetime(parsed_now, int(timezone_row["timezone_offset_minutes"] or 0) if timezone_row else 0)
+    activity_date = local_now.date().isoformat()
+    position = max(0, int(position_value or 0))
+    cur = await db.execute(
+        """
+        SELECT last_position, accumulated_value
+        FROM reader_activity_targets
+        WHERE user_id=? AND activity_date=? AND content_type=? AND target_id=?
+        """,
+        (int(user_id), activity_date, kind, int(target_id)),
+    )
+    previous = await cur.fetchone()
+    first_session = previous is None
+    delta = 0
+    if previous is None:
+        await db.execute(
+            """
+            INSERT INTO reader_activity_targets(
+                user_id,activity_date,content_type,target_id,first_position,last_position,
+                accumulated_value,created_at,updated_at
+            ) VALUES(?,?,?,?,?,?,0,?,?)
+            """,
+            (int(user_id), activity_date, kind, int(target_id), position, position, now, now),
+        )
+    else:
+        raw_delta = max(0, position - int(previous["last_position"] or 0))
+        if kind == "text":
+            delta = min(100, raw_delta)
+        elif kind == "audio":
+            delta = min(3600, raw_delta)
+        else:
+            delta = min(500, raw_delta)
+        await db.execute(
+            """
+            UPDATE reader_activity_targets
+            SET last_position=?, accumulated_value=accumulated_value+?, updated_at=?
+            WHERE user_id=? AND activity_date=? AND content_type=? AND target_id=?
+            """,
+            (position, delta, now, int(user_id), activity_date, kind, int(target_id)),
+        )
+
+    text_chapters = 1 if first_session and kind == "text" else 0
+    text_progress = delta if kind == "text" else 0
+    audio_seconds = delta if kind == "audio" else 0
+    graphic_pages = delta if kind == "graphic" else 0
+    sessions = 1 if first_session else 0
+    await db.execute(
+        """
+        INSERT INTO reader_activity_daily(
+            user_id,activity_date,text_chapters,text_progress_points,audio_seconds,
+            graphic_pages,sessions,created_at,updated_at
+        ) VALUES(?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(user_id,activity_date) DO UPDATE SET
+            text_chapters=reader_activity_daily.text_chapters+excluded.text_chapters,
+            text_progress_points=reader_activity_daily.text_progress_points+excluded.text_progress_points,
+            audio_seconds=reader_activity_daily.audio_seconds+excluded.audio_seconds,
+            graphic_pages=reader_activity_daily.graphic_pages+excluded.graphic_pages,
+            sessions=reader_activity_daily.sessions+excluded.sessions,
+            updated_at=excluded.updated_at
+        """,
+        (
+            int(user_id), activity_date, text_chapters, text_progress, audio_seconds,
+            graphic_pages, sessions, now, now,
+        ),
+    )
+
+
+async def set_user_reading_goals(
+    user_id: int,
+    *,
+    active_days_week: int,
+    text_chapters_week: int,
+    audio_minutes_week: int,
+    graphic_pages_week: int,
+) -> dict[str, int | str]:
+    active_days = max(0, min(7, int(active_days_week)))
+    text_chapters = max(0, min(200, int(text_chapters_week)))
+    audio_minutes = max(0, min(10080, int(audio_minutes_week)))
+    graphic_pages = max(0, min(5000, int(graphic_pages_week)))
+    now = utc_now()
+    async with connect() as db:
+        await db.execute(
+            """
+            INSERT INTO reader_goal_settings(
+                user_id,active_days_week,text_chapters_week,audio_minutes_week,
+                graphic_pages_week,updated_at
+            ) VALUES(?,?,?,?,?,?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                active_days_week=excluded.active_days_week,
+                text_chapters_week=excluded.text_chapters_week,
+                audio_minutes_week=excluded.audio_minutes_week,
+                graphic_pages_week=excluded.graphic_pages_week,
+                updated_at=excluded.updated_at
+            """,
+            (int(user_id), active_days, text_chapters, audio_minutes, graphic_pages, now),
+        )
+        await db.commit()
+    return {
+        "active_days_week": active_days,
+        "text_chapters_week": text_chapters,
+        "audio_minutes_week": audio_minutes,
+        "graphic_pages_week": graphic_pages,
+        "updated_at": now,
+    }
+
+
+def _goal_progress(code: str, label: str, current: int, target: int, unit: str) -> dict[str, Any]:
+    safe_target = max(0, int(target or 0))
+    safe_current = max(0, int(current or 0))
+    percent = 0 if safe_target == 0 else min(100, round(safe_current * 100 / safe_target))
+    return {
+        "code": code,
+        "label": label,
+        "current": safe_current,
+        "target": safe_target,
+        "unit": unit,
+        "percent": percent,
+        "enabled": safe_target > 0,
+        "completed": safe_target > 0 and safe_current >= safe_target,
+    }
+
+
+def _next_month_start(value) -> Any:
+    return (value.replace(day=28) + timedelta(days=4)).replace(day=1)
+
+
+def _previous_month_start(value) -> Any:
+    return (value.replace(day=1) - timedelta(days=1)).replace(day=1)
+
+
+def _activity_totals_between(rows: list[dict[str, Any]], start_date, end_date) -> dict[str, int]:
+    selected: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            current_date = datetime.strptime(str(row["activity_date"]), "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        if start_date <= current_date <= end_date:
+            selected.append(row)
+    audio_seconds = sum(int(row.get("audio_seconds") or 0) for row in selected)
+    return {
+        "active_days": sum(1 for row in selected if int(row.get("sessions") or 0) > 0),
+        "text_chapters": sum(int(row.get("text_chapters") or 0) for row in selected),
+        "text_progress_points": sum(int(row.get("text_progress_points") or 0) for row in selected),
+        "audio_seconds": audio_seconds,
+        "audio_minutes": audio_seconds // 60,
+        "graphic_pages": sum(int(row.get("graphic_pages") or 0) for row in selected),
+        "sessions": sum(int(row.get("sessions") or 0) for row in selected),
+    }
+
+
+def _activity_comparison(code: str, label: str, unit: str, current: int, previous: int) -> dict[str, Any]:
+    current_value = max(0, int(current or 0))
+    previous_value = max(0, int(previous or 0))
+    delta = current_value - previous_value
+    if previous_value > 0:
+        percent = round(delta * 100 / previous_value)
+        trend = "up" if delta > 0 else "down" if delta < 0 else "same"
+    elif current_value > 0:
+        percent = None
+        trend = "new"
+    else:
+        percent = 0
+        trend = "same"
+    return {
+        "code": code,
+        "label": label,
+        "unit": unit,
+        "current": current_value,
+        "previous": previous_value,
+        "delta": delta,
+        "percent": percent,
+        "trend": trend,
+    }
+
+
+def _activity_day_score(row: dict[str, Any]) -> int:
+    return (
+        int(row.get("sessions") or 0) * 4
+        + int(row.get("text_chapters") or 0) * 5
+        + int(row.get("text_progress_points") or 0) // 10
+        + int(row.get("audio_seconds") or 0) // 300
+        + int(row.get("graphic_pages") or 0) // 5
+    )
+
+
+def _best_activity_day(rows: list[dict[str, Any]], start_date, end_date) -> dict[str, Any] | None:
+    candidates: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            current_date = datetime.strptime(str(row["activity_date"]), "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        if start_date <= current_date <= end_date and int(row.get("sessions") or 0) > 0:
+            item = dict(row)
+            item["score"] = _activity_day_score(item)
+            candidates.append(item)
+    if not candidates:
+        return None
+    row = max(candidates, key=lambda item: (int(item.get("score") or 0), str(item.get("activity_date") or "")))
+    return {
+        "date": str(row.get("activity_date") or ""),
+        "sessions": int(row.get("sessions") or 0),
+        "text_chapters": int(row.get("text_chapters") or 0),
+        "audio_minutes": int(row.get("audio_seconds") or 0) // 60,
+        "graphic_pages": int(row.get("graphic_pages") or 0),
+    }
+
+
+def _rhythm_recommendation(current: dict[str, int], previous: dict[str, int], elapsed_days: int) -> dict[str, str]:
+    active = int(current.get("active_days") or 0)
+    previous_active = int(previous.get("active_days") or 0)
+    if active <= 0:
+        return {
+            "code": "gentle_start",
+            "title": "Спокойный старт",
+            "text": "В этом месяце ещё не было сеансов. Возвращайтесь тогда, когда появится желание — место чтения сохранено.",
+        }
+    regular_threshold = max(3, round(max(1, elapsed_days) * 0.45))
+    if active >= regular_threshold:
+        return {
+            "code": "steady",
+            "title": "Устойчивый ритм",
+            "text": "Активность распределена регулярно. Сохраняйте удобный темп без необходимости увеличивать нагрузку.",
+        }
+    if active > previous_active:
+        return {
+            "code": "growing",
+            "title": "Ритм становится чаще",
+            "text": "Активных дней стало больше, чем за такой же отрезок прошлого месяца. Продолжайте только в комфортном темпе.",
+        }
+    if previous_active >= 3 and active < previous_active:
+        return {
+            "code": "more_space",
+            "title": "Сейчас больше пространства",
+            "text": "Темп стал спокойнее, и это нормально. Даже один короткий сеанс может мягко вернуть историю в привычный ритм.",
+        }
+    focus_values = {
+        "text": int(current.get("text_chapters") or 0) * 8,
+        "audio": int(current.get("audio_minutes") or 0),
+        "graphic": int(current.get("graphic_pages") or 0) * 2,
+    }
+    focus = max(focus_values, key=focus_values.get)
+    focus_text = {
+        "text": "Текст остаётся главным форматом этого месяца.",
+        "audio": "Чаще всего в ритм входит прослушивание.",
+        "graphic": "Графические истории заметнее всего поддерживают активность.",
+    }[focus]
+    return {
+        "code": f"flexible_{focus}",
+        "title": "Гибкий ритм",
+        "text": f"{focus_text} Выбирайте формат по настроению — все виды активности учитываются вместе.",
+    }
+
+
+def _monthly_summary_from_rows(rows: list[dict[str, Any]], today) -> dict[str, Any]:
+    current_start = today.replace(day=1)
+    previous_start = _previous_month_start(current_start)
+    previous_end = current_start - timedelta(days=1)
+    previous_same_end = min(previous_end, previous_start + timedelta(days=max(0, today.day - 1)))
+    current = _activity_totals_between(rows, current_start, today)
+    previous_same = _activity_totals_between(rows, previous_start, previous_same_end)
+    previous_full = _activity_totals_between(rows, previous_start, previous_end)
+    comparisons = [
+        _activity_comparison("active_days", "Активные дни", "дн.", current["active_days"], previous_same["active_days"]),
+        _activity_comparison("text_chapters", "Текстовые главы", "глав", current["text_chapters"], previous_same["text_chapters"]),
+        _activity_comparison("audio_minutes", "Аудио", "мин.", current["audio_minutes"], previous_same["audio_minutes"]),
+        _activity_comparison("graphic_pages", "Комиксы", "стр.", current["graphic_pages"], previous_same["graphic_pages"]),
+    ]
+
+    trend: list[dict[str, Any]] = []
+    month_cursor = current_start
+    month_starts = [current_start]
+    for _ in range(5):
+        month_cursor = _previous_month_start(month_cursor)
+        month_starts.append(month_cursor)
+    month_starts.reverse()
+    max_score = 0
+    for month_start in month_starts:
+        month_end = min(today, _next_month_start(month_start) - timedelta(days=1))
+        totals = _activity_totals_between(rows, month_start, month_end)
+        score = (
+            totals["active_days"] * 10
+            + totals["text_chapters"] * 3
+            + totals["audio_minutes"] // 10
+            + totals["graphic_pages"] // 8
+        )
+        max_score = max(max_score, score)
+        trend.append({"month": month_start.strftime("%Y-%m"), "totals": totals, "score": score})
+    for item in trend:
+        item["intensity"] = 0 if max_score <= 0 else max(4, round(int(item["score"]) * 100 / max_score))
+
+    active_days = max(1, int(current.get("active_days") or 0))
+    averages = {
+        "text_chapters": round(int(current.get("text_chapters") or 0) / active_days, 1) if current.get("active_days") else 0,
+        "audio_minutes": round(int(current.get("audio_minutes") or 0) / active_days, 1) if current.get("active_days") else 0,
+        "graphic_pages": round(int(current.get("graphic_pages") or 0) / active_days, 1) if current.get("active_days") else 0,
+    }
+    return {
+        "current_month": current_start.strftime("%Y-%m"),
+        "previous_month": previous_start.strftime("%Y-%m"),
+        "period_start": current_start.isoformat(),
+        "period_end": today.isoformat(),
+        "comparison_period_start": previous_start.isoformat(),
+        "comparison_period_end": previous_same_end.isoformat(),
+        "elapsed_days": today.day,
+        "current": current,
+        "previous_same_period": previous_same,
+        "previous_full_month": previous_full,
+        "comparisons": comparisons,
+        "six_month_trend": trend,
+        "best_day": _best_activity_day(rows, current_start, today),
+        "averages_per_active_day": averages,
+        "recommendation": _rhythm_recommendation(current, previous_same, today.day),
+    }
+
+
+def _completed_month_summary_from_rows(rows: list[dict[str, Any]], month_start) -> dict[str, Any]:
+    month_end = _next_month_start(month_start) - timedelta(days=1)
+    previous_start = _previous_month_start(month_start)
+    previous_end = month_start - timedelta(days=1)
+    current = _activity_totals_between(rows, month_start, month_end)
+    previous = _activity_totals_between(rows, previous_start, previous_end)
+    comparisons = [
+        _activity_comparison("active_days", "Активные дни", "дн.", current["active_days"], previous["active_days"]),
+        _activity_comparison("text_chapters", "Текстовые главы", "глав", current["text_chapters"], previous["text_chapters"]),
+        _activity_comparison("audio_minutes", "Аудио", "мин.", current["audio_minutes"], previous["audio_minutes"]),
+        _activity_comparison("graphic_pages", "Комиксы", "стр.", current["graphic_pages"], previous["graphic_pages"]),
+    ]
+    return {
+        "month": month_start.strftime("%Y-%m"),
+        "previous_month": previous_start.strftime("%Y-%m"),
+        "totals": current,
+        "previous_totals": previous,
+        "comparisons": comparisons,
+        "best_day": _best_activity_day(rows, month_start, month_end),
+        "recommendation": _rhythm_recommendation(current, previous, month_end.day),
+    }
+
+
+async def get_user_monthly_reading_report(user_id: int, report_month: str | None = None) -> dict[str, Any]:
+    settings_payload = await get_user_reading_notification_settings(user_id)
+    local_now = _local_datetime(datetime.now(timezone.utc), int(settings_payload.get("timezone_offset_minutes") or 0))
+    if report_month:
+        try:
+            month_start = datetime.strptime(str(report_month), "%Y-%m").date().replace(day=1)
+        except ValueError as exc:
+            raise ValueError("Месяц должен быть указан в формате ГГГГ-ММ.") from exc
+    else:
+        month_start = _previous_month_start(local_now.date().replace(day=1))
+    previous_start = _previous_month_start(month_start)
+    month_end = _next_month_start(month_start) - timedelta(days=1)
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT * FROM reader_activity_daily
+            WHERE user_id=? AND activity_date>=? AND activity_date<=?
+            ORDER BY activity_date ASC
+            """,
+            (int(user_id), previous_start.isoformat(), month_end.isoformat()),
+        )
+        rows = [dict(row) for row in await cur.fetchall()]
+    return _completed_month_summary_from_rows(rows, month_start)
+
+
+# v1.13.24 — личные рекорды, памятные вехи и годовая карта активности.
+def _activity_rows_with_dates(rows: list[dict[str, Any]]) -> list[tuple[Any, dict[str, Any]]]:
+    parsed: list[tuple[Any, dict[str, Any]]] = []
+    for row in rows:
+        try:
+            parsed.append((datetime.strptime(str(row.get("activity_date") or ""), "%Y-%m-%d").date(), row))
+        except ValueError:
+            continue
+    parsed.sort(key=lambda item: item[0])
+    return parsed
+
+
+def _record_payload(code: str, icon: str, title: str, value: int, unit: str, record_date: str = "", note: str = "") -> dict[str, Any]:
+    return {
+        "code": code,
+        "icon": icon,
+        "title": title,
+        "value": max(0, int(value or 0)),
+        "unit": unit,
+        "date": record_date,
+        "note": note,
+    }
+
+
+def _personal_reading_records(rows: list[dict[str, Any]], best_streak: int) -> list[dict[str, Any]]:
+    parsed = [(day, row) for day, row in _activity_rows_with_dates(rows) if int(row.get("sessions") or 0) > 0]
+    if not parsed:
+        return []
+
+    def best_row(field: str, *, divisor: int = 1) -> tuple[Any, dict[str, Any], int] | None:
+        candidates = [(day, row, int(row.get(field) or 0) // divisor) for day, row in parsed]
+        day, row, value = max(candidates, key=lambda item: (item[2], item[0]))
+        return (day, row, value) if value > 0 else None
+
+    records: list[dict[str, Any]] = []
+    if best_streak > 0:
+        records.append(_record_payload("best_streak", "🔥", "Лучшая серия", best_streak, "дн.", note="Самая длинная непрерывная серия активности."))
+
+    best_day, best_day_row = max(parsed, key=lambda item: (_activity_day_score(item[1]), item[0]))
+    records.append(_record_payload(
+        "best_day", "✦", "Самый насыщенный день", _activity_day_score(best_day_row), "баллов",
+        best_day.isoformat(),
+        f"{int(best_day_row.get('text_chapters') or 0)} гл. · {int(best_day_row.get('audio_seconds') or 0) // 60} мин. · {int(best_day_row.get('graphic_pages') or 0)} стр.",
+    ))
+
+    definitions = (
+        ("text_day", "📖", "Глав за один день", "text_chapters", 1, "глав"),
+        ("audio_day", "🎧", "Аудио за один день", "audio_seconds", 60, "мин."),
+        ("graphic_day", "🖼", "Страниц за один день", "graphic_pages", 1, "стр."),
+        ("sessions_day", "📚", "Сеансов за один день", "sessions", 1, "сеансов"),
+    )
+    for code, icon, title, field, divisor, unit in definitions:
+        item = best_row(field, divisor=divisor)
+        if item:
+            day, _row, value = item
+            records.append(_record_payload(code, icon, title, value, unit, day.isoformat()))
+
+    month_rows: dict[str, list[dict[str, Any]]] = {}
+    for day, row in parsed:
+        month_rows.setdefault(day.strftime("%Y-%m"), []).append(row)
+    month_candidates: list[tuple[int, str, dict[str, int]]] = []
+    for month_key, items in month_rows.items():
+        first = datetime.strptime(f"{month_key}-01", "%Y-%m-%d").date()
+        last = _next_month_start(first) - timedelta(days=1)
+        totals = _activity_totals_between(items, first, last)
+        score = totals["active_days"] * 10 + totals["text_chapters"] * 3 + totals["audio_minutes"] // 10 + totals["graphic_pages"] // 8
+        month_candidates.append((score, month_key, totals))
+    if month_candidates:
+        _score, month_key, totals = max(month_candidates, key=lambda item: (item[0], item[1]))
+        records.append(_record_payload(
+            "best_month", "🗓", "Самый активный месяц", totals["active_days"], "активных дней",
+            f"{month_key}-01",
+            f"{totals['text_chapters']} гл. · {totals['audio_minutes']} мин. · {totals['graphic_pages']} стр.",
+        ))
+    return records
+
+
+def _cumulative_crossing_date(parsed: list[tuple[Any, dict[str, Any]]], field: str, threshold: int) -> str:
+    total = 0
+    for day, row in parsed:
+        total += max(0, int(row.get(field) or 0))
+        if total >= threshold:
+            return day.isoformat()
+    return ""
+
+
+def _active_day_crossing_date(parsed: list[tuple[Any, dict[str, Any]]], threshold: int) -> str:
+    count = 0
+    for day, row in parsed:
+        if int(row.get("sessions") or 0) <= 0:
+            continue
+        count += 1
+        if count >= threshold:
+            return day.isoformat()
+    return ""
+
+
+def _streak_crossing_date(parsed: list[tuple[Any, dict[str, Any]]], threshold: int) -> str:
+    running = 0
+    previous_day = None
+    for day, row in parsed:
+        if int(row.get("sessions") or 0) <= 0:
+            continue
+        running = running + 1 if previous_day and day == previous_day + timedelta(days=1) else 1
+        previous_day = day
+        if running >= threshold:
+            return day.isoformat()
+    return ""
+
+
+def _milestone_payload(
+    code: str, icon: str, title: str, description: str, current: int, target: int,
+    unit: str, achieved_at: str,
+) -> dict[str, Any]:
+    current_value = max(0, int(current or 0))
+    target_value = max(1, int(target or 1))
+    return {
+        "code": code,
+        "icon": icon,
+        "title": title,
+        "description": description,
+        "current": current_value,
+        "target": target_value,
+        "unit": unit,
+        "progress": min(100, round(current_value * 100 / target_value)),
+        "achieved": bool(achieved_at),
+        "achieved_at": achieved_at,
+    }
+
+
+def _personal_reading_milestones(rows: list[dict[str, Any]], best_streak: int) -> dict[str, Any]:
+    parsed = _activity_rows_with_dates(rows)
+    active_days = sum(1 for _day, row in parsed if int(row.get("sessions") or 0) > 0)
+    text_chapters = sum(max(0, int(row.get("text_chapters") or 0)) for _day, row in parsed)
+    audio_minutes = sum(max(0, int(row.get("audio_seconds") or 0)) for _day, row in parsed) // 60
+    graphic_pages = sum(max(0, int(row.get("graphic_pages") or 0)) for _day, row in parsed)
+
+    items: list[dict[str, Any]] = []
+    definitions = (
+        ("first_day", "🌱", "Первая сохранённая активность", "Начало личной истории чтения в VoxLyra.", "active", 1, "день"),
+        ("active_7", "📅", "7 активных дней", "Семь дней с чтением, аудио или комиксами — без требования идти подряд.", "active", 7, "дн."),
+        ("active_30", "🗓", "30 активных дней", "Тридцать личных дней, к которым можно вернуться в годовой карте.", "active", 30, "дн."),
+        ("active_100", "✨", "100 активных дней", "Большая личная веха без сравнения с другими читателями.", "active", 100, "дн."),
+        ("text_10", "📖", "10 текстовых глав", "Первые десять текстовых глав в общей статистике.", "text", 10, "глав"),
+        ("text_50", "📚", "50 текстовых глав", "Пятьдесят глав, прочитанных в собственном темпе.", "text", 50, "глав"),
+        ("text_100", "🏛", "100 текстовых глав", "Сотня текстовых глав в личной истории.", "text", 100, "глав"),
+        ("audio_300", "🎧", "5 часов аудио", "Пять часов прослушивания книг и историй.", "audio", 300, "мин."),
+        ("audio_1200", "🎙", "20 часов аудио", "Двадцать часов личной аудиотеки.", "audio", 1200, "мин."),
+        ("graphic_100", "🖼", "100 страниц комиксов", "Первые сто просмотренных страниц графических историй.", "graphic", 100, "стр."),
+        ("graphic_500", "🎨", "500 страниц комиксов", "Пятьсот страниц манги, манхвы и комиксов.", "graphic", 500, "стр."),
+        ("streak_7", "🔥", "Серия 7 дней", "Семь активных дней подряд, если такой ритм однажды сложился сам.", "streak", 7, "дн."),
+        ("streak_30", "💫", "Серия 30 дней", "Тридцать дней подряд — памятный рекорд, а не обязательная цель.", "streak", 30, "дн."),
+    )
+    for code, icon, title, description, category, target, unit in definitions:
+        if category == "active":
+            current = active_days
+            achieved_at = _active_day_crossing_date(parsed, target)
+        elif category == "text":
+            current = text_chapters
+            achieved_at = _cumulative_crossing_date(parsed, "text_chapters", target)
+        elif category == "audio":
+            current = audio_minutes
+            achieved_at = _cumulative_crossing_date(parsed, "audio_seconds", target * 60)
+        elif category == "graphic":
+            current = graphic_pages
+            achieved_at = _cumulative_crossing_date(parsed, "graphic_pages", target)
+        else:
+            current = best_streak
+            achieved_at = _streak_crossing_date(parsed, target)
+        items.append(_milestone_payload(code, icon, title, description, current, target, unit, achieved_at))
+
+    achieved = sorted((item for item in items if item["achieved"]), key=lambda item: (str(item["achieved_at"]), item["target"]), reverse=True)
+    upcoming = sorted((item for item in items if not item["achieved"]), key=lambda item: (int(item["progress"]), -int(item["target"])), reverse=True)
+    return {
+        "achieved_count": len(achieved),
+        "total_count": len(items),
+        "latest": achieved[:8],
+        "upcoming": upcoming[:4],
+        "items": items,
+    }
+
+
+def _yearly_activity_summary(rows: list[dict[str, Any]], selected_year: int, today) -> dict[str, Any]:
+    year = max(1970, min(int(selected_year), int(today.year)))
+    year_start = today.replace(year=year, month=1, day=1)
+    year_end = today.replace(year=year, month=12, day=31)
+    parsed = _activity_rows_with_dates(rows)
+    by_date = {day.isoformat(): row for day, row in parsed if day.year == year}
+    scores = [_activity_day_score(row) for day, row in parsed if day.year == year and day <= today and int(row.get("sessions") or 0) > 0]
+    max_score = max(scores, default=0)
+    days: list[dict[str, Any]] = []
+    cursor = year_start
+    while cursor <= year_end:
+        row = by_date.get(cursor.isoformat(), {})
+        future = cursor > today
+        sessions = 0 if future else int(row.get("sessions") or 0)
+        score = 0 if future else _activity_day_score(row)
+        intensity = 0 if score <= 0 or max_score <= 0 else max(1, min(4, (score * 4 + max_score - 1) // max_score))
+        days.append({
+            "date": cursor.isoformat(),
+            "future": future,
+            "active": sessions > 0,
+            "intensity": intensity,
+            "sessions": sessions,
+            "text_chapters": 0 if future else int(row.get("text_chapters") or 0),
+            "audio_minutes": 0 if future else int(row.get("audio_seconds") or 0) // 60,
+            "graphic_pages": 0 if future else int(row.get("graphic_pages") or 0),
+        })
+        cursor += timedelta(days=1)
+
+    months: list[dict[str, Any]] = []
+    strongest: dict[str, Any] | None = None
+    for month in range(1, 13):
+        month_start = year_start.replace(month=month, day=1)
+        month_end = _next_month_start(month_start) - timedelta(days=1)
+        effective_end = min(month_end, today) if year == today.year else month_end
+        totals = _activity_totals_between(rows, month_start, effective_end)
+        score = totals["active_days"] * 10 + totals["text_chapters"] * 3 + totals["audio_minutes"] // 10 + totals["graphic_pages"] // 8
+        item = {"month": month_start.strftime("%Y-%m"), "totals": totals, "score": score, "future": month_start > today}
+        months.append(item)
+        if score > 0 and not item["future"] and (strongest is None or (score, item["month"]) > (int(strongest["score"]), str(strongest["month"]))):
+            strongest = item
+
+    totals = _activity_totals_between(rows, year_start, min(year_end, today))
+    years = sorted({day.year for day, _row in parsed if day.year <= today.year} | {today.year, year}, reverse=True)
+    return {
+        "year": year,
+        "available_years": years,
+        "totals": totals,
+        "days": days,
+        "months": months,
+        "strongest_month": strongest,
+        "privacy_note": "Эта карта и рекорды видны только владельцу профиля.",
+    }
+
+
+async def get_user_reading_dashboard(user_id: int, activity_year: int | None = None) -> dict[str, Any]:
+    notification_settings = await get_user_reading_notification_settings(user_id)
+    local_now = _local_datetime(datetime.now(timezone.utc), int(notification_settings.get("timezone_offset_minutes") or 0))
+    today = local_now.date()
+    week_start = today - timedelta(days=today.weekday())
+    month_start = today.replace(day=1)
+    calendar_start = today - timedelta(days=34)
+    now = utc_now()
+    async with connect() as db:
+        await db.execute(
+            """
+            INSERT INTO reader_goal_settings(user_id,updated_at)
+            VALUES(?,?) ON CONFLICT(user_id) DO NOTHING
+            """,
+            (int(user_id), now),
+        )
+        cur = await db.execute("SELECT * FROM reader_goal_settings WHERE user_id=?", (int(user_id),))
+        goals_row = await cur.fetchone()
+        cur = await db.execute(
+            """
+            SELECT * FROM reader_activity_daily
+            WHERE user_id=? ORDER BY activity_date ASC
+            """,
+            (int(user_id),),
+        )
+        rows = [dict(row) for row in await cur.fetchall()]
+        await db.commit()
+
+    by_date: dict[str, dict[str, Any]] = {str(row["activity_date"]): row for row in rows}
+
+    active_dates = []
+    for row in rows:
+        if int(row.get("sessions") or 0) <= 0:
+            continue
+        try:
+            active_dates.append(datetime.strptime(str(row["activity_date"]), "%Y-%m-%d").date())
+        except ValueError:
+            continue
+    active_set = set(active_dates)
+    streak_cursor = today if today in active_set else today - timedelta(days=1)
+    current_streak = 0
+    while streak_cursor in active_set:
+        current_streak += 1
+        streak_cursor -= timedelta(days=1)
+    best_streak = 0
+    running = 0
+    previous_date = None
+    for current_date in sorted(active_set):
+        running = running + 1 if previous_date and current_date == previous_date + timedelta(days=1) else 1
+        best_streak = max(best_streak, running)
+        previous_date = current_date
+
+    today_totals = _activity_totals_between(rows, today, today)
+    week_totals = _activity_totals_between(rows, week_start, today)
+    month_totals = _activity_totals_between(rows, month_start, today)
+    all_totals = _activity_totals_between(rows, datetime(1970, 1, 1).date(), today)
+    monthly_summary = _monthly_summary_from_rows(rows, today)
+    selected_year = int(activity_year or today.year)
+    yearly_activity = _yearly_activity_summary(rows, selected_year, today)
+    personal_records = _personal_reading_records(rows, best_streak)
+    milestones = _personal_reading_milestones(rows, best_streak)
+
+    calendar = []
+    for offset in range(35):
+        current_date = calendar_start + timedelta(days=offset)
+        row = by_date.get(current_date.isoformat(), {})
+        sessions = int(row.get("sessions") or 0)
+        activity_score = (
+            sessions
+            + int(row.get("text_progress_points") or 0) // 20
+            + int(row.get("audio_seconds") or 0) // 600
+            + int(row.get("graphic_pages") or 0) // 10
+        )
+        intensity = 0 if sessions <= 0 else min(4, 1 + activity_score // 3)
+        calendar.append({
+            "date": current_date.isoformat(),
+            "active": sessions > 0,
+            "intensity": intensity,
+            "sessions": sessions,
+            "text_chapters": int(row.get("text_chapters") or 0),
+            "audio_minutes": int(row.get("audio_seconds") or 0) // 60,
+            "graphic_pages": int(row.get("graphic_pages") or 0),
+        })
+
+    goals = {
+        "active_days_week": int(goals_row["active_days_week"] or 0),
+        "text_chapters_week": int(goals_row["text_chapters_week"] or 0),
+        "audio_minutes_week": int(goals_row["audio_minutes_week"] or 0),
+        "graphic_pages_week": int(goals_row["graphic_pages_week"] or 0),
+        "updated_at": str(goals_row["updated_at"] or ""),
+    }
+    goal_items = [
+        _goal_progress("active_days_week", "Активные дни", week_totals["active_days"], goals["active_days_week"], "дн."),
+        _goal_progress("text_chapters_week", "Текстовые главы", week_totals["text_chapters"], goals["text_chapters_week"], "глав"),
+        _goal_progress("audio_minutes_week", "Прослушивание", week_totals["audio_minutes"], goals["audio_minutes_week"], "мин."),
+        _goal_progress("graphic_pages_week", "Страницы комиксов", week_totals["graphic_pages"], goals["graphic_pages_week"], "стр."),
+    ]
+    enabled_goals = [item for item in goal_items if item["enabled"]]
+    return {
+        "timezone": f"UTC{int(notification_settings.get('timezone_offset_minutes') or 0) / 60:+g}",
+        "today": today.isoformat(),
+        "week_start": week_start.isoformat(),
+        "current_streak": current_streak,
+        "best_streak": best_streak,
+        "today_totals": today_totals,
+        "week_totals": week_totals,
+        "month_totals": month_totals,
+        "monthly_summary": monthly_summary,
+        "yearly_activity": yearly_activity,
+        "personal_records": personal_records,
+        "milestones": milestones,
+        "all_totals": all_totals,
+        "calendar": calendar,
+        "goals": goals,
+        "goal_items": goal_items,
+        "completed_goals": sum(1 for item in enabled_goals if item["completed"]),
+        "enabled_goals": len(enabled_goals),
+    }

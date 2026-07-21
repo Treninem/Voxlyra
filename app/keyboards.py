@@ -261,6 +261,14 @@ def author_book_card_menu(book_id: int, publication_status: str) -> InlineKeyboa
     if publication_status == "draft":
         kb.button(text="📤 Отправить на проверку", callback_data=f"author:submit_book:{book_id}")
     if publication_status == "published":
+        web_url = settings.WEBAPP_URL.strip().rstrip("/")
+        if web_url:
+            kb.button(
+                text="📖 Открыть книгу",
+                web_app=WebAppInfo(url=f"{web_url}/book/{int(book_id)}"),
+            )
+        else:
+            kb.button(text="📖 Открыть книгу", callback_data=f"open:book:{int(book_id)}")
         kb.button(text="📢 Опубликовать в канале", callback_data=f"channel:promote:{book_id}")
     kb.button(text="➕ Главы", callback_data=f"author:chapters:{book_id}")
     kb.button(text="🎧 Аудио", callback_data=f"author:audio:{book_id}")
@@ -489,6 +497,34 @@ def purchase_cancel_confirm_menu(purchase_id: int) -> InlineKeyboardMarkup:
 def pay_target_menu(kind: str, target_id: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="💫 Купить за Stars", callback_data=f"buy:{kind}:{target_id}")
+    kb.button(text="⬅️ В меню", callback_data="menu:main")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def my_library_menu(purchases, continue_item: dict | None = None) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    if settings.WEBAPP_URL:
+        base = settings.WEBAPP_URL.rstrip('/')
+        if continue_item:
+            kind = str(continue_item.get("kind") or "text")
+            target_id = int(continue_item.get("target_id") or 0)
+            if kind == "audio":
+                url = f"{base}/audio/{target_id}"
+                text = "▶️ Продолжить слушать"
+            elif kind == "graphic":
+                page = max(1, int(continue_item.get("position") or 1))
+                url = f"{base}/comic/{target_id}#page={page}"
+                text = "▶️ Продолжить смотреть"
+            else:
+                url = f"{base}/reader/{target_id}"
+                text = "▶️ Продолжить читать"
+            kb.button(text=text, web_app=WebAppInfo(url=url))
+        kb.button(text="📚 Моя библиотека", web_app=WebAppInfo(url=f"{base}/library"))
+        kb.button(text="📊 Статистика и отчёты", web_app=WebAppInfo(url=f"{base}/library?tab=activity"))
+    if purchases:
+        kb.button(text=f"⭐ Покупки · {len(purchases)}", callback_data="main:purchases")
+    kb.button(text="💎 Баланс и бонусы", callback_data="main:bonuses")
     kb.button(text="⬅️ В меню", callback_data="menu:main")
     kb.adjust(1)
     return kb.as_markup()
@@ -1088,6 +1124,25 @@ def library_manager_menu(
         kb.button(text="⚙️ Настройки импорта", callback_data="library:settings")
     kb.button(text="⬅️ Назад", callback_data=back_callback)
     kb.adjust(1, 2, 2, 1, 1, 1, 1)
+    return kb.as_markup()
+
+
+def library_import_active_menu(job_id: int, *, processing: bool = True) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(
+        text="❌ Остановить безопасно" if processing else "❌ Отменить импорт",
+        callback_data=f"library:cancel_job:{int(job_id)}",
+    )
+    kb.button(text="⬅️ Управление библиотекой", callback_data="library:menu")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def library_import_failed_menu(job_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🔄 Повторить импорт", callback_data=f"library:retry_job:{int(job_id)}")
+    kb.button(text="⬅️ Управление библиотекой", callback_data="library:menu")
+    kb.adjust(1)
     return kb.as_markup()
 
 

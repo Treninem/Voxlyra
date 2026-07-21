@@ -41,7 +41,7 @@ const DEFAULTS = {
   audioRate: 1, rewindStep: 15, autoplayNext: false, saveOnPause: true,
   ttsVoice: 'irina', ttsStyle: 'natural', ttsRate: 1, ttsAutoNext: true,
   notifications: true, notificationChapters: true, notificationAudio: true, notificationDiscounts: true,
-  notificationReminders: true, notificationAchievements: true,
+  notificationReminders: true, notificationAchievements: true, notificationFollowedOnly: true,
   contrast: 'normal', focusMode: false, showReaderAds: true,
   profileFrame: 'standard', seasonalDecor: true,
 };
@@ -110,6 +110,7 @@ function getPrefs() {
     notificationDiscounts: getStoredBool('voxNotificationDiscounts', DEFAULTS.notificationDiscounts),
     notificationReminders: getStoredBool('voxNotificationReminders', DEFAULTS.notificationReminders),
     notificationAchievements: getStoredBool('voxNotificationAchievements', DEFAULTS.notificationAchievements),
+    notificationFollowedOnly: getStoredBool('voxNotificationFollowedOnly', DEFAULTS.notificationFollowedOnly),
     contrast: localStorage.getItem('voxContrast') || DEFAULTS.contrast,
     focusMode: getStoredBool('voxFocusMode', DEFAULTS.focusMode),
     showReaderAds: getStoredBool('voxShowReaderAds', DEFAULTS.showReaderAds),
@@ -127,6 +128,7 @@ function setPref(key, value) {
     notifications: 'voxNotifications', notificationChapters: 'voxNotificationChapters',
     notificationAudio: 'voxNotificationAudio', notificationDiscounts: 'voxNotificationDiscounts',
     notificationReminders: 'voxNotificationReminders', notificationAchievements: 'voxNotificationAchievements',
+    notificationFollowedOnly: 'voxNotificationFollowedOnly',
     contrast: 'voxContrast', focusMode: 'voxFocusMode',
     showReaderAds: 'voxShowReaderAds', profileFrame: 'voxProfileFrame', seasonalDecor: 'voxSeasonalDecor',
   };
@@ -315,7 +317,7 @@ function changeFont(delta) {
 }
 
 async function resetSettings() {
-  ['voxTheme','readerFontSize','readerLineHeight','readerWidth','voxAudioRate','voxRewindStep','voxAutoplayNext','voxSaveOnPause','voxTtsVoice','voxTtsStyle','voxTtsRate','voxTtsAutoNext','voxNotifications','voxNotificationChapters','voxNotificationAudio','voxNotificationDiscounts','voxNotificationReminders','voxNotificationAchievements','voxContrast','voxFocusMode','voxShowReaderAds','voxProfileFrame','voxSeasonalDecor'].forEach((key) => localStorage.removeItem(key));
+  ['voxTheme','readerFontSize','readerLineHeight','readerWidth','voxAudioRate','voxRewindStep','voxAutoplayNext','voxSaveOnPause','voxTtsVoice','voxTtsStyle','voxTtsRate','voxTtsAutoNext','voxNotifications','voxNotificationChapters','voxNotificationAudio','voxNotificationDiscounts','voxNotificationReminders','voxNotificationAchievements','voxNotificationFollowedOnly','voxContrast','voxFocusMode','voxShowReaderAds','voxProfileFrame','voxSeasonalDecor'].forEach((key) => localStorage.removeItem(key));
   applySettings();
   if (tgInitData()) {
     try { await apiFetch('/api/preferences', { method: 'DELETE' }); }
@@ -348,6 +350,7 @@ const SERVER_NOTIFICATION_KEYS = {
   notificationDiscounts: 'notifications_discounts',
   notificationReminders: 'notifications_reminders',
   notificationAchievements: 'notifications_achievements',
+  notificationFollowedOnly: 'notifications_followed_only',
 };
 
 async function saveNotificationPreference(key, enabled) {
@@ -371,13 +374,14 @@ async function syncNotificationPreferences() {
       notificationDiscounts: prefs.notifications_discounts !== '0',
       notificationReminders: prefs.notifications_reminders !== '0',
       notificationAchievements: prefs.notifications_achievements !== '0',
+      notificationFollowedOnly: prefs.notifications_followed_only !== '0',
     };
     Object.entries(values).forEach(([key, value]) => {
       const storageKey = {
         notifications: 'voxNotifications', notificationChapters: 'voxNotificationChapters',
         notificationAudio: 'voxNotificationAudio', notificationDiscounts: 'voxNotificationDiscounts',
         notificationReminders: 'voxNotificationReminders', notificationAchievements: 'voxNotificationAchievements',
-    notificationReminders: 'voxNotificationReminders', notificationAchievements: 'voxNotificationAchievements',
+        notificationFollowedOnly: 'voxNotificationFollowedOnly',
       }[key];
       localStorage.setItem(storageKey, value ? '1' : '0');
     });
@@ -419,13 +423,26 @@ function dynamicCover(item, kind = 'book') {
 }
 
 function continueCard(item, kind = 'reading') {
-  const isAudio = kind === 'audio';
-  const href = isAudio ? `/audio/${Number(item.audio_chapter_id)}` : `/reader/${Number(item.chapter_id)}`;
+  const resolvedKind = String(item.continue_kind || kind || 'reading');
+  const isAudio = resolvedKind === 'audio';
+  const isGraphic = resolvedKind === 'graphic';
+  const href = item.continue_url || (isAudio
+    ? `/audio/${Number(item.audio_chapter_id)}`
+    : isGraphic
+      ? `/comic/${Number(item.graphic_chapter_id)}#page=${Math.max(1, Number(item.page_number || 1))}`
+      : `/reader/${Number(item.chapter_id)}`);
   const progress = isAudio
     ? (item.duration_seconds ? Math.min(100, Math.round(Number(item.position_seconds || 0) / Number(item.duration_seconds) * 100)) : 0)
-    : Math.max(0, Math.min(100, Number(item.position_percent || 0)));
-  const subtitle = isAudio ? `Аудиоглава ${item.audio_number || ''} · ${formatTime(item.position_seconds || 0)}` : `Глава ${item.chapter_number || ''} · ${progress}%`;
-  return `<a class="continue-card" href="${href}">${dynamicCover(item, isAudio ? 'audio' : 'book')}<div><span>${isAudio ? 'Слушаете' : 'Читаете'}</span><h3>${escapeHtml(item.title || 'Книга')}</h3><p>${escapeHtml(subtitle)}</p><div class="mini-progress"><i style="width:${progress}%"></i></div></div></a>`;
+    : isGraphic
+      ? (item.pages_count ? Math.min(100, Math.round(Number(item.page_number || 1) / Number(item.pages_count) * 100)) : 0)
+      : Math.max(0, Math.min(100, Number(item.position_percent || 0)));
+  const subtitle = isAudio
+    ? `Аудиоглава ${item.audio_number || ''} · ${formatTime(item.position_seconds || 0)}`
+    : isGraphic
+      ? `Глава ${item.graphic_number || ''} · страница ${Number(item.page_number || 1)} из ${Number(item.pages_count || 0) || '…'}`
+      : `Глава ${item.chapter_number || ''} · ${progress}%`;
+  const label = isAudio ? 'Слушаете' : isGraphic ? 'Смотрите' : 'Читаете';
+  return `<a class="continue-card continue-${resolvedKind}" href="${href}">${dynamicCover(item, isAudio ? 'audio' : 'book')}<div><span>${label}</span><h3>${escapeHtml(item.title || 'Книга')}</h3><p>${escapeHtml(subtitle)}</p><div class="mini-progress"><i style="width:${progress}%"></i></div></div></a>`;
 }
 
 const CHAPTER_REACTION_META = {
@@ -514,6 +531,46 @@ function renderReviews(reviews) {
   }).join('') : '<p class="muted">Отзывов пока нет. Можно стать первым.</p>';
 }
 
+const VOX_PROGRESS_QUEUE_KEY = 'voxlyra_progress_sync_v11320';
+
+function readProgressSyncQueue() {
+  try {
+    const value = JSON.parse(localStorage.getItem(VOX_PROGRESS_QUEUE_KEY) || '[]');
+    return Array.isArray(value) ? value : [];
+  } catch (_) { return []; }
+}
+
+function queueProgressSync(kind, targetId, position) {
+  const cleanKind = String(kind || '');
+  const cleanTarget = Number(targetId || 0);
+  if (!['text', 'audio', 'graphic'].includes(cleanKind) || !cleanTarget) return;
+  const items = readProgressSyncQueue().filter((item) => !(item.kind === cleanKind && Number(item.target_id) === cleanTarget));
+  items.push({ kind: cleanKind, target_id: cleanTarget, position: Math.max(0, Number(position || 0)), queued_at: new Date().toISOString() });
+  try { localStorage.setItem(VOX_PROGRESS_QUEUE_KEY, JSON.stringify(items.slice(-100))); } catch (_) {}
+}
+
+function dropProgressSync(kind, targetId) {
+  const items = readProgressSyncQueue().filter((item) => !(item.kind === String(kind) && Number(item.target_id) === Number(targetId)));
+  try { localStorage.setItem(VOX_PROGRESS_QUEUE_KEY, JSON.stringify(items)); } catch (_) {}
+}
+
+async function flushProgressSyncQueue() {
+  if (!tgInitData()) return null;
+  const updates = readProgressSyncQueue();
+  if (!updates.length) {
+    try { return await apiFetch('/api/progress/sync'); } catch (_) { return null; }
+  }
+  try {
+    const result = await apiFetch('/api/progress/sync', { method: 'POST', body: JSON.stringify({ updates }) });
+    localStorage.removeItem(VOX_PROGRESS_QUEUE_KEY);
+    return result;
+  } catch (_) { return null; }
+}
+
+window.queueVoxProgressSync = queueProgressSync;
+window.dropVoxProgressSync = dropProgressSync;
+window.flushVoxProgressSync = flushProgressSyncQueue;
+
 function readerTextMap() {
   const content = document.getElementById('readerParagraphs');
   if (!content) return null;
@@ -567,7 +624,9 @@ async function saveReaderProgress(forcedPercent = null) {
   const reader = document.getElementById('readerText');
   if (!reader || !tgInitData()) return;
   const percent = forcedPercent === null ? calcReadingPercent() : Number(forcedPercent);
+  queueProgressSync('text', Number(reader.dataset.chapterId), percent);
   const result = await apiFetch(`/api/reader/${reader.dataset.chapterId}/progress`, { method: 'POST', body: JSON.stringify({ position_percent: percent }) });
+  dropProgressSync('text', Number(reader.dataset.chapterId));
   (result.achievements?.new || []).forEach((item) => notify(`Новое достижение: ${item.title}`));
   const label = document.getElementById('progressLabel');
   if (label) label.textContent = `Сохранено ${Math.max(0, Math.min(100, percent))}%`;
@@ -1872,7 +1931,10 @@ async function saveAudioProgress() {
   const page = document.getElementById('audioPage');
   const player = document.getElementById('voxPlayer');
   if (!page || !player?.src || !tgInitData()) return;
-  await apiFetch(`/api/audio/${page.dataset.audioId}/progress`, { method: 'POST', body: JSON.stringify({ position_seconds: Math.floor(player.currentTime || 0) }) });
+  const position = Math.floor(player.currentTime || 0);
+  queueProgressSync('audio', Number(page.dataset.audioId), position);
+  await apiFetch(`/api/audio/${page.dataset.audioId}/progress`, { method: 'POST', body: JSON.stringify({ position_seconds: position }) });
+  dropProgressSync('audio', Number(page.dataset.audioId));
 }
 
 function updateAudioTime(player) {
@@ -1951,6 +2013,10 @@ async function initBookPage() {
     const favorite = document.getElementById('bookmarkFavorite');
     if (state.bookmark?.status === 'reading' && reading) { reading.classList.add('saved'); reading.textContent = 'В библиотеке'; }
     if (state.bookmark?.status === 'favorite' && favorite) { favorite.classList.add('saved'); favorite.textContent = 'В любимом'; }
+    const subscribeBook = document.getElementById('subscribeBook');
+    const subscribeAuthor = document.getElementById('subscribeAuthor');
+    if (subscribeBook && state.book_subscription) { subscribeBook.classList.add('saved'); subscribeBook.textContent = '🔔 Вы подписаны'; }
+    if (subscribeAuthor && state.author_subscription) { subscribeAuthor.classList.add('saved'); subscribeAuthor.textContent = '✦ Вы подписаны на автора'; }
     if (state.my_review) {
       const rating = document.getElementById('reviewRating');
       const text = document.getElementById('reviewText');
@@ -2262,8 +2328,8 @@ async function initContinueShelves() {
   if ((!readingSection && !audioSection) || !tgInitData()) return;
   try {
     const data = await loadMeData();
-    if (readingSection && data.continue_reading?.length) {
-      document.getElementById('continueShelf').innerHTML = data.continue_reading.map((item) => continueCard(item, 'reading')).join('');
+    if (readingSection && data.continue_items?.length) {
+      document.getElementById('continueShelf').innerHTML = data.continue_items.slice(0, 12).map((item) => continueCard(item, item.continue_kind)).join('');
       readingSection.hidden = false;
     }
     if (audioSection && data.continue_listening?.length) {
@@ -2273,9 +2339,353 @@ async function initContinueShelves() {
   } catch (_) {}
 }
 
-function bookmarkCard(item) {
+function bookmarkCard(item, shelves = []) {
   const labels = { reading: 'Читаю', favorite: 'Любимое', planned: 'В планах', finished: 'Прочитано', dropped: 'Отложено' };
-  return `<a class="book-card library-book-card" href="/book/${Number(item.book_id)}">${dynamicCover(item)}<div class="book-info"><span class="eyebrow">${escapeHtml(labels[item.status] || 'В библиотеке')}</span><h3>${escapeHtml(item.title || 'Книга')}</h3><p>${escapeHtml(item.pen_name || 'Автор не указан')}</p></div></a>`;
+  const shelfOptions = shelves.length
+    ? `<label class="library-shelf-picker">Добавить на полку<select data-shelf-book-picker="${Number(item.book_id)}"><option value="">Выберите полку</option>${shelves.map((shelf) => `<option value="${Number(shelf.id)}">${escapeHtml(shelf.icon || '📚')} ${escapeHtml(shelf.name || 'Полка')}</option>`).join('')}</select></label>`
+    : '<small class="muted">Создайте свою полку во вкладке «Полки».</small>';
+  return `<article class="book-card library-book-card">${dynamicCover(item)}<div class="book-info"><span class="eyebrow">${escapeHtml(labels[item.status] || 'В библиотеке')}</span><a href="/book/${Number(item.book_id)}"><h3>${escapeHtml(item.title || 'Книга')}</h3></a><p>${escapeHtml(item.pen_name || 'Автор не указан')}</p>${shelfOptions}</div></article>`;
+}
+
+function customShelfBookCard(item, shelfId) {
+  return `<article class="custom-shelf-book">${dynamicCover(item)}<div><a href="/book/${Number(item.book_id)}"><h3>${escapeHtml(item.title || 'Книга')}</h3></a><p>${escapeHtml(item.pen_name || 'Автор не указан')}</p></div><button type="button" class="secondary compact-button" data-shelf-remove-book="${Number(item.book_id)}" data-shelf-id="${Number(shelfId)}">Убрать</button></article>`;
+}
+
+function historyCard(item) {
+  const kind = String(item.content_type || 'text');
+  const href = kind === 'audio' ? `/audio/${Number(item.target_id)}` : kind === 'graphic' ? `/comic/${Number(item.target_id)}#page=${Math.max(1, Number(item.position_value || 1))}` : `/reader/${Number(item.target_id)}`;
+  const detail = kind === 'audio'
+    ? `Аудиоглава ${Number(item.audio_number || 0) || ''} · ${formatTime(item.position_value || 0)}`
+    : kind === 'graphic'
+      ? `Глава ${Number(item.graphic_number || 0) || ''} · страница ${Math.max(1, Number(item.position_value || 1))}`
+      : `Глава ${Number(item.chapter_number || 0) || ''} · ${Math.max(0, Math.min(100, Number(item.position_value || 0)))}%`;
+  const label = kind === 'audio' ? 'Слушали' : kind === 'graphic' ? 'Смотрели' : 'Читали';
+  return `<article class="history-card" data-history-card="${Number(item.id)}">${dynamicCover(item)}<div><span>${label}</span><a href="${href}"><h3>${escapeHtml(item.title || 'Книга')}</h3></a><p>${escapeHtml(detail)}</p><small>Открытий: ${Number(item.open_count || 1)}</small></div><button type="button" class="secondary compact-button" data-history-delete="${Number(item.id)}">Удалить</button></article>`;
+}
+
+function annotationCard(item) {
+  const isQuote = String(item.annotation_type) === 'quote';
+  const body = isQuote ? item.selected_text : item.note_text;
+  return `<article class="annotation-card annotation-${escapeHtml(item.color || 'violet')}" data-annotation-card="${Number(item.id)}"><div class="annotation-card-head"><span>${isQuote ? 'Цитата' : 'Заметка'} · глава ${Number(item.chapter_number || 0)}</span><button type="button" class="quiet-link" data-annotation-delete="${Number(item.id)}">Удалить</button></div><a href="/reader/${Number(item.chapter_id)}"><h3>${escapeHtml(item.title || 'Книга')}</h3></a><p>${escapeHtml(body || '')}</p>${isQuote && item.note_text ? `<small>${escapeHtml(item.note_text)}</small>` : ''}</article>`;
+}
+
+function journalStatusLabel(status) {
+  return ({ planned: 'В планах', reading: 'Читаю', paused: 'Пауза', finished: 'Завершено', dropped: 'Отложено' })[String(status || 'reading')] || 'Читаю';
+}
+
+function journalStatusOptions(current) {
+  const items = [['planned','В планах'], ['reading','Читаю'], ['paused','Пауза'], ['finished','Завершено'], ['dropped','Отложено']];
+  return items.map(([value, label]) => `<option value="${value}" ${String(current) === value ? 'selected' : ''}>${label}</option>`).join('');
+}
+
+function journalRatingOptions(current) {
+  const selected = Math.max(0, Math.min(5, Number(current || 0)));
+  return Array.from({ length: 6 }, (_, value) => `<option value="${value}" ${selected === value ? 'selected' : ''}>${value ? `${value} из 5` : 'Без оценки'}</option>`).join('');
+}
+
+function readingCycleStatusLabel(status) {
+  return ({ reading: 'Читаю', paused: 'Пауза', finished: 'Завершено', dropped: 'Остановлено' })[String(status || 'reading')] || 'Читаю';
+}
+
+function readingCycleStatusOptions(current) {
+  const labels = [['reading','Читаю'],['paused','Пауза'],['finished','Завершено'],['dropped','Остановлено']];
+  return labels.map(([value,label]) => `<option value="${value}" ${String(current || 'reading') === value ? 'selected' : ''}>${label}</option>`).join('');
+}
+
+function readingCycleCard(cycle) {
+  const number = Math.max(1, Number(cycle.cycle_number || 1));
+  const label = number === 1 ? 'Первое чтение' : `${number}-й цикл`;
+  return `<form class="reading-cycle-card${String(cycle.status) === 'finished' ? ' finished' : ''}" data-reading-cycle-form="${Number(cycle.id || 0)}">
+    <div class="reading-cycle-heading"><div><span>${escapeHtml(label)}</span><strong>${escapeHtml(readingCycleStatusLabel(cycle.status))}</strong></div><small>${cycle.finished_on ? `завершено ${escapeHtml(activityDateLabel(cycle.finished_on))}` : cycle.started_on ? `начато ${escapeHtml(activityDateLabel(cycle.started_on))}` : 'даты не указаны'}</small></div>
+    <div class="reading-cycle-fields">
+      <label>Статус<select name="status">${readingCycleStatusOptions(cycle.status)}</select></label>
+      <label>Начало<input type="date" name="started_on" value="${escapeHtml(cycle.started_on || '')}"></label>
+      <label>Завершение<input type="date" name="finished_on" value="${escapeHtml(cycle.finished_on || '')}"></label>
+    </div>
+    <label class="reading-cycle-note">Заметка о цикле<textarea name="note" maxlength="2000" rows="2" placeholder="Что изменилось при повторном чтении…">${escapeHtml(cycle.note || '')}</textarea></label>
+    <button type="submit" class="secondary compact-button">Сохранить цикл</button>
+  </form>`;
+}
+
+function yearListOptions(item, context) {
+  const currentYear = Number(context?.yearLists?.year || context?.summary?.current_year || new Date().getFullYear());
+  const years = new Set([currentYear, ...(context?.yearLists?.available_years || []), ...(item.year_lists || []).map((row) => Number(row.list_year || 0))]);
+  return [...years].filter((year) => year >= 1900).sort((a,b) => b-a).map((year) => `<option value="${year}" ${year === currentYear ? 'selected' : ''}>${year}</option>`).join('');
+}
+
+function yearListForm(item, context) {
+  const currentYear = Number(context?.yearLists?.year || context?.summary?.current_year || new Date().getFullYear());
+  const selected = new Set((item.year_lists || []).filter((row) => Number(row.list_year) === currentYear).map((row) => String(row.list_code || '')));
+  const choices = [['best','Лучшее года'],['discovery','Открытие года'],['emotional','Самое эмоциональное'],['reread','Хочу перечитать']];
+  return `<form class="reading-year-list-form" data-year-list-form="${Number(item.book_id || 0)}">
+    <div class="reading-year-list-heading"><div><span class="eyebrow">Личные списки</span><strong>Мои итоги года</strong></div><label>Год<select name="year">${yearListOptions(item, context)}</select></label></div>
+    <div class="reading-year-list-choices">${choices.map(([code,label]) => `<label><input type="checkbox" name="list_codes" value="${code}" ${selected.has(code) ? 'checked' : ''}><span>${label}</span></label>`).join('')}</div>
+    <button type="submit" class="secondary compact-button">Сохранить списки</button>
+  </form>`;
+}
+
+function startRereadMarkup(item) {
+  const completed = Math.max(0, Number(item.completed_cycles || 0));
+  if (!completed || item.active_cycle) return '';
+  const today = new Date().toISOString().slice(0, 10);
+  return `<form class="start-reread-form" data-reread-start-form="${Number(item.book_id || 0)}"><div><span class="eyebrow">Следующий круг</span><strong>Начать перечитывание</strong><small>Предыдущие даты и впечатления сохранятся.</small></div><label>Дата начала<input type="date" name="started_on" value="${today}"></label><input name="note" maxlength="2000" placeholder="Необязательная заметка"><button type="submit">Начать</button></form>`;
+}
+
+function readingJournalCard(item, context = {}) {
+  const bookId = Number(item.book_id || 0);
+  const activity = item.last_activity_at || item.history_updated_at || '';
+  const detail = [
+    journalStatusLabel(item.status),
+    item.started_on ? `впервые начато ${activityDateLabel(item.started_on)}` : '',
+    item.finished_on ? `последнее завершение ${activityDateLabel(item.finished_on)}` : '',
+  ].filter(Boolean).join(' · ');
+  const cycles = item.cycles || [];
+  return `<article class="reading-journal-card" data-reading-journal-card="${bookId}">
+    <div class="reading-journal-book">${dynamicCover(item)}<div><span class="eyebrow">${escapeHtml(detail || 'Личная запись')}</span><a href="/book/${bookId}"><h3>${escapeHtml(item.title || 'Произведение')}</h3></a><p>${escapeHtml(item.pen_name || 'Автор не указан')}</p><small>${Number(item.history_items || 0)} записей истории · ${Number(item.annotation_items || 0)} заметок и цитат · ${Number(item.completed_cycles || 0)} завершённых циклов${Number(item.reread_count || 0) ? ` · перечитано ${Number(item.reread_count || 0)} раз` : ''}${activity ? ` · активность ${escapeHtml(activityDateLabel(String(activity).slice(0,10)))}` : ''}</small></div></div>
+    <form class="reading-journal-form" data-reading-journal-form="${bookId}">
+      <div class="reading-journal-fields">
+        <label>Общий статус<select name="status">${journalStatusOptions(item.status)}</select></label>
+        <label>Первое начало<input type="date" name="started_on" value="${escapeHtml(item.started_on || '')}"></label>
+        <label>Последнее завершение<input type="date" name="finished_on" value="${escapeHtml(item.finished_on || '')}"></label>
+        <label>Личная оценка<select name="private_rating">${journalRatingOptions(item.private_rating)}</select></label>
+      </div>
+      <label class="reading-journal-impression">Мои впечатления<textarea name="impression" maxlength="6000" rows="4" placeholder="Что запомнилось, какие чувства осталось после чтения…">${escapeHtml(item.impression || '')}</textarea></label>
+      <div class="reading-journal-actions"><button type="submit">Сохранить запись</button><button type="button" class="secondary" data-journal-delete="${bookId}">Очистить запись</button></div>
+    </form>
+    <section class="reading-cycle-panel"><div class="section-title slim"><h3>Циклы чтения</h3><p>Каждое перечитывание хранит собственные даты и заметку.</p></div>${cycles.length ? `<div class="reading-cycle-list">${cycles.map(readingCycleCard).join('')}</div>` : '<p class="muted">Цикл появится после начала чтения.</p>'}${startRereadMarkup(item)}</section>
+    ${yearListForm(item, context)}
+  </article>`;
+}
+
+function readingJournalSummaryMarkup(summary) {
+  const data = summary || {};
+  return `<div class="reading-journal-summary">
+    <article><strong>${activityNumber(data.total)}</strong><small>в дневнике</small></article>
+    <article><strong>${activityNumber(data.completed_cycles)}</strong><small>завершённых циклов</small></article>
+    <article><strong>${activityNumber(data.completed_rereads)}</strong><small>перечитываний</small></article>
+    <article><strong>${activityNumber(data.year_list_books)}</strong><small>в списках года</small></article>
+  </div>`;
+}
+
+function completionCalendarDay(item) {
+  const count = Math.max(0, Number(item.count || 0));
+  const titles = (item.items || []).map((row) => `${row.title}${Number(row.cycle_number || 1) > 1 ? ` · цикл ${row.cycle_number}` : ''}`).join('; ');
+  const label = item.future ? `${activityDateLabel(item.date)}: день ещё впереди` : count ? `${activityDateLabel(item.date)}: ${titles}` : `${activityDateLabel(item.date)}: завершений нет`;
+  return `<span class="completion-calendar-day${count ? ' completed' : ''}${count > 1 ? ' multiple' : ''}${item.future ? ' future' : ''}" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}">${count > 1 ? count : ''}</span>`;
+}
+
+function completionCalendarMarkup(calendar, yearLists) {
+  const data = calendar || {};
+  const lists = yearLists || {};
+  const days = data.days || [];
+  const years = data.available_years || [new Date().getFullYear()];
+  const selectedYear = Number(data.year || new Date().getFullYear());
+  const leading = days.length ? (new Date(`${days[0].date}T12:00:00Z`).getUTCDay() + 6) % 7 : 0;
+  const placeholders = Array.from({length: leading}, () => '<span class="completion-calendar-day placeholder"></span>').join('');
+  const groups = (lists.groups || []).map((group) => `<article class="year-list-group"><div><strong>${escapeHtml(group.label || 'Личный список')}</strong><small>${Number(group.count || 0)} произведений</small></div>${(group.items || []).length ? `<div>${group.items.map((item) => `<a href="/book/${Number(item.book_id || 0)}">${escapeHtml(item.title || 'Произведение')}</a>`).join('')}</div>` : '<p>Пока пусто</p>'}</article>`).join('');
+  return `<section class="completion-calendar-panel">
+    <div class="section-title split-title slim"><div><span class="eyebrow">Личная хронология</span><h2>Завершения за ${selectedYear} год</h2><p>${escapeHtml(data.privacy_note || 'Календарь виден только вам.')}</p></div><label class="year-activity-select">Год<select id="completionCalendarYear">${years.map((year) => `<option value="${Number(year)}" ${Number(year) === selectedYear ? 'selected' : ''}>${Number(year)}</option>`).join('')}</select></label></div>
+    <div class="completion-calendar-summary"><article><strong>${Number(data.total_completions || 0)}</strong><small>завершений</small></article><article><strong>${Number(data.unique_books || 0)}</strong><small>произведений</small></article><article><strong>${Number(data.rereads || 0)}</strong><small>повторных циклов</small></article><article><strong>${Number(lists.total_items || 0)}</strong><small>в списках года</small></article></div>
+    <div class="completion-calendar-scroll"><div class="completion-calendar-grid">${placeholders}${days.map(completionCalendarDay).join('')}</div></div>
+    <div class="completion-calendar-legend"><i></i><span>завершённое произведение</span><i class="multiple"></i><span>несколько завершений в день</span></div>
+    <div class="year-list-groups">${groups}</div>
+  </section>`;
+}
+
+function applyReadingJournalPayload(page, result) {
+  if (!page?._libraryData || !result) return;
+  page._libraryData.reading_journal = result.reading_journal || page._libraryData.reading_journal || [];
+  page._libraryData.reading_journal_summary = result.reading_journal_summary || page._libraryData.reading_journal_summary || {};
+  page._libraryData.completion_calendar = result.completion_calendar || page._libraryData.completion_calendar || {};
+  page._libraryData.year_lists = result.year_lists || page._libraryData.year_lists || {};
+  page._libraryData.reread_summary = result.reread_summary || page._libraryData.reread_summary || {};
+  page._libraryData.journal_import_history = result.journal_import_history || page._libraryData.journal_import_history || [];
+}
+
+async function downloadReadingJournal(format) {
+  try {
+    const response = await fetch(`/api/library/journal/export?format=${encodeURIComponent(format)}`, {
+      headers: { 'X-Telegram-Init-Data': tgInitData() },
+    });
+    if (!response.ok) {
+      let message = 'Не удалось выгрузить дневник';
+      try { message = (await response.json()).detail || message; } catch (_) {}
+      throw new Error(message);
+    }
+    const blob = await response.blob();
+    const disposition = response.headers.get('content-disposition') || '';
+    const match = disposition.match(/filename="?([^";]+)"?/i);
+    const filename = match?.[1] || `voxlyra-reading-diary.${format === 'csv' ? 'csv' : 'json'}`;
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url; link.download = filename; link.rel = 'noopener';
+    document.body.appendChild(link); link.click(); link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    notify('Экспорт подготовлен');
+  } catch (error) { notify(error.message || 'Не удалось выгрузить дневник'); }
+}
+
+
+function journalImportActionLabel(action) {
+  if (action === 'add') return 'добавить';
+  if (action === 'update') return 'обновить';
+  if (action === 'fill') return 'заполнить пустое';
+  return 'восстановить';
+}
+
+function journalImportStatusLabel(status) {
+  return ({ planned: 'в планах', reading: 'читаю', paused: 'пауза', finished: 'завершено', dropped: 'отложено' })[String(status || '')] || String(status || '');
+}
+
+function journalImportListLabel(code) {
+  return ({ best: 'Лучшее года', discovery: 'Открытие года', emotional: 'Самое эмоциональное', reread: 'Хочу перечитать' })[String(code || '')] || String(code || '');
+}
+
+function journalImportSelectionItemMarkup(item) {
+  const id = escapeHtml(item.selection_id || '');
+  const action = journalImportActionLabel(item.action);
+  const author = item.author ? ` · ${escapeHtml(item.author)}` : '';
+  let meta = action;
+  if (item.kind === 'journal') {
+    meta += item.status ? ` · ${escapeHtml(journalImportStatusLabel(item.status))}` : '';
+    if (Number(item.private_rating || 0) > 0) meta += ` · оценка ${Number(item.private_rating)}/5`;
+    if (item.has_impression) meta += ' · есть впечатление';
+  } else if (item.kind === 'cycle') {
+    meta = `Цикл №${Number(item.cycle_number || 1)} · ${action}`;
+    if (item.status) meta += ` · ${escapeHtml(journalImportStatusLabel(item.status))}`;
+    if (item.started_on) meta += ` · с ${escapeHtml(item.started_on)}`;
+    if (item.finished_on) meta += ` по ${escapeHtml(item.finished_on)}`;
+    if (item.has_note) meta += ' · есть заметка';
+  } else if (item.kind === 'year_list') {
+    meta = `${escapeHtml(journalImportListLabel(item.list_code))} · ${Number(item.year || 0)} · ${action}`;
+    if (item.has_note) meta += ' · есть заметка';
+  }
+  const dependency = item.requires_journal ? ` data-journal-import-depends="${escapeHtml(item.requires_journal)}"` : '';
+  return `<label class="journal-import-select-item"><input type="checkbox" data-journal-import-select value="${id}"${dependency} checked><span><strong>${escapeHtml(item.title || 'Без названия')}</strong><small>${meta}${author}</small></span></label>`;
+}
+
+function journalImportSelectionSection(title, items, open = false) {
+  const list = Array.isArray(items) ? items : [];
+  if (!list.length) return '';
+  return `<details class="journal-import-select-section" ${open ? 'open' : ''}><summary><span>${escapeHtml(title)}</span><b>${list.length}</b></summary><div class="journal-import-select-list">${list.map(journalImportSelectionItemMarkup).join('')}</div></details>`;
+}
+
+function selectedReadingJournalImportIds() {
+  return [...document.querySelectorAll('#readingJournalImportPreview [data-journal-import-select]:checked')].map((input) => String(input.value || '')).filter(Boolean);
+}
+
+function updateReadingJournalImportSelection() {
+  const root = document.getElementById('readingJournalImportPreview');
+  if (!root) return;
+  const selected = selectedReadingJournalImportIds();
+  const total = root.querySelectorAll('[data-journal-import-select]').length;
+  const counter = root.querySelector('[data-journal-import-selected-count]');
+  const apply = root.querySelector('[data-journal-import-apply]');
+  if (counter) counter.textContent = `${selected.length} из ${total}`;
+  if (apply) {
+    apply.disabled = selected.length <= 0;
+    apply.textContent = `Применить выбранное: ${selected.length}`;
+  }
+}
+
+function readingJournalImportPreviewMarkup(preview) {
+  if (!preview) return '<div id="readingJournalImportPreview"></div>';
+  const changes = preview.changes || {};
+  const source = preview.source_counts || {};
+  const ignored = preview.ignored_sections || {};
+  const selectable = preview.selectable_items || {};
+  const added = Number(changes.journal_add || 0) + Number(changes.cycles_add || 0) + Number(changes.year_lists_add || 0);
+  const updated = Number(changes.journal_update || 0) + Number(changes.cycles_update || 0) + Number(changes.year_lists_update || 0);
+  const filled = Number(changes.journal_fill || 0) + Number(changes.cycles_fill || 0) + Number(changes.year_lists_fill || 0);
+  const unchanged = Number(changes.journal_unchanged || 0) + Number(changes.cycles_unchanged || 0) + Number(changes.year_lists_unchanged || 0);
+  const protectedCount = Number(preview.total_protected || 0);
+  const ignoredCount = Number(ignored.history || 0) + Number(ignored.annotations || 0) + Number(ignored.daily_activity || 0);
+  const missing = (preview.missing_books || []).slice(0, 8);
+  const protectedExamples = (preview.protected_examples || []).slice(0, 8);
+  const details = [];
+  if (missing.length) details.push(`<details><summary>Не найденные произведения: ${Number(preview.missing_book_count || missing.length)}</summary><ul>${missing.map((item) => `<li><strong>${escapeHtml(item.title || 'Без названия')}</strong>${item.author ? ` — ${escapeHtml(item.author)}` : ''}</li>`).join('')}</ul></details>`);
+  if (protectedExamples.length) details.push(`<details><summary>Защищённые текущие записи: ${protectedCount}</summary><ul>${protectedExamples.map((item) => `<li><strong>${escapeHtml(item.title || 'Произведение')}</strong> · ${escapeHtml(item.section || '')}: ${escapeHtml(item.reason || '')}</li>`).join('')}</ul></details>`);
+  const ignoredNote = ignoredCount ? `<p class="journal-import-note">История позиций, заметки/цитаты и дневная активность из файла не импортируются: они привязаны к внутренним главам и остаются в текущем аккаунте без изменений.</p>` : '';
+  const selectionSections = [
+    journalImportSelectionSection('Произведения и впечатления', selectable.journal || [], true),
+    journalImportSelectionSection('Циклы чтения и перечитывания', selectable.cycles || []),
+    journalImportSelectionSection('Отметки в списках года', selectable.year_lists || []),
+  ].join('');
+  const selectionTotal = Number(preview.total_changes || 0);
+  const selectionBlock = selectionTotal > 0 ? `<section class="journal-import-selection"><div class="journal-import-selection-head"><div><span class="eyebrow">Выборочное восстановление</span><h4>Что применить</h4><p>${escapeHtml(preview.selection_note || 'Отметьте только нужные записи.')}</p></div><strong data-journal-import-selected-count>${selectionTotal} из ${selectionTotal}</strong></div><div class="journal-import-selection-tools"><button type="button" class="secondary compact-button" data-journal-import-select-all>Выбрать всё</button><button type="button" class="secondary compact-button" data-journal-import-select-none>Снять всё</button></div>${selectionSections}<p class="journal-import-dependency-note">При выборе цикла базовая запись произведения включается автоматически, только если без неё цикл не сможет отображаться в дневнике.</p></section>` : '';
+  return `<section class="journal-import-preview" id="readingJournalImportPreview">
+    <div class="journal-import-preview-head"><div><span class="eyebrow">Предварительная проверка</span><h3>Восстановление дневника</h3><p>Экспорт ${escapeHtml(preview.source_version || '')} · записей ${Number(source.journal || 0)}, циклов ${Number(source.cycles || 0)}, отметок списков ${Number(source.year_lists || 0)}</p></div><span class="journal-import-safe">Без перезаписи новых данных</span></div>
+    <div class="journal-import-stats">
+      <article><strong>${added}</strong><small>будет добавлено</small></article>
+      <article><strong>${updated}</strong><small>новее текущих</small></article>
+      <article><strong>${filled}</strong><small>заполнит пустые поля</small></article>
+      <article><strong>${protectedCount}</strong><small>защищено</small></article>
+      <article><strong>${unchanged}</strong><small>без изменений</small></article>
+      <article><strong>${Number(preview.invalid_records || 0)}</strong><small>ошибочных записей</small></article>
+    </div>
+    <p class="journal-import-safety">${escapeHtml(preview.safety_note || 'Более новые текущие данные не будут перезаписаны.')}</p>
+    ${ignoredNote}${details.join('')}${selectionBlock}
+    <div class="journal-import-actions"><button type="button" data-journal-import-apply="${escapeHtml(preview.preview_token || '')}" ${selectionTotal <= 0 ? 'disabled' : ''}>Применить выбранное: ${selectionTotal}</button><button type="button" class="secondary" data-journal-import-cancel>Отмена</button></div>
+  </section>`;
+}
+
+
+function journalImportDateTime(value) {
+  if (!value) return 'дата не указана';
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return String(value);
+  return parsed.toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
+function readingJournalImportHistoryMarkup(history) {
+  const items = Array.isArray(history) ? history : [];
+  if (!items.length) return '<section class="journal-import-history"><div class="section-title slim"><span class="eyebrow">Резервные точки</span><h3>История восстановлений</h3><p>После первого применённого импорта здесь появится автоматическая резервная копия.</p></div></section>';
+  return `<section class="journal-import-history"><div class="section-title slim"><span class="eyebrow">Резервные точки</span><h3>История восстановлений</h3><p>Перед каждым импортом VoxLyra сохраняет приватную копию. Отмена не затрагивает записи, изменённые после восстановления.</p></div><div class="journal-import-history-list">${items.map((item) => {
+    const counts = item.counts || {};
+    const rollback = item.rollback_counts || {};
+    const partial = item.status === 'rolled_back_partial';
+    const rolledBack = item.status === 'rolled_back' || partial;
+    const status = partial ? `Отменён частично · защищено ${Number(rollback.protected || 0)}` : rolledBack ? 'Импорт отменён' : 'Импорт применён';
+    const actions = `<button type="button" class="secondary compact-button" data-journal-import-backup="${Number(item.id || 0)}">Скачать резерв</button>${item.can_rollback ? `<button type="button" class="danger-button compact-button" data-journal-import-rollback="${Number(item.id || 0)}">Отменить импорт</button>` : ''}`;
+    return `<article class="journal-import-history-card ${rolledBack ? 'rolled-back' : ''}"><div><span>${escapeHtml(status)}</span><h4>Экспорт ${escapeHtml(item.source_version || '')}</h4><p>${journalImportDateTime(item.applied_at)} · применено ${Number(counts.total || 0)} изменений${rolledBack ? ` · восстановлено ${Number(rollback.restored || 0)}` : ''}</p></div><div class="journal-import-history-actions">${actions}</div></article>`;
+  }).join('')}</div></section>`;
+}
+
+async function downloadReadingJournalBackup(runId) {
+  const response = await fetch(`/api/library/journal/import/${Number(runId)}/backup`, { headers: { 'X-Telegram-Init-Data': tgInitData() } });
+  if (!response.ok) {
+    let message = 'Не удалось скачать резервную точку';
+    try { message = (await response.json()).detail || message; } catch (_) {}
+    throw new Error(message);
+  }
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url; link.download = `voxlyra-before-import-${Number(runId)}.json`; link.rel = 'noopener';
+  document.body.appendChild(link); link.click(); link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+async function rollbackReadingJournalImport(runId) {
+  return apiFetch(`/api/library/journal/import/${Number(runId)}/rollback`, { method: 'POST', body: JSON.stringify({}) });
+}
+
+async function previewReadingJournalImport(file) {
+  if (!file) return;
+  if (file.size > 5 * 1024 * 1024) throw new Error('JSON-файл больше допустимых 5 МБ');
+  const form = new FormData();
+  form.append('file', file, file.name || 'voxlyra-reading-history.json');
+  return apiFetch('/api/library/journal/import/preview', { method: 'POST', body: form });
+}
+
+async function applyReadingJournalImport(previewToken, selectedItems) {
+  return apiFetch('/api/library/journal/import/apply', {
+    method: 'POST',
+    body: JSON.stringify({
+      preview_token: String(previewToken || ''),
+      selected_items: Array.isArray(selectedItems) ? selectedItems : [],
+    }),
+  });
 }
 
 function purchaseCard(item) {
@@ -2290,22 +2700,265 @@ function purchaseCard(item) {
   return `<a class="purchase-card${refunded ? ' refunded' : ''}" href="${href}"><div><span>${type}</span><h3>${escapeHtml(title)}</h3><p>${escapeHtml(stateText)}</p></div><b>${Number(item.amount_stars || 0)} Stars</b></a>`;
 }
 
+function subscriptionBookCard(item) {
+  return `<article class="subscription-card" data-subscription-book-card="${Number(item.book_id)}">${dynamicCover(item)}<div><span>Книга</span><a href="/book/${Number(item.book_id)}"><h3>${escapeHtml(item.title || 'Книга')}</h3></a><p>${escapeHtml(item.pen_name || 'Автор не указан')} · ${Number(item.chapters_count || 0)} глав</p><small>${item.notify_chapters ? 'Новые главы' : ''}${item.notify_chapters && item.notify_audio ? ' · ' : ''}${item.notify_audio ? 'Аудио' : ''}</small></div><button type="button" class="secondary compact-button" data-unsubscribe-book="${Number(item.book_id)}">Отписаться</button></article>`;
+}
+
+function subscriptionAuthorCard(item) {
+  return `<article class="subscription-card author-subscription-card" data-subscription-author-card="${Number(item.author_id)}"><div class="subscription-avatar">${escapeHtml((item.pen_name || 'А')[0])}</div><div><span>Автор</span><h3>${escapeHtml(item.pen_name || 'Автор')}</h3><p>${Number(item.books_count || 0)} опубликованных книг</p><small>Новые книги${item.notify_chapters ? ' · главы' : ''}${item.notify_audio ? ' · аудио' : ''}</small></div><button type="button" class="secondary compact-button" data-unsubscribe-author="${Number(item.author_id)}">Отписаться</button></article>`;
+}
+
+function activityNumber(value) {
+  return Math.max(0, Number(value || 0));
+}
+
+function activityGoalCard(item) {
+  const current = activityNumber(item.current);
+  const target = activityNumber(item.target);
+  const percent = Math.max(0, Math.min(100, activityNumber(item.percent)));
+  const state = target <= 0 ? 'Цель выключена' : item.completed ? 'Выполнено' : `${current} из ${target} ${escapeHtml(item.unit || '')}`;
+  return `<article class="reading-goal-card${item.completed ? ' completed' : ''}${target <= 0 ? ' disabled' : ''}"><div><strong>${escapeHtml(item.label || 'Цель')}</strong><span>${state}</span></div><div class="reading-goal-progress" aria-label="Выполнено ${percent}%"><i style="width:${percent}%"></i></div></article>`;
+}
+
+function activityCalendarCell(item) {
+  const date = new Date(`${item.date}T12:00:00Z`);
+  const day = Number.isNaN(date.getTime()) ? String(item.date || '').slice(-2) : date.toLocaleDateString('ru-RU', { day: '2-digit' });
+  const label = `${item.date}: ${activityNumber(item.sessions)} открытых материалов, ${activityNumber(item.text_chapters)} текстовых глав, ${activityNumber(item.audio_minutes)} мин. аудио, ${activityNumber(item.graphic_pages)} страниц`;
+  return `<span class="activity-calendar-day intensity-${Math.max(0, Math.min(4, activityNumber(item.intensity)))}" title="${escapeHtml(label)}"><b>${day}</b></span>`;
+}
+
+function readingReminderWeekdays(settings) {
+  const selected = new Set((settings?.reminder_weekdays || []).map((value) => Number(value)));
+  const labels = [['Пн', 1], ['Вт', 2], ['Ср', 3], ['Чт', 4], ['Пт', 5], ['Сб', 6], ['Вс', 7]];
+  return labels.map(([label, value]) => `<label class="weekday-choice"><input type="checkbox" name="reminder_weekdays" value="${value}" ${selected.has(value) ? 'checked' : ''}><span>${label}</span></label>`).join('');
+}
+
+function activityMonthLabel(monthKey) {
+  const raw = String(monthKey || '');
+  const date = new Date(`${raw}-01T12:00:00Z`);
+  if (Number.isNaN(date.getTime())) return raw || 'месяц';
+  return date.toLocaleDateString('ru-RU', { month: 'long', year: 'numeric', timeZone: 'UTC' }).replace(' г.', '');
+}
+
+function activityComparisonCard(item) {
+  const current = activityNumber(item.current);
+  const previous = activityNumber(item.previous);
+  const delta = Number(item.delta || 0);
+  const trend = String(item.trend || 'same');
+  const icon = trend === 'up' ? '↗' : trend === 'down' ? '↘' : trend === 'new' ? '✦' : '→';
+  const change = trend === 'new'
+    ? 'новая активность'
+    : delta === 0
+      ? 'без изменений'
+      : `${delta > 0 ? '+' : ''}${delta} ${escapeHtml(item.unit || '')}`;
+  return `<article class="monthly-comparison-card trend-${escapeHtml(trend)}"><div><span>${icon}</span><small>${escapeHtml(item.label || 'Показатель')}</small></div><strong>${current}</strong><p>${change} · было ${previous}</p></article>`;
+}
+
+function activityTrendMarkup(items) {
+  if (!items.length) return '<p class="muted">Данных для динамики пока недостаточно.</p>';
+  return `<div class="monthly-trend-list">${items.map((item) => {
+    const totals = item.totals || {};
+    const label = activityMonthLabel(item.month).split(' ')[0].slice(0, 3);
+    const title = `${activityMonthLabel(item.month)}: ${activityNumber(totals.active_days)} активных дней, ${activityNumber(totals.text_chapters)} глав, ${activityNumber(totals.audio_minutes)} мин. аудио, ${activityNumber(totals.graphic_pages)} стр.`;
+    return `<div class="monthly-trend-item" title="${escapeHtml(title)}"><div class="monthly-trend-bar"><i style="height:${Math.max(4, Math.min(100, activityNumber(item.intensity)))}%"></i></div><b>${escapeHtml(label)}</b><small>${activityNumber(totals.active_days)} дн.</small></div>`;
+  }).join('')}</div>`;
+}
+
+function activityBestDayMarkup(bestDay) {
+  if (!bestDay?.date) return '<p class="muted">Самый насыщенный день появится после первой активности в этом месяце.</p>';
+  const date = new Date(`${bestDay.date}T12:00:00Z`);
+  const label = Number.isNaN(date.getTime()) ? String(bestDay.date) : date.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', timeZone: 'UTC' });
+  return `<p><b>${escapeHtml(label)}</b> · ${activityNumber(bestDay.text_chapters)} глав, ${activityNumber(bestDay.audio_minutes)} мин. аудио, ${activityNumber(bestDay.graphic_pages)} стр. комиксов.</p>`;
+}
+
+
+function activityDateLabel(raw, options = { day: 'numeric', month: 'long', year: 'numeric' }) {
+  const date = new Date(`${String(raw || '').slice(0, 10)}T12:00:00Z`);
+  return Number.isNaN(date.getTime()) ? String(raw || '') : date.toLocaleDateString('ru-RU', { ...options, timeZone: 'UTC' });
+}
+
+function personalRecordCard(item) {
+  const date = item.date ? `<small>${escapeHtml(activityDateLabel(item.date))}</small>` : '';
+  const note = item.note ? `<p>${escapeHtml(item.note)}</p>` : '';
+  return `<article class="personal-record-card"><span>${escapeHtml(item.icon || '✦')}</span><div><small>${escapeHtml(item.title || 'Личный рекорд')}</small><strong>${activityNumber(item.value)} ${escapeHtml(item.unit || '')}</strong>${date}${note}</div></article>`;
+}
+
+function milestoneCard(item, upcoming = false) {
+  const achievedDate = item.achieved_at ? `Получено ${activityDateLabel(item.achieved_at)}` : `${activityNumber(item.current)} из ${activityNumber(item.target)} ${escapeHtml(item.unit || '')}`;
+  return `<article class="reading-milestone-card${item.achieved ? ' achieved' : ''}${upcoming ? ' upcoming' : ''}"><span class="reading-milestone-icon">${escapeHtml(item.icon || '✦')}</span><div><strong>${escapeHtml(item.title || 'Веха')}</strong><p>${escapeHtml(item.description || '')}</p><small>${escapeHtml(achievedDate)}</small>${!item.achieved ? `<div class="reading-milestone-progress"><i style="width:${Math.max(0, Math.min(100, activityNumber(item.progress)))}%"></i></div>` : ''}</div></article>`;
+}
+
+function yearActivityDayCell(item) {
+  const title = item.future
+    ? `${activityDateLabel(item.date)}: день ещё впереди`
+    : `${activityDateLabel(item.date)}: ${activityNumber(item.sessions)} сеансов, ${activityNumber(item.text_chapters)} глав, ${activityNumber(item.audio_minutes)} мин. аудио, ${activityNumber(item.graphic_pages)} стр.`;
+  return `<span class="year-activity-cell intensity-${Math.max(0, Math.min(4, activityNumber(item.intensity)))}${item.future ? ' future' : ''}" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}"></span>`;
+}
+
+function yearlyActivityMarkup(yearly) {
+  const data = yearly || {};
+  const days = data.days || [];
+  const years = data.available_years || [new Date().getFullYear()];
+  const selectedYear = Number(data.year || new Date().getFullYear());
+  const totals = data.totals || {};
+  const leading = days.length ? (new Date(`${days[0].date}T12:00:00Z`).getUTCDay() + 6) % 7 : 0;
+  const placeholders = Array.from({ length: leading }, () => '<span class="year-activity-cell placeholder"></span>').join('');
+  const monthItems = (data.months || []).filter((item) => !item.future).map((item) => {
+    const monthTotals = item.totals || {};
+    return `<article><span>${escapeHtml(activityMonthLabel(item.month).split(' ')[0])}</span><b>${activityNumber(monthTotals.active_days)} дн.</b><small>${activityNumber(monthTotals.text_chapters)} гл. · ${activityNumber(monthTotals.audio_minutes)} мин. · ${activityNumber(monthTotals.graphic_pages)} стр.</small></article>`;
+  }).join('');
+  const strongest = data.strongest_month || {};
+  const strongestText = strongest.month ? `Самый насыщенный месяц: ${activityMonthLabel(strongest.month)} · ${activityNumber(strongest.totals?.active_days)} активных дней.` : 'Самый насыщенный месяц появится после активности.';
+  return `<section class="year-activity-panel">
+    <div class="section-title split-title slim"><div><span class="eyebrow">Личная карта</span><h2>Активность за ${selectedYear} год</h2><p>${escapeHtml(data.privacy_note || 'Карта видна только вам.')}</p></div><label class="year-activity-select">Год<select id="readingActivityYear">${years.map((year) => `<option value="${Number(year)}" ${Number(year) === selectedYear ? 'selected' : ''}>${Number(year)}</option>`).join('')}</select></label></div>
+    <div class="year-activity-summary"><article><strong>${activityNumber(totals.active_days)}</strong><small>активных дней</small></article><article><strong>${activityNumber(totals.text_chapters)}</strong><small>текстовых глав</small></article><article><strong>${activityNumber(totals.audio_minutes)}</strong><small>минут аудио</small></article><article><strong>${activityNumber(totals.graphic_pages)}</strong><small>страниц комиксов</small></article></div>
+    <div class="year-activity-scroll"><div class="year-activity-heatmap" role="img" aria-label="Годовая карта активности">${placeholders}${days.map(yearActivityDayCell).join('')}</div></div>
+    <div class="year-activity-legend"><span>меньше</span>${[0,1,2,3,4].map((level) => `<i class="year-activity-cell intensity-${level}"></i>`).join('')}<span>больше</span></div>
+    <p class="year-activity-strongest">${escapeHtml(strongestText)}</p>
+    <div class="year-month-list">${monthItems}</div>
+  </section>`;
+}
+
+function readingActivityMarkup(dashboard, reminderSettings) {
+  const data = dashboard || {};
+  const reminders = reminderSettings || {};
+  const week = data.week_totals || {};
+  const month = data.month_totals || {};
+  const monthly = data.monthly_summary || {};
+  const goals = data.goals || {};
+  const goalItems = data.goal_items || [];
+  const calendar = data.calendar || [];
+  const comparisons = monthly.comparisons || [];
+  const trend = monthly.six_month_trend || [];
+  const recommendation = monthly.recommendation || {};
+  const averages = monthly.averages_per_active_day || {};
+  const records = data.personal_records || [];
+  const milestones = data.milestones || {};
+  const achievedMilestones = milestones.latest || [];
+  const upcomingMilestones = milestones.upcoming || [];
+  const yearly = data.yearly_activity || {};
+  return `<div class="section-title slim"><span class="eyebrow">Личный ритм</span><h2>Статистика чтения</h2><p>Текст, аудио и комиксы учитываются вместе. Серия сохраняется, когда есть хотя бы один сеанс за день.</p></div>
+    <div class="reading-stat-grid">
+      <article><span>🔥</span><strong>${activityNumber(data.current_streak)}</strong><small>текущая серия, дней</small></article>
+      <article><span>🏆</span><strong>${activityNumber(data.best_streak)}</strong><small>лучшая серия, дней</small></article>
+      <article><span>📖</span><strong>${activityNumber(week.text_chapters)}</strong><small>текстовых глав за неделю</small></article>
+      <article><span>🎧</span><strong>${activityNumber(week.audio_minutes)}</strong><small>минут аудио за неделю</small></article>
+      <article><span>🖼</span><strong>${activityNumber(week.graphic_pages)}</strong><small>страниц за неделю</small></article>
+      <article><span>📅</span><strong>${activityNumber(month.active_days)}</strong><small>активных дней за месяц</small></article>
+    </div>
+    <section class="monthly-summary-panel">
+      <div class="section-title split-title slim"><div><span class="eyebrow">Итоги месяца</span><h2>${escapeHtml(activityMonthLabel(monthly.current_month))}</h2><p>Сравнение с таким же количеством дней ${escapeHtml(activityMonthLabel(monthly.previous_month))}, чтобы неполный месяц не выглядел слабее полного.</p></div></div>
+      <div class="monthly-comparison-grid">${comparisons.map(activityComparisonCard).join('')}</div>
+      <div class="monthly-summary-details">
+        <article><span>Самый насыщенный день</span>${activityBestDayMarkup(monthly.best_day)}</article>
+        <article><span>В среднем за активный день</span><p><b>${Number(averages.text_chapters || 0).toLocaleString('ru-RU')}</b> глав · <b>${Number(averages.audio_minutes || 0).toLocaleString('ru-RU')}</b> мин. аудио · <b>${Number(averages.graphic_pages || 0).toLocaleString('ru-RU')}</b> стр.</p></article>
+      </div>
+      <article class="reading-rhythm-card"><span>Личный ориентир</span><h3>${escapeHtml(recommendation.title || 'Гибкий ритм')}</h3><p>${escapeHtml(recommendation.text || 'Выбирайте удобный темп без давления.')}</p></article>
+      <div class="section-title slim monthly-trend-title"><h3>Динамика за полгода</h3><p>Высота показывает общую активность, а подпись — число активных дней.</p></div>
+      ${activityTrendMarkup(trend)}
+    </section>
+    <section class="personal-records-panel">
+      <div class="section-title slim"><span class="eyebrow">Только ваши данные</span><h2>Личные рекорды</h2><p>Рекорды не участвуют в публичных рейтингах и сравнениях с другими читателями.</p></div>
+      ${records.length ? `<div class="personal-record-grid">${records.map(personalRecordCard).join('')}</div>` : `<p class="muted">Первый личный рекорд появится после сохранённой активности.</p>`}
+    </section>
+    <section class="reading-milestones-panel">
+      <div class="section-title split-title slim"><div><span class="eyebrow">Памятные вехи</span><h2>${activityNumber(milestones.achieved_count)} из ${activityNumber(milestones.total_count)}</h2><p>Это личная хронология, а не обязательный список задач.</p></div></div>
+      ${achievedMilestones.length ? `<div class="reading-milestone-grid">${achievedMilestones.map((item) => milestoneCard(item)).join('')}</div>` : `<p class="muted">Первая веха сохранится после первого активного дня.</p>`}
+      ${upcomingMilestones.length ? `<div class="section-title slim milestone-upcoming-title"><h3>Ближайшие вехи</h3><p>Показываются для ориентира без напоминаний и давления.</p></div><div class="reading-milestone-grid upcoming-grid">${upcomingMilestones.map((item) => milestoneCard(item, true)).join('')}</div>` : ""}
+    </section>
+    ${yearlyActivityMarkup(yearly)}
+    <section class="reading-goals-panel">
+      <div class="section-title split-title slim"><div><h2>Цели на неделю</h2><p>${activityNumber(data.completed_goals)} из ${activityNumber(data.enabled_goals)} выполнено.</p></div></div>
+      <div class="reading-goal-list">${goalItems.map(activityGoalCard).join('')}</div>
+      <form id="readingGoalsForm" class="reading-goals-form">
+        <label>Активных дней<input name="active_days_week" type="number" min="0" max="7" value="${activityNumber(goals.active_days_week)}"></label>
+        <label>Текстовых глав<input name="text_chapters_week" type="number" min="0" max="200" value="${activityNumber(goals.text_chapters_week)}"></label>
+        <label>Минут аудио<input name="audio_minutes_week" type="number" min="0" max="10080" value="${activityNumber(goals.audio_minutes_week)}"></label>
+        <label>Страниц комиксов<input name="graphic_pages_week" type="number" min="0" max="5000" value="${activityNumber(goals.graphic_pages_week)}"></label>
+        <button type="submit">Сохранить цели</button>
+      </form>
+      <small class="muted">Ноль отключает отдельную цель.</small>
+    </section>
+    <section class="reading-reminder-panel">
+      <div class="section-title slim"><span class="eyebrow">Без навязчивости</span><h2>Напоминания и отчёты</h2><p>Выберите удобное расписание. VoxLyra не повторяет один и тот же отчёт и уважает общее отключение уведомлений.</p></div>
+      <form id="readingReminderForm" class="reading-reminder-form">
+        <label class="setting-inline-check"><input type="checkbox" name="reminder_enabled" ${reminders.reminder_enabled !== false ? 'checked' : ''}><span><b>Напоминать продолжить чтение</b><small>Только после выбранного количества дней без активности.</small></span></label>
+        <div class="reminder-fields">
+          <label>Время<input name="reminder_time" type="time" value="${escapeHtml(reminders.reminder_time || '19:00')}"></label>
+          <label>После паузы<input name="inactive_days" type="number" min="1" max="30" value="${Math.max(1, Number(reminders.inactive_days || 3))}"><small>дней</small></label>
+        </div>
+        <fieldset class="weekday-fieldset"><legend>Дни напоминаний</legend><div class="weekday-choices">${readingReminderWeekdays(reminders)}</div></fieldset>
+        <label class="setting-inline-check"><input type="checkbox" name="weekly_report_enabled" ${reminders.weekly_report_enabled !== false ? 'checked' : ''}><span><b>Личный отчёт за неделю</b><small>Активные дни, главы, аудио, комиксы, серия и выполненные цели.</small></span></label>
+        <div class="reminder-fields">
+          <label>День отчёта<select name="weekly_report_weekday">${[['Понедельник',1],['Вторник',2],['Среда',3],['Четверг',4],['Пятница',5],['Суббота',6],['Воскресенье',7]].map(([label,value]) => `<option value="${value}" ${Number(reminders.weekly_report_weekday || 7) === value ? 'selected' : ''}>${label}</option>`).join('')}</select></label>
+          <label>Время отчёта<input name="weekly_report_time" type="time" value="${escapeHtml(reminders.weekly_report_time || '20:00')}"></label>
+        </div>
+        <label class="setting-inline-check"><input type="checkbox" name="monthly_report_enabled" ${reminders.monthly_report_enabled !== false ? 'checked' : ''}><span><b>Личный итог за месяц</b><small>Приходит в начале нового месяца и сравнивает завершённый месяц с предыдущим.</small></span></label>
+        <div class="reminder-fields">
+          <label>Число месяца<select name="monthly_report_day">${Array.from({length:7}, (_,index) => index + 1).map((value) => `<option value="${value}" ${Number(reminders.monthly_report_day || 1) === value ? 'selected' : ''}>${value}-е число</option>`).join('')}</select></label>
+          <label>Время итога<input name="monthly_report_time" type="time" value="${escapeHtml(reminders.monthly_report_time || '20:00')}"></label>
+        </div>
+        <button type="submit">Сохранить расписание</button>
+      </form>
+    </section>
+    <section class="activity-calendar-panel"><div class="section-title slim"><h2>Последние 35 дней</h2><p>Чем ярче ячейка, тем больше активности в этот день.</p></div><div class="activity-calendar">${calendar.map(activityCalendarCell).join('')}</div></section>`;
+}
+
 function renderLibraryTab(tab, data) {
   const content = document.getElementById('libraryContent');
   if (!content) return;
   if (tab === 'continue') {
-    const reading = data.continue_reading || [];
-    const audio = data.continue_listening || [];
-    if (!reading.length && !audio.length) {
-      content.innerHTML = emptyStateMarkup('history-empty', 'Продолжать пока нечего', 'Откройте любую главу или аудио — прогресс появится здесь.', '/catalog', 'Выбрать книгу');
+    const items = data.continue_items || [];
+    if (!items.length) {
+      content.innerHTML = emptyStateMarkup('history-empty', 'Продолжать пока нечего', 'Откройте текстовую, аудио- или графическую главу — место появится здесь.', '/catalog', 'Выбрать произведение');
       return;
     }
-    content.innerHTML = `${reading.length ? `<div class="section-title slim"><h2>Чтение</h2></div><div class="library-continue-grid">${reading.map((item) => continueCard(item,'reading')).join('')}</div>` : ''}${audio.length ? `<div class="section-title slim"><h2>Аудио</h2></div><div class="library-continue-grid">${audio.map((item) => continueCard(item,'audio')).join('')}</div>` : ''}`;
+    content.innerHTML = `<div class="section-title slim"><h2>С последнего места</h2><p>Книги, аудио и комиксы собраны по времени последнего открытия.</p></div><div class="library-continue-grid">${items.map((item) => continueCard(item, item.continue_kind)).join('')}</div>`;
+    return;
+  }
+  if (tab === 'activity') {
+    content.innerHTML = readingActivityMarkup(data.reading_dashboard || {}, data.reading_notification_settings || {});
+    return;
+  }
+  if (tab === 'journal') {
+    const items = data.reading_journal || [];
+    const summary = data.reading_journal_summary || {};
+    const context = { summary, yearLists: data.year_lists || {} };
+    const exportButtons = `<div class="reading-journal-export"><button type="button" class="secondary compact-button" data-journal-import>Восстановить из JSON</button><input type="file" id="readingJournalImportFile" accept="application/json,.json" hidden><button type="button" class="secondary compact-button" data-journal-export="json">Экспорт всей истории JSON</button><button type="button" class="secondary compact-button" data-journal-export="csv">Экспорт дневника CSV</button></div>`;
+    content.innerHTML = `<div class="section-title split-title slim"><div><span class="eyebrow">Только для вас</span><h2>Читательский дневник</h2><p>${escapeHtml(summary.privacy_note || 'Даты, оценки, циклы и списки не публикуются как отзывы.')}</p></div>${exportButtons}</div>${readingJournalImportPreviewMarkup(data.journal_import_preview)}${readingJournalImportHistoryMarkup(data.journal_import_history || [])}${readingJournalSummaryMarkup(summary)}${completionCalendarMarkup(data.completion_calendar || {}, data.year_lists || {})}${items.length ? `<div class="reading-journal-list">${items.map((item) => readingJournalCard(item, context)).join('')}</div>` : emptyStateMarkup('history-empty', 'Дневник пока пуст', 'Откройте произведение или добавьте его в библиотеку — первая запись появится автоматически.', '/catalog', 'Выбрать произведение')}`;
     return;
   }
   if (tab === 'saved') {
     const items = data.bookmarks || [];
-    content.innerHTML = items.length ? `<div class="book-list">${items.map(bookmarkCard).join('')}</div>` : emptyStateMarkup('no-bookmarks', 'Полка пока пустая', 'Добавляйте книги в библиотеку или любимое.', '/catalog', 'Открыть каталог');
+    const shelves = data.shelves || [];
+    content.innerHTML = items.length ? `<div class="section-title slim"><h2>Сохранённые произведения</h2><p>Книгу можно перенести на любую созданную полку.</p></div><div class="book-list">${items.map((item) => bookmarkCard(item, shelves)).join('')}</div>` : emptyStateMarkup('no-bookmarks', 'Полка пока пустая', 'Добавляйте книги в библиотеку или любимое.', '/catalog', 'Открыть каталог');
+    return;
+  }
+  if (tab === 'shelves') {
+    const shelves = data.shelves || [];
+    const form = `<form class="custom-shelf-form" id="customShelfForm"><input id="customShelfIcon" maxlength="8" value="📚" aria-label="Значок полки"><input id="customShelfName" maxlength="60" placeholder="Название новой полки" required><button type="submit">Создать</button></form>`;
+    const sections = shelves.map((shelf) => `<section class="custom-shelf" data-custom-shelf="${Number(shelf.id)}"><div class="section-title split-title slim"><div><span class="eyebrow">${escapeHtml(shelf.icon || '📚')} Личная полка</span><h2>${escapeHtml(shelf.name || 'Полка')}</h2><p>${Number(shelf.books_count || 0)} произведений</p></div><button type="button" class="secondary compact-button" data-shelf-delete="${Number(shelf.id)}">Удалить полку</button></div>${(shelf.books || []).length ? `<div class="custom-shelf-list">${shelf.books.map((item) => customShelfBookCard(item, shelf.id)).join('')}</div>` : '<p class="muted">Добавьте сюда книгу из вкладки «Сохранённое».</p>'}</section>`).join('');
+    content.innerHTML = `<div class="section-title slim"><h2>Мои полки</h2><p>Создавайте собственные подборки без ограничения стандартными статусами.</p></div>${form}${sections || emptyStateMarkup('no-bookmarks', 'Пользовательских полок пока нет', 'Создайте первую полку выше.')}`;
+    return;
+  }
+  if (tab === 'history') {
+    const items = data.reading_history || [];
+    content.innerHTML = `<div class="section-title split-title slim"><div><h2>История чтения</h2><p>Последние открытые главы, аудио и комиксы.</p></div>${items.length ? '<button type="button" class="secondary compact-button" id="clearReadingHistory">Очистить</button>' : ''}</div>${items.length ? `<div class="history-list">${items.map(historyCard).join('')}</div>` : emptyStateMarkup('history-empty', 'История пока пустая', 'Открытые произведения появятся здесь автоматически.')}`;
+    return;
+  }
+  if (tab === 'notes') {
+    const items = data.annotations || [];
+    content.innerHTML = `<div class="section-title slim"><h2>Заметки и цитаты</h2><p>Личные записи синхронизируются между устройствами и не видны другим читателям.</p></div>${items.length ? `<div class="annotation-list">${items.map(annotationCard).join('')}</div>` : emptyStateMarkup('no-bookmarks', 'Записей пока нет', 'Добавляйте заметки и сохраняйте цитаты прямо во время чтения.')}`;
+    return;
+  }
+  if (tab === 'subscriptions') {
+    const books = data.subscriptions?.books || [];
+    const authors = data.subscriptions?.authors || [];
+    if (!books.length && !authors.length) {
+      content.innerHTML = emptyStateMarkup('no-bookmarks', 'Подписок пока нет', 'Подпишитесь на книгу или автора, чтобы получать только нужные обновления.', '/catalog', 'Найти книгу');
+      return;
+    }
+    content.innerHTML = `${authors.length ? `<div class="section-title slim"><h2>Авторы</h2></div><div class="subscription-list">${authors.map(subscriptionAuthorCard).join('')}</div>` : ''}${books.length ? `<div class="section-title slim"><h2>Книги</h2></div><div class="subscription-list">${books.map(subscriptionBookCard).join('')}</div>` : ''}`;
     return;
   }
   const purchases = data.purchases || [];
@@ -2497,6 +3150,31 @@ function renderWalletSummary(data) {
   }
 }
 
+async function syncReadingTimezone(data) {
+  const current = data?.reading_notification_settings || {};
+  const detectedOffset = -new Date().getTimezoneOffset();
+  if (!Number.isFinite(detectedOffset) || Number(current.timezone_offset_minutes || 0) === detectedOffset) return;
+  try {
+    const result = await apiFetch('/api/library/reminders', {
+      method: 'PATCH',
+      body: JSON.stringify({
+        reminder_enabled: current.reminder_enabled !== false,
+        reminder_time: current.reminder_time || '19:00',
+        reminder_weekdays: current.reminder_weekdays || [1,2,3,4,5,6,7],
+        inactive_days: Number(current.inactive_days || 3),
+        weekly_report_enabled: current.weekly_report_enabled !== false,
+        weekly_report_weekday: Number(current.weekly_report_weekday || 7),
+        weekly_report_time: current.weekly_report_time || '20:00',
+        monthly_report_enabled: current.monthly_report_enabled !== false,
+        monthly_report_day: Number(current.monthly_report_day || 1),
+        monthly_report_time: current.monthly_report_time || '20:00',
+        timezone_offset_minutes: detectedOffset,
+      }),
+    });
+    data.reading_notification_settings = result.reading_notification_settings || current;
+  } catch (_) {}
+}
+
 async function initLibrary() {
   const page = document.getElementById('libraryPage');
   if (!page) return;
@@ -2514,6 +3192,7 @@ async function initLibrary() {
   }
   try {
     const data = await loadMeData();
+    await syncReadingTimezone(data);
     page._libraryData = data;
     renderWalletSummary(data);
     const profileName = String(data.user?.full_name || data.user?.username || '').trim();
@@ -2563,7 +3242,12 @@ async function initLibrary() {
       const hint = document.getElementById('controlCenterHint');
       if (hint) hint.textContent = data.control.owner ? 'Полное управление платформой' : 'Доступные разделы модерации';
     }
-    renderLibraryTab('continue', data);
+    const ownerBooksEntry = document.getElementById('ownerBooksEntry');
+    if (ownerBooksEntry && data.control?.owner) ownerBooksEntry.hidden = false;
+    const requestedTab = new URLSearchParams(window.location.search).get('tab');
+    const initialTab = ['continue','activity','journal','saved','shelves','history','notes','subscriptions','purchases'].includes(requestedTab) ? requestedTab : 'continue';
+    document.querySelectorAll('[data-library-tab]').forEach((button) => button.classList.toggle('active', button.dataset.libraryTab === initialTab));
+    renderLibraryTab(initialTab, data);
   } catch (_) {
     if (content) content.innerHTML = emptyStateMarkup('nothing-found', 'Не удалось открыть полку', 'Закройте Mini App и откройте его снова из бота.');
   }
@@ -2631,9 +3315,55 @@ async function shareReaderQuoteCard() {
   document.getElementById('readerQuoteDownload')?.click();
 }
 
+async function saveReaderAnnotation(annotationType) {
+  const chapterId = Number(document.getElementById('readerText')?.dataset.chapterId || 0);
+  if (!chapterId || !tgInitData()) { notify('Откройте главу внутри Telegram'); return; }
+  const isQuote = annotationType === 'quote';
+  const selectedText = String(document.getElementById('readerQuoteText')?.value || '').trim();
+  const noteText = isQuote ? '' : String(document.getElementById('readerNoteText')?.value || '').trim();
+  if (isQuote && selectedText.length < 3) { notify('Выберите текст цитаты'); return; }
+  if (!isQuote && !noteText) { notify('Введите текст заметки'); return; }
+  const button = document.getElementById(isQuote ? 'readerQuoteSave' : 'readerNoteSave');
+  if (button) button.disabled = true;
+  try {
+    await apiFetch(`/api/reader/${chapterId}/annotations`, {
+      method: 'POST',
+      body: JSON.stringify({
+        annotation_type: annotationType,
+        selected_text: selectedText,
+        note_text: noteText,
+        color: isQuote ? 'violet' : (document.getElementById('readerNoteColor')?.value || 'violet'),
+        position_percent: calcReadingPercent(),
+      }),
+    });
+    meDataPromise = null;
+    if (isQuote) notify('Цитата сохранена');
+    else {
+      notify('Заметка сохранена');
+      document.getElementById('readerNoteText').value = '';
+      document.getElementById('readerNotePanel').hidden = true;
+    }
+    await loadReaderAnnotations();
+  } catch (error) { notify(error.message || 'Не удалось сохранить запись'); }
+  finally { if (button) button.disabled = false; }
+}
+
+async function loadReaderAnnotations() {
+  const chapterId = Number(document.getElementById('readerText')?.dataset.chapterId || 0);
+  const box = document.getElementById('readerAnnotationList');
+  if (!chapterId || !box || !tgInitData()) return;
+  try {
+    const data = await apiFetch(`/api/reader/${chapterId}/annotations`);
+    const items = data.annotations || [];
+    box.hidden = !items.length;
+    box.innerHTML = items.length ? `<div class="section-title slim"><span class="eyebrow">Личные записи</span><h2>В этой главе</h2></div><div class="annotation-list">${items.map(annotationCard).join('')}</div>` : '';
+  } catch (_) { box.hidden = true; }
+}
+
 function bindReaderQuoteCards() {
   const start = document.getElementById('readerQuoteStart');
-  if (!start) return;
+  const noteStart = document.getElementById('readerNoteStart');
+  if (!start && !noteStart) return;
   const styleSelect = document.getElementById('readerQuoteStyle');
   if (styleSelect && tgInitData()) {
     apiFetch('/api/premium/status').then((data) => {
@@ -2644,7 +3374,11 @@ function bindReaderQuoteCards() {
       if (!active) styleSelect.value = 'standard';
     }).catch(() => {});
   }
-  start.addEventListener('click', () => setReaderQuoteMode(true));
+  start?.addEventListener('click', () => setReaderQuoteMode(true));
+  noteStart?.addEventListener('click', () => {
+    const panel = document.getElementById('readerNotePanel');
+    if (panel) { panel.hidden = false; panel.scrollIntoView({ behavior: 'smooth', block: 'center' }); }
+  });
   document.getElementById('readerQuoteClose')?.addEventListener('click', () => { setReaderQuoteMode(false); clearReaderQuotePreview(); });
   document.getElementById('readerQuoteCancelMode')?.addEventListener('click', () => {
     document.getElementById('readerQuoteText').value = '';
@@ -2652,7 +3386,12 @@ function bindReaderQuoteCards() {
     setReaderQuoteMode(false);
   });
   document.getElementById('readerQuoteCreate')?.addEventListener('click', createReaderQuoteCard);
+  document.getElementById('readerQuoteSave')?.addEventListener('click', () => saveReaderAnnotation('quote'));
   document.getElementById('readerQuoteShare')?.addEventListener('click', shareReaderQuoteCard);
+  document.getElementById('readerNoteSave')?.addEventListener('click', () => saveReaderAnnotation('note'));
+  const closeNote = () => { const panel = document.getElementById('readerNotePanel'); if (panel) panel.hidden = true; };
+  document.getElementById('readerNoteClose')?.addEventListener('click', closeNote);
+  document.getElementById('readerNoteCancel')?.addEventListener('click', closeNote);
   document.getElementById('readerParagraphs')?.addEventListener('click', (event) => {
     if (!event.currentTarget.classList.contains('quote-selection-mode')) return;
     const paragraph = event.target.closest('p');
@@ -2663,6 +3402,7 @@ function bindReaderQuoteCards() {
     paragraph.classList.add('quote-selected');
     document.getElementById('readerQuotePanel')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
   });
+  loadReaderAnnotations();
 }
 
 function markActiveNav() {
@@ -2699,6 +3439,92 @@ async function openChapterByNumber(form) {
 function bindEvents() {
   document.addEventListener('input', (event) => { if (event.target.id === 'catalogSearch') applyCatalogFilter(); });
   document.addEventListener('change', async (event) => {
+    if (event.target.matches('[data-journal-import-select]')) {
+      const input = event.target;
+      const dependency = String(input.dataset.journalImportDepends || '');
+      if (input.checked && dependency) {
+        const dependencyInput = [...document.querySelectorAll('#readingJournalImportPreview [data-journal-import-select]')]
+          .find((item) => String(item.value || '') === dependency);
+        if (dependencyInput) dependencyInput.checked = true;
+      }
+      if (!input.checked && String(input.value || '').startsWith('journal:')) {
+        document.querySelectorAll('#readingJournalImportPreview [data-journal-import-depends]').forEach((cycleInput) => {
+          if (String(cycleInput.dataset.journalImportDepends || '') === String(input.value || '')) cycleInput.checked = false;
+        });
+      }
+      updateReadingJournalImportSelection();
+      return;
+    }
+    if (event.target.id === 'readingJournalImportFile') {
+      const input = event.target;
+      const file = input.files?.[0];
+      if (!file) return;
+      input.disabled = true;
+      try {
+        const result = await previewReadingJournalImport(file);
+        const page = document.getElementById('libraryPage');
+        if (page?._libraryData) {
+          page._libraryData.journal_import_preview = result.preview || null;
+          renderLibraryTab('journal', page._libraryData);
+        }
+        notify(Number(result.preview?.total_changes || 0) ? 'Файл проверен — посмотрите изменения' : 'Файл проверен, новых данных нет');
+      } catch (error) {
+        notify(error.message || 'Не удалось проверить файл');
+        input.disabled = false;
+        input.value = '';
+      }
+      return;
+    }
+    if (event.target.id === 'readingActivityYear') {
+      const year = Number(event.target.value || new Date().getFullYear());
+      event.target.disabled = true;
+      try {
+        const result = await apiFetch(`/api/library/activity?year=${encodeURIComponent(year)}`);
+        const page = document.getElementById('libraryPage');
+        if (page?._libraryData) {
+          page._libraryData.reading_dashboard = result.reading_dashboard || {};
+          page._libraryData.reading_notification_settings = result.reading_notification_settings || page._libraryData.reading_notification_settings || {};
+          renderLibraryTab('activity', page._libraryData);
+        }
+      } catch (error) {
+        notify(error.message || 'Не удалось открыть выбранный год');
+        event.target.disabled = false;
+      }
+      return;
+    }
+    if (event.target.id === 'completionCalendarYear') {
+      const year = Number(event.target.value || new Date().getFullYear());
+      event.target.disabled = true;
+      try {
+        const result = await apiFetch(`/api/library/completions?year=${encodeURIComponent(year)}`);
+        const page = document.getElementById('libraryPage');
+        if (page?._libraryData) {
+          page._libraryData.completion_calendar = result.completion_calendar || {};
+          page._libraryData.year_lists = result.year_lists || {};
+          renderLibraryTab('journal', page._libraryData);
+        }
+      } catch (error) {
+        notify(error.message || 'Не удалось открыть календарь выбранного года');
+        event.target.disabled = false;
+      }
+      return;
+    }
+    if (event.target.matches('[data-shelf-book-picker]')) {
+      const shelfId = Number(event.target.value || 0);
+      const bookId = Number(event.target.dataset.shelfBookPicker || 0);
+      if (!shelfId || !bookId) return;
+      event.target.disabled = true;
+      try {
+        const result = await apiFetch(`/api/library/shelves/${shelfId}/books`, { method: 'POST', body: JSON.stringify({ book_id: bookId, enabled: true }) });
+        const page = document.getElementById('libraryPage');
+        if (page?._libraryData) page._libraryData.shelves = result.shelves || [];
+        meDataPromise = null;
+        notify('Книга добавлена на полку');
+        event.target.value = '';
+      } catch (error) { notify(error.message || 'Не удалось добавить книгу'); }
+      finally { event.target.disabled = false; }
+      return;
+    }
     if (event.target.id === 'readerTtsVoice') {
       setPref('ttsVoice', event.target.value);
       if (readerTtsStream.sessionId) await loadReaderTtsChapter(readerTtsChapterId(), readerTtsStream.requestedPlay);
@@ -2729,6 +3555,143 @@ function bindEvents() {
     }
   });
   document.addEventListener('submit', async (event) => {
+    if (event.target.id === 'readingReminderForm') {
+      event.preventDefault();
+      const form = new FormData(event.target);
+      const payload = {
+        reminder_enabled: Boolean(form.get('reminder_enabled')),
+        reminder_time: String(form.get('reminder_time') || '19:00'),
+        reminder_weekdays: form.getAll('reminder_weekdays').map((value) => Number(value)),
+        inactive_days: Number(form.get('inactive_days') || 3),
+        weekly_report_enabled: Boolean(form.get('weekly_report_enabled')),
+        weekly_report_weekday: Number(form.get('weekly_report_weekday') || 7),
+        weekly_report_time: String(form.get('weekly_report_time') || '20:00'),
+        monthly_report_enabled: Boolean(form.get('monthly_report_enabled')),
+        monthly_report_day: Number(form.get('monthly_report_day') || 1),
+        monthly_report_time: String(form.get('monthly_report_time') || '20:00'),
+        timezone_offset_minutes: -new Date().getTimezoneOffset(),
+      };
+      try {
+        const result = await apiFetch('/api/library/reminders', { method: 'PATCH', body: JSON.stringify(payload) });
+        const page = document.getElementById('libraryPage');
+        if (page?._libraryData) {
+          page._libraryData.reading_notification_settings = result.reading_notification_settings || {};
+          renderLibraryTab('activity', page._libraryData);
+        }
+        meDataPromise = null;
+        notify('Расписание сохранено');
+      } catch (error) { notify(error.message || 'Не удалось сохранить расписание'); }
+      return;
+    }
+    if (event.target.id === 'readingGoalsForm') {
+      event.preventDefault();
+      const form = new FormData(event.target);
+      const payload = {
+        active_days_week: Number(form.get('active_days_week') || 0),
+        text_chapters_week: Number(form.get('text_chapters_week') || 0),
+        audio_minutes_week: Number(form.get('audio_minutes_week') || 0),
+        graphic_pages_week: Number(form.get('graphic_pages_week') || 0),
+      };
+      try {
+        const result = await apiFetch('/api/library/goals', { method: 'PATCH', body: JSON.stringify(payload) });
+        const page = document.getElementById('libraryPage');
+        if (page?._libraryData) {
+          page._libraryData.reading_dashboard = result.reading_dashboard || {};
+          renderLibraryTab('activity', page._libraryData);
+        }
+        meDataPromise = null;
+        notify('Цели сохранены');
+      } catch (error) { notify(error.message || 'Не удалось сохранить цели'); }
+      return;
+    }
+    if (event.target.matches('[data-reading-journal-form]')) {
+      event.preventDefault();
+      const bookId = Number(event.target.dataset.readingJournalForm || 0);
+      const form = new FormData(event.target);
+      const payload = {
+        status: String(form.get('status') || 'reading'),
+        started_on: String(form.get('started_on') || ''),
+        finished_on: String(form.get('finished_on') || ''),
+        private_rating: Number(form.get('private_rating') || 0),
+        impression: String(form.get('impression') || ''),
+      };
+      const submit = event.target.querySelector('button[type="submit"]');
+      if (submit) submit.disabled = true;
+      try {
+        const result = await apiFetch(`/api/library/journal/${bookId}`, { method: 'PATCH', body: JSON.stringify(payload) });
+        const page = document.getElementById('libraryPage');
+        if (page?._libraryData) {
+          applyReadingJournalPayload(page, result);
+          renderLibraryTab('journal', page._libraryData);
+        }
+        meDataPromise = null;
+        notify('Запись дневника сохранена');
+      } catch (error) { notify(error.message || 'Не удалось сохранить запись'); }
+      finally { if (submit) submit.disabled = false; }
+      return;
+    }
+    if (event.target.matches('[data-reread-start-form]')) {
+      event.preventDefault();
+      const bookId = Number(event.target.dataset.rereadStartForm || 0);
+      const form = new FormData(event.target);
+      const submit = event.target.querySelector('button[type="submit"]');
+      if (submit) submit.disabled = true;
+      try {
+        const result = await apiFetch(`/api/library/journal/${bookId}/cycles`, { method: 'POST', body: JSON.stringify({ started_on: String(form.get('started_on') || ''), note: String(form.get('note') || '') }) });
+        const page = document.getElementById('libraryPage');
+        if (page?._libraryData) { applyReadingJournalPayload(page, result); renderLibraryTab('journal', page._libraryData); }
+        meDataPromise = null;
+        notify('Новый цикл чтения начат');
+      } catch (error) { notify(error.message || 'Не удалось начать перечитывание'); }
+      finally { if (submit) submit.disabled = false; }
+      return;
+    }
+    if (event.target.matches('[data-reading-cycle-form]')) {
+      event.preventDefault();
+      const cycleId = Number(event.target.dataset.readingCycleForm || 0);
+      const form = new FormData(event.target);
+      const submit = event.target.querySelector('button[type="submit"]');
+      if (submit) submit.disabled = true;
+      try {
+        const result = await apiFetch(`/api/library/journal/cycles/${cycleId}`, { method: 'PATCH', body: JSON.stringify({ status: String(form.get('status') || 'reading'), started_on: String(form.get('started_on') || ''), finished_on: String(form.get('finished_on') || ''), note: String(form.get('note') || '') }) });
+        const page = document.getElementById('libraryPage');
+        if (page?._libraryData) { applyReadingJournalPayload(page, result); renderLibraryTab('journal', page._libraryData); }
+        meDataPromise = null;
+        notify('Цикл сохранён');
+      } catch (error) { notify(error.message || 'Не удалось сохранить цикл'); }
+      finally { if (submit) submit.disabled = false; }
+      return;
+    }
+    if (event.target.matches('[data-year-list-form]')) {
+      event.preventDefault();
+      const bookId = Number(event.target.dataset.yearListForm || 0);
+      const form = new FormData(event.target);
+      const payload = { year: Number(form.get('year') || new Date().getFullYear()), list_codes: form.getAll('list_codes').map((value) => String(value)) };
+      const submit = event.target.querySelector('button[type="submit"]');
+      if (submit) submit.disabled = true;
+      try {
+        const result = await apiFetch(`/api/library/journal/${bookId}/year-lists`, { method: 'PUT', body: JSON.stringify(payload) });
+        const page = document.getElementById('libraryPage');
+        if (page?._libraryData) { applyReadingJournalPayload(page, result); renderLibraryTab('journal', page._libraryData); }
+        meDataPromise = null;
+        notify('Личные списки сохранены');
+      } catch (error) { notify(error.message || 'Не удалось сохранить списки года'); }
+      finally { if (submit) submit.disabled = false; }
+      return;
+    }
+    if (event.target.id === 'customShelfForm') {
+      event.preventDefault();
+      const name = String(document.getElementById('customShelfName')?.value || '').trim();
+      const icon = String(document.getElementById('customShelfIcon')?.value || '📚').trim();
+      try {
+        const result = await apiFetch('/api/library/shelves', { method: 'POST', body: JSON.stringify({ name, icon }) });
+        const page = document.getElementById('libraryPage');
+        if (page?._libraryData) { page._libraryData.shelves = result.shelves || []; renderLibraryTab('shelves', page._libraryData); }
+        meDataPromise = null;
+        notify('Полка создана');
+      } catch (error) { notify(error.message || 'Не удалось создать полку'); }
+      return;
+    }
     if (event.target.id !== 'chapterJumpForm') return;
     event.preventDefault();
     await openChapterByNumber(event.target);
@@ -2810,6 +3773,163 @@ function bindEvents() {
       return;
     }
     if (target.matches('[data-library-tab]')) { event.preventDefault(); document.querySelectorAll('[data-library-tab]').forEach((btn) => btn.classList.remove('active')); target.classList.add('active'); const page = document.getElementById('libraryPage'); if (page?._libraryData) renderLibraryTab(target.dataset.libraryTab, page._libraryData); return; }
+    if (target.matches('[data-shelf-delete]')) {
+      event.preventDefault();
+      const shelfId = Number(target.dataset.shelfDelete || 0);
+      if (!shelfId || !confirm('Удалить эту полку? Книги останутся в библиотеке.')) return;
+      try {
+        const result = await apiFetch(`/api/library/shelves/${shelfId}`, { method: 'DELETE' });
+        const page = document.getElementById('libraryPage');
+        if (page?._libraryData) { page._libraryData.shelves = result.shelves || []; renderLibraryTab('shelves', page._libraryData); }
+        meDataPromise = null;
+        notify('Полка удалена');
+      } catch (error) { notify(error.message || 'Не удалось удалить полку'); }
+      return;
+    }
+    if (target.matches('[data-shelf-remove-book]')) {
+      event.preventDefault();
+      const shelfId = Number(target.dataset.shelfId || 0);
+      const bookId = Number(target.dataset.shelfRemoveBook || 0);
+      try {
+        const result = await apiFetch(`/api/library/shelves/${shelfId}/books`, { method: 'POST', body: JSON.stringify({ book_id: bookId, enabled: false }) });
+        const page = document.getElementById('libraryPage');
+        if (page?._libraryData) { page._libraryData.shelves = result.shelves || []; renderLibraryTab('shelves', page._libraryData); }
+        meDataPromise = null;
+        notify('Книга убрана с полки');
+      } catch (error) { notify(error.message || 'Не удалось изменить полку'); }
+      return;
+    }
+    if (target.matches('[data-journal-import]')) {
+      event.preventDefault();
+      document.getElementById('readingJournalImportFile')?.click();
+      return;
+    }
+    if (target.matches('[data-journal-import-cancel]')) {
+      event.preventDefault();
+      const page = document.getElementById('libraryPage');
+      if (page?._libraryData) {
+        page._libraryData.journal_import_preview = null;
+        renderLibraryTab('journal', page._libraryData);
+      }
+      return;
+    }
+    if (target.matches('[data-journal-import-select-all], [data-journal-import-select-none]')) {
+      event.preventDefault();
+      const checked = target.matches('[data-journal-import-select-all]');
+      document.querySelectorAll('#readingJournalImportPreview [data-journal-import-select]').forEach((input) => { input.checked = checked; });
+      updateReadingJournalImportSelection();
+      return;
+    }
+    if (target.matches('[data-journal-import-apply]')) {
+      event.preventDefault();
+      const token = String(target.dataset.journalImportApply || '');
+      const selectedItems = selectedReadingJournalImportIds();
+      if (!selectedItems.length) { notify('Выберите хотя бы одну запись'); return; }
+      if (!token || target.disabled) return;
+      target.disabled = true;
+      try {
+        const result = await applyReadingJournalImport(token, selectedItems);
+        const page = document.getElementById('libraryPage');
+        if (page?._libraryData) {
+          applyReadingJournalPayload(page, result);
+          page._libraryData.journal_import_preview = null;
+          renderLibraryTab('journal', page._libraryData);
+        }
+        meDataPromise = null;
+        const appliedCount = Number(result.import_result?.total_applied || 0);
+        const skippedCount = Number(result.import_result?.skipped_after_recheck || 0);
+        const autoCount = Number((result.import_result?.auto_included_selection_ids || []).length || 0);
+        const extra = [skippedCount ? `защищено после повторной проверки: ${skippedCount}` : '', autoCount ? `служебно добавлено: ${autoCount}` : ''].filter(Boolean).join(' · ');
+        notify(`Восстановлено изменений: ${appliedCount}${extra ? ` · ${extra}` : ''}`);
+      } catch (error) {
+        notify(error.message || 'Не удалось восстановить дневник');
+        target.disabled = false;
+      }
+      return;
+    }
+    if (target.matches('[data-journal-import-backup]')) {
+      event.preventDefault();
+      const runId = Number(target.dataset.journalImportBackup || 0);
+      if (!runId || target.disabled) return;
+      target.disabled = true;
+      try { await downloadReadingJournalBackup(runId); notify('Резервная точка подготовлена'); }
+      catch (error) { notify(error.message || 'Не удалось скачать резервную точку'); }
+      finally { target.disabled = false; }
+      return;
+    }
+    if (target.matches('[data-journal-import-rollback]')) {
+      event.preventDefault();
+      const runId = Number(target.dataset.journalImportRollback || 0);
+      if (!runId || target.disabled || !confirm('Отменить этот импорт? Ручные изменения, сделанные позже, останутся без изменений.')) return;
+      target.disabled = true;
+      try {
+        const result = await rollbackReadingJournalImport(runId);
+        const page = document.getElementById('libraryPage');
+        if (page?._libraryData) { applyReadingJournalPayload(page, result); renderLibraryTab('journal', page._libraryData); }
+        meDataPromise = null;
+        const restored = Number(result.rollback_result?.total_restored || 0);
+        const protectedCount = Number(result.rollback_result?.total_protected || 0);
+        notify(protectedCount ? `Импорт отменён частично: восстановлено ${restored}, защищено ${protectedCount}` : `Импорт отменён: восстановлено ${restored}`);
+      } catch (error) { notify(error.message || 'Не удалось отменить импорт'); target.disabled = false; }
+      return;
+    }
+    if (target.matches('[data-journal-export]')) {
+      event.preventDefault();
+      await downloadReadingJournal(String(target.dataset.journalExport || 'json'));
+      return;
+    }
+    if (target.matches('[data-journal-delete]')) {
+      event.preventDefault();
+      const bookId = Number(target.dataset.journalDelete || 0);
+      if (!bookId || !confirm('Очистить личную запись дневника для этого произведения? История чтения и заметки останутся.')) return;
+      try {
+        const result = await apiFetch(`/api/library/journal/${bookId}`, { method: 'DELETE' });
+        const page = document.getElementById('libraryPage');
+        if (page?._libraryData) {
+          applyReadingJournalPayload(page, result);
+          renderLibraryTab('journal', page._libraryData);
+        }
+        meDataPromise = null;
+        notify('Запись очищена');
+      } catch (error) { notify(error.message || 'Не удалось очистить запись'); }
+      return;
+    }
+    if (target.id === 'clearReadingHistory') {
+      event.preventDefault();
+      if (!confirm('Очистить всю историю чтения? Сохранённые места останутся.')) return;
+      try {
+        await apiFetch('/api/library/history', { method: 'DELETE' });
+        const page = document.getElementById('libraryPage');
+        if (page?._libraryData) { page._libraryData.reading_history = []; renderLibraryTab('history', page._libraryData); }
+        meDataPromise = null;
+        notify('История очищена');
+      } catch (error) { notify(error.message || 'Не удалось очистить историю'); }
+      return;
+    }
+    if (target.matches('[data-history-delete]')) {
+      event.preventDefault();
+      const historyId = Number(target.dataset.historyDelete || 0);
+      try {
+        await apiFetch(`/api/library/history/${historyId}`, { method: 'DELETE' });
+        const page = document.getElementById('libraryPage');
+        if (page?._libraryData) { page._libraryData.reading_history = (page._libraryData.reading_history || []).filter((item) => Number(item.id) !== historyId); renderLibraryTab('history', page._libraryData); }
+        meDataPromise = null;
+      } catch (error) { notify(error.message || 'Не удалось удалить запись'); }
+      return;
+    }
+    if (target.matches('[data-annotation-delete]')) {
+      event.preventDefault();
+      const annotationId = Number(target.dataset.annotationDelete || 0);
+      try {
+        await apiFetch(`/api/reader/annotations/${annotationId}`, { method: 'DELETE' });
+        target.closest('[data-annotation-card]')?.remove();
+        const page = document.getElementById('libraryPage');
+        if (page?._libraryData) page._libraryData.annotations = (page._libraryData.annotations || []).filter((item) => Number(item.id) !== annotationId);
+        meDataPromise = null;
+        notify('Запись удалена');
+      } catch (error) { notify(error.message || 'Не удалось удалить запись'); }
+      return;
+    }
 
     if (target.matches('[data-card-bookmark]')) {
       event.preventDefault();
@@ -2822,6 +3942,53 @@ function bindEvents() {
         target.setAttribute('aria-pressed', 'true');
         notify('Книга добавлена в библиотеку');
       } catch (_) { notify('Откройте Mini App из бота'); }
+      return;
+    }
+
+    if (target.id === 'subscribeBook' || target.id === 'subscribeAuthor') {
+      event.preventDefault();
+      const page = document.getElementById('bookPage');
+      if (!page) return;
+      const enabled = !target.classList.contains('saved');
+      const isAuthor = target.id === 'subscribeAuthor';
+      const id = Number(isAuthor ? page.dataset.authorId : page.dataset.bookId);
+      if (!id) return;
+      target.disabled = true;
+      try {
+        await apiFetch(isAuthor ? `/api/author/${id}/subscription` : `/api/book/${id}/subscription`, {
+          method: 'POST', body: JSON.stringify({ enabled }),
+        });
+        target.classList.toggle('saved', enabled);
+        target.textContent = isAuthor
+          ? (enabled ? '✦ Вы подписаны на автора' : '✦ Подписаться на автора')
+          : (enabled ? '🔔 Вы подписаны' : '🔔 Подписаться на книгу');
+        meDataPromise = null;
+        notify(enabled ? 'Подписка включена' : 'Подписка отключена');
+      } catch (error) { notify(error.message || 'Не удалось изменить подписку'); }
+      finally { target.disabled = false; }
+      return;
+    }
+
+    if (target.matches('[data-unsubscribe-book], [data-unsubscribe-author]')) {
+      event.preventDefault();
+      const isAuthor = target.hasAttribute('data-unsubscribe-author');
+      const id = Number(isAuthor ? target.dataset.unsubscribeAuthor : target.dataset.unsubscribeBook);
+      if (!id) return;
+      target.disabled = true;
+      try {
+        await apiFetch(isAuthor ? `/api/author/${id}/subscription` : `/api/book/${id}/subscription`, {
+          method: 'POST', body: JSON.stringify({ enabled: false }),
+        });
+        target.closest('.subscription-card')?.remove();
+        const page = document.getElementById('libraryPage');
+        if (page?._libraryData) {
+          const key = isAuthor ? 'authors' : 'books';
+          page._libraryData.subscriptions[key] = (page._libraryData.subscriptions[key] || []).filter((item) => Number(item[isAuthor ? 'author_id' : 'book_id']) !== id);
+          if (!(page._libraryData.subscriptions.books || []).length && !(page._libraryData.subscriptions.authors || []).length) renderLibraryTab('subscriptions', page._libraryData);
+        }
+        meDataPromise = null;
+        notify('Подписка отключена');
+      } catch (error) { target.disabled = false; notify(error.message || 'Не удалось отписаться'); }
       return;
     }
 
@@ -3029,6 +4196,7 @@ function bindEvents() {
 document.addEventListener('DOMContentLoaded', () => {
   initVoxSplash();
   applySettings();
+  flushProgressSyncQueue().catch(() => {});
   syncNotificationPreferences();
   markActiveNav();
   bindEvents();

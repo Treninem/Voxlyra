@@ -7,7 +7,7 @@
 {% set is_graphic = content_type != 'book' %}
 {% set pricing_mode = 'premium' if book.pricing_type == 'premium' else ('free' if book.price_stars|int <= 0 else ('chapters' if book.pricing_type == 'chapters' else 'whole_book')) %}
 {% set type_label = {'comic':'Комикс','manga':'Манга','manhwa':'Манхва','webtoon':'Вебтун','graphic_novel':'Графический роман'}.get(content_type, 'Книга') %}
-<section class="book-page premium-book-page{% if is_graphic %} graphic-work-page{% endif %}" id="bookPage" data-book-id="{{ book_id }}">
+<section class="book-page premium-book-page{% if is_graphic %} graphic-work-page{% endif %}" id="bookPage" data-book-id="{{ book_id }}" data-author-id="{{ book.author_id or '' }}">
   <a class="quiet-back" href="/catalog">← Каталог</a>
   <section class="book-hero-card deluxe-book-hero">
     {{ cover(book, 'big') }}
@@ -38,6 +38,8 @@
     {% if audios %}<a class="button-link purple-btn" href="/audio/{{ audios[0].id }}">Слушать</a>{% endif %}
     <button id="bookmarkReading" class="secondary">В библиотеку</button>
     <button id="bookmarkFavorite" class="secondary">В любимое</button>
+    <button id="subscribeBook" class="secondary subscription-button">🔔 Подписаться на книгу</button>
+    {% if book.author_id %}<button id="subscribeAuthor" class="secondary subscription-button">✦ Подписаться на автора</button>{% endif %}
     {% if pricing_mode == 'premium' %}<a class="button-link premium-subscription-button full-span" href="/premium">👑 Читать по VoxLyra Premium</a>{% elif book.price_stars|int > 0 and bot_username %}<a class="button-link gold-button full-span" href="https://t.me/{{ bot_username }}?start=buy_book_{{ book.id }}">Купить всю {% if is_graphic %}графическую историю{% else %}книгу{% endif %} · {{ book.price_stars }} Stars · ≈ {{ '%.2f'|format((book.price_stars|int * buyer_star_rate_minor|default(145)) / 100) }} ₽</a>{% endif %}
     {% if bot_username and channel_promotion_enabled %}<a class="button-link secondary full-span" href="https://t.me/{{ bot_username }}?start=promote_book_{{ book.id }}">📢 Опубликовать книгу в канале</a>{% endif %}
   </div>

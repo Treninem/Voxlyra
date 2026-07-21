@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 import asyncio
+import csv
 import errno
+import io
 import hashlib
 from html import escape
 import hmac
@@ -64,10 +68,13 @@ from app.db import (
     get_admin_permissions,
     get_platform_stats,
     get_owner_today_stats,
+    record_owner_channel_promotion,
     get_platform_finance_summary,
     get_control_queue_counts,
     get_book_with_counts,
     get_bookmark,
+    get_book_subscription,
+    get_author_subscription,
     get_chapter,
     get_published_chapter_by_number,
     get_published_chapter_bounds,
@@ -98,6 +105,7 @@ from app.db import (
     sync_user_achievements,
     get_user_by_id,
     search_users,
+    search_books,
     list_grantable_books,
     resolve_chapters_by_numbers,
     grant_manual_chapter_access,
@@ -162,6 +170,7 @@ from app.db import (
     set_review_status,
     set_complaint_status,
     set_book_publication_status,
+    set_book_blocked,
     resolve_book_moderation,
     resolve_comment_complaints,
     publish_book_content,
@@ -185,8 +194,43 @@ from app.db import (
     record_recommendation_event,
     record_recommendation_events,
     list_user_bookmarks,
+    list_user_continue_graphics,
     list_user_continue_listening,
     list_user_continue_reading,
+    list_user_shelves,
+    create_user_shelf,
+    update_user_shelf,
+    delete_user_shelf,
+    set_user_shelf_book,
+    list_user_reading_history,
+    delete_user_reading_history,
+    create_reader_annotation,
+    update_reader_annotation,
+    delete_reader_annotation,
+    list_reader_annotations,
+    get_progress_sync_snapshot,
+    get_user_reading_dashboard,
+    get_user_reading_notification_settings,
+    list_user_reading_journal,
+    get_user_reading_journal_summary,
+    update_user_reading_journal,
+    delete_user_reading_journal_entry,
+    get_user_reading_export_data,
+    prepare_user_reading_import,
+    apply_user_reading_import,
+    list_user_reading_import_history,
+    get_user_reading_import_backup,
+    rollback_user_reading_import,
+    list_user_reading_cycles,
+    get_user_reread_summary,
+    start_user_reread_cycle,
+    update_user_reading_cycle,
+    set_user_year_lists,
+    get_user_year_lists,
+    get_user_completion_calendar,
+    set_user_reading_goals,
+    set_user_reading_notification_settings,
+    list_user_subscriptions,
     list_user_purchases,
     record_reader_ad_event,
     remove_bookmark,
@@ -215,6 +259,8 @@ from app.db import (
     set_book_duplicate_override,
     save_reading_progress,
     save_tts_progress,
+    set_author_subscription,
+    set_book_subscription,
     set_bookmark,
     set_chapter_status,
     set_graphic_chapter_status,
@@ -228,6 +274,7 @@ from app.db import (
     user_can_access_graphic,
 )
 from app.services.tma_auth import TMAAuthError, TMAUser, authenticate_init_data
+from app.services.publication import post_book_to_channel
 from app.permissions import PERMISSION_BY_CODE
 from app.keyboards import author_book_card_menu
 from app.services.diagnostics import diagnostics_summary
@@ -281,15 +328,28 @@ from app.services.chunked_upload import (
 from app.services.library_import_queue import (
     IMPORT_UPLOAD_ROOT,
     calculate_archive_hash,
+    cancel_import_job,
     ensure_import_queue_schema,
     enqueue_import_job,
+    get_import_queue_control_state,
+    list_import_jobs,
+    retry_import_job,
+    set_import_queue_mode,
 )
 from app.services.library_import_upload import (
     LibraryImportUploadTokenError,
     create_library_import_upload_token,
     verify_library_import_upload_token,
 )
-from app.services.library_manager import get_import_settings
+from app.services.library_manager import (
+    audit_batch_publication,
+    get_batch,
+    get_import_settings,
+    list_batch_duplicates,
+    publish_batch,
+    resolve_duplicate,
+    rollback_batch_drafts,
+)
 from app.services.moderation_learning import (
     get_moderation_learning_summary,
     record_moderation_decision,
@@ -571,6 +631,34 @@ async def _notify_new_achievements(user: TMAUser, payload: dict[str, Any]) -> No
 
 def _rows_to_dicts(rows) -> list[dict[str, Any]]:
     return [_row_to_dict(row) for row in rows]
+
+
+def _continue_payload(
+    reading_rows: list[Any],
+    listening_rows: list[Any],
+    graphic_rows: list[Any],
+    *,
+    limit: int = 24,
+) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for row in reading_rows:
+        item = _row_to_dict(row)
+        item["continue_kind"] = "reading"
+        item["continue_url"] = f"/reader/{int(item.get('chapter_id') or 0)}"
+        items.append(item)
+    for row in listening_rows:
+        item = _row_to_dict(row)
+        item["continue_kind"] = "audio"
+        item["continue_url"] = f"/audio/{int(item.get('audio_chapter_id') or 0)}"
+        items.append(item)
+    for row in graphic_rows:
+        item = _row_to_dict(row)
+        item["continue_kind"] = "graphic"
+        page = max(1, int(item.get("page_number") or 1))
+        item["continue_url"] = f"/comic/{int(item.get('graphic_chapter_id') or 0)}#page={page}"
+        items.append(item)
+    items.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+    return items[: max(1, int(limit))]
 
 
 async def _tma_user(init_data: str | None) -> TMAUser:
@@ -873,27 +961,52 @@ def create_app() -> FastAPI:
         await ensure_import_queue_schema()
         cfg = await get_import_settings()
         learning = await get_moderation_learning_summary()
+        can_manage = bool(is_owner or "library_import_manage" in permissions)
+        jobs = await list_import_jobs(
+            20,
+            actor_user_id=None if can_manage else int(user.app_user_id),
+        )
+        queue_control = await get_import_queue_control_state()
         async with connect() as db:
-            cur = await db.execute(
-                """SELECT status, COUNT(*) AS count FROM library_import_jobs
-                   GROUP BY status"""
-            )
+            if can_manage:
+                cur = await db.execute(
+                    """SELECT status, COUNT(*) AS count FROM library_import_jobs
+                       GROUP BY status"""
+                )
+                cur_batches = await db.execute(
+                    """SELECT id, archive_name, status, total_found, imported_count,
+                              replaced_count, renumbered_count, duplicate_count,
+                              error_count, created_at, completed_at
+                       FROM library_import_batches ORDER BY id DESC LIMIT 8"""
+                )
+            else:
+                cur = await db.execute(
+                    """SELECT status, COUNT(*) AS count FROM library_import_jobs
+                       WHERE actor_user_id=? GROUP BY status""",
+                    (int(user.app_user_id),),
+                )
+                cur_batches = await db.execute(
+                    """SELECT id, archive_name, status, total_found, imported_count,
+                              replaced_count, renumbered_count, duplicate_count,
+                              error_count, created_at, completed_at
+                       FROM library_import_batches
+                       WHERE imported_by_user_id=? ORDER BY id DESC LIMIT 8""",
+                    (int(user.app_user_id),),
+                )
             queue = {str(row["status"]): int(row["count"] or 0) for row in await cur.fetchall()}
-            cur = await db.execute(
-                """SELECT id, archive_name, status, total_found, imported_count,
-                          replaced_count, renumbered_count, duplicate_count,
-                          error_count, created_at, completed_at
-                   FROM library_import_batches ORDER BY id DESC LIMIT 8"""
-            )
-            batches = [dict(row) for row in await cur.fetchall()]
+            batches = [dict(row) for row in await cur_batches.fetchall()]
         return {
             "can_bulk_import": bool(is_owner or "library_bulk_import" in permissions),
-            "can_manage": bool(is_owner or "library_import_manage" in permissions),
+            "can_manage": can_manage,
+            "can_control_queue": bool(is_owner),
+            "queue_control": queue_control,
             "settings": dict(cfg),
             "learning": learning,
             "queue": queue,
+            "jobs": jobs,
             "batches": batches,
             "telegram_id": int(user.telegram_id),
+            "app_user_id": int(user.app_user_id),
         }
 
     @app.post("/api/control/library-import/session")
@@ -931,6 +1044,30 @@ def create_app() -> FastAPI:
             "upload_url": f"/library-import-upload?token={quote(token, safe='')}",
         }
 
+    @app.patch("/api/control/library-import/queue-mode")
+    async def api_control_library_import_queue_mode(
+        request: Request,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user, is_owner, _ = await control_session(x_telegram_init_data, "library_import_manage")
+        if not is_owner:
+            raise HTTPException(status_code=403, detail="Режим всей очереди может менять только владелец.")
+        payload = await request.json()
+        mode = str(payload.get("mode") or "") if isinstance(payload, dict) else ""
+        if mode not in {"running", "paused", "maintenance"}:
+            raise HTTPException(status_code=400, detail="Выберите режим running, paused или maintenance.")
+        before = await get_import_queue_control_state()
+        state = await set_import_queue_mode(mode, actor_user_id=int(user.app_user_id))
+        await add_audit(
+            user.app_user_id,
+            f"library_import_queue_{mode}",
+            "settings",
+            "library_import_queue_mode",
+            str(before.get("mode") or "running"),
+            mode,
+        )
+        return {"ok": True, "queue_control": state}
+
     @app.patch("/api/control/library-import/auto-moderation")
     async def api_control_library_import_auto_moderation(
         request: Request,
@@ -950,6 +1087,200 @@ def create_app() -> FastAPI:
             "1" if enabled else "0",
         )
         return {"ok": True, "enabled": enabled}
+
+    @app.get("/api/control/library-import/batch/{batch_id}")
+    async def api_control_library_import_batch(
+        batch_id: int,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user, is_owner, permissions = await control_session(
+            x_telegram_init_data,
+            "library_import_manage",
+            "library_bulk_import",
+        )
+        batch = await get_batch(batch_id)
+        if not batch:
+            raise HTTPException(status_code=404, detail="Пакет импорта не найден.")
+        can_manage = bool(is_owner or "library_import_manage" in permissions)
+        if not can_manage and int(batch["imported_by_user_id"] or 0) != int(user.app_user_id):
+            raise HTTPException(status_code=403, detail="Этот пакет загружен другим пользователем.")
+        try:
+            errors = json.loads(str(batch["errors_json"] or "[]"))
+            if not isinstance(errors, list):
+                errors = []
+        except (TypeError, ValueError, json.JSONDecodeError):
+            errors = []
+        duplicates = [dict(row) for row in await list_batch_duplicates(batch_id, pending_only=False)]
+        audit = await audit_batch_publication(batch_id)
+        async with connect() as db:
+            cur = await db.execute(
+                """SELECT publication_status, COUNT(*) AS count
+                   FROM books WHERE import_batch_id=?
+                   GROUP BY publication_status""",
+                (int(batch_id),),
+            )
+            book_statuses = {str(row["publication_status"]): int(row["count"] or 0) for row in await cur.fetchall()}
+        return {
+            "ok": True,
+            "can_manage": can_manage,
+            "batch": dict(batch),
+            "errors": errors[:200],
+            "duplicates": duplicates,
+            "audit": audit,
+            "book_statuses": book_statuses,
+        }
+
+    @app.post("/api/control/library-import/job/{job_id}/cancel")
+    async def api_control_library_import_cancel_job(
+        job_id: int,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user, is_owner, permissions = await control_session(
+            x_telegram_init_data,
+            "library_import_manage",
+            "library_bulk_import",
+        )
+        result = await cancel_import_job(
+            job_id,
+            actor_user_id=int(user.app_user_id),
+            allow_any=bool(is_owner or "library_import_manage" in permissions),
+        )
+        reason = str(result.get("reason") or "")
+        if reason == "not_found":
+            raise HTTPException(status_code=404, detail="Задание импорта не найдено.")
+        if reason == "forbidden":
+            raise HTTPException(status_code=403, detail="Можно остановить только своё задание.")
+        if reason in {"not_queued", "not_cancellable", "race"}:
+            raise HTTPException(status_code=409, detail="Задание уже завершено или остановлено.")
+        await add_audit(
+            user.app_user_id,
+            "library_import_job_cancelled",
+            "library_import_job",
+            str(job_id),
+            None,
+            str(result.get("status") or "cancelled"),
+        )
+        return result
+
+    @app.post("/api/control/library-import/job/{job_id}/retry")
+    async def api_control_library_import_retry_job(
+        job_id: int,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user, is_owner, permissions = await control_session(
+            x_telegram_init_data,
+            "library_import_manage",
+            "library_bulk_import",
+        )
+        result = await retry_import_job(
+            job_id,
+            actor_user_id=int(user.app_user_id),
+            allow_any=bool(is_owner or "library_import_manage" in permissions),
+        )
+        reason = str(result.get("reason") or "")
+        if reason == "not_found":
+            raise HTTPException(status_code=404, detail="Задание импорта не найдено.")
+        if reason == "forbidden":
+            raise HTTPException(status_code=403, detail="Можно повторить только своё задание.")
+        if reason == "archive_expired":
+            raise HTTPException(status_code=410, detail="Срок хранения исходного ZIP истёк. Загрузите архив повторно.")
+        if reason in {"not_failed", "not_retryable", "race"}:
+            raise HTTPException(status_code=409, detail="Задание уже запущено или завершено.")
+        await add_audit(
+            user.app_user_id,
+            "library_import_job_retried",
+            "library_import_job",
+            str(job_id),
+            "failed",
+            "queued",
+        )
+        return result
+
+    @app.post("/api/control/library-import/batch/{batch_id}/audit")
+    async def api_control_library_import_audit(
+        batch_id: int,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user, _, _ = await control_session(x_telegram_init_data, "library_import_manage")
+        if not await get_batch(batch_id):
+            raise HTTPException(status_code=404, detail="Пакет импорта не найден.")
+        audit = await audit_batch_publication(batch_id)
+        await add_audit(
+            user.app_user_id,
+            "library_import_batch_audited",
+            "library_import_batch",
+            str(batch_id),
+            None,
+            f"ready={audit['ready']};blocked={audit['blocked']}",
+        )
+        return {"ok": True, "audit": audit}
+
+    @app.post("/api/control/library-import/batch/{batch_id}/publish")
+    async def api_control_library_import_publish(
+        batch_id: int,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user, _, _ = await control_session(x_telegram_init_data, "library_import_manage")
+        if not await get_batch(batch_id):
+            raise HTTPException(status_code=404, detail="Пакет импорта не найден.")
+        result = await publish_batch(batch_id)
+        await add_audit(
+            user.app_user_id,
+            "library_import_batch_published_web",
+            "library_import_batch",
+            str(batch_id),
+            None,
+            json.dumps(result, ensure_ascii=False, default=str)[:1000],
+        )
+        return {"ok": True, **result}
+
+    @app.post("/api/control/library-import/batch/{batch_id}/rollback")
+    async def api_control_library_import_rollback(
+        batch_id: int,
+        request: Request,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user, _, _ = await control_session(x_telegram_init_data, "library_import_manage")
+        payload = await request.json()
+        if not isinstance(payload, dict) or payload.get("confirm") is not True:
+            raise HTTPException(status_code=400, detail="Подтвердите откат пакета.")
+        if not await get_batch(batch_id):
+            raise HTTPException(status_code=404, detail="Пакет импорта не найден.")
+        result = await rollback_batch_drafts(batch_id)
+        await add_audit(
+            user.app_user_id,
+            "library_import_batch_rolled_back_web",
+            "library_import_batch",
+            str(batch_id),
+            None,
+            json.dumps(result, ensure_ascii=False),
+        )
+        return {"ok": True, **result}
+
+    @app.post("/api/control/library-import/duplicate/{duplicate_id}")
+    async def api_control_library_import_duplicate(
+        duplicate_id: int,
+        request: Request,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user, _, _ = await control_session(x_telegram_init_data, "library_import_manage")
+        payload = await request.json()
+        action = str(payload.get("action") or "") if isinstance(payload, dict) else ""
+        if action not in {"skip", "replace"}:
+            raise HTTPException(status_code=400, detail="Выберите: пропустить или заменить.")
+        try:
+            result = await resolve_duplicate(duplicate_id, action)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        await add_audit(
+            user.app_user_id,
+            f"library_import_duplicate_{action}_web",
+            "library_import_duplicate",
+            str(duplicate_id),
+            None,
+            str(result.get("book_id") or ""),
+        )
+        return {"ok": True, **result}
 
     @app.get("/library-import-upload", response_class=HTMLResponse)
     async def library_import_upload_page(request: Request, token: str = ""):
@@ -1711,8 +2042,23 @@ def create_app() -> FastAPI:
         bookmarks = await list_user_bookmarks(user.app_user_id, limit=40, published_only=True)
         continue_reading = await list_user_continue_reading(user.app_user_id, limit=12)
         continue_listening = await list_user_continue_listening(user.app_user_id, limit=12)
+        continue_graphics = await list_user_continue_graphics(user.app_user_id, limit=12)
+        continue_items = _continue_payload(continue_reading, continue_listening, continue_graphics, limit=24)
+        subscriptions = await list_user_subscriptions(user.app_user_id, limit=100)
         purchases = await list_user_purchases(user.app_user_id, limit=30)
         chapter_package_balances = await list_user_chapter_package_balances(user.app_user_id)
+        shelves = await list_user_shelves(user.app_user_id, limit=30)
+        reading_history = await list_user_reading_history(user.app_user_id, limit=80)
+        annotations = await list_reader_annotations(user.app_user_id, limit=120)
+        progress_sync = await get_progress_sync_snapshot(user.app_user_id, limit=200)
+        reading_dashboard = await get_user_reading_dashboard(user.app_user_id)
+        reading_notification_settings = await get_user_reading_notification_settings(user.app_user_id)
+        reading_journal = await list_user_reading_journal(user.app_user_id, limit=250)
+        reading_journal_summary = await get_user_reading_journal_summary(user.app_user_id)
+        completion_calendar = await get_user_completion_calendar(user.app_user_id)
+        year_lists = await get_user_year_lists(user.app_user_id)
+        reread_summary = await get_user_reread_summary(user.app_user_id)
+        journal_import_history = await list_user_reading_import_history(user.app_user_id)
         author_profile = await get_author_profile(user.app_user_id)
         is_owner = user.telegram_id in settings.owner_ids
         permissions = set(PERMISSION_BY_CODE) if is_owner else await get_admin_permissions(user.app_user_id)
@@ -1733,8 +2079,26 @@ def create_app() -> FastAPI:
             "bookmarks": _rows_to_dicts(bookmarks),
             "continue_reading": _rows_to_dicts(continue_reading),
             "continue_listening": _rows_to_dicts(continue_listening),
+            "continue_graphics": _rows_to_dicts(continue_graphics),
+            "continue_items": continue_items,
+            "subscriptions": {
+                "books": _rows_to_dicts(subscriptions.get("books") or []),
+                "authors": _rows_to_dicts(subscriptions.get("authors") or []),
+            },
             "purchases": _rows_to_dicts(purchases),
             "chapter_package_balances": _rows_to_dicts(chapter_package_balances),
+            "shelves": shelves,
+            "reading_history": _rows_to_dicts(reading_history),
+            "annotations": _rows_to_dicts(annotations),
+            "progress_sync": progress_sync,
+            "reading_dashboard": reading_dashboard,
+            "reading_notification_settings": reading_notification_settings,
+            "reading_journal": reading_journal,
+            "reading_journal_summary": reading_journal_summary,
+            "completion_calendar": completion_calendar,
+            "year_lists": year_lists,
+            "reread_summary": reread_summary,
+            "journal_import_history": journal_import_history,
             "preferences": preferences,
             "achievements": achievements,
             "premium": premium,
@@ -1749,6 +2113,598 @@ def create_app() -> FastAPI:
                 "permissions": sorted(permissions),
             },
         }
+
+    @app.get("/api/library/organizer")
+    async def api_library_organizer(x_telegram_init_data: str | None = Header(default=None)):
+        user = await _tma_user(x_telegram_init_data)
+        return {
+            "ok": True,
+            "shelves": await list_user_shelves(user.app_user_id, limit=30),
+            "reading_history": _rows_to_dicts(await list_user_reading_history(user.app_user_id, limit=100)),
+            "annotations": _rows_to_dicts(await list_reader_annotations(user.app_user_id, limit=200)),
+            "progress_sync": await get_progress_sync_snapshot(user.app_user_id, limit=300),
+            "reading_dashboard": await get_user_reading_dashboard(user.app_user_id),
+            "reading_notification_settings": await get_user_reading_notification_settings(user.app_user_id),
+            "reading_journal": await list_user_reading_journal(user.app_user_id, limit=500),
+            "reading_journal_summary": await get_user_reading_journal_summary(user.app_user_id),
+            "completion_calendar": await get_user_completion_calendar(user.app_user_id),
+            "year_lists": await get_user_year_lists(user.app_user_id),
+            "reread_summary": await get_user_reread_summary(user.app_user_id),
+            "journal_import_history": await list_user_reading_import_history(user.app_user_id),
+        }
+
+    @app.get("/api/library/journal")
+    async def api_library_journal(
+        year: int | None = None,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        if year is not None and (year < 1900 or year > datetime.now().year):
+            raise HTTPException(status_code=400, detail="Год указан неверно.")
+        return {
+            "ok": True,
+            "reading_journal": await list_user_reading_journal(user.app_user_id, limit=500),
+            "reading_journal_summary": await get_user_reading_journal_summary(user.app_user_id),
+            "completion_calendar": await get_user_completion_calendar(user.app_user_id, year=year),
+            "year_lists": await get_user_year_lists(user.app_user_id, list_year=year),
+            "reread_summary": await get_user_reread_summary(user.app_user_id),
+            "journal_import_history": await list_user_reading_import_history(user.app_user_id),
+        }
+
+    @app.patch("/api/library/journal/{book_id}")
+    async def api_library_journal_update(
+        book_id: int,
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        try:
+            entry = await update_user_reading_journal(
+                user.app_user_id,
+                book_id,
+                status=payload.get("status") or "reading",
+                started_on=payload.get("started_on") or "",
+                finished_on=payload.get("finished_on") or "",
+                impression=payload.get("impression") or "",
+                private_rating=int(payload.get("private_rating") or 0),
+            )
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "ok": True,
+            "entry": entry,
+            "reading_journal": await list_user_reading_journal(user.app_user_id, limit=500),
+            "reading_journal_summary": await get_user_reading_journal_summary(user.app_user_id),
+            "completion_calendar": await get_user_completion_calendar(user.app_user_id),
+            "year_lists": await get_user_year_lists(user.app_user_id),
+            "reread_summary": await get_user_reread_summary(user.app_user_id),
+        }
+
+    @app.delete("/api/library/journal/{book_id}")
+    async def api_library_journal_delete(
+        book_id: int,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        deleted = await delete_user_reading_journal_entry(user.app_user_id, book_id)
+        return {
+            "ok": True,
+            "deleted": deleted,
+            "reading_journal": await list_user_reading_journal(user.app_user_id, limit=500),
+            "reading_journal_summary": await get_user_reading_journal_summary(user.app_user_id),
+            "completion_calendar": await get_user_completion_calendar(user.app_user_id),
+            "year_lists": await get_user_year_lists(user.app_user_id),
+            "reread_summary": await get_user_reread_summary(user.app_user_id),
+        }
+
+    @app.post("/api/library/journal/{book_id}/cycles")
+    async def api_library_reread_start(
+        book_id: int,
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        try:
+            cycle = await start_user_reread_cycle(
+                user.app_user_id,
+                book_id,
+                started_on=payload.get("started_on") or "",
+                note=payload.get("note") or "",
+            )
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "ok": True,
+            "cycle": cycle,
+            "reading_journal": await list_user_reading_journal(user.app_user_id, limit=500),
+            "reading_journal_summary": await get_user_reading_journal_summary(user.app_user_id),
+            "completion_calendar": await get_user_completion_calendar(user.app_user_id),
+            "year_lists": await get_user_year_lists(user.app_user_id),
+            "reread_summary": await get_user_reread_summary(user.app_user_id),
+        }
+
+    @app.patch("/api/library/journal/cycles/{cycle_id}")
+    async def api_library_cycle_update(
+        cycle_id: int,
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        try:
+            cycle = await update_user_reading_cycle(
+                user.app_user_id,
+                cycle_id,
+                status=payload.get("status") or "reading",
+                started_on=payload.get("started_on") or "",
+                finished_on=payload.get("finished_on") or "",
+                note=payload.get("note") or "",
+            )
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "ok": True,
+            "cycle": cycle,
+            "reading_journal": await list_user_reading_journal(user.app_user_id, limit=500),
+            "reading_journal_summary": await get_user_reading_journal_summary(user.app_user_id),
+            "completion_calendar": await get_user_completion_calendar(user.app_user_id),
+            "year_lists": await get_user_year_lists(user.app_user_id),
+            "reread_summary": await get_user_reread_summary(user.app_user_id),
+        }
+
+    @app.put("/api/library/journal/{book_id}/year-lists")
+    async def api_library_year_lists_update(
+        book_id: int,
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        try:
+            memberships = await set_user_year_lists(
+                user.app_user_id,
+                book_id,
+                list_year=int(payload.get("year") or datetime.now().year),
+                list_codes=payload.get("list_codes") or [],
+            )
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        selected_year = int(payload.get("year") or datetime.now().year)
+        return {
+            "ok": True,
+            "memberships": memberships,
+            "reading_journal": await list_user_reading_journal(user.app_user_id, limit=500),
+            "reading_journal_summary": await get_user_reading_journal_summary(user.app_user_id),
+            "completion_calendar": await get_user_completion_calendar(user.app_user_id, year=selected_year),
+            "year_lists": await get_user_year_lists(user.app_user_id, list_year=selected_year),
+            "reread_summary": await get_user_reread_summary(user.app_user_id),
+        }
+
+    @app.get("/api/library/completions")
+    async def api_library_completions(
+        year: int | None = None,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        if year is not None and (year < 1900 or year > datetime.now().year):
+            raise HTTPException(status_code=400, detail="Год указан неверно.")
+        return {
+            "ok": True,
+            "completion_calendar": await get_user_completion_calendar(user.app_user_id, year=year),
+            "year_lists": await get_user_year_lists(user.app_user_id, list_year=year),
+        }
+
+    @app.post("/api/library/journal/import/preview")
+    async def api_library_journal_import_preview(
+        file: UploadFile = File(...),
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        filename = str(file.filename or '').strip()
+        if filename and not filename.lower().endswith('.json'):
+            raise HTTPException(status_code=400, detail="Для восстановления выберите JSON-файл экспорта VoxLyra.")
+        max_bytes = 5 * 1024 * 1024
+        raw = await file.read(max_bytes + 1)
+        await file.close()
+        if not raw:
+            raise HTTPException(status_code=400, detail="Выбранный файл пуст.")
+        if len(raw) > max_bytes:
+            raise HTTPException(status_code=413, detail="JSON-файл больше допустимых 5 МБ.")
+        try:
+            payload = json.loads(raw.decode('utf-8-sig'))
+            preview = await prepare_user_reading_import(user.app_user_id, payload)
+        except UnicodeDecodeError as exc:
+            raise HTTPException(status_code=400, detail="JSON-файл должен быть сохранён в UTF-8.") from exc
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail="Файл содержит повреждённый JSON.") from exc
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"ok": True, "preview": preview}
+
+    @app.post("/api/library/journal/import/apply")
+    async def api_library_journal_import_apply(
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        try:
+            result = await apply_user_reading_import(
+                user.app_user_id,
+                payload.get('preview_token'),
+                payload.get('selected_items'),
+            )
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "ok": True,
+            "import_result": result,
+            "reading_journal": await list_user_reading_journal(user.app_user_id, limit=500),
+            "reading_journal_summary": await get_user_reading_journal_summary(user.app_user_id),
+            "completion_calendar": await get_user_completion_calendar(user.app_user_id),
+            "year_lists": await get_user_year_lists(user.app_user_id),
+            "reread_summary": await get_user_reread_summary(user.app_user_id),
+            "journal_import_history": await list_user_reading_import_history(user.app_user_id),
+        }
+
+    @app.get("/api/library/journal/import/{run_id}/backup")
+    async def api_library_journal_import_backup(
+        run_id: int,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        try:
+            backup = await get_user_reading_import_backup(user.app_user_id, run_id)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        payload = json.dumps(backup, ensure_ascii=False, indent=2).encode("utf-8")
+        return Response(
+            content=payload,
+            media_type="application/json; charset=utf-8",
+            headers={
+                "Content-Disposition": f'attachment; filename="voxlyra-before-import-{run_id}.json"',
+                "Cache-Control": "no-store, max-age=0",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
+    @app.post("/api/library/journal/import/{run_id}/rollback")
+    async def api_library_journal_import_rollback(
+        run_id: int,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        try:
+            result = await rollback_user_reading_import(user.app_user_id, run_id)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "ok": True,
+            "rollback_result": result,
+            "reading_journal": await list_user_reading_journal(user.app_user_id, limit=500),
+            "reading_journal_summary": await get_user_reading_journal_summary(user.app_user_id),
+            "completion_calendar": await get_user_completion_calendar(user.app_user_id),
+            "year_lists": await get_user_year_lists(user.app_user_id),
+            "reread_summary": await get_user_reread_summary(user.app_user_id),
+            "journal_import_history": await list_user_reading_import_history(user.app_user_id),
+        }
+
+    @app.get("/api/library/journal/export")
+    async def api_library_journal_export(
+        format: str = "json",
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        export_data = await get_user_reading_export_data(user.app_user_id)
+        safe_format = str(format or "json").lower()
+        date_stamp = datetime.now().strftime("%Y-%m-%d")
+        headers = {
+            "Cache-Control": "no-store, max-age=0",
+            "X-Content-Type-Options": "nosniff",
+        }
+        if safe_format == "csv":
+            stream = io.StringIO(newline="")
+            writer = csv.writer(stream, delimiter=";")
+            writer.writerow([
+                "Произведение", "Автор", "Статус", "Дата начала", "Дата завершения",
+                "Личная оценка", "Впечатление", "Последняя активность",
+            ])
+            for item in export_data.get("journal") or []:
+                writer.writerow([
+                    item.get("title") or "", item.get("author") or "", item.get("status") or "",
+                    item.get("started_on") or "", item.get("finished_on") or "",
+                    item.get("private_rating") or 0, item.get("impression") or "",
+                    item.get("last_activity_at") or "",
+                ])
+            headers["Content-Disposition"] = f'attachment; filename="voxlyra-reading-diary-{date_stamp}.csv"'
+            return Response(content=("\ufeff" + stream.getvalue()).encode("utf-8"), media_type="text/csv; charset=utf-8", headers=headers)
+        if safe_format != "json":
+            raise HTTPException(status_code=400, detail="Доступны форматы JSON и CSV.")
+        headers["Content-Disposition"] = f'attachment; filename="voxlyra-reading-history-{date_stamp}.json"'
+        return Response(
+            content=json.dumps(export_data, ensure_ascii=False, indent=2).encode("utf-8"),
+            media_type="application/json; charset=utf-8",
+            headers=headers,
+        )
+
+    @app.get("/api/library/activity")
+    async def api_library_activity(
+        year: int | None = None,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        if year is not None and (year < 1970 or year > datetime.now().year):
+            raise HTTPException(status_code=400, detail="Недоступный год активности.")
+        return {
+            "ok": True,
+            "reading_dashboard": await get_user_reading_dashboard(user.app_user_id, activity_year=year),
+            "reading_notification_settings": await get_user_reading_notification_settings(user.app_user_id),
+        }
+
+    @app.patch("/api/library/reminders")
+    async def api_library_reminders(
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        current_notification_settings = await get_user_reading_notification_settings(user.app_user_id)
+        def payload_bool(key: str, default: bool = False) -> bool:
+            value = payload.get(key, default)
+            if isinstance(value, bool):
+                return value
+            return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+        try:
+            settings_payload = await set_user_reading_notification_settings(
+                user.app_user_id,
+                reminder_enabled=payload_bool("reminder_enabled"),
+                reminder_time=payload.get("reminder_time") or "19:00",
+                reminder_weekdays=payload.get("reminder_weekdays") or [],
+                inactive_days=int(payload.get("inactive_days") or 3),
+                weekly_report_enabled=payload_bool("weekly_report_enabled"),
+                weekly_report_weekday=int(payload.get("weekly_report_weekday") or 7),
+                weekly_report_time=payload.get("weekly_report_time") or "20:00",
+                monthly_report_enabled=payload_bool(
+                    "monthly_report_enabled", bool(current_notification_settings.get("monthly_report_enabled", True))
+                ),
+                monthly_report_day=int(
+                    payload.get("monthly_report_day", current_notification_settings.get("monthly_report_day", 1)) or 1
+                ),
+                monthly_report_time=(
+                    payload.get("monthly_report_time")
+                    or current_notification_settings.get("monthly_report_time")
+                    or "20:00"
+                ),
+                timezone_offset_minutes=int(payload.get("timezone_offset_minutes") or 0),
+            )
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"ok": True, "reading_notification_settings": settings_payload}
+
+    @app.patch("/api/library/goals")
+    async def api_library_goals(
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        try:
+            await set_user_reading_goals(
+                user.app_user_id,
+                active_days_week=int(payload.get("active_days_week") or 0),
+                text_chapters_week=int(payload.get("text_chapters_week") or 0),
+                audio_minutes_week=int(payload.get("audio_minutes_week") or 0),
+                graphic_pages_week=int(payload.get("graphic_pages_week") or 0),
+            )
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"ok": True, "reading_dashboard": await get_user_reading_dashboard(user.app_user_id)}
+
+    @app.post("/api/library/shelves")
+    async def api_library_create_shelf(
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        try:
+            row = await create_user_shelf(
+                user.app_user_id,
+                str(payload.get("name") or ""),
+                str(payload.get("icon") or "📚"),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"ok": True, "shelf": _row_to_dict(row), "shelves": await list_user_shelves(user.app_user_id)}
+
+    @app.patch("/api/library/shelves/{shelf_id}")
+    async def api_library_update_shelf(
+        shelf_id: int,
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        try:
+            row = await update_user_shelf(
+                user.app_user_id,
+                shelf_id,
+                name=payload.get("name") if "name" in payload else None,
+                icon=payload.get("icon") if "icon" in payload else None,
+                position=payload.get("position") if "position" in payload else None,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if not row:
+            raise HTTPException(status_code=404, detail="Полка не найдена.")
+        return {"ok": True, "shelf": _row_to_dict(row), "shelves": await list_user_shelves(user.app_user_id)}
+
+    @app.delete("/api/library/shelves/{shelf_id}")
+    async def api_library_delete_shelf(
+        shelf_id: int,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        if not await delete_user_shelf(user.app_user_id, shelf_id):
+            raise HTTPException(status_code=404, detail="Полка не найдена.")
+        return {"ok": True, "shelves": await list_user_shelves(user.app_user_id)}
+
+    @app.post("/api/library/shelves/{shelf_id}/books")
+    async def api_library_shelf_book(
+        shelf_id: int,
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        book_id = int(payload.get("book_id") or 0)
+        enabled = str(payload.get("enabled", "1")).strip().lower() not in {"0", "false", "off", "no"}
+        if book_id <= 0:
+            raise HTTPException(status_code=400, detail="Книга не выбрана.")
+        try:
+            await set_user_shelf_book(user.app_user_id, shelf_id, book_id, enabled=enabled)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"ok": True, "shelves": await list_user_shelves(user.app_user_id)}
+
+    @app.delete("/api/library/history")
+    async def api_library_clear_history(x_telegram_init_data: str | None = Header(default=None)):
+        user = await _tma_user(x_telegram_init_data)
+        deleted = await delete_user_reading_history(user.app_user_id)
+        return {"ok": True, "deleted": deleted}
+
+    @app.delete("/api/library/history/{history_id}")
+    async def api_library_delete_history(
+        history_id: int,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        deleted = await delete_user_reading_history(user.app_user_id, history_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Запись истории не найдена.")
+        return {"ok": True, "deleted": deleted}
+
+    @app.get("/api/reader/{chapter_id}/annotations")
+    async def api_reader_annotations(
+        chapter_id: int,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        chapter = await get_chapter(chapter_id)
+        if not chapter:
+            raise HTTPException(status_code=404, detail="Глава не найдена.")
+        allowed, moderation_access = await _chapter_access(
+            app_user_id=user.app_user_id, telegram_id=user.telegram_id, chapter=chapter,
+        )
+        if not allowed or moderation_access:
+            raise HTTPException(status_code=403, detail="Заметки доступны только в личном режиме чтения.")
+        return {"ok": True, "annotations": _rows_to_dicts(await list_reader_annotations(user.app_user_id, chapter_id=chapter_id))}
+
+    @app.post("/api/reader/{chapter_id}/annotations")
+    async def api_reader_create_annotation(
+        chapter_id: int,
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        chapter = await get_chapter(chapter_id)
+        if not chapter:
+            raise HTTPException(status_code=404, detail="Глава не найдена.")
+        allowed, moderation_access = await _chapter_access(
+            app_user_id=user.app_user_id, telegram_id=user.telegram_id, chapter=chapter,
+        )
+        if not allowed or moderation_access:
+            raise HTTPException(status_code=403, detail="Заметки доступны только в личном режиме чтения.")
+        try:
+            row = await create_reader_annotation(
+                user.app_user_id,
+                chapter_id,
+                annotation_type=str(payload.get("annotation_type") or "note"),
+                selected_text=str(payload.get("selected_text") or ""),
+                note_text=str(payload.get("note_text") or ""),
+                color=str(payload.get("color") or "violet"),
+                position_percent=int(payload.get("position_percent") or 0),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"ok": True, "annotation": _row_to_dict(row)}
+
+    @app.patch("/api/reader/annotations/{annotation_id}")
+    async def api_reader_update_annotation(
+        annotation_id: int,
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        try:
+            row = await update_reader_annotation(
+                user.app_user_id,
+                annotation_id,
+                note_text=payload.get("note_text") if "note_text" in payload else None,
+                color=payload.get("color") if "color" in payload else None,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if not row:
+            raise HTTPException(status_code=404, detail="Заметка не найдена.")
+        return {"ok": True, "annotation": _row_to_dict(row)}
+
+    @app.delete("/api/reader/annotations/{annotation_id}")
+    async def api_reader_delete_annotation(
+        annotation_id: int,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        if not await delete_reader_annotation(user.app_user_id, annotation_id):
+            raise HTTPException(status_code=404, detail="Заметка не найдена.")
+        return {"ok": True}
+
+    @app.get("/api/progress/sync")
+    async def api_progress_sync_get(x_telegram_init_data: str | None = Header(default=None)):
+        user = await _tma_user(x_telegram_init_data)
+        return {"ok": True, **(await get_progress_sync_snapshot(user.app_user_id, limit=500))}
+
+    @app.post("/api/progress/sync")
+    async def api_progress_sync(
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        updates = list(payload.get("updates") or [])[:100]
+        applied = 0
+        for update in updates:
+            kind = str(update.get("kind") or "")
+            target_id = int(update.get("target_id") or 0)
+            position = max(0, int(update.get("position") or 0))
+            if target_id <= 0:
+                continue
+            if kind == "text":
+                chapter = await get_chapter(target_id)
+                if not chapter:
+                    continue
+                allowed, moderation_access = await _chapter_access(
+                    app_user_id=user.app_user_id, telegram_id=user.telegram_id, chapter=chapter,
+                )
+                if not allowed or moderation_access:
+                    continue
+                await save_reading_progress(user.app_user_id, target_id, min(100, position))
+                applied += 1
+            elif kind == "audio":
+                audio = await get_audio_chapter(target_id)
+                if not audio or audio["publication_status"] != "published" or audio["status"] != "published":
+                    continue
+                if not await user_can_access_audio(user.app_user_id, target_id):
+                    continue
+                await save_listening_progress(user.app_user_id, target_id, position)
+                applied += 1
+            elif kind == "graphic":
+                graphic = await get_graphic_chapter(target_id)
+                if not graphic:
+                    continue
+                allowed, moderation_access = await _graphic_access(
+                    app_user_id=user.app_user_id, telegram_id=user.telegram_id, chapter=graphic,
+                )
+                if not allowed or moderation_access:
+                    continue
+                await save_graphic_reading_progress(
+                    user.app_user_id, target_id,
+                    max(1, min(int(graphic["pages_count"] or 1), position)),
+                )
+                applied += 1
+        return {"ok": True, "applied": applied, **(await get_progress_sync_snapshot(user.app_user_id, limit=500))}
 
     @app.post("/api/wallet/checkout")
     async def api_wallet_checkout(
@@ -1781,6 +2737,7 @@ def create_app() -> FastAPI:
             "theme", "font_size", "notifications",
             "notifications_chapters", "notifications_audio", "notifications_discounts",
             "notifications_reminders", "notifications_achievements",
+            "notifications_followed_only",
         }
         if key not in allowed:
             raise HTTPException(status_code=400, detail="Настройка не найдена.")
@@ -1800,10 +2757,17 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="Книга не найдена.")
         bookmark = await get_bookmark(user.app_user_id, book_id)
         review = await get_user_review(user.app_user_id, book_id)
+        book_subscription = await get_book_subscription(user.app_user_id, book_id)
+        author_subscription = None
+        if book_row["author_id"] is not None:
+            author_subscription = await get_author_subscription(user.app_user_id, int(book_row["author_id"]))
         reviews = await list_reviews_for_book(book_id, limit=20)
         return {
             "ok": True,
             "bookmark": _row_to_dict(bookmark) if bookmark else None,
+            "book_subscription": _row_to_dict(book_subscription) if book_subscription else None,
+            "author_subscription": _row_to_dict(author_subscription) if author_subscription else None,
+            "author_id": int(book_row["author_id"]) if book_row["author_id"] is not None else None,
             "my_review": _row_to_dict(review) if review else None,
             "reviews": _rows_to_dicts(reviews),
         }
@@ -1823,6 +2787,67 @@ def create_app() -> FastAPI:
         achievements = await sync_user_achievements(user.app_user_id)
         await _notify_new_achievements(user, achievements)
         return {"ok": True, "bookmark": _row_to_dict(bookmark) if bookmark else None, "achievements": achievements}
+
+    @app.post("/api/book/{book_id}/subscription")
+    async def api_book_subscription(
+        book_id: int,
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        book_row = await get_book(book_id)
+        if not book_row or book_row["publication_status"] != "published":
+            raise HTTPException(status_code=404, detail="Книга не найдена.")
+        enabled = str(payload.get("enabled", "1")).strip().lower() not in {"0", "false", "off", "no"}
+        row = await set_book_subscription(
+            user.app_user_id,
+            book_id,
+            enabled=enabled,
+            notify_chapters=str(payload.get("notify_chapters", "1")).lower() not in {"0", "false", "off"},
+            notify_audio=str(payload.get("notify_audio", "1")).lower() not in {"0", "false", "off"},
+        )
+        await add_audit(
+            user.app_user_id,
+            "book_subscription_enabled" if enabled else "book_subscription_disabled",
+            "book",
+            str(book_id),
+        )
+        return {"ok": True, "subscription": _row_to_dict(row) if row else None}
+
+    @app.post("/api/author/{author_id}/subscription")
+    async def api_author_subscription(
+        author_id: int,
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        async with connect() as db:
+            cur = await db.execute(
+                "SELECT ap.*, u.id AS owner_user_id FROM author_profiles ap "
+                "JOIN users u ON u.id=ap.user_id WHERE ap.id=? AND ap.status IN ('active', 'approved')",
+                (int(author_id),),
+            )
+            author = await cur.fetchone()
+        if not author:
+            raise HTTPException(status_code=404, detail="Автор не найден.")
+        if int(author["owner_user_id"]) == int(user.app_user_id):
+            raise HTTPException(status_code=400, detail="На собственный профиль подписываться не требуется.")
+        enabled = str(payload.get("enabled", "1")).strip().lower() not in {"0", "false", "off", "no"}
+        row = await set_author_subscription(
+            user.app_user_id,
+            author_id,
+            enabled=enabled,
+            notify_new_books=str(payload.get("notify_new_books", "1")).lower() not in {"0", "false", "off"},
+            notify_chapters=str(payload.get("notify_chapters", "1")).lower() not in {"0", "false", "off"},
+            notify_audio=str(payload.get("notify_audio", "1")).lower() not in {"0", "false", "off"},
+        )
+        await add_audit(
+            user.app_user_id,
+            "author_subscription_enabled" if enabled else "author_subscription_disabled",
+            "author",
+            str(author_id),
+        )
+        return {"ok": True, "subscription": _row_to_dict(row) if row else None}
 
     @app.post("/api/book/{book_id}/review")
     async def api_review(book_id: int, payload: dict[str, Any], x_telegram_init_data: str | None = Header(default=None)):
@@ -5163,9 +6188,19 @@ def create_app() -> FastAPI:
         return {"ok": True}
 
     @app.get("/api/control/books")
-    async def api_control_books(x_telegram_init_data: str | None = Header(default=None)):
-        await control_session(x_telegram_init_data, "mod_books")
-        return {"ok": True, "items": _rows_to_dicts(await list_books_for_moderation())}
+    async def api_control_books(
+        q: str = "",
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        _, is_owner, _ = await control_session(x_telegram_init_data, "mod_books")
+        clean = str(q or "").strip()
+        rows = await search_books(clean, limit=50) if is_owner else await list_books_for_moderation()
+        return {
+            "ok": True,
+            "owner": bool(is_owner),
+            "query": clean,
+            "items": _rows_to_dicts(rows),
+        }
 
     @app.post("/api/control/book/{book_id}/{action}")
     async def api_control_book_action(
@@ -5174,12 +6209,48 @@ def create_app() -> FastAPI:
         payload: dict[str, Any] | None = None,
         x_telegram_init_data: str | None = Header(default=None),
     ):
-        user, _, _ = await control_session(x_telegram_init_data, "mod_books")
-        if action not in {"publish", "reject"}:
+        user, is_owner, _ = await control_session(x_telegram_init_data, "mod_books")
+        if action not in {"publish", "reject", "repost", "block", "hide"}:
             raise HTTPException(status_code=404, detail="Действие не найдено.")
+        if action in {"repost", "block", "hide"} and not is_owner:
+            raise HTTPException(status_code=403, detail="Это действие доступно только владельцу.")
         book = await get_book(book_id)
-        if not book or book["publication_status"] != "review":
-            raise HTTPException(status_code=409, detail="Книга уже обработана или не найдена.")
+        if not book:
+            raise HTTPException(status_code=404, detail="Книга не найдена.")
+
+        if action == "repost":
+            if book["publication_status"] != "published":
+                raise HTTPException(status_code=409, detail="В канал можно повторно отправить только опубликованную книгу.")
+            if not settings.BOT_TOKEN:
+                raise HTTPException(status_code=503, detail="Бот временно недоступен для публикации.")
+            bot = Bot(token=settings.BOT_TOKEN)
+            try:
+                result = await post_book_to_channel(bot, book_id, actor_user_id=user.app_user_id, force=True)
+            finally:
+                await bot.session.close()
+            sent = result.channel_status == "sent"
+            await record_owner_channel_promotion(
+                book_id, user.app_user_id, sent=sent, error=result.channel_error
+            )
+            if not sent:
+                raise HTTPException(status_code=409, detail=result.channel_message or "Не удалось отправить пост в канал.")
+            return {"ok": True, "status": "published", "channel_sent": True}
+
+        if action in {"block", "hide"}:
+            blocked = action == "block"
+            await set_book_blocked(book_id, blocked)
+            await add_audit(
+                user.app_user_id,
+                "book_block_changed_web",
+                "book",
+                str(book_id),
+                str(book["publication_status"]),
+                "blocked" if blocked else "hidden",
+            )
+            return {"ok": True, "status": "blocked" if blocked else "hidden"}
+
+        if book["publication_status"] != "review":
+            raise HTTPException(status_code=409, detail="Книга уже обработана или не находится на проверке.")
         chapters_count = await count_chapters_for_book(book_id)
         if action == "publish" and chapters_count < 1:
             raise HTTPException(status_code=409, detail="Нельзя публиковать книгу без глав.")

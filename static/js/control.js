@@ -1,5 +1,5 @@
 (() => {
-  const state = { permissions: new Set(), role: '', dashboard: null, active: '', accessUser: null, accessBooks: [] };
+  const state = { permissions: new Set(), role: '', dashboard: null, active: '', accessUser: null, accessBooks: [], libraryBatchId: null, libraryRefreshTimer: null, bookQuery: '' };
   const $ = (id) => document.getElementById(id);
   const can = (code) => state.role === 'owner' || state.permissions.has(code);
   const esc = (value) => escapeHtml(value ?? '');
@@ -63,7 +63,7 @@
 
     const sections = [];
     if (can('mod_books')) {
-      sections.push(sectionButton('books', 'Книги', 'Проверка и публикация', q.books_review));
+      sections.push(sectionButton('books', data.role === 'owner' ? 'Управление книгами' : 'Книги', data.role === 'owner' ? 'Поиск, проверка и публикация в канал' : 'Проверка и публикация', q.books_review));
       sections.push(sectionButton('graphic_pages', 'Страницы комиксов', 'Жалобы и постраничная проверка', q.graphic_page_reports));
     }
     if (can('mod_comments')) sections.push(sectionButton('comments', 'Отзывы и комментарии', 'Скрытие нарушений', (q.comments || 0) + (q.reviews || 0) + (q.graphic_page_comments || 0)));
@@ -100,52 +100,216 @@
     $('workspaceList').innerHTML = `<article class="empty-card premium-empty"><div class="empty-icon">✓</div><h3>${esc(title)}</h3><p>${esc(text)}</p></article>`;
   }
 
-  async function loadBooks() {
-    openWorkspace('Книги на проверке', 'Публикуйте готовые книги или возвращайте автору на доработку.');
-    $('workspaceTabs').innerHTML = '';
-    const data = await apiFetch('/api/control/books');
+  async function loadBooks(query = state.bookQuery) {
+    const ownerMode = state.role === 'owner';
+    state.bookQuery = String(query || '').trim();
+    openWorkspace(ownerMode ? 'Управление книгами' : 'Книги на проверке', ownerMode ? 'Ищите по названию, ID, описанию или автору и управляйте публикацией.' : 'Публикуйте готовые книги или возвращайте автору на доработку.');
+    if (ownerMode) {
+      $('workspaceTabs').innerHTML = `<div class="control-book-search"><input id="controlBookSearch" type="search" value="${esc(state.bookQuery)}" placeholder="Название, ID или автор"><button type="button" id="controlBookSearchButton">Найти</button></div>`;
+      const input = $('controlBookSearch');
+      const run = () => loadBooks(String(input?.value || '')).catch(handleError);
+      $('controlBookSearchButton')?.addEventListener('click', run);
+      input?.addEventListener('keydown', (event) => { if (event.key === 'Enter') run(); });
+    } else {
+      $('workspaceTabs').innerHTML = '';
+    }
+    const suffix = ownerMode && state.bookQuery ? `?q=${encodeURIComponent(state.bookQuery)}` : '';
+    const data = await apiFetch(`/api/control/books${suffix}`);
     const items = data.items || [];
-    if (!items.length) return emptyList('Очередь пуста', 'Новых книг на проверке нет.');
-    $('workspaceList').innerHTML = items.map((item) => `<article class="control-item" data-id="${item.id}">
-      <div class="control-item-main"><span>${item.content_type && item.content_type !== 'book' ? 'Графическое произведение' : 'Книга'} #${item.id}</span><h3>${esc(item.title)}</h3><p>${esc(item.pen_name || 'Автор')} · ${esc(item.age_limit || '')}</p><small>${esc((item.description || '').slice(0, 240))}</small></div>
-      <div class="control-actions">${item.first_graphic_chapter_id ? actionLink('Проверить страницы', `/comic/${Number(item.first_graphic_chapter_id)}?moderation=1`) : item.first_chapter_id ? actionLink('Читать книгу', `/reader/${Number(item.first_chapter_id)}?moderation=1`) : ''}${actionButton('Опубликовать', `book:publish:${item.id}`, 'approve')}${actionButton('На доработку', `book:reject:${item.id}`, 'danger')}</div>
-    </article>`).join('');
+    if (!items.length) return emptyList(ownerMode ? 'Книги не найдены' : 'Очередь пуста', ownerMode ? 'Проверьте имя автора или попробуйте часть названия.' : 'Новых книг на проверке нет.');
+    $('workspaceList').innerHTML = items.map((item) => {
+      const status = String(item.publication_status || 'draft');
+      const preview = item.first_graphic_chapter_id
+        ? actionLink('Открыть страницы', `/comic/${Number(item.first_graphic_chapter_id)}?moderation=1`)
+        : item.first_chapter_id
+          ? actionLink('Открыть текст', `/reader/${Number(item.first_chapter_id)}?moderation=1`)
+          : status === 'published' ? actionLink('Открыть книгу', `/book/${Number(item.id)}`) : '';
+      let actions = preview;
+      if (status === 'review') actions += `${actionButton('Опубликовать', `book:publish:${item.id}`, 'approve')}${actionButton('На доработку', `book:reject:${item.id}`, 'danger')}`;
+      if (ownerMode && status === 'published') actions += actionButton('Выложить в канал', `book:repost:${item.id}`, 'approve');
+      if (ownerMode && status === 'blocked') actions += actionButton('Перевести в скрытые', `book:hide:${item.id}`);
+      else if (ownerMode) actions += actionButton('Заблокировать', `book:block:${item.id}`, 'danger');
+      return `<article class="control-item" data-id="${Number(item.id)}">
+        <div class="control-item-main"><span>Книга #${Number(item.id)} · ${esc(status)}</span><h3>${esc(item.title)}</h3><p>${esc(item.pen_name || item.source_author_name || 'Автор не указан')} · ${esc(item.age_limit || '')}</p><small>${esc((item.description || '').slice(0, 240))}</small></div>
+        <div class="control-actions">${actions}</div>
+      </article>`;
+    }).join('');
   }
 
-  async function loadLibraryImport() {
-    openWorkspace('Импорт библиотеки', 'Загружайте накопительные ZIP прямо из Mini App. Все книги остаются черновиками.', 'Библиотека');
-    $('workspaceTabs').innerHTML = '';
-    const data = await apiFetch('/api/control/library-import');
-    const settings = data.settings || {};
-    const learning = data.learning || {};
-    const queue = data.queue || {};
-    const batches = data.batches || [];
-    const queueCount = Number(queue.queued || 0) + Number(queue.processing || 0);
-    const history = batches.length ? batches.map((item) => `<article class="control-item">
+  const libraryJobStatusLabels = {
+    queued: 'Ожидает', processing: 'Импортируется', cancelling: 'Останавливается', completed: 'Завершён',
+    failed: 'Ошибка', cancelled: 'Остановлен',
+  };
+  const libraryBatchStatusLabels = {
+    processing: 'Обрабатывается', completed: 'Готов', published: 'Опубликован',
+    failed: 'Ошибка', rolled_back: 'Откатан',
+  };
+  const libraryPhaseLabels = {
+    0: 'Подготовка', 1: 'Проверка структуры', 2: 'Импорт книг', 3: 'Завершение',
+  };
+
+  function libraryJobCard(item, data) {
+    const status = String(item.status || '');
+    const percent = Math.max(0, Math.min(100, Number(item.progress_percent || 0)));
+    const ownsJob = Boolean(data.can_manage) || Number(item.actor_user_id) === Number(data.app_user_id);
+    const canCancel = Boolean(item.can_cancel) && ownsJob;
+    const canRetry = Boolean(item.can_retry) && ownsJob;
+    const progress = ['processing', 'cancelling'].includes(status)
+      ? `<progress max="100" value="${percent}">${percent}%</progress><small>${status === 'cancelling' ? 'Завершается текущая операция' : esc(libraryPhaseLabels[Number(item.phase || 0)] || 'Импорт')} · ${Number(item.processed || 0)} из ${Number(item.total || 0) || '…'} · ${percent}%</small>`
+      : status === 'queued'
+        ? `<small>Позиция в очереди: ${Number(item.queue_position || 1)}</small>`
+        : `<small>${esc(dateText(item.completed_at || item.heartbeat_at || item.created_at))}</small>`;
+    const error = item.last_error && !['cancelled', 'cancelling'].includes(status)
+      ? `<p class="danger-text">${esc(String(item.last_error).slice(0, 700))}</p>` : '';
+    const stopInfo = ['cancelled', 'cancelling'].includes(status) && item.last_error
+      ? `<p>${esc(String(item.last_error).slice(0, 700))}</p>` : '';
+    const retryInfo = ['failed', 'cancelled'].includes(status)
+      ? (canRetry
+        ? `<small>ZIP сохранён до ${esc(dateText(item.archive_expires_at))} · повторов: ${Number(item.retry_count || 0)}</small>`
+        : '<small>Исходный ZIP для повтора уже недоступен. Загрузите архив заново.</small>')
+      : (Number(item.retry_count || 0) ? `<small>Повторных запусков: ${Number(item.retry_count || 0)}</small>` : '');
+    return `<article class="control-item">
       <div class="control-item-main">
-        <span>Пакет #${Number(item.id)} · ${esc(item.status || '')}</span>
+        <span>Задание #${Number(item.id)} · ${esc(libraryJobStatusLabels[status] || status)}</span>
+        <h3>${esc(item.archive_name || 'Архив библиотеки')}</h3>
+        <p>Добавлено: ${Number(item.added || 0)} · заменено: ${Number(item.replaced_count || 0)} · перенумеровано: ${Number(item.renumbered_count || 0)} · ошибок: ${Number(item.error_count || 0)}</p>
+        ${progress}${error}${stopInfo}${retryInfo}
+      </div>
+      <div class="control-actions">${item.batch_id ? actionButton('Открыть пакет', `librarybatch:details:${Number(item.batch_id)}`) : ''}${canRetry ? actionButton('Повторить', `libraryjob:retry:${Number(item.id)}`) : ''}${canCancel ? actionButton(status === 'processing' ? 'Остановить' : 'Отменить', `libraryjob:cancel:${Number(item.id)}`, 'danger') : ''}</div>
+    </article>`;
+  }
+
+  function libraryBatchCard(item, canManage) {
+    const status = String(item.status || '');
+    return `<article class="control-item">
+      <div class="control-item-main">
+        <span>Пакет #${Number(item.id)} · ${esc(libraryBatchStatusLabels[status] || status)}</span>
         <h3>${esc(item.archive_name || 'Архив библиотеки')}</h3>
         <p>Добавлено: ${Number(item.imported_count || 0)} · заменено: ${Number(item.replaced_count || 0)} · перенумеровано: ${Number(item.renumbered_count || 0)}</p>
         <small>Дублей: ${Number(item.duplicate_count || 0)} · ошибок: ${Number(item.error_count || 0)} · ${esc(dateText(item.completed_at || item.created_at))}</small>
       </div>
-    </article>`).join('') : '<article class="empty-card"><h3>История пока пуста</h3><p>Первый импорт появится здесь после завершения.</p></article>';
+      <div class="control-actions">${actionButton(canManage ? 'Проверить пакет' : 'Подробнее', `librarybatch:details:${Number(item.id)}`)}</div>
+    </article>`;
+  }
+
+  function renderLibraryEvidence(items) {
+    if (!Array.isArray(items) || !items.length) return '';
+    return `<div class="library-evidence"><strong>Где именно найдено:</strong>${items.map((item) => `<div><span>Глава ${Number(item.chapter || 0)} · ${esc(item.label || 'Фрагмент')}</span>${item.excerpt ? `<code>${esc(item.excerpt)}</code>` : ''}</div>`).join('')}</div>`;
+  }
+
+  async function openLibraryBatch(batchId) {
+    if (state.libraryRefreshTimer) {
+      window.clearTimeout(state.libraryRefreshTimer);
+      state.libraryRefreshTimer = null;
+    }
+    state.libraryBatchId = Number(batchId);
+    openWorkspace(`Пакет импорта #${Number(batchId)}`, 'Проверка, причины блокировок, дубли и безопасная публикация.', 'Библиотека');
+    $('workspaceTabs').innerHTML = `<button type="button" data-action="librarybatch:back:${Number(batchId)}">← К истории</button><button type="button" data-action="librarybatch:details:${Number(batchId)}">Обновить</button>`;
+    $('workspaceList').innerHTML = '<article class="empty-card"><h3>Проверяем пакет…</h3><p>Читаем ошибки, дубли и состояние книг.</p></article>';
+    const data = await apiFetch(`/api/control/library-import/batch/${Number(batchId)}`);
+    const batch = data.batch || {};
+    const audit = data.audit || {};
+    const statuses = data.book_statuses || {};
+    const errors = Array.isArray(data.errors) ? data.errors : [];
+    const duplicates = Array.isArray(data.duplicates) ? data.duplicates : [];
+    const pendingDuplicates = duplicates.filter((item) => String(item.status || '') === 'pending');
+    const blocked = Array.isArray(audit.blocked_items) ? audit.blocked_items : [];
+    const checked = Array.isArray(audit.checked_items) ? audit.checked_items : [];
+    const warnings = checked.filter((item) => Array.isArray(item.warnings) && item.warnings.length);
+
+    const errorCards = errors.length ? errors.map((item) => `<article class="control-item danger-card">
+      <div class="control-item-main"><span>${esc(item.folder || 'Папка не определена')}</span><h3>${esc(item.title || 'Без названия')}</h3><p>${esc((item.reasons || []).join('; ') || 'Причина не записана')}</p></div>
+    </article>`).join('') : '<article class="empty-card"><h3>Ошибок структуры нет</h3><p>Все найденные папки были обработаны.</p></article>';
+
+    const blockedCards = blocked.length ? blocked.map((item) => `<article class="control-item danger-card">
+      <div class="control-item-main"><span>Книга #${Number(item.book_id)} · качество ${Number(item.quality_score || 0)}%</span><h3>${esc(item.title || 'Без названия')}</h3><p>${esc((item.reasons || []).join('; '))}</p>${Array.isArray(item.warnings) && item.warnings.length ? `<small>Предупреждения: ${esc(item.warnings.join('; '))}</small>` : ''}${renderLibraryEvidence(item.evidence)}</div>
+    </article>`).join('') : '<article class="empty-card premium-empty"><div class="empty-icon">✓</div><h3>Блокирующих проблем нет</h3><p>Все оставшиеся черновики можно публиковать.</p></article>';
+
+    const warningCards = warnings.length ? warnings.map((item) => `<article class="control-item">
+      <div class="control-item-main"><span>Книга #${Number(item.book_id)} · качество ${Number(item.quality_score || 0)}%</span><h3>${esc(item.title || 'Без названия')}</h3><p>${esc(item.warnings.join('; '))}</p>${renderLibraryEvidence(item.evidence)}</div>
+    </article>`).join('') : '<p class="muted">Отдельных предупреждений нет.</p>';
+
+    const duplicateCards = pendingDuplicates.length ? pendingDuplicates.map((item) => `<article class="control-item">
+      <div class="control-item-main"><span>Кандидат на замену</span><h3>${esc(item.title || 'Без названия')}</h3><p>${esc(item.author || 'Автор не указан')} · существующая книга ID ${Number(item.existing_book_id || 0)}</p><small>Замена сохранит ID книги, покупки и прогресс читателей.</small></div>
+      <div class="control-actions">${data.can_manage ? `${actionButton('Пропустить', `libraryduplicate:skip:${Number(item.id)}`)}${actionButton('Заменить книгу', `libraryduplicate:replace:${Number(item.id)}`, 'danger')}` : ''}</div>
+    </article>`).join('') : '<article class="empty-card"><h3>Неразобранных дублей нет</h3><p>Все совпадения уже обработаны.</p></article>';
+
+    const actions = data.can_manage ? `<article class="control-item payment-settings-card">
+      <div class="control-item-main"><span>Действия с пакетом</span><h3>${esc(batch.archive_name || 'Архив')}</h3><p>Публикуются только готовые книги. Заблокированные останутся черновиками. Откат удаляет только новые неопубликованные книги этого пакета; заменённые существующие книги не удаляются.</p></div>
+      <div class="control-actions">${actionButton('Повторить проверку', `librarybatch:audit:${Number(batchId)}`)}${Number(audit.ready || 0) ? actionButton(`Опубликовать готовые: ${Number(audit.ready)}`, `librarybatch:publish:${Number(batchId)}`, 'approve') : ''}${Number(statuses.draft || 0) ? actionButton('Откатить черновики', `librarybatch:rollback:${Number(batchId)}`, 'danger') : ''}</div>
+    </article>` : '';
+
+    $('workspaceList').innerHTML = `<div class="control-stat-grid">
+      ${statCard('Найдено папок', Number(batch.total_found || 0))}
+      ${statCard('Черновиков', Number(statuses.draft || 0))}
+      ${statCard('Готовы', Number(audit.ready || 0))}
+      ${statCard('Заблокированы', Number(audit.blocked || 0))}
+      ${statCard('Опубликовано', Number(statuses.published || 0))}
+      ${statCard('Среднее качество', `${Number(audit.average_score || 0)}%`)}
+    </div>${actions}
+    <div class="section-title"><div><span class="eyebrow">Проверка публикации</span><h2>Что мешает публикации</h2><p>Показываются причины и найденные фрагменты, чтобы не искать проблему во всём тексте.</p></div></div>${blockedCards}
+    <div class="section-title"><div><span class="eyebrow">Предупреждения</span><h2>Не блокируют публикацию</h2></div></div>${warningCards}
+    <div class="section-title"><div><span class="eyebrow">Совпадения</span><h2>Дубли книг</h2></div></div>${duplicateCards}
+    <div class="section-title"><div><span class="eyebrow">Импорт</span><h2>Ошибки папок и файлов</h2></div></div>${errorCards}`;
+  }
+
+  async function loadLibraryImport(silent = false) {
+    if (state.libraryRefreshTimer) {
+      window.clearTimeout(state.libraryRefreshTimer);
+      state.libraryRefreshTimer = null;
+    }
+    state.libraryBatchId = null;
+    if (!silent) openWorkspace('Импорт библиотеки', 'Загружайте накопительные ZIP прямо из Mini App. Все книги остаются черновиками.', 'Библиотека');
+    $('workspaceTabs').innerHTML = '<button type="button" data-section="library_import">Обновить</button>';
+    const data = await apiFetch('/api/control/library-import');
+    const settings = data.settings || {};
+    const learning = data.learning || {};
+    const queue = data.queue || {};
+    const queueControl = data.queue_control || { mode: 'running' };
+    const queueMode = String(queueControl.mode || 'running');
+    const queueModeLabels = { running: 'Работает', paused: 'Пауза', maintenance: 'Обслуживание' };
+    const jobs = Array.isArray(data.jobs) ? data.jobs : [];
+    const batches = Array.isArray(data.batches) ? data.batches : [];
+    const queueCount = Number(queue.queued || 0) + Number(queue.processing || 0) + Number(queue.cancelling || 0);
+    const activeJobs = jobs.filter((item) => ['queued', 'processing', 'cancelling'].includes(String(item.status || '')));
+    const recentJobs = jobs.filter((item) => !['queued', 'processing', 'cancelling'].includes(String(item.status || ''))).slice(0, 8);
+    const activeHtml = activeJobs.length ? activeJobs.map((item) => libraryJobCard(item, data)).join('') : '<article class="empty-card premium-empty"><div class="empty-icon">✓</div><h3>Активных заданий нет</h3><p>Очередь импорта свободна.</p></article>';
+    const recentHtml = recentJobs.length ? recentJobs.map((item) => libraryJobCard(item, data)).join('') : '<p class="muted">Завершённых заданий пока нет.</p>';
+    const history = batches.length ? batches.map((item) => libraryBatchCard(item, data.can_manage)).join('') : '<article class="empty-card"><h3>История пока пуста</h3><p>Первый импорт появится здесь после завершения.</p></article>';
     const importButton = data.can_bulk_import
       ? '<button type="button" id="libraryImportStart" class="approve">Выбрать ZIP и импортировать</button>'
       : '';
     const moderationButton = data.can_manage
       ? `<button type="button" id="libraryAutoModerationToggle" class="${learning.enabled ? 'secondary' : 'approve'}">${learning.enabled ? 'Выключить автомодерацию' : 'Включить автомодерацию'}</button>`
       : '';
+    const queueModeText = queueMode === 'running'
+      ? 'Новые задания запускаются автоматически.'
+      : queueMode === 'maintenance'
+        ? (queueControl.draining ? 'Текущее задание завершится. Новые не запускаются до окончания обслуживания.' : 'Новые задания не запускаются до окончания обслуживания.')
+        : (queueControl.draining ? 'Текущее задание завершится. Следующие останутся в очереди.' : 'Следующие задания останутся в очереди до продолжения.');
+    const queueModeActions = data.can_control_queue
+      ? queueMode === 'running'
+        ? '<button type="button" id="libraryQueuePause" class="secondary">Поставить на паузу</button><button type="button" id="libraryQueueMaintenance" class="danger">Режим обслуживания</button>'
+        : `<button type="button" id="libraryQueueResume" class="approve">Продолжить очередь</button>${queueMode === 'paused' ? '<button type="button" id="libraryQueueMaintenance" class="danger">Режим обслуживания</button>' : '<button type="button" id="libraryQueuePause" class="secondary">Обычная пауза</button>'}`
+      : '';
     $('workspaceList').innerHTML = `<div class="control-stat-grid">
       ${statCard('В очереди', queueCount)}
+      ${statCard('Режим очереди', queueModeLabels[queueMode] || queueMode)}
       ${statCard('Автомодерация', learning.enabled ? 'Включена' : 'Выключена')}
       ${statCard('Решений для обучения', Number(learning.approved || 0) + Number(learning.rejected || 0))}
       ${statCard('Доверенных категорий', (learning.trusted_categories || []).length)}
     </div>
     <article class="control-item payment-settings-card">
-      <div class="control-item-main"><span>Массовый импорт</span><h3>Books/001/...</h3><p>Изменённая книга заменяет старую версию автоматически. При занятом ID новая книга получает первый свободный номер.</p><small>Лимит: ${Number(settings.max_books || 0) ? `до ${Number(settings.max_books)} книг` : 'без ограничения по количеству'} · ZIP до ${Number(settings.max_archive_mb || 0)} МБ. Публикация после импорта не выполняется.</small></div>
+      <div class="control-item-main"><span>Управление очередью</span><h3>${esc(queueModeLabels[queueMode] || queueMode)}</h3><p>${esc(queueModeText)}</p><small>Пауза и обслуживание сохраняются после перезапуска сервера. Уже выполняющееся задание не обрывается.</small></div>
+      <div class="control-actions">${queueModeActions}</div>
+    </article>
+    <article class="control-item payment-settings-card">
+      <div class="control-item-main"><span>Массовый импорт</span><h3>Books/001/...</h3><p>Изменённая книга заменяет старую версию автоматически. При занятом ID новая книга получает первый свободный номер.</p><small>Лимит: ${Number(settings.max_books || 0) ? `до ${Number(settings.max_books)} книг` : 'без ограничения по количеству'} · ZIP до ${Number(settings.max_archive_mb || 0)} МБ. Публикация после импорта не выполняется.${queueMode !== 'running' ? ' Архив можно загрузить, но обработка начнётся только после продолжения очереди.' : ''}</small></div>
       <div class="control-actions">${importButton}${moderationButton}</div>
     </article>
-    <div class="section-title"><div><span class="eyebrow">Последние пакеты</span><h2>История импорта</h2></div></div>${history}`;
+    <div class="section-title"><div><span class="eyebrow">Сейчас</span><h2>Очередь и прогресс</h2></div></div>${activeHtml}
+    <div class="section-title"><div><span class="eyebrow">Недавние задания</span><h2>Результаты обработки ZIP</h2></div></div>${recentHtml}
+    <div class="section-title"><div><span class="eyebrow">Пакеты</span><h2>Проверка и публикация</h2></div></div>${history}`;
     $('libraryImportStart')?.addEventListener('click', async () => {
       const button = $('libraryImportStart');
       button.disabled = true;
@@ -167,6 +331,25 @@
       notify(!learning.enabled ? 'Автомодерация включена' : 'Автомодерация выключена');
       await loadLibraryImport();
     });
+    const changeQueueMode = async (mode) => {
+      await apiFetch('/api/control/library-import/queue-mode', {
+        method: 'PATCH',
+        body: JSON.stringify({ mode }),
+      });
+      notify(mode === 'running' ? 'Очередь продолжена' : mode === 'maintenance' ? 'Включён режим обслуживания' : 'Очередь поставлена на паузу');
+      await loadLibraryImport();
+    };
+    $('libraryQueuePause')?.addEventListener('click', () => changeQueueMode('paused').catch(handleError));
+    $('libraryQueueMaintenance')?.addEventListener('click', () => changeQueueMode('maintenance').catch(handleError));
+    $('libraryQueueResume')?.addEventListener('click', () => changeQueueMode('running').catch(handleError));
+    if (activeJobs.length && state.active === 'library_import') {
+      state.libraryRefreshTimer = window.setTimeout(() => {
+        state.libraryRefreshTimer = null;
+        if (state.active === 'library_import' && !state.libraryBatchId) {
+          loadLibraryImport(true).catch(handleError);
+        }
+      }, 4000);
+    }
   }
 
   async function loadGraphicPages(status = 'new') {
@@ -711,6 +894,14 @@
       await loadTtsDiagnostics();
       return;
     }
+    if (kind === 'librarybatch' && verb === 'details') {
+      await openLibraryBatch(Number(id));
+      return;
+    }
+    if (kind === 'librarybatch' && verb === 'back') {
+      await loadLibraryImport();
+      return;
+    }
     let url = '';
     let body = undefined;
     if (kind === 'book') {
@@ -749,14 +940,23 @@
       }
     }
     if (kind === 'rubpayout' && verb === 'execute') url = `/api/control/rub-payout/${id}/execute`;
+    if (kind === 'libraryjob' && ['cancel', 'retry'].includes(verb)) url = `/api/control/library-import/job/${id}/${verb}`;
+    if (kind === 'librarybatch' && ['audit', 'publish', 'rollback'].includes(verb)) {
+      url = `/api/control/library-import/batch/${id}/${verb}`;
+      if (verb === 'rollback') body = JSON.stringify({ confirm: true });
+    }
+    if (kind === 'libraryduplicate' && ['skip', 'replace'].includes(verb)) {
+      url = `/api/control/library-import/duplicate/${id}`;
+      body = JSON.stringify({ action: verb });
+    }
     if (!url) return;
 
-    const dangerous = ['reject', 'freeze', 'approve', 'paid', 'publish', 'closed', 'hide', 'block', 'execute'].includes(verb);
+    const dangerous = ['reject', 'freeze', 'approve', 'paid', 'publish', 'closed', 'hide', 'block', 'execute', 'rollback', 'replace', 'cancel'].includes(verb);
     const tg = window.Telegram?.WebApp;
     const proceed = async () => {
       await apiFetch(url, { method: 'POST', body });
       notify('Готово');
-      if (state.active === 'books') await loadBooks();
+      if (state.active === 'books') await loadBooks(state.bookQuery);
       if (state.active === 'graphic_pages') await loadGraphicPages();
       if (state.active === 'comments') await loadComments();
       if (state.active === 'complaints') await loadComplaints();
@@ -764,6 +964,11 @@
       if (state.active === 'payouts') await loadPayouts();
       if (state.active === 'rub_profiles') await loadRubProfiles();
       if (state.active === 'rub_payouts') await loadRubPayouts();
+      if (state.active === 'library_import') {
+        if (kind === 'librarybatch') await openLibraryBatch(Number(id));
+        else if (kind === 'libraryduplicate' && state.libraryBatchId) await openLibraryBatch(state.libraryBatchId);
+        else await loadLibraryImport();
+      }
       await refreshDashboard();
     };
     if (dangerous && tg?.showConfirm) {
@@ -790,6 +995,10 @@
   });
 
   $('closeWorkspace')?.addEventListener('click', () => {
+    if (state.libraryRefreshTimer) {
+      window.clearTimeout(state.libraryRefreshTimer);
+      state.libraryRefreshTimer = null;
+    }
     $('controlWorkspace').hidden = true;
     state.active = '';
   });
@@ -797,6 +1006,10 @@
   apiFetch('/api/control/dashboard').then((data) => {
     renderDashboard(data);
     const requested = new URLSearchParams(window.location.search).get('section');
+    if (requested === 'books' && (data.role === 'owner' || can('mod_books'))) {
+      state.active = 'books';
+      loadBooks().catch(handleError);
+    }
     if (requested === 'payments' && data.role === 'owner') {
       state.active = 'payments';
       loadPaymentSettings().catch(handleError);

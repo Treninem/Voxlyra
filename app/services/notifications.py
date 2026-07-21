@@ -12,6 +12,7 @@ from app.db import (
     claim_notification_delivery,
     finish_notification_delivery,
     get_user_preferences,
+    list_author_notification_recipients,
     list_book_notification_recipients,
 )
 
@@ -103,6 +104,34 @@ def payout_message(status: str, amount_stars: object, note: object = "") -> str:
     return f"💎 Выплата отклонена\n\nЗаявка на {amount} Stars не была одобрена.{suffix}"
 
 
+def new_book_message(book_title: object, author_name: object = "") -> str:
+    safe_book = _clean(book_title, 160) or "Новая книга"
+    safe_author = _clean(author_name, 120)
+    author_line = f" автора {safe_author}" if safe_author else ""
+    return f"📚 Новая книга\n\nВ Вокслире опубликована «{safe_book}»{author_line}."
+
+
+def book_open_markup(book_id: int) -> InlineKeyboardMarkup | None:
+    book_id = int(book_id or 0)
+    if book_id <= 0:
+        return None
+    web_url = settings.WEBAPP_URL.strip().rstrip("/")
+    username = settings.BOT_USERNAME.strip().lstrip("@")
+    if web_url:
+        return InlineKeyboardMarkup(
+            inline_keyboard=[[
+                InlineKeyboardButton(text="📖 Открыть", web_app=WebAppInfo(url=f"{web_url}/book/{book_id}"))
+            ]]
+        )
+    if username:
+        return InlineKeyboardMarkup(
+            inline_keyboard=[[
+                InlineKeyboardButton(text="📖 Открыть", url=f"https://t.me/{username}?start=book_{book_id}")
+            ]]
+        )
+    return None
+
+
 def new_chapter_message(book_title: object, chapter_title: object = "", number: object = "", count: int = 1) -> str:
     safe_book = _clean(book_title, 160) or "Книга"
     if int(count or 1) > 1:
@@ -190,7 +219,7 @@ async def notify_book_followers(
 ) -> dict[str, int]:
     """Отправляет одно событие заинтересованным читателям без повторной доставки."""
     totals = {"sent": 0, "disabled": 0, "unavailable": 0, "failed": 0, "duplicate": 0}
-    recipients = await list_book_notification_recipients(int(book_id))
+    recipients = await list_book_notification_recipients(int(book_id), category=category)
     if not recipients:
         return totals
 
@@ -218,6 +247,44 @@ async def notify_book_followers(
                 text=delivery_text,
                 bot=delivery_bot,
                 category=category,
+                reply_markup=book_open_markup(int(book_id)),
+            )
+            totals[status] += 1
+            await finish_notification_delivery(event_key, user_id, status)
+    finally:
+        if owns_bot and delivery_bot is not None:
+            await delivery_bot.session.close()
+    return totals
+
+async def notify_author_followers(
+    *,
+    author_id: int,
+    book_id: int,
+    event_key: str,
+    text: str,
+    bot: Bot | None = None,
+) -> dict[str, int]:
+    """Уведомляет явных подписчиков автора о новой опубликованной книге."""
+    totals = {"sent": 0, "disabled": 0, "unavailable": 0, "failed": 0, "duplicate": 0}
+    recipients = await list_author_notification_recipients(int(author_id))
+    if not recipients:
+        return totals
+    owns_bot = bot is None and bool(settings.BOT_TOKEN)
+    delivery_bot = bot or (Bot(token=settings.BOT_TOKEN) if settings.BOT_TOKEN else None)
+    try:
+        for recipient in recipients:
+            user_id = int(recipient["id"])
+            claimed = await claim_notification_delivery(event_key, user_id, "chapters")
+            if not claimed:
+                totals["duplicate"] += 1
+                continue
+            status = await send_user_notification(
+                app_user_id=user_id,
+                telegram_id=int(recipient["telegram_id"]),
+                text=text,
+                bot=delivery_bot,
+                category="chapters",
+                reply_markup=book_open_markup(int(book_id)),
             )
             totals[status] += 1
             await finish_notification_delivery(event_key, user_id, status)

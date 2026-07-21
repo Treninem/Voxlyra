@@ -48,13 +48,22 @@ class PublicationResult:
 
 
 def _book_link(book_id: int) -> str:
-    """Ссылка из канала сразу запускает Main Mini App на нужной книге."""
+    """Возвращает единственную рабочую точку входа в книгу из канала.
+
+    При подключённом Mini App Telegram сразу открывает нужную книгу. Если
+    веб-приложение отключено, та же кнопка открывает бота с параметром книги,
+    вместо неработающего ``startapp``. Прямая веб-ссылка используется только
+    как запасной вариант, когда username бота не задан.
+    """
+    book_id = int(book_id)
     username = settings.BOT_USERNAME.strip().lstrip("@")
-    if username:
-        return f"https://t.me/{username}?startapp=book_{int(book_id)}"
     web_url = settings.WEBAPP_URL.strip().rstrip("/")
+    if username and web_url:
+        return f"https://t.me/{username}?startapp=book_{book_id}"
+    if username:
+        return f"https://t.me/{username}?start=book_{book_id}"
     if web_url:
-        return f"{web_url}/book/{int(book_id)}"
+        return f"{web_url}/book/{book_id}"
     return ""
 
 
@@ -249,6 +258,24 @@ async def publish_book_and_channel(
     # Импортированные книги ставит в очередь Library Manager. Обычные авторские
     # книги идут в отдельную справедливую очередь, чтобы сотни публикаций не спамили канал.
     fresh = await get_book(book_id)
+    if fresh and fresh["author_id"] is not None:
+        from app.services.notifications import new_book_message, notify_author_followers
+
+        follower_result = await notify_author_followers(
+            author_id=int(fresh["author_id"]),
+            book_id=int(book_id),
+            event_key=f"book:{int(book_id)}:published",
+            text=new_book_message(fresh["title"], fresh["pen_name"]),
+            bot=bot,
+        )
+        await add_audit(
+            actor_user_id,
+            "author_followers_notified",
+            "book",
+            str(book_id),
+            None,
+            str(follower_result),
+        )
     if fresh and fresh["author_id"] is not None and fresh["import_batch_id"] is None and not force_channel:
         from app.services.author_channel_queue import enqueue_author_channel_post
         await enqueue_author_channel_post(book_id, author_id=int(fresh["author_id"]), actor_user_id=actor_user_id)

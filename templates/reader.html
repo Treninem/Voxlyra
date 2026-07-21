@@ -129,7 +129,7 @@
   {% elif can_buy_chapter %}<div id="readerParagraphs" class="empty-card paywall-card"><div class="empty-icon">◇</div><h3>Глава закрыта</h3><p><b>Эта глава: {{ chapter.price_stars }} Stars</b> · ≈ {{ '%.2f'|format((chapter.price_stars|int * buyer_star_rate_minor|default(145)) / 100) }} ₽</p>{% if purchase_url %}<a class="button-link secondary" href="{{ purchase_url }}">Купить эту главу</a>{% endif %}{% if book_purchase_url %}<a class="button-link gold-button" href="{{ book_purchase_url }}">Купить всю книгу · {{ chapter.book_price_stars }} Stars</a>{% endif %}</div>
   {% else %}<div id="readerParagraphs" class="empty-card paywall-card"><div class="empty-icon">◇</div><h3>Доступ после покупки книги</h3><p>Эта глава отдельно не продаётся.</p>{% if book_purchase_url %}<a class="button-link gold-button" href="{{ book_purchase_url }}">Купить всю книгу · {{ chapter.book_price_stars }} Stars</a>{% endif %}</div>{% endif %}
 </article>
-<section class="reader-actions premium-reader-actions"><button id="saveReadingProgress" class="secondary">Сохранить место</button><button id="readerQuoteStart" class="secondary" type="button">Создать карточку цитаты</button><span id="progressLabel" class="muted"></span></section>
+<section class="reader-actions premium-reader-actions"><button id="saveReadingProgress" class="secondary">Сохранить место</button><button id="readerNoteStart" class="secondary" type="button">Добавить заметку</button><button id="readerQuoteStart" class="secondary" type="button">Цитата</button><span id="progressLabel" class="muted"></span></section>
 <section class="reader-quote-panel" id="readerQuotePanel" hidden>
   <div class="reader-quote-heading"><div><span class="eyebrow">Поделиться моментом</span><h2>Карточка цитаты</h2></div><button type="button" class="secondary" id="readerQuoteClose">Закрыть</button></div>
   <p class="muted">Нажмите на нужный абзац в тексте, затем при необходимости сократите его. Карточка не открывает доступ к главе и содержит только выбранную цитату.</p>
@@ -141,9 +141,19 @@
       <option value="parchment">Тёплый пергамент · Premium</option>
     </select>
   </label>
-  <div class="form-actions"><button type="button" id="readerQuoteCreate">Создать изображение</button><button type="button" class="secondary" id="readerQuoteCancelMode">Отменить выбор</button></div>
+  <div class="form-actions"><button type="button" id="readerQuoteSave">Сохранить цитату</button><button type="button" class="secondary" id="readerQuoteCreate">Создать изображение</button><button type="button" class="secondary" id="readerQuoteCancelMode">Отменить выбор</button></div>
   <div class="reader-quote-preview" id="readerQuotePreview" hidden><img id="readerQuoteImage" alt="Карточка цитаты"><div class="form-actions"><button type="button" id="readerQuoteShare">Поделиться</button><a id="readerQuoteDownload" class="button-link secondary" download="voxlyra_quote.png">Сохранить</a></div></div>
 </section>
+<section class="reader-note-panel reader-quote-panel" id="readerNotePanel" hidden>
+  <div class="reader-quote-heading"><div><span class="eyebrow">Личная запись</span><h2>Заметка к главе</h2></div><button type="button" class="secondary" id="readerNoteClose">Закрыть</button></div>
+  <p class="muted">Заметка видна только вам и синхронизируется между устройствами.</p>
+  <textarea id="readerNoteText" maxlength="4000" placeholder="Запишите мысль, вопрос или важную деталь"></textarea>
+  <label class="quote-style-field">Метка
+    <select id="readerNoteColor"><option value="violet">Фиолетовая</option><option value="gold">Золотая</option><option value="blue">Синяя</option><option value="green">Зелёная</option></select>
+  </label>
+  <div class="form-actions"><button type="button" id="readerNoteSave">Сохранить заметку</button><button type="button" class="secondary" id="readerNoteCancel">Отмена</button></div>
+</section>
+<section class="reader-annotation-list" id="readerAnnotationList" hidden></section>
 <nav class="chapter-navigation" aria-label="Переход между главами">
   {% if previous_chapter %}<a href="/reader/{{ previous_chapter.id }}" data-reader-nav="previous"><small>Предыдущая</small><strong>← {{ previous_chapter.title }}</strong></a>{% else %}<span></span>{% endif %}
   {% if next_chapter %}<a href="/reader/{{ next_chapter.id }}" data-reader-nav="next"><small>Следующая</small><strong>{{ next_chapter.title }} →</strong></a>{% else %}<a href="/book/{{ chapter.book_id }}"><small>Конец</small><strong>К книге →</strong></a>{% endif %}
