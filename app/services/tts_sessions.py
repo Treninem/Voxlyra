@@ -66,6 +66,8 @@ class TTSSessionManager:
         self._sessions: dict[str, ReaderTTSSession] = {}
         self._profile_index: dict[str, str] = {}
         self._lock = asyncio.Lock()
+        self._maintenance_tasks: list[asyncio.Task[Any]] = []
+        self._started = False
 
     def _ttl(self) -> int:
         return max(900, min(86400, int(settings.TTS_SESSION_TTL_SECONDS or 7200)))
@@ -73,20 +75,70 @@ class TTSSessionManager:
     def _profile_key(self, *, user_id: int, chapter_id: int, voice: str, style: str, high_quality: bool, priority_boost: bool, chapter_digest: str) -> str:
         return ':'.join((str(user_id), str(chapter_id), validate_voice(voice), validate_style(style), 'hq' if high_quality else 'std', 'priority' if priority_boost else 'normal', chapter_digest))
 
-    async def start(self) -> None:
-        cache_root = Path(settings.TTS_CACHE_DIR or 'storage/tts')
-        await asyncio.to_thread(migrate_old_tts_cache_once, cache_root)
-        await asyncio.to_thread(
-            cleanup_segment_cache, cache_root / 'segments-v1110',
-            max_age_days=settings.TTS_CACHE_DAYS, max_megabytes=settings.TTS_MAX_CACHE_MB,
-        )
-        await self.queue.start()
+    async def _background_cache_maintenance(self, cache_root: Path) -> None:
         try:
-            await asyncio.wait_for(self.queue.registry.warmup(), timeout=20)
+            # Let Bothost finish deployment and let the database become idle before
+            # scanning persistent storage. This task is never part of ASGI startup.
+            await asyncio.sleep(30)
+            await asyncio.to_thread(migrate_old_tts_cache_once, cache_root)
+            await asyncio.to_thread(
+                cleanup_segment_cache, cache_root / 'segments-v1110',
+                max_age_days=settings.TTS_CACHE_DAYS, max_megabytes=settings.TTS_MAX_CACHE_MB,
+            )
+        except asyncio.CancelledError:
+            raise
         except Exception:
-            pass
+            # Cache maintenance is best-effort and must never stop HTTP startup.
+            return
+
+    async def _background_provider_warmup(self) -> None:
+        try:
+            # The Vosk model is intentionally lazy: loading a large ONNX model at
+            # container startup can exceed a small Bothost memory limit and cause a
+            # restart loop. Remote providers and lightweight Piper may warm safely.
+            providers = [
+                provider
+                for name, provider in self.queue.registry.providers.items()
+                if name != 'vosk'
+            ]
+            if providers:
+                await asyncio.wait_for(
+                    asyncio.gather(*(provider.warmup() for provider in providers), return_exceptions=True),
+                    timeout=20,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return
+
+    async def start(self) -> None:
+        if self._started:
+            return
+        self._started = True
+        cache_root = Path(settings.TTS_CACHE_DIR or 'storage/tts')
+        cache_root.mkdir(parents=True, exist_ok=True)
+        # Workers are made available first. Cache scans and model warmup can be
+        # expensive on persistent Bothost storage and therefore run in background.
+        await self.queue.start()
+        self._maintenance_tasks = [
+            asyncio.create_task(
+                self._background_cache_maintenance(cache_root),
+                name='tts-cache-maintenance',
+            ),
+            asyncio.create_task(
+                self._background_provider_warmup(),
+                name='tts-provider-warmup',
+            ),
+        ]
 
     async def close(self) -> None:
+        for task in self._maintenance_tasks:
+            if not task.done():
+                task.cancel()
+        if self._maintenance_tasks:
+            await asyncio.gather(*self._maintenance_tasks, return_exceptions=True)
+        self._maintenance_tasks.clear()
+        self._started = False
         async with self._lock:
             self._sessions.clear()
             self._profile_index.clear()

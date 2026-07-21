@@ -23,6 +23,35 @@ from app.services.runtime_state import mark_bot_connected, mark_bot_starting, ma
 logger = logging.getLogger(__name__)
 
 
+_DISPATCHER: Dispatcher | None = None
+
+
+def _dispatcher() -> Dispatcher:
+    """Build the aiogram router tree once per process.
+
+    Aiogram routers keep their parent reference. Recreating Dispatcher after a
+    transient Telegram failure raises `Router is already attached`, so retries
+    must reuse the original tree.
+    """
+    global _DISPATCHER
+    if _DISPATCHER is not None:
+        return _DISPATCHER
+    dp = Dispatcher(storage=MemoryStorage())
+    blocked_guard = BlockedUserMiddleware()
+    dp.message.outer_middleware(blocked_guard)
+    dp.callback_query.outer_middleware(blocked_guard)
+    dp.pre_checkout_query.outer_middleware(blocked_guard)
+    dp.include_router(payments.router)
+    dp.include_router(legal.router)
+    dp.include_router(start.router)
+    dp.include_router(author.router)
+    dp.include_router(owner.router)
+    dp.include_router(library_manager.router)
+    dp.include_router(moderation.router)
+    _DISPATCHER = dp
+    return dp
+
+
 async def run_bot() -> None:
     mark_bot_starting()
     if not settings.BOT_TOKEN:
@@ -46,19 +75,7 @@ async def run_bot() -> None:
             # had a short network interruption during deployment.
             logger.warning("Could not resolve bot username: %s", exc)
 
-        dp = Dispatcher(storage=MemoryStorage())
-        blocked_guard = BlockedUserMiddleware()
-        dp.message.outer_middleware(blocked_guard)
-        dp.callback_query.outer_middleware(blocked_guard)
-        dp.pre_checkout_query.outer_middleware(blocked_guard)
-
-        dp.include_router(payments.router)
-        dp.include_router(legal.router)
-        dp.include_router(start.router)
-        dp.include_router(author.router)
-        dp.include_router(owner.router)
-        dp.include_router(library_manager.router)
-        dp.include_router(moderation.router)
+        dp = _dispatcher()
 
         # If this network call fails, main.supervise_bot retries the entire bot
         # without terminating the Mini App HTTP server.

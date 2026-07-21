@@ -7,6 +7,7 @@ import csv
 import errno
 import io
 import hashlib
+import logging
 from html import escape
 import hmac
 import json
@@ -904,18 +905,87 @@ def _showcase_sections(books: list[Any]) -> dict[str, list[Any]]:
 
 
 def create_app() -> FastAPI:
+    logger = logging.getLogger(__name__)
+
+    async def bootstrap_application(application: FastAPI) -> None:
+        """Prepare SQLite and optional TTS without blocking the HTTP bind.
+
+        Bothost must be able to see the configured port immediately. Large old
+        databases or a populated TTS cache can take longer than the platform
+        startup deadline, so the expensive work runs after the ASGI lifespan has
+        yielded. Normal application routes stay behind a short 503 gate until the
+        database is ready, while /health remains available to the platform.
+        """
+        delay = 2
+        while not bool(getattr(application.state, "database_ready", False)):
+            application.state.startup_stage = "database"
+            application.state.startup_error = ""
+            logger.info("Application bootstrap: database initialization started")
+            try:
+                await init_db()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                application.state.startup_error = str(exc)[:240]
+                logger.exception(
+                    "Application bootstrap: database initialization failed; retrying in %s seconds",
+                    delay,
+                )
+                await asyncio.sleep(delay)
+                delay = min(60, delay * 2)
+                continue
+            application.state.database_ready = True
+            logger.info("Application bootstrap: database ready")
+
+        application.state.startup_stage = "tts"
+        try:
+            await application.state.tts_sessions.start()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # Text/audio/comic pages and the bot must stay available even when an
+            # optional voice provider cannot initialize. The manager itself starts
+            # queue workers first, so TTS can recover lazily on later requests.
+            application.state.tts_ready = False
+            application.state.startup_error = str(exc)[:240]
+            logger.exception("Application bootstrap: TTS initialization failed")
+        else:
+            application.state.tts_ready = True
+            logger.info("Application bootstrap: TTS queue ready")
+
+        application.state.startup_stage = "ready"
+        application.state.startup_ready = True
+        logger.info("Application bootstrap complete")
+
     @asynccontextmanager
     async def lifespan(application: FastAPI):
-        await init_db()
-        tts_sessions = TTSSessionManager(build_default_generation_queue())
-        application.state.tts_sessions = tts_sessions
-        await tts_sessions.start()
+        application.state.startup_stage = "starting"
+        application.state.startup_error = ""
+        application.state.startup_ready = False
+        application.state.database_ready = False
+        application.state.tts_ready = False
+        application.state.tts_sessions = TTSSessionManager(build_default_generation_queue())
+        bootstrap_task = asyncio.create_task(
+            bootstrap_application(application),
+            name="voxlyra-application-bootstrap",
+        )
+        application.state.bootstrap_task = bootstrap_task
         try:
+            # Yield immediately so Uvicorn binds PORT and Bothost does not restart
+            # the container while a large migration/cache scan is still running.
             yield
         finally:
-            await tts_sessions.close()
+            if not bootstrap_task.done():
+                bootstrap_task.cancel()
+            await asyncio.gather(bootstrap_task, return_exceptions=True)
+            await application.state.tts_sessions.close()
 
     app = FastAPI(title="Вокслира", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+    app.state.startup_stage = "created"
+    app.state.startup_error = ""
+    app.state.startup_ready = False
+    app.state.database_ready = False
+    app.state.tts_ready = False
     # CORS нужен только для явно перечисленных внешних origin. Обычный Mini App
     # работает same-origin и не требует wildcard-доступа ко всем приватным API.
     app.add_middleware(
@@ -930,6 +1000,41 @@ def create_app() -> FastAPI:
     @app.middleware("http")
     async def security_boundary(request: Request, call_next):
         request_id = str(request.headers.get("X-Request-Id") or uuid.uuid4().hex)[:64]
+        path = request.url.path
+        startup_allowed = (
+            path in {"/health", "/readiness", "/favicon.ico"}
+            or path.startswith("/static/")
+        )
+        if not bool(getattr(request.app.state, "database_ready", False)) and not startup_allowed:
+            stage = str(getattr(request.app.state, "startup_stage", "starting") or "starting")
+            common_headers = {
+                "Retry-After": "3",
+                "Cache-Control": "no-store",
+                "X-Request-Id": request_id,
+                **security_headers(),
+            }
+            if path == "/" and request.method == "GET":
+                # Some hosting probes request only /. Return 200 so a slow first
+                # migration cannot be mistaken for a dead process.
+                return HTMLResponse(
+                    status_code=200,
+                    content=(
+                        "<!doctype html><html lang='ru'><meta charset='utf-8'>"
+                        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+                        "<title>VoxLyra запускается</title>"
+                        "<body style='font-family:system-ui;background:#120d20;color:#fff;"
+                        "display:grid;place-items:center;min-height:100vh;margin:0'>"
+                        "<main style='text-align:center;padding:24px'><h1>VoxLyra запускается</h1>"
+                        "<p>Подготовка данных продолжается. Страница обновится автоматически.</p>"
+                        "<script>setTimeout(()=>location.reload(),3000)</script></main></body></html>"
+                    ),
+                    headers=common_headers,
+                )
+            payload = {
+                "detail": "VoxLyra запускается. Повторите запрос через несколько секунд.",
+                "startup_stage": stage,
+            }
+            return JSONResponse(status_code=503, content=payload, headers=common_headers)
         origin = request.headers.get("Origin")
         if request.url.path.startswith("/api/") and not origin_is_allowed(origin, str(request.base_url)):
             return JSONResponse(
@@ -1779,27 +1884,36 @@ def create_app() -> FastAPI:
             await bot.session.close()
 
     @app.get("/health")
-    async def health():
-        """Короткая проверка для Bothost и владельца. Не раскрывает токен и секреты."""
-        summary = diagnostics_summary()
+    async def health(request: Request):
+        """Always-answering process probe for Bothost."""
         return {
             "ok": True,
             "project": settings.PROJECT_NAME,
+            "startup_stage": str(getattr(request.app.state, "startup_stage", "starting")),
+            "database_ready": bool(getattr(request.app.state, "database_ready", False)),
         }
 
     @app.get("/readiness")
-    async def readiness():
+    async def readiness(request: Request):
         """Bothost readiness checks only the HTTP runtime, SQLite and disk.
 
         Optional Telegram/channel/TTS configuration belongs to the protected
         owner diagnostics and must not cause a deployment restart loop while a
         bot connection or a background model download is temporarily unavailable.
         """
+        if not bool(getattr(request.app.state, "database_ready", False)):
+            return {
+                "ok": False,
+                "database_ok": False,
+                "disk_ok": True,
+                "startup_stage": str(getattr(request.app.state, "startup_stage", "database")),
+            }
         runtime = await runtime_readiness()
         return {
             "ok": bool(runtime["ok"]),
             "database_ok": bool(runtime.get("database_ok")),
             "disk_ok": bool(runtime.get("disk_ok")),
+            "startup_stage": str(getattr(request.app.state, "startup_stage", "ready")),
         }
 
     @app.get("/legal", response_class=HTMLResponse)
