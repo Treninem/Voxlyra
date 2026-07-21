@@ -4,6 +4,9 @@ set -u
 # The production Bothost project uses port 3000. Respect an explicit platform
 # value, but keep the clean runtime bootable with the correct project default.
 export PORT="${PORT:-3000}"
+# Keep Python/native allocators predictable on memory-constrained Bothost plans.
+export MALLOC_ARENA_MAX="${MALLOC_ARENA_MAX:-2}"
+export MALLOC_TRIM_THRESHOLD_="${MALLOC_TRIM_THRESHOLD_:-131072}"
 export VOSK_MODEL_PATH=/app/storage/tts/models/vosk
 export TTS_VOSK_MODEL_DIR=/app/storage/tts/models/vosk
 mkdir -p data storage/covers storage/books storage/audio storage/tts storage/tts/models/vosk storage/comics storage/temp storage/legal

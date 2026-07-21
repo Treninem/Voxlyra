@@ -17,8 +17,6 @@ from pathlib import Path, PurePosixPath
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable
 
-from PIL import Image, UnidentifiedImageError
-
 from app.config import settings
 from app.db import connect, utc_now
 from app.services.book_parser import BookParseError, parse_book_file
@@ -1279,6 +1277,7 @@ async def _inspect_book_quality(row: Any, chapters: list[Any]) -> tuple[list[str
     cover_path = Path(str(row["cover_path"] or ""))
     if cover_path.is_file():
         try:
+            from PIL import Image, UnidentifiedImageError
             with Image.open(cover_path) as image:
                 image.verify()
             with Image.open(cover_path) as image:

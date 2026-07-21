@@ -52,8 +52,13 @@ async def connect():
     await db.create_function("unicode_casefold", 1, lambda value: str(value or "").casefold())
     await db.execute("PRAGMA foreign_keys = ON")
     await db.execute(f"PRAGMA busy_timeout = {max(1000, int(settings.DB_BUSY_TIMEOUT_MS or 15000))}")
-    await db.execute(f"PRAGMA cache_size = {-max(8, int(settings.DB_CACHE_MB or 64)) * 1024}")
-    await db.execute("PRAGMA temp_store = MEMORY")
+    configured_cache_mb = max(4, int(settings.DB_CACHE_MB or 8))
+    if bool(getattr(settings, "DB_LOW_MEMORY_MODE", True)):
+        configured_cache_mb = min(configured_cache_mb, 8)
+    await db.execute(f"PRAGMA cache_size = {-configured_cache_mb * 1024}")
+    await db.execute("PRAGMA temp_store = FILE" if bool(getattr(settings, "DB_LOW_MEMORY_MODE", True)) else "PRAGMA temp_store = MEMORY")
+    if bool(getattr(settings, "DB_LOW_MEMORY_MODE", True)):
+        await db.execute("PRAGMA mmap_size = 0")
     await db.execute("PRAGMA synchronous = NORMAL")
     await db.execute(
         f"PRAGMA wal_autocheckpoint = {max(100, int(settings.DB_WAL_AUTOCHECKPOINT_PAGES or 2000))}"

@@ -17,7 +17,7 @@ from fastapi import UploadFile
 
 from app.config import settings
 from app.services.book_parser import SUPPORTED_BOOK_EXTENSIONS
-from app.services.graphic_import import SUPPORTED_GRAPHIC_EXTENSIONS
+from app.services.graphic_types import SUPPORTED_GRAPHIC_EXTENSIONS
 
 UPLOAD_ROOT = Path("storage/temp/chunked_book_uploads")
 CHUNK_SIZE_BYTES = 6 * 1024 * 1024

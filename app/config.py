@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     BOT_USERNAME: str = "VoxlyraBot"
     PROJECT_NAME: str = "Вокслира"
     PUBLIC_VERSION_VISIBLE: bool = False
-    PROJECT_VERSION: str = "v1.14.0.2"
+    PROJECT_VERSION: str = "v1.14.0.3"
     MAX_BOOK_UPLOAD_MB: int = 0
     MAX_BOOK_UNPACKED_MB: int = 2048
     # Прямая загрузка больших библиотечных ZIP идёт частями. Это аварийный
@@ -30,7 +30,8 @@ class Settings(BaseSettings):
     LIBRARY_IMPORT_MIN_FREE_DISK_MB: int = 256
     CHUNK_UPLOAD_MAX_CONCURRENCY: int = 4
     DB_BUSY_TIMEOUT_MS: int = 15000
-    DB_CACHE_MB: int = 64
+    DB_CACHE_MB: int = 8
+    DB_LOW_MEMORY_MODE: bool = True
     DB_WAL_AUTOCHECKPOINT_PAGES: int = 2000
     LIBRARY_IMPORT_FAILED_ARCHIVE_HOURS: int = 24
     MAX_COMIC_UPLOAD_MB: int = 512
@@ -76,7 +77,7 @@ class Settings(BaseSettings):
     TTS_REMOTE_TIMEOUT_SECONDS: int = 120
     TTS_REMOTE_FIRST_TIMEOUT_SECONDS: int = 10
     TTS_REMOTE_COOLDOWN_SECONDS: int = 60
-    TTS_WORKERS: int = 2
+    TTS_WORKERS: int = 1
     TTS_SESSION_TTL_SECONDS: int = 7200
     TTS_SESSION_INITIAL_SEGMENTS: int = 8
     TTS_SESSION_WINDOW_SEGMENTS: int = 10

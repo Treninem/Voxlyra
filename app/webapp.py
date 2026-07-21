@@ -307,15 +307,7 @@ from app.services.quote_cards import build_quote_card, normalize_quote, quote_be
 from app.services.book_parser import BookParseError, build_import_report, parse_book_file
 from app.services.access_grants import ChapterSelectionError, parse_chapter_selection
 from app.services.duplicate_books import find_book_duplicates, sha256_file
-from app.services.graphic_import import (
-    GraphicImportError,
-    PreparedGraphicPage,
-    graphic_report,
-    prepare_graphic_file,
-    prepare_graphic_images,
-    prepare_replacement_page,
-    rotate_graphic_page_file,
-)
+from app.services.graphic_types import GraphicImportError, PreparedGraphicPage
 from app.services.graphic_ocr import (
     GraphicOCRError,
     available_ocr_languages,
@@ -440,6 +432,31 @@ from app.services.reader_tts import (
     validate_style,
     validate_voice,
 )
+
+
+def _lazy_graphic_report(*args, **kwargs):
+    from app.services.graphic_import import graphic_report
+    return graphic_report(*args, **kwargs)
+
+
+def _lazy_prepare_graphic_file(*args, **kwargs):
+    from app.services.graphic_import import prepare_graphic_file
+    return prepare_graphic_file(*args, **kwargs)
+
+
+def _lazy_prepare_graphic_images(*args, **kwargs):
+    from app.services.graphic_import import prepare_graphic_images
+    return prepare_graphic_images(*args, **kwargs)
+
+
+def _lazy_prepare_replacement_page(*args, **kwargs):
+    from app.services.graphic_import import prepare_replacement_page
+    return prepare_replacement_page(*args, **kwargs)
+
+
+def _lazy_rotate_graphic_page_file(*args, **kwargs):
+    from app.services.graphic_import import rotate_graphic_page_file
+    return rotate_graphic_page_file(*args, **kwargs)
 
 
 GRAPHIC_CONTENT_TYPES = {"comic", "manga", "manhwa", "webtoon", "graphic_novel"}
@@ -5701,7 +5718,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="Файл страницы не найден.")
         temporary = source.with_name(f".{source.stem}-rotate-{uuid.uuid4().hex}.webp")
         try:
-            prepared = await asyncio.to_thread(rotate_graphic_page_file, source, temporary, degrees)
+            prepared = await asyncio.to_thread(_lazy_rotate_graphic_page_file, source, temporary, degrees)
             installed = install_prepared_page(prepared, source)
             ok = await update_graphic_page_file_for_author(
                 graphic_page_id,
@@ -5769,7 +5786,7 @@ def create_app() -> FastAPI:
             if written <= 0:
                 raise GraphicImportError("Загружен пустой файл.")
             prepared = await asyncio.to_thread(
-                prepare_replacement_page, uploaded, original_name, temp_dir / "prepared"
+                _lazy_prepare_replacement_page, uploaded, original_name, temp_dir / "prepared"
             )
             installed = install_prepared_page(prepared, target)
             ok = await update_graphic_page_file_for_author(
@@ -5965,13 +5982,13 @@ def create_app() -> FastAPI:
             work_dir = path.parent / "graphic-prepared"
             split_long_pages = bool(payload.get("split_long_pages")) or reading_mode == "vertical" or str(book["content_type"] or "") in {"webtoon", "manhwa"}
             prepared = await asyncio.to_thread(
-                prepare_graphic_file,
+                _lazy_prepare_graphic_file,
                 path,
                 str(meta.get("filename") or path.name),
                 work_dir,
                 split_long_pages=split_long_pages,
             )
-            report = graphic_report(prepared)
+            report = _lazy_graphic_report(prepared)
             chapter = await _commit_graphic_chapter(
                 book_id=book_id,
                 title=title,
@@ -6081,9 +6098,9 @@ def create_app() -> FastAPI:
                 saved.append((target, filename))
             use_slicing = bool(split_long_pages) or reading_mode == "vertical" or str(book["content_type"] or "") in {"webtoon", "manhwa"}
             prepared = await asyncio.to_thread(
-                prepare_graphic_images, saved, temp_dir / "prepared", split_long_pages=use_slicing
+                _lazy_prepare_graphic_images, saved, temp_dir / "prepared", split_long_pages=use_slicing
             )
-            report = graphic_report(prepared)
+            report = _lazy_graphic_report(prepared)
             chapter = await _commit_graphic_chapter(
                 book_id=book_id,
                 title=clean_title,
