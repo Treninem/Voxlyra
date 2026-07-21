@@ -20,28 +20,35 @@ def ocr_engine_available() -> bool:
     return bool(pytesseract is not None and shutil.which("tesseract"))
 
 
-def recognize_graphic_text(path: Path, languages: str = "rus+eng") -> dict[str, Any]:
+def available_ocr_languages() -> list[str]:
     if not ocr_engine_available():
-        raise GraphicOCRError("Локальный OCR пока недоступен на сервере")
-    source = Path(path)
-    if not source.is_file():
-        raise GraphicOCRError("Файл страницы не найден")
+        return []
     try:
-        with Image.open(source) as image:
-            image = ImageOps.exif_transpose(image).convert("RGB")
-            max_side = max(image.size)
-            if max_side > 3200:
-                scale = 3200 / max_side
-                image = image.resize((max(1, int(image.width * scale)), max(1, int(image.height * scale))))
-            data = pytesseract.image_to_data(
-                image,
-                lang=languages,
-                config="--oem 1 --psm 6",
-                output_type=pytesseract.Output.DICT,
-            )
-    except Exception as exc:
-        raise GraphicOCRError("Не удалось распознать текст на странице") from exc
+        return sorted({str(item).strip().lower() for item in pytesseract.get_languages(config="") if str(item).strip()})
+    except Exception:
+        return []
 
+
+def _resolve_ocr_languages(requested: str) -> str:
+    installed = set(available_ocr_languages())
+    wanted = [part.strip().lower() for part in str(requested or "rus+eng").split("+") if part.strip()]
+    usable = [part for part in wanted if part in installed]
+    if not usable:
+        usable = [part for part in ("rus", "eng") if part in installed]
+    if not usable and installed:
+        usable = [sorted(installed)[0]]
+    if not usable:
+        raise GraphicOCRError("Tesseract установлен без языковых данных OCR")
+    return "+".join(dict.fromkeys(usable))
+
+
+def _extract_ocr_candidate(image: Image.Image, *, languages: str, psm: int) -> dict[str, Any]:
+    data = pytesseract.image_to_data(
+        image,
+        lang=languages,
+        config=f"--oem 1 --psm {int(psm)}",
+        output_type=pytesseract.Output.DICT,
+    )
     words: list[str] = []
     confidences: list[float] = []
     for raw_text, raw_conf in zip(data.get("text", []), data.get("conf", [])):
@@ -57,7 +64,44 @@ def recognize_graphic_text(path: Path, languages: str = "rus+eng") -> dict[str, 
         words.append(text)
     text = " ".join(words).strip()
     confidence = sum(confidences) / len(confidences) if confidences else 0.0
-    return {"text": text, "confidence": round(confidence, 2), "languages": languages}
+    score = len(text) + confidence * max(1, len(words)) / 10
+    return {"text": text, "confidence": round(confidence, 2), "score": score, "psm": int(psm)}
+
+
+def recognize_graphic_text(path: Path, languages: str = "rus+eng") -> dict[str, Any]:
+    if not ocr_engine_available():
+        raise GraphicOCRError("Локальный OCR пока недоступен на сервере")
+    source = Path(path)
+    if not source.is_file():
+        raise GraphicOCRError("Файл страницы не найден")
+    resolved_languages = _resolve_ocr_languages(languages)
+    try:
+        with Image.open(source) as original:
+            image = ImageOps.exif_transpose(original).convert("L")
+            max_side = max(image.size)
+            if max_side > 3200:
+                scale = 3200 / max_side
+                image = image.resize(
+                    (max(1, int(image.width * scale)), max(1, int(image.height * scale)))
+                )
+            # Нормализация контраста помогает и сканам, и цветным облакам комиксов.
+            image = ImageOps.autocontrast(image, cutoff=1)
+            candidates = [
+                _extract_ocr_candidate(image, languages=resolved_languages, psm=6),
+                _extract_ocr_candidate(image, languages=resolved_languages, psm=11),
+            ]
+    except GraphicOCRError:
+        raise
+    except Exception as exc:
+        raise GraphicOCRError("Не удалось распознать текст на странице") from exc
+
+    best = max(candidates, key=lambda item: float(item.get("score") or 0))
+    return {
+        "text": str(best.get("text") or ""),
+        "confidence": float(best.get("confidence") or 0),
+        "languages": resolved_languages,
+        "strategy": f"psm-{int(best.get('psm') or 6)}",
+    }
 
 
 def _ranges_from_blank_flags(flags: list[bool], minimum_content: int) -> list[tuple[int, int]]:

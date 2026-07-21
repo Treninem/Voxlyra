@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 from app.config import settings
 from app.build_info import owner_build_label
 from app.services.reader_tts import tts_engine_status
+from app.services.runtime_state import bot_runtime_snapshot
 
 
 @dataclass(frozen=True)
@@ -66,8 +67,8 @@ def collect_diagnostics() -> list[DiagnosticItem]:
         DiagnosticItem(
             "port",
             "PORT задан",
-            int(settings.PORT) > 0,
-            "На Bothost обычно ставим PORT=3000.",
+            int(settings.PORT) == 3000,
+            "Для этого проекта Bothost должен использовать PORT=3000.",
         ),
         DiagnosticItem(
             "webapp_url",
@@ -88,10 +89,40 @@ def collect_diagnostics() -> list[DiagnosticItem]:
             "Для Bothost лучше DATABASE_PATH=data/voxlyra.sqlite3, чтобы база сохранялась между обновлениями.",
         ),
         DiagnosticItem(
+            "sqlite_concurrency",
+            "SQLite настроен для параллельного чтения и импорта",
+            int(settings.DB_BUSY_TIMEOUT_MS or 0) >= 5000 and int(settings.DB_CACHE_MB or 0) >= 16,
+            "Рекомендуется DB_BUSY_TIMEOUT_MS не меньше 5000 и DB_CACHE_MB не меньше 16.",
+        ),
+        DiagnosticItem(
+            "large_library_upload",
+            "Прямая загрузка крупных библиотечных ZIP включена",
+            int(settings.LIBRARY_IMPORT_LARGE_UPLOAD_MAX_MB or 0) >= 512,
+            "Установите LIBRARY_IMPORT_LARGE_UPLOAD_MAX_MB минимум 512 для больших архивов.",
+        ),
+        DiagnosticItem(
+            "storage_reserve",
+            "Для импорта оставляется резерв свободного диска",
+            int(settings.LIBRARY_IMPORT_MIN_FREE_DISK_MB or 0) >= 128,
+            "Рекомендуется LIBRARY_IMPORT_MIN_FREE_DISK_MB не меньше 128.",
+        ),
+        DiagnosticItem(
             "channel",
             "CHANNEL_ID указан",
             bool(channel_id),
             "Укажите @username_канала или числовой ID. Бот должен быть администратором канала.",
+        ),
+        DiagnosticItem(
+            "data_encryption",
+            "Отдельный ключ шифрования реквизитов указан",
+            bool(settings.DATA_ENCRYPTION_KEY.strip()),
+            "Добавьте DATA_ENCRYPTION_KEY (Fernet). Без него используется совместимый ключ из серверных секретов.",
+        ),
+        DiagnosticItem(
+            "cors_policy",
+            "Приватные API не открыты wildcard-CORS",
+            "*" not in str(settings.CORS_ALLOWED_ORIGINS or ""),
+            "Не добавляйте * в CORS_ALLOWED_ORIGINS; перечисляйте только доверенные HTTPS-origin.",
         ),
         DiagnosticItem(
             "reader_tts",
@@ -110,6 +141,7 @@ def diagnostics_summary() -> dict[str, object]:
         "ok_count": ok_count,
         "total": len(items),
         "items": items,
+        "bot_runtime": bot_runtime_snapshot(),
     }
 
 

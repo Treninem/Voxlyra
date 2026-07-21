@@ -34,6 +34,10 @@ from app.services.publication import publish_book_and_channel
 from app.services.automatic_moderation import (
     count_book_moderation_findings, list_book_moderation_findings, resolve_book_moderation_findings,
 )
+from app.services.moderation_revisions import (
+    capture_moderation_snapshot, create_revision_request, format_structured_revision_reason,
+    resolve_revision_request,
+)
 from app.services.moderation_alerts import notify_moderation_resolved
 from app.services.moderation_learning import record_moderation_decision
 from app.services.notifications import (
@@ -217,6 +221,11 @@ async def moderation_book_publish(call: CallbackQuery) -> None:
         actor_user_id=int(user["id"]),
         note="Опубликовано после ручной проверки",
     )
+    await resolve_book_moderation_findings(book_id)
+    await resolve_revision_request(book_id, "manual_approved")
+    await capture_moderation_snapshot(
+        book_id, snapshot_kind="approved", actor_user_id=int(user["id"]), source="telegram_moderation"
+    )
     await notify_moderation_resolved(
         call.bot,
         book_id=book_id,
@@ -283,20 +292,27 @@ async def moderation_book_revision_reason(message: Message, state: FSMContext) -
         await state.clear()
         await message.answer("Книга уже обработана или не найдена.")
         return
+    finding_rows = await list_book_moderation_findings(book_id, limit=500)
+    finding_ids = [int(row["id"]) for row in finding_rows]
+    structured_reason = format_structured_revision_reason(reason, [dict(row) for row in finding_rows])
+    await create_revision_request(
+        book_id, actor_user_id=int(user["id"]), reason=structured_reason, finding_ids=finding_ids,
+        requires_manual_confirmation=not bool(finding_ids), source="telegram_moderation",
+    )
     await set_book_publication_status(book_id, "draft")
     await record_moderation_decision(
         book_id,
         "reject",
         actor_user_id=int(user["id"]),
-        note=reason,
+        note=structured_reason,
     )
     await resolve_book_moderation(
         book_id,
         resolution="revision",
         actor_user_id=int(user["id"]),
-        note=reason,
+        note=structured_reason,
     )
-    await add_audit(user["id"], "book_returned_for_revision", "book", str(book_id), None, reason[:1000])
+    await add_audit(user["id"], "book_returned_for_revision", "book", str(book_id), None, structured_reason[:1000])
     await _notify(
         message,
         actor_user_id=int(user["id"]),
@@ -305,7 +321,7 @@ async def moderation_book_revision_reason(message: Message, state: FSMContext) -
         target_id=book_id,
         app_user_id=int(book["author_user_id"]) if book["author_user_id"] is not None else None,
         telegram_id=int(book["author_telegram_id"]) if book["author_telegram_id"] is not None else None,
-        text=book_moderation_message(book["title"], "rejected", reason=reason, book_id=book_id),
+        text=book_moderation_message(book["title"], "rejected", reason=structured_reason, book_id=book_id),
         reply_markup=book_revision_markup(book_id),
     )
     await notify_moderation_resolved(

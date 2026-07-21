@@ -702,9 +702,9 @@ SETTING_INPUTS = {
     "max_archive_mb": {
         "title": "Изменение лимита",
         "label": "максимальный размер ZIP в МБ",
-        "hint": "Допустимое значение: от <b>10</b> до <b>2000</b> МБ.",
+        "hint": "Значение <b>0</b> снимает пользовательский лимит; технический потолок прямой загрузки задаётся сервером.",
         "cancel": "library:settings",
-        "minimum": 10,
+        "minimum": 0,
         "maximum": 2000,
     },
     "max_unpacked_mb": {
@@ -819,7 +819,7 @@ async def library_set_limit_receive(message: Message, state: FSMContext) -> None
         auto_enabled = await is_auto_moderation_enabled()
         await message.answer(
             "✅ Лимит сохранён.\n\n"
-            f"Книг: <b>{'без ограничения' if int(cfg['max_books']) == 0 else cfg['max_books']}</b>\nZIP: <b>{cfg['max_archive_mb']} МБ</b>\n"
+            f"Книг: <b>{'без ограничения' if int(cfg['max_books']) == 0 else cfg['max_books']}</b>\nZIP: <b>{'без ограничения' if int(cfg['max_archive_mb']) == 0 else str(cfg['max_archive_mb']) + ' МБ'}</b>\n"
             f"После распаковки: <b>{cfg['max_unpacked_mb']} МБ</b>",
             reply_markup=library_settings_menu(str(cfg['duplicate_policy']), auto_enabled),
         )
@@ -895,7 +895,7 @@ async def library_settings(call: CallbackQuery) -> None:
         call,
         "<b>⚙️ Настройки импорта</b>\n\n"
         f"Книг в архиве: до <b>{cfg['max_books']}</b>\n"
-        f"Размер ZIP: до <b>{cfg['max_archive_mb']} МБ</b>\n"
+        f"Размер ZIP: <b>{'без ограничения' if int(cfg['max_archive_mb']) == 0 else 'до ' + str(cfg['max_archive_mb']) + ' МБ'}</b>\n"
         f"После распаковки: до <b>{cfg['max_unpacked_mb']} МБ</b>\n"
         f"Дубли: <b>{policy}</b>\n\n"
         f"Автомодерация: <b>{'включена' if learning['enabled'] else 'выключена'}</b>\n"

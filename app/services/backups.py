@@ -54,9 +54,12 @@ def _create_backup_sync(include_storage: bool = True) -> BackupInfo:
     target = BACKUP_ROOT / f"voxlyra_backup_{stamp}.zip"
     temp = target.with_suffix(".tmp")
     manifest = {
-        "format": 1,
+        "format": 2,
         "created_at": datetime.now(timezone.utc).isoformat(),
+        "project_version": str(settings.PROJECT_VERSION),
         "database": "data/voxlyra.sqlite3",
+        "database_sha256": _sha256(db_path),
+        "database_size": db_path.stat().st_size,
         "includes_storage": bool(include_storage),
     }
     with zipfile.ZipFile(temp, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
@@ -96,32 +99,67 @@ def _restore_backup_sync(archive: Path) -> dict[str, int]:
     with tempfile.TemporaryDirectory(prefix="voxlyra_restore_") as td:
         root = Path(td)
         with zipfile.ZipFile(archive) as zf:
-            names = zf.namelist()
+            infos = zf.infolist()
+            names = [item.filename for item in infos]
             if MANIFEST_NAME not in names or "data/voxlyra.sqlite3" not in names:
                 raise ValueError("Это не резервная копия VoxLyra")
+            if len(infos) > max(100, int(settings.BACKUP_MAX_FILES)):
+                raise ValueError("В резервной копии слишком много файлов")
+            max_unpacked = max(64, int(settings.BACKUP_MAX_UNPACKED_MB)) * 1024 * 1024
+            if sum(max(0, int(item.file_size)) for item in infos) > max_unpacked:
+                raise ValueError("Резервная копия превышает разрешённый распакованный размер")
             if any(not _safe_member(name) for name in names):
                 raise ValueError("Архив содержит небезопасные пути")
+            for item in infos:
+                mode = (item.external_attr >> 16) & 0o170000
+                if mode == 0o120000:
+                    raise ValueError("Архив содержит символическую ссылку")
+            try:
+                manifest = json.loads(zf.read(MANIFEST_NAME).decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise ValueError("Манифест резервной копии повреждён") from exc
+            if int(manifest.get("format") or 0) not in {1, 2}:
+                raise ValueError("Формат резервной копии не поддерживается")
             zf.extractall(root)
         restored_db = root / "data/voxlyra.sqlite3"
         _validate_sqlite(restored_db)
+        expected_db_hash = str(manifest.get("database_sha256") or "")
+        if expected_db_hash and _sha256(restored_db) != expected_db_hash:
+            raise ValueError("Контрольная сумма базы не совпадает с манифестом")
         current_db = Path(settings.DATABASE_PATH)
         current_db.parent.mkdir(parents=True, exist_ok=True)
+        BACKUP_ROOT.mkdir(parents=True, exist_ok=True)
         safety = BACKUP_ROOT / f"before_restore_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.sqlite3"
-        if current_db.exists():
+        had_current = current_db.exists()
+        if had_current:
             shutil.copy2(current_db, safety)
-        os.replace(restored_db, current_db)
         restored_files = 0
-        restored_storage = root / "storage"
-        if restored_storage.exists():
-            destination = Path("storage")
-            for item in restored_storage.rglob("*"):
-                if item.is_file() and "backups" not in item.parts:
-                    rel = item.relative_to(restored_storage)
-                    out = destination / rel
-                    out.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(item, out)
-                    restored_files += 1
-        return {"storage_files": restored_files, "safety_copy": int(safety.exists())}
+        try:
+            staged_db = current_db.with_suffix(current_db.suffix + ".restore.tmp")
+            shutil.copy2(restored_db, staged_db)
+            os.replace(staged_db, current_db)
+            restored_storage = root / "storage"
+            if restored_storage.exists():
+                destination = Path("storage")
+                for item in restored_storage.rglob("*"):
+                    if item.is_file() and "backups" not in item.parts:
+                        rel = item.relative_to(restored_storage)
+                        out = destination / rel
+                        out.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(item, out)
+                        restored_files += 1
+            _validate_sqlite(current_db)
+        except Exception:
+            if had_current and safety.exists():
+                shutil.copy2(safety, current_db)
+            elif current_db.exists():
+                current_db.unlink(missing_ok=True)
+            raise
+        return {
+            "storage_files": restored_files,
+            "safety_copy": int(safety.exists()),
+            "manifest_format": int(manifest.get("format") or 1),
+        }
 
 
 async def restore_backup(archive: Path) -> dict[str, int]:

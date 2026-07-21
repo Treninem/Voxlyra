@@ -18,6 +18,7 @@ const graphicState = {
   frameIndex: 0,
   sessionKey: `comic-${Date.now()}-${Math.random().toString(16).slice(2)}`,
   lastEventPageId: 0,
+  lastNetworkErrorAt: 0,
 };
 
 const GRAPHIC_DB_NAME = 'voxlyra-graphic-cache';
@@ -354,10 +355,19 @@ async function applyGraphicImageSource(image, page, { retry = false } = {}) {
     image.dataset.loaded = '1';
     image.dataset.variant = result.variant?.label || 'auto';
     figure?.classList.add('is-ready');
-  } catch (_) {
+  } catch (error) {
+    graphicState.lastNetworkErrorAt = Date.now();
     image.alt = `Страница ${page.number} временно недоступна`;
     delete image.dataset.loaded;
     figure?.classList.add('is-error');
+    const placeholder = figure?.querySelector('.graphic-page-placeholder span');
+    if (placeholder) {
+      placeholder.textContent = navigator.onLine === false
+        ? `Страница ${page.number} не сохранена офлайн`
+        : (Number(error?.status || 0) === 403
+          ? `Ссылка на страницу ${page.number} обновляется`
+          : `Страница ${page.number} временно недоступна`);
+    }
   } finally {
     delete image.dataset.loading;
   }
@@ -513,6 +523,7 @@ async function saveGraphicProgress() {
     window.queueVoxProgressSync?.('graphic', Number(graphicState.chapterId), Number(page.number));
     await apiFetch(`/api/comic/${graphicState.chapterId}/progress`, {
       method: 'POST',
+      keepalive: true,
       body: JSON.stringify({ page_number: page.number }),
     });
     window.dropVoxProgressSync?.('graphic', Number(graphicState.chapterId));
@@ -529,14 +540,18 @@ function graphicPreloadCount() {
 async function preloadGraphicAround(index) {
   const count = graphicPreloadCount();
   const positions = [];
+  // Сначала текущая и следующая страницы, затем предыдущие. Это помогает и
+  // обычному чтению, и возврату назад без последовательной блокировки сети.
   for (let offset = 0; offset <= count; offset += 1) {
-    const position = index + offset;
-    if (position >= 0 && position < graphicState.pages.length) positions.push(position);
+    const forward = index + offset;
+    const backward = index - offset;
+    if (forward >= 0 && forward < graphicState.pages.length && !positions.includes(forward)) positions.push(forward);
+    if (offset > 0 && backward >= 0 && backward < graphicState.pages.length && !positions.includes(backward)) positions.push(backward);
   }
-  for (const position of positions) {
+  const jobs = positions.map((position) => async () => {
     const page = graphicState.pages[position];
     const runKey = `${graphicState.chapterId}:${page.number}`;
-    if (graphicState.preloadRunning.has(runKey)) continue;
+    if (graphicState.preloadRunning.has(runKey)) return;
     graphicState.preloadRunning.add(runKey);
     try {
       const image = document.querySelector(`img[data-graphic-page="${page.number}"]`);
@@ -544,6 +559,10 @@ async function preloadGraphicAround(index) {
       else await loadGraphicPageBlob(page);
     } catch (_) {}
     finally { graphicState.preloadRunning.delete(runKey); }
+  });
+  const concurrency = graphicConnectionProfile().slow ? 1 : 3;
+  for (let offset = 0; offset < jobs.length; offset += concurrency) {
+    await Promise.allSettled(jobs.slice(offset, offset + concurrency).map((job) => job()));
   }
 }
 
@@ -1047,16 +1066,25 @@ function bindGraphicReaderEvents() {
   }, { passive: true });
   window.addEventListener('online', () => {
     updateGraphicNetworkStatus();
-    const failed = document.querySelectorAll('.graphic-page.is-error img[data-graphic-page]');
-    failed.forEach((image) => {
-      const page = graphicState.pages.find((item) => Number(item.number) === Number(image.dataset.graphicPage));
-      if (page) applyGraphicImageSource(image, page, { retry: true });
-    });
+    const retryFailedPages = async () => {
+      if (graphicState.lastNetworkErrorAt && Date.now() - graphicState.lastNetworkErrorAt > 30_000) {
+        await refreshGraphicMeta().catch(() => null);
+      }
+      const failed = document.querySelectorAll('.graphic-page.is-error img[data-graphic-page]');
+      failed.forEach((image) => {
+        const page = graphicState.pages.find((item) => Number(item.number) === Number(image.dataset.graphicPage));
+        if (page) applyGraphicImageSource(image, page, { retry: true });
+      });
+    };
+    retryFailedPages().catch(() => {});
   });
   window.addEventListener('offline', updateGraphicNetworkStatus);
   navigator.connection?.addEventListener?.('change', updateGraphicNetworkStatus);
-  window.addEventListener('beforeunload', () => {
-    saveGraphicProgress();
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') saveGraphicProgress().catch(() => {});
+  });
+  window.addEventListener('pagehide', () => {
+    saveGraphicProgress().catch(() => {});
     sendGraphicReadingEvent('exit', currentGraphicPage()).catch(() => {});
     releaseGraphicObjectUrls();
   });

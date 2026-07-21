@@ -70,6 +70,7 @@ from app.db import (
     get_owner_today_stats,
     record_owner_channel_promotion,
     get_platform_finance_summary,
+    get_monetization_integrity_report,
     get_control_queue_counts,
     get_book_with_counts,
     get_bookmark,
@@ -83,6 +84,8 @@ from app.db import (
     get_listening_progress,
     get_legal_acceptances,
     get_missing_legal_documents,
+    accept_legal_document,
+    withdraw_legal_document,
     get_graphic_chapter,
     get_graphic_page,
     get_graphic_reading_progress,
@@ -274,10 +277,24 @@ from app.db import (
     user_can_access_graphic,
 )
 from app.services.tma_auth import TMAAuthError, TMAUser, authenticate_init_data
+from app.services.privacy_controls import (
+    build_full_privacy_export,
+    confirm_account_deletion,
+    create_deletion_preview,
+    get_privacy_overview,
+)
+from app.services.security import (
+    cors_origins,
+    origin_is_allowed,
+    request_ip_hash,
+    request_limiter,
+    security_headers,
+)
 from app.services.publication import post_book_to_channel
 from app.permissions import PERMISSION_BY_CODE
 from app.keyboards import author_book_card_menu
 from app.services.diagnostics import diagnostics_summary
+from app.services.runtime_performance import runtime_performance_report, runtime_readiness
 from app.services.book_assistant import (
     answer_question as answer_book_question,
     build_chapter_analysis,
@@ -300,6 +317,7 @@ from app.services.graphic_import import (
 )
 from app.services.graphic_ocr import (
     GraphicOCRError,
+    available_ocr_languages,
     ocr_engine_available,
     recognize_graphic_text,
     suggest_graphic_frames,
@@ -317,6 +335,7 @@ from app.services.chunked_upload import (
     CHUNK_SIZE_BYTES,
     assemble_upload,
     cleanup_upload,
+    claim_upload_finish,
     create_graphic_upload,
     create_library_import_upload,
     create_or_resume_library_import_upload,
@@ -332,6 +351,7 @@ from app.services.library_import_queue import (
     ensure_import_queue_schema,
     enqueue_import_job,
     get_import_queue_control_state,
+    get_import_upload_receipt,
     list_import_jobs,
     retry_import_job,
     set_import_queue_mode,
@@ -354,6 +374,21 @@ from app.services.moderation_learning import (
     get_moderation_learning_summary,
     record_moderation_decision,
     set_auto_moderation_enabled,
+)
+from app.services.automatic_moderation import (
+    count_book_moderation_findings,
+    list_book_moderation_findings,
+    resolve_book_moderation_findings,
+)
+from app.services.moderation_revisions import (
+    capture_moderation_snapshot,
+    create_revision_request,
+    format_structured_revision_reason,
+    get_author_moderation_state,
+    get_findings_for_revision_reason,
+    get_revision_change_set,
+    list_revision_history,
+    resolve_revision_request,
 )
 from app.services.notifications import (
     book_moderation_message,
@@ -413,6 +448,22 @@ GRAPHIC_TEMP_ROOT = Path("storage/temp/graphic_imports")
 LIBRARY_IMPORT_CHUNK_SIZE_BYTES = 1024 * 1024
 
 
+def _effective_library_upload_limit_mb(configured_limit: object) -> int:
+    """Combine the owner limit with the server safety ceiling.
+
+    Zero in the owner settings means no business limit, but the deployment still
+    keeps a configurable technical ceiling to protect disk and reverse proxy.
+    """
+    try:
+        configured = max(0, int(configured_limit or 0))
+    except (TypeError, ValueError):
+        configured = 0
+    hard_limit = max(0, int(settings.LIBRARY_IMPORT_LARGE_UPLOAD_MAX_MB or 0))
+    if configured and hard_limit:
+        return min(configured, hard_limit)
+    return configured or hard_limit
+
+
 def _reader_watermark_label(user: TMAUser) -> str:
     name = (user.full_name or (f"@{user.username}" if user.username else "Читатель")).strip()[:48]
     tail = str(user.telegram_id)[-4:]
@@ -461,6 +512,39 @@ def _validate_graphic_media_token(
         user_id=user_id, chapter_id=chapter_id, page_number=page_number, expires_at=expires_at
     )
     return hmac.compare_digest(expected, str(token or ""))
+
+
+def _audio_signing_secret() -> bytes:
+    value = (
+        settings.TTS_SIGNING_SECRET.strip()
+        or settings.COMIC_SIGNING_SECRET.strip()
+        or settings.BOT_TOKEN.strip()
+        or "voxlyra-local-audio-secret"
+    )
+    return value.encode("utf-8")
+
+
+def _audio_media_token(*, user_id: int, audio_id: int, expires_at: int) -> str:
+    payload = f"{int(user_id)}:{int(audio_id)}:{int(expires_at)}".encode("utf-8")
+    return hmac.new(_audio_signing_secret(), payload, hashlib.sha256).hexdigest()
+
+
+def _validate_audio_media_token(
+    *, user_id: int, audio_id: int, expires_at: int, token: str
+) -> bool:
+    if int(expires_at) < int(time.time()):
+        return False
+    expected = _audio_media_token(user_id=user_id, audio_id=audio_id, expires_at=expires_at)
+    return hmac.compare_digest(expected, str(token or ""))
+
+
+def _effective_pricing_mode(price_stars: int, declared_mode: str | None) -> str:
+    mode = str(declared_mode or "").strip().lower()
+    if mode == "premium":
+        return "premium"
+    if int(price_stars or 0) <= 0:
+        return "free"
+    return "chapters" if mode == "chapters" else "whole_book"
 
 
 def _safe_graphic_path(value: str) -> Path | None:
@@ -832,17 +916,47 @@ def create_app() -> FastAPI:
             await tts_sessions.close()
 
     app = FastAPI(title="Вокслира", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
-    # Прямая загрузка может открываться Telegram WebView через промежуточный origin.
-    # Все API импорта всё равно защищены проверкой Telegram initData и одноразовым
-    # подписанным токеном, поэтому разрешаем preflight без cookie-аутентификации.
+    # CORS нужен только для явно перечисленных внешних origin. Обычный Mini App
+    # работает same-origin и не требует wildcard-доступа ко всем приватным API.
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=cors_origins(),
         allow_credentials=False,
         allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["*"],
+        allow_headers=["Content-Type", "X-Telegram-Init-Data", "X-Vox-Request-Id"],
         max_age=600,
     )
+
+    @app.middleware("http")
+    async def security_boundary(request: Request, call_next):
+        request_id = str(request.headers.get("X-Request-Id") or uuid.uuid4().hex)[:64]
+        origin = request.headers.get("Origin")
+        if request.url.path.startswith("/api/") and not origin_is_allowed(origin, str(request.base_url)):
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "Источник запроса не разрешён."},
+                headers={"X-Request-Id": request_id, **security_headers()},
+            )
+        content_length = request.headers.get("Content-Length")
+        content_type = str(request.headers.get("Content-Type") or "").lower()
+        if content_length and "application/json" in content_type:
+            try:
+                too_large = int(content_length) > max(1024, int(settings.SECURITY_MAX_JSON_BYTES))
+            except ValueError:
+                too_large = True
+            if too_large:
+                return JSONResponse(
+                    status_code=413,
+                    content={"detail": "Запрос слишком большой."},
+                    headers={"X-Request-Id": request_id, **security_headers()},
+                )
+        response = await call_next(request)
+        response.headers["X-Request-Id"] = request_id
+        for key, value in security_headers().items():
+            response.headers.setdefault(key, value)
+        if request.url.path.startswith(("/api/privacy", "/api/legal/status")):
+            response.headers["Cache-Control"] = "private, no-store, max-age=0"
+        return response
     app.mount("/static", StaticFiles(directory="static"), name="static")
 
     @app.get("/favicon.ico", include_in_schema=False)
@@ -868,6 +982,17 @@ def create_app() -> FastAPI:
         if extra:
             data.update(extra)
         return data
+
+    def claim_sensitive_request(user: TMAUser, request_id: str | None, action: str) -> None:
+        subject = f"{user.app_user_id}:{action}"
+        if not request_limiter.allow(
+            subject,
+            limit=max(3, int(settings.SECURITY_SENSITIVE_REQUESTS_PER_MINUTE)),
+            window_seconds=60,
+        ):
+            raise HTTPException(status_code=429, detail="Слишком много чувствительных запросов. Повторите позже.")
+        if not request_id or not request_limiter.claim_request_id(subject, request_id):
+            raise HTTPException(status_code=409, detail="Запрос уже обработан или не содержит уникального идентификатора.")
 
     async def price_context() -> dict[str, Any]:
         cfg = await load_runtime_payment_settings()
@@ -1125,10 +1250,94 @@ def create_app() -> FastAPI:
             "can_manage": can_manage,
             "batch": dict(batch),
             "errors": errors[:200],
+            "errors_total": len(errors),
             "duplicates": duplicates,
             "audit": audit,
             "book_statuses": book_statuses,
         }
+
+    @app.get("/api/control/library-import/batch/{batch_id}/report")
+    async def api_control_library_import_batch_report(
+        batch_id: int,
+        format: str = "json",
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user, is_owner, permissions = await control_session(
+            x_telegram_init_data,
+            "library_import_manage",
+            "library_bulk_import",
+        )
+        batch = await get_batch(batch_id)
+        if not batch:
+            raise HTTPException(status_code=404, detail="Пакет импорта не найден.")
+        can_manage = bool(is_owner or "library_import_manage" in permissions)
+        if not can_manage and int(batch["imported_by_user_id"] or 0) != int(user.app_user_id):
+            raise HTTPException(status_code=403, detail="Этот пакет загружен другим пользователем.")
+        try:
+            errors = json.loads(str(batch["errors_json"] or "[]"))
+            if not isinstance(errors, list):
+                errors = []
+        except (TypeError, ValueError, json.JSONDecodeError):
+            errors = []
+        duplicates = [dict(row) for row in await list_batch_duplicates(batch_id, pending_only=False)]
+        async with connect() as db:
+            cur = await db.execute(
+                """SELECT id, title, source_author_name, publication_status,
+                          import_was_replacement, created_at, updated_at
+                   FROM books WHERE import_batch_id=? ORDER BY id""",
+                (int(batch_id),),
+            )
+            books = [dict(row) for row in await cur.fetchall()]
+        safe_format = str(format or "json").strip().lower()
+        filename_base = f"voxlyra_import_batch_{int(batch_id)}"
+        if safe_format == "csv":
+            output = io.StringIO()
+            writer = csv.writer(output, delimiter=";")
+            writer.writerow(["type", "folder", "title", "reason", "book_id", "status"])
+            for item in errors:
+                reasons = item.get("reasons") if isinstance(item, dict) else []
+                if not isinstance(reasons, list):
+                    reasons = [str(reasons or "")]
+                if not reasons:
+                    reasons = ["Причина не записана"]
+                for reason in reasons:
+                    writer.writerow([
+                        "error",
+                        str(item.get("folder") or "") if isinstance(item, dict) else "",
+                        str(item.get("title") or "Без названия") if isinstance(item, dict) else "Без названия",
+                        str(reason or ""),
+                        "",
+                        "",
+                    ])
+            for item in duplicates:
+                writer.writerow([
+                    "duplicate",
+                    str(item.get("folder_name") or ""),
+                    str(item.get("title") or "Без названия"),
+                    f"Совпадение с книгой ID {int(item.get('existing_book_id') or 0)}",
+                    int(item.get("existing_book_id") or 0),
+                    str(item.get("status") or ""),
+                ])
+            return Response(
+                content=("\ufeff" + output.getvalue()).encode("utf-8"),
+                media_type="text/csv; charset=utf-8",
+                headers={"Content-Disposition": f'attachment; filename="{filename_base}.csv"'},
+            )
+        if safe_format != "json":
+            raise HTTPException(status_code=400, detail="Поддерживаются форматы json и csv.")
+        report = {
+            "report_version": "1.0",
+            "generated_at": datetime.now().isoformat(),
+            "batch": dict(batch),
+            "books": books,
+            "duplicates": duplicates,
+            "errors": errors,
+        }
+        return Response(
+            content=json.dumps(report, ensure_ascii=False, indent=2, default=str).encode("utf-8"),
+            media_type="application/json; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename_base}.json"'},
+        )
 
     @app.post("/api/control/library-import/job/{job_id}/cancel")
     async def api_control_library_import_cancel_job(
@@ -1290,10 +1499,15 @@ def create_app() -> FastAPI:
             verify_library_import_upload_token(token)
         except LibraryImportUploadTokenError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
+        cfg = await get_import_settings()
+        large_upload_max_mb = _effective_library_upload_limit_mb(cfg.get("max_archive_mb"))
         response = templates.TemplateResponse(
             request,
             "library_import_upload.html",
-            common_context({"upload_token": token}),
+            common_context({
+                "upload_token": token,
+                "large_upload_max_mb": large_upload_max_mb,
+            }),
         )
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         response.headers["Pragma"] = "no-cache"
@@ -1347,7 +1561,7 @@ def create_app() -> FastAPI:
                     user_id=user.app_user_id,
                     filename=str(payload.get("filename") or ""),
                     total_size=int(payload.get("size") or 0),
-                    max_mb=int(cfg.get("max_archive_mb") or 0),
+                    max_mb=_effective_library_upload_limit_mb(cfg.get("max_archive_mb")),
                     resume_upload_id=str(payload.get("resume_upload_id") or ""),
                 )
             )
@@ -1432,6 +1646,30 @@ def create_app() -> FastAPI:
         token = str(payload.get("token") or "")
         init_data = str(payload.get("init_data") or x_telegram_init_data or "")
         user, token_data = await library_import_upload_session(init_data, token)
+        receipt = await get_import_upload_receipt(upload_id, actor_user_id=user.app_user_id)
+        if receipt is not None:
+            await asyncio.to_thread(cleanup_upload, upload_id)
+            return {
+                "ok": True,
+                "job_id": int(receipt["job_id"]),
+                "position": int(receipt["position"]),
+                "idempotent": True,
+            }
+        try:
+            claimed = await asyncio.to_thread(
+                claim_upload_finish,
+                upload_id,
+                user_id=user.app_user_id,
+                book_id=0,
+            )
+        except ChunkedUploadError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if not claimed:
+            raise HTTPException(
+                status_code=425,
+                detail="Архив уже собирается. Повторите завершение через несколько секунд.",
+            )
+
         total_chunks = int(payload.get("total_chunks") or 0)
         queue_path: Path | None = None
         try:
@@ -1460,6 +1698,7 @@ def create_app() -> FastAPI:
                 actor_user_id=user.app_user_id,
                 chat_id=int(token_data.chat_id),
                 progress_message_id=int(token_data.progress_message_id),
+                idempotency_key=upload_id,
             )
         except (ChunkedUploadError, ValueError) as exc:
             if queue_path is not None and queue_path.exists():
@@ -1550,9 +1789,18 @@ def create_app() -> FastAPI:
 
     @app.get("/readiness")
     async def readiness():
-        """Подробная, но безопасная проверка окружения после деплоя."""
-        summary = diagnostics_summary()
-        return {"ok": bool(summary["ok"])}
+        """Bothost readiness checks only the HTTP runtime, SQLite and disk.
+
+        Optional Telegram/channel/TTS configuration belongs to the protected
+        owner diagnostics and must not cause a deployment restart loop while a
+        bot connection or a background model download is temporarily unavailable.
+        """
+        runtime = await runtime_readiness()
+        return {
+            "ok": bool(runtime["ok"]),
+            "database_ok": bool(runtime.get("database_ok")),
+            "disk_ok": bool(runtime.get("disk_ok")),
+        }
 
     @app.get("/legal", response_class=HTMLResponse)
     async def legal_index(request: Request):
@@ -1614,6 +1862,52 @@ def create_app() -> FastAPI:
                 for row in accepted
             ],
         }
+
+    @app.post("/api/legal/accept")
+    async def api_legal_accept(
+        request: Request,
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+        x_vox_request_id: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        claim_sensitive_request(user, x_vox_request_id, "legal_accept")
+        code = str((payload or {}).get("code") or "").strip()
+        doc = get_doc(code)
+        if not doc or doc.consent_kind not in {"agreement", "consent", "information"}:
+            raise HTTPException(status_code=404, detail="Документ не найден или не требует принятия.")
+        if str((payload or {}).get("version") or doc.version) != doc.version:
+            raise HTTPException(status_code=409, detail="Редакция документа изменилась. Откройте документ заново.")
+        await accept_legal_document(
+            user.app_user_id,
+            doc.code,
+            doc.version,
+            doc_hash=doc.digest,
+            source="miniapp",
+            user_agent=str(request.headers.get("User-Agent") or "")[:500],
+            ip_hash=request_ip_hash(request.client.host if request.client else ""),
+        )
+        await add_audit(user.app_user_id, "legal_document_accepted_web", "legal_document", doc.code, None, doc.version)
+        required = [(item, LEGAL_DOCS[item].version, LEGAL_DOCS[item].digest) for item in REQUIRED_ON_START]
+        return {"ok": True, "code": doc.code, "version": doc.version, "missing": await get_missing_legal_documents(user.app_user_id, required)}
+
+    @app.post("/api/legal/withdraw")
+    async def api_legal_withdraw(
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+        x_vox_request_id: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        claim_sensitive_request(user, x_vox_request_id, "legal_withdraw")
+        code = str((payload or {}).get("code") or "").strip()
+        doc = get_doc(code)
+        if not doc or doc.consent_kind != "consent":
+            raise HTTPException(status_code=400, detail="Через Mini App можно отозвать только отдельное согласие.")
+        ok = await withdraw_legal_document(user.app_user_id, doc.code, doc.version)
+        if not ok:
+            raise HTTPException(status_code=404, detail="Активное согласие этой редакции не найдено.")
+        await add_audit(user.app_user_id, "legal_consent_withdrawn_web", "legal_document", doc.code, doc.version, "withdrawn")
+        return {"ok": True, "code": doc.code, "message": "Согласие отозвано. Функции, которым оно необходимо, будут ограничены."}
 
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request):
@@ -2665,12 +2959,15 @@ def create_app() -> FastAPI:
         user = await _tma_user(x_telegram_init_data)
         updates = list(payload.get("updates") or [])[:100]
         applied = 0
+        skipped_stale = 0
         for update in updates:
             kind = str(update.get("kind") or "")
             target_id = int(update.get("target_id") or 0)
             position = max(0, int(update.get("position") or 0))
+            queued_at = update.get("queued_at")
             if target_id <= 0:
                 continue
+            saved = False
             if kind == "text":
                 chapter = await get_chapter(target_id)
                 if not chapter:
@@ -2680,16 +2977,22 @@ def create_app() -> FastAPI:
                 )
                 if not allowed or moderation_access:
                     continue
-                await save_reading_progress(user.app_user_id, target_id, min(100, position))
-                applied += 1
+                saved = await save_reading_progress(
+                    user.app_user_id, target_id, min(100, position),
+                    client_updated_at=queued_at, protect_newer=True,
+                )
             elif kind == "audio":
                 audio = await get_audio_chapter(target_id)
                 if not audio or audio["publication_status"] != "published" or audio["status"] != "published":
                     continue
                 if not await user_can_access_audio(user.app_user_id, target_id):
                     continue
-                await save_listening_progress(user.app_user_id, target_id, position)
-                applied += 1
+                maximum = max(0, int(audio["duration_seconds"] or 0))
+                safe_position = min(maximum, position) if maximum else position
+                saved = await save_listening_progress(
+                    user.app_user_id, target_id, safe_position,
+                    client_updated_at=queued_at, protect_newer=True,
+                )
             elif kind == "graphic":
                 graphic = await get_graphic_chapter(target_id)
                 if not graphic:
@@ -2699,12 +3002,19 @@ def create_app() -> FastAPI:
                 )
                 if not allowed or moderation_access:
                     continue
-                await save_graphic_reading_progress(
+                saved = await save_graphic_reading_progress(
                     user.app_user_id, target_id,
                     max(1, min(int(graphic["pages_count"] or 1), position)),
+                    client_updated_at=queued_at, protect_newer=True,
                 )
+            if saved:
                 applied += 1
-        return {"ok": True, "applied": applied, **(await get_progress_sync_snapshot(user.app_user_id, limit=500))}
+            elif kind in {"text", "audio", "graphic"}:
+                skipped_stale += 1
+        return {
+            "ok": True, "applied": applied, "skipped_stale": skipped_stale,
+            **(await get_progress_sync_snapshot(user.app_user_id, limit=500)),
+        }
 
     @app.post("/api/wallet/checkout")
     async def api_wallet_checkout(
@@ -2748,6 +3058,88 @@ def create_app() -> FastAPI:
     async def api_preferences_reset(x_telegram_init_data: str | None = Header(default=None)):
         user = await _tma_user(x_telegram_init_data)
         return {"ok": True, "preferences": await reset_user_preferences(user.app_user_id)}
+
+    @app.get("/api/privacy/overview")
+    async def api_privacy_overview(x_telegram_init_data: str | None = Header(default=None)):
+        user = await _tma_user(x_telegram_init_data)
+        overview = await get_privacy_overview(user.app_user_id)
+        required = [(code, LEGAL_DOCS[code].version, LEGAL_DOCS[code].digest) for code in REQUIRED_ON_START]
+        accepted_rows = await get_legal_acceptances(user.app_user_id)
+        overview["legal"] = {
+            "missing": await get_missing_legal_documents(user.app_user_id, required),
+            "accepted": [
+                {
+                    "code": row["doc_code"], "version": row["doc_version"],
+                    "accepted_at": row["accepted_at"], "active": not bool(row["withdrawn_at"]),
+                    "source": row["acceptance_source"],
+                }
+                for row in accepted_rows
+            ],
+            "documents": [
+                {
+                    "code": code, "title": LEGAL_DOCS[code].short_title,
+                    "version": LEGAL_DOCS[code].version, "kind": LEGAL_DOCS[code].consent_kind,
+                    "url": f"/legal/{code}",
+                }
+                for code in REQUIRED_ON_START
+            ],
+        }
+        return {"ok": True, "privacy": overview}
+
+    @app.get("/api/privacy/export")
+    async def api_privacy_export(x_telegram_init_data: str | None = Header(default=None)):
+        user = await _tma_user(x_telegram_init_data)
+        if not request_limiter.allow(f"{user.app_user_id}:privacy_export", limit=3, window_seconds=3600):
+            raise HTTPException(status_code=429, detail="Экспорт уже создавался недавно. Повторите позже.")
+        export_data = await build_full_privacy_export(user.app_user_id)
+        await add_audit(user.app_user_id, "personal_data_exported", "user", str(user.app_user_id), None, export_data.get("generated_at"))
+        payload = json.dumps(export_data, ensure_ascii=False, indent=2).encode("utf-8")
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return Response(
+            content=payload,
+            media_type="application/json; charset=utf-8",
+            headers={
+                "Content-Disposition": f'attachment; filename="voxlyra_personal_data_{stamp}.json"',
+                "Cache-Control": "private, no-store, max-age=0",
+            },
+        )
+
+    @app.post("/api/privacy/delete/preview")
+    async def api_privacy_delete_preview(
+        x_telegram_init_data: str | None = Header(default=None),
+        x_vox_request_id: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        if user.telegram_id in settings.owner_ids:
+            raise HTTPException(status_code=409, detail="Профиль владельца нельзя удалить из пользовательского интерфейса.")
+        claim_sensitive_request(user, x_vox_request_id, "privacy_delete_preview")
+        try:
+            preview = await create_deletion_preview(user.app_user_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        await add_audit(user.app_user_id, "account_deletion_previewed", "user", str(user.app_user_id), None, str(preview.get("request_id")))
+        return {"ok": True, "preview": preview}
+
+    @app.post("/api/privacy/delete/confirm")
+    async def api_privacy_delete_confirm(
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+        x_vox_request_id: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        if user.telegram_id in settings.owner_ids:
+            raise HTTPException(status_code=409, detail="Профиль владельца нельзя удалить из пользовательского интерфейса.")
+        claim_sensitive_request(user, x_vox_request_id, "privacy_delete_confirm")
+        if str((payload or {}).get("confirmation_phrase") or "").strip().upper() != "УДАЛИТЬ":
+            raise HTTPException(status_code=400, detail="Не введено контрольное слово УДАЛИТЬ.")
+        try:
+            result = await confirm_account_deletion(
+                user.app_user_id, int((payload or {}).get("request_id") or 0),
+                str((payload or {}).get("confirmation_token") or ""),
+            )
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"ok": True, "result": result, "message": "Профиль удалён. Юридически обязательные записи сохранены в минимальном объёме."}
 
     @app.get("/api/book/{book_id}/state")
     async def api_book_state(book_id: int, x_telegram_init_data: str | None = Header(default=None)):
@@ -4127,13 +4519,40 @@ def create_app() -> FastAPI:
         audio = await get_audio_chapter(audio_id)
         if not audio or audio["publication_status"] != "published" or audio["status"] != "published":
             raise HTTPException(status_code=404, detail="Аудиоглава не найдена.")
+        mode = _effective_pricing_mode(
+            int(audio["book_price_stars"] or 0), str(audio["pricing_type"] or "")
+        )
+        effective_free = mode == "free" or int(audio["is_free"] or 0) == 1
+        premium_required = mode == "premium" and not effective_free
+        can_buy_audio = (
+            mode not in {"free", "premium"}
+            and not effective_free
+            and int(audio["price_stars"] or 0) > 0
+        )
         allowed = await user_can_access_audio(user.app_user_id, audio_id)
         progress = await get_listening_progress(user.app_user_id, audio_id) if allowed else 0
         adjacent = await get_adjacent_audio_chapters(audio_id)
+        stream_url = ""
+        stream_expires_at = 0
+        if allowed and audio["file_path"]:
+            stream_expires_at = int(time.time()) + 2 * 60 * 60
+            token = _audio_media_token(
+                user_id=user.app_user_id, audio_id=audio_id, expires_at=stream_expires_at
+            )
+            stream_url = (
+                f"/media/audio-stream/{int(audio_id)}?user_id={int(user.app_user_id)}"
+                f"&expires={stream_expires_at}&token={token}"
+            )
         return {
             "ok": True,
             "allowed": allowed,
-            "purchase_url": _bot_purchase_url("audio", audio_id),
+            "pricing_mode": mode,
+            "premium_required": premium_required,
+            "premium_url": "/premium",
+            "can_buy_audio": can_buy_audio,
+            "purchase_url": _bot_purchase_url("audio", audio_id) if can_buy_audio else "",
+            "stream_url": stream_url,
+            "stream_expires_at": stream_expires_at,
             "navigation": {
                 "previous": _row_to_dict(adjacent["previous"]) if adjacent["previous"] else None,
                 "next": _row_to_dict(adjacent["next"]) if adjacent["next"] else None,
@@ -4146,9 +4565,12 @@ def create_app() -> FastAPI:
                 "book_title": audio["book_title"],
                 "narrator": audio["narrator"],
                 "duration_seconds": int(audio["duration_seconds"] or 0),
-                "is_free": int(audio["is_free"] or 0) == 1,
-                "price_stars": int(audio["price_stars"] or 0),
-                "buyer_estimate_minor": int(audio["price_stars"] or 0) * (await load_runtime_payment_settings()).buyer_star_rate_minor,
+                "is_free": effective_free,
+                "price_stars": int(audio["price_stars"] or 0) if can_buy_audio else 0,
+                "buyer_estimate_minor": (
+                    int(audio["price_stars"] or 0) * (await load_runtime_payment_settings()).buyer_star_rate_minor
+                    if can_buy_audio else 0
+                ),
             },
         }
 
@@ -4160,24 +4582,41 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="Аудиоглава не найдена.")
         if not await user_can_access_audio(user.app_user_id, audio_id):
             raise HTTPException(status_code=403, detail="Нет доступа к аудиоглаве.")
-        position = int(payload.get("position_seconds") or 0)
+        position = max(0, int(payload.get("position_seconds") or 0))
+        maximum = max(0, int(audio["duration_seconds"] or 0))
+        if maximum:
+            position = min(maximum, position)
         await save_listening_progress(user.app_user_id, audio_id, position)
-        return {"ok": True, "position_seconds": max(0, position)}
+        return {"ok": True, "position_seconds": position}
 
     @app.get("/api/audio/{audio_id}/file")
     async def api_audio_file(audio_id: int, x_telegram_init_data: str | None = Header(default=None)):
+        """Совместимый защищённый адрес для старых клиентов.
+
+        Новые клиенты используют подписанный /media/audio-stream/... напрямую в
+        HTMLAudioElement, чтобы браузер мог применять Range и не держал весь файл в памяти.
+        """
         user = await _tma_user(x_telegram_init_data)
         audio = await get_audio_chapter(audio_id)
         if not audio or audio["publication_status"] != "published" or audio["status"] != "published" or not audio["file_path"]:
             raise HTTPException(status_code=404, detail="Аудиоглава не найдена.")
         if not await user_can_access_audio(user.app_user_id, audio_id):
             raise HTTPException(status_code=403, detail="Аудиоглава доступна после покупки.")
-        if int(audio["is_free"] or 0) != 1 and int(audio["price_stars"] or 0) > 0:
+        mode = _effective_pricing_mode(int(audio["book_price_stars"] or 0), str(audio["pricing_type"] or ""))
+        if mode not in {"free", "premium"} and int(audio["is_free"] or 0) != 1:
             await mark_purchase_access_used(user.app_user_id, audio_chapter_id=audio_id)
-        path = Path(audio["file_path"])
+        path = Path(audio["file_path"] )
         if not path.exists() or not path.is_file():
             raise HTTPException(status_code=404, detail="Аудиофайл не найден.")
-        return FileResponse(path, media_type=audio["mime_type"] or "audio/mpeg", filename=audio["source_filename"] or path.name)
+        return FileResponse(
+            path, media_type=audio["mime_type"] or "audio/mpeg",
+            headers={
+                "Cache-Control": "private, no-store, max-age=0",
+                "Content-Disposition": f'inline; filename="{audio["source_filename"] or path.name}"',
+                "Accept-Ranges": "bytes",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
 
     @app.get("/api/author/dashboard")
     async def api_author_dashboard(x_telegram_init_data: str | None = Header(default=None)):
@@ -4457,6 +4896,7 @@ def create_app() -> FastAPI:
             "graphic_volumes": _rows_to_dicts(graphic_volumes),
             "chapter_packages": _rows_to_dicts(chapter_packages),
             "audio": _rows_to_dicts(audio),
+            "moderation": await get_author_moderation_state(book_id),
         }
 
     @app.get("/api/author/chapter/{chapter_id}")
@@ -4947,6 +5387,7 @@ def create_app() -> FastAPI:
             "chapter": _row_to_dict(chapter),
             "pages": page_items,
             "ocr_available": ocr_engine_available(),
+            "ocr_languages": available_ocr_languages(),
         }
 
     @app.post("/api/author/graphic-chapter/{graphic_chapter_id}/pages/reorder")
@@ -4994,9 +5435,17 @@ def create_app() -> FastAPI:
         source = _safe_graphic_path(str(page["file_path"] or ""))
         if not source:
             raise HTTPException(status_code=404, detail="Файл страницы не найден.")
-        language = str((payload or {}).get("language") or "rus+eng")[:32]
+        language = str((payload or {}).get("language") or "rus+eng").strip().lower()[:32]
+        if not language or any(char not in "abcdefghijklmnopqrstuvwxyz+_-" for char in language):
+            raise HTTPException(status_code=400, detail="Передан неверный язык OCR.")
         try:
-            result = await asyncio.to_thread(recognize_graphic_text, source, language)
+            result = await asyncio.wait_for(
+                asyncio.to_thread(recognize_graphic_text, source, language), timeout=90
+            )
+        except asyncio.TimeoutError as exc:
+            raise HTTPException(
+                status_code=504, detail="OCR не завершился за 90 секунд. Уменьшите страницу или повторите позже."
+            ) from exc
         except GraphicOCRError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         await upsert_graphic_page_text(
@@ -5792,6 +6241,7 @@ def create_app() -> FastAPI:
             result["today"] = await get_owner_today_stats()
         if is_owner:
             result["premium"] = await get_premium_owner_summary()
+            result["monetization_integrity"] = await get_monetization_integrity_report()
         if is_owner or permissions.intersection({"view_finance", "refunds", "payouts"}):
             result["finance"] = await get_platform_finance_summary()
             rub = await get_rub_control_summary()
@@ -5988,6 +6438,15 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="Активная выдача доступа не найдена.")
         await add_audit(actor.app_user_id, "manual_access_revoked", grant_type, str(grant_id))
         return {"ok": True}
+
+    @app.get("/api/control/runtime-performance")
+    async def api_control_runtime_performance(
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        _, is_owner, _ = await control_session(x_telegram_init_data)
+        if not is_owner:
+            raise HTTPException(status_code=403, detail="Диагностика производительности доступна только владельцу.")
+        return await runtime_performance_report()
 
     @app.get("/api/control/tts-diagnostics")
     async def api_control_tts_diagnostics(x_telegram_init_data: str | None = Header(default=None)):
@@ -6202,6 +6661,28 @@ def create_app() -> FastAPI:
             "items": _rows_to_dicts(rows),
         }
 
+    @app.get("/api/control/book/{book_id}/moderation")
+    async def api_control_book_moderation(
+        book_id: int,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        await control_session(x_telegram_init_data, "mod_books")
+        book = await get_book(book_id)
+        if not book:
+            raise HTTPException(status_code=404, detail="Книга не найдена.")
+        state = await get_author_moderation_state(book_id)
+        history = await list_revision_history(book_id, limit=20)
+        return {
+            "ok": True,
+            "book": _row_to_dict(book),
+            "queue": state.get("queue"),
+            "revision": state.get("revision"),
+            "changes": state.get("changes"),
+            "has_changes": state.get("has_changes"),
+            "findings": state.get("findings", []),
+            "history": _rows_to_dicts(history),
+        }
+
     @app.post("/api/control/book/{book_id}/{action}")
     async def api_control_book_action(
         book_id: int,
@@ -6283,6 +6764,11 @@ def create_app() -> FastAPI:
                     actor_user_id=user.app_user_id,
                     note="Опубликовано после ручной проверки в Mini App",
                 )
+                await resolve_book_moderation_findings(book_id)
+                await resolve_revision_request(book_id, "manual_approved")
+                await capture_moderation_snapshot(
+                    book_id, snapshot_kind="approved", actor_user_id=user.app_user_id, source="miniapp_moderation"
+                )
                 notification = await notify_after_action(
                     actor_user_id=user.app_user_id,
                     event="book_published",
@@ -6305,20 +6791,33 @@ def create_app() -> FastAPI:
             reason = str((payload or {}).get("reason") or "").strip()
             if len(reason) < 8:
                 raise HTTPException(status_code=400, detail="Укажите понятную причину возврата на доработку.")
+            raw_finding_ids = (payload or {}).get("finding_ids")
+            if isinstance(raw_finding_ids, list):
+                requested_finding_ids = [int(value) for value in raw_finding_ids if str(value).isdigit() and int(value) > 0]
+                finding_rows = await get_findings_for_revision_reason(book_id, requested_finding_ids)
+                finding_ids = [int(row["id"]) for row in finding_rows]
+            else:
+                finding_rows = [dict(row) for row in await list_book_moderation_findings(book_id, limit=500)]
+                finding_ids = [int(row["id"]) for row in finding_rows]
+            structured_reason = format_structured_revision_reason(reason, finding_rows)
+            await create_revision_request(
+                book_id, actor_user_id=user.app_user_id, reason=structured_reason, finding_ids=finding_ids,
+                requires_manual_confirmation=not bool(finding_ids), source="miniapp_moderation",
+            )
             await set_book_publication_status(book_id, "draft")
             await record_moderation_decision(
                 book_id,
                 "reject",
                 actor_user_id=user.app_user_id,
-                note=reason,
+                note=structured_reason,
             )
             await resolve_book_moderation(
                 book_id,
                 resolution="revision",
                 actor_user_id=user.app_user_id,
-                note=reason,
+                note=structured_reason,
             )
-            await add_audit(user.app_user_id, "book_revision_web", "book", str(book_id), None, reason[:1000])
+            await add_audit(user.app_user_id, "book_revision_web", "book", str(book_id), None, structured_reason[:1000])
             notification = await notify_after_action(
                 actor_user_id=user.app_user_id,
                 event="book_revision",
@@ -6326,7 +6825,7 @@ def create_app() -> FastAPI:
                 target_id=book_id,
                 app_user_id=int(book["author_user_id"]) if book["author_user_id"] is not None else None,
                 telegram_id=int(book["author_telegram_id"]) if book["author_telegram_id"] is not None else None,
-                text=book_moderation_message(book["title"], "rejected", reason=reason, book_id=book_id),
+                text=book_moderation_message(book["title"], "rejected", reason=structured_reason, book_id=book_id),
                 reply_markup=book_revision_markup(book_id),
             )
             if settings.BOT_TOKEN:
@@ -6667,6 +7166,39 @@ def create_app() -> FastAPI:
             text=payout_message(target_status, payout["amount_stars"], action_note),
         )
         return {"ok": True, "status": target_status, "notification": notification}
+
+    @app.get("/media/audio-stream/{audio_id}")
+    async def audio_stream_media(
+        audio_id: int, user_id: int, expires: int, token: str,
+    ):
+        if not _validate_audio_media_token(
+            user_id=user_id, audio_id=audio_id, expires_at=expires, token=token
+        ):
+            raise HTTPException(status_code=403, detail="Ссылка на аудио устарела. Обновите плеер.")
+        user = await get_user_by_id(user_id)
+        if not user or bool(user["is_blocked"]):
+            raise HTTPException(status_code=403, detail="Доступ к аудио недоступен.")
+        audio = await get_audio_chapter(audio_id)
+        if not audio or audio["publication_status"] != "published" or audio["status"] != "published" or not audio["file_path"]:
+            raise HTTPException(status_code=404, detail="Аудиоглава не найдена.")
+        if not await user_can_access_audio(user_id, audio_id):
+            raise HTTPException(status_code=403, detail="Доступ к аудиоглаве изменился. Обновите плеер.")
+        mode = _effective_pricing_mode(int(audio["book_price_stars"] or 0), str(audio["pricing_type"] or ""))
+        if mode not in {"free", "premium"} and int(audio["is_free"] or 0) != 1:
+            await mark_purchase_access_used(user_id, audio_chapter_id=audio_id)
+        path = Path(str(audio["file_path"] or ""))
+        if not path.exists() or not path.is_file():
+            raise HTTPException(status_code=404, detail="Аудиофайл не найден.")
+        return FileResponse(
+            path,
+            media_type=str(audio["mime_type"] or "audio/mpeg"),
+            headers={
+                "Cache-Control": "private, no-store, max-age=0",
+                "Content-Disposition": f'inline; filename="{audio["source_filename"] or path.name}"',
+                "Accept-Ranges": "bytes",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
 
     @app.get("/media/audio/{audio_id}")
     async def audio_media(audio_id: int):

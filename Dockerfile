@@ -35,7 +35,6 @@ RUN set -eux; \
 
 COPY . .
 
-EXPOSE 8080
 EXPOSE 3000
 
 RUN mkdir -p data storage/covers storage/books storage/audio storage/tts storage/tts/models/vosk storage/comics storage/temp storage/legal \

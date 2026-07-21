@@ -1,16 +1,19 @@
 #!/bin/sh
 set -u
 
+# The production Bothost project uses port 3000. Respect an explicit platform
+# value, but keep the clean runtime bootable with the correct project default.
+export PORT="${PORT:-3000}"
 export VOSK_MODEL_PATH=/app/storage/tts/models/vosk
 export TTS_VOSK_MODEL_DIR=/app/storage/tts/models/vosk
 mkdir -p data storage/covers storage/books storage/audio storage/tts storage/tts/models/vosk storage/comics storage/temp storage/legal
 
-# После перезапуска незавершённые части и рабочие каталоги импорта уже не используются.
-# Очищаем их до запуска SQLite/бота, чтобы старые неудачные ZIP не вызывали Bad Gateway.
+# Remove only stale/broken import artifacts. Fresh chunk sessions are preserved
+# so a 250+ MB upload can continue after Redeploy instead of starting from zero.
 python scripts/cleanup_import_storage.py || true
 
-# Удаляем только устаревшие юридические PDF прежней редакции. Пользовательские
-# книги, база, чеки и другие файлы storage этот блок не затрагивает.
+# Remove only outdated generated legal PDFs. User books, database, receipts and
+# other persistent storage files are never touched here.
 rm -f \
   storage/legal/voxlyra_author_license_agreement.pdf \
   storage/legal/voxlyra_author_license_agreement.pdf.sha256 \
@@ -29,8 +32,8 @@ rm -f \
   storage/legal/voxlyra_refund_policy.pdf \
   storage/legal/voxlyra_refund_policy.pdf.sha256
 
-# Большая русская модель загружается после старта и больше не блокирует сборку Bothost.
-# До её готовности бот доступен, а озвучивание использует резервный Piper.
+# The large Russian model is bootstrapped in background and never blocks the
+# Bothost HTTP start. Piper remains available while the model is unavailable.
 case "${TTS_VOSK_ENABLED:-true}" in
   0|false|False|FALSE|no|No|NO) ;;
   *)

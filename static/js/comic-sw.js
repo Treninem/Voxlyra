@@ -1,8 +1,8 @@
 /* Voxlyra comics shell service worker.
    It caches only the reader shell and static interface files. Signed page URLs
    are intentionally left to the encrypted/local IndexedDB cache in comic.js. */
-const SHELL_CACHE = "voxlyra-comic-shell-v197";
-const STATIC_CACHE = "voxlyra-comic-static-v197";
+const SHELL_CACHE = "voxlyra-comic-shell-v11400";
+const STATIC_CACHE = "voxlyra-comic-static-v11400";
 const CORE_FILES = [
   "/static/css/style.css",
   "/static/js/app.js",
@@ -62,17 +62,18 @@ self.addEventListener("fetch", (event) => {
 
   if (isStaticFile(url)) {
     event.respondWith((async () => {
-      const cached = await caches.match(request, { ignoreSearch: true });
-      if (cached) return cached;
+      // Network-first prevents an old app.js/comic.js from remaining forever
+      // after Redeploy. The cache is only a fallback for a real offline start.
       try {
-        const fresh = await fetch(request);
+        const fresh = await fetch(request, { cache: "no-cache" });
         if (fresh.ok) {
           const cache = await caches.open(STATIC_CACHE);
           await cache.put(request, fresh.clone());
         }
         return fresh;
       } catch (_) {
-        return new Response("", { status: 503 });
+        const cached = await caches.match(request, { ignoreSearch: true });
+        return cached || new Response("", { status: 503 });
       }
     })());
   }

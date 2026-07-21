@@ -1,38 +1,181 @@
-(function initTelegram() {
-  const tg = window.Telegram?.WebApp;
-  if (!tg) return;
+const VOX_ROUTE_STATE_KEY = 'voxlyra:last-route:v11336';
+const VOX_ROUTE_STACK_KEY = 'voxlyra:route-stack:v11336';
+const VOX_SKIP_RESTORE_KEY = 'voxlyra:skip-restore-once';
+const VOX_ROUTE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+function voxTelegramWebApp() {
+  return window.Telegram?.WebApp || null;
+}
+
+function voxHasTelegramAuth() {
+  return Boolean(voxTelegramWebApp()?.initData);
+}
+
+function voxSafeRoute(raw = '') {
   try {
-    tg.ready();
-    tg.expand();
-    tg.setHeaderColor?.('#090b18');
-    tg.setBackgroundColor?.('#090b18');
-  } catch (_) {}
-})();
-
-(function routeTelegramMiniAppStartParam() {
-  const path = window.location.pathname || '/';
-  if (path !== '/' && path !== '') return;
-  const query = new URLSearchParams(window.location.search);
-  const unsafe = window.Telegram?.WebApp?.initDataUnsafe || {};
-  const startParam = String(query.get('tgWebAppStartParam') || unsafe.start_param || '').trim();
-  const bookMatch = /^book_(\d+)$/.exec(startParam);
-  if (!bookMatch) return;
-  const bookId = Number(bookMatch[1]);
-  if (Number.isInteger(bookId) && bookId > 0) {
-    // Telegram передаёт авторизационные параметры в адресе запуска. Сохраняем
-    // query/hash при переходе, иначе новая страница может решить, что открыта
-    // вне Mini App, и попросить пользователя вернуться в Telegram.
-    window.location.replace(`/book/${bookId}${window.location.search || ''}${window.location.hash || ''}`);
+    const url = new URL(raw || window.location.href, window.location.origin);
+    if (url.origin !== window.location.origin) return '';
+    const path = url.pathname || '/';
+    const allowed = [
+      /^\/$/, /^\/catalog\/?$/, /^\/comics\/?$/, /^\/audio\/?$/, /^\/library\/?$/,
+      /^\/settings\/?$/, /^\/premium\/?$/, /^\/author\/?$/, /^\/control\/?$/,
+      /^\/book\/\d+\/?$/, /^\/reader\/\d+\/?$/, /^\/comic\/\d+\/?$/, /^\/audio\/\d+\/?$/,
+    ];
+    if (!allowed.some((pattern) => pattern.test(path))) return '';
+    const params = new URLSearchParams(url.search);
+    [...params.keys()].forEach((key) => {
+      if (/^tgWebApp/i.test(key) || key === 'startapp') params.delete(key);
+    });
+    const query = params.toString();
+    const hash = /^#page(?:-|=)\d+$/.test(url.hash || '') ? url.hash : '';
+    return `${path}${query ? `?${query}` : ''}${hash}`;
+  } catch (_) {
+    return '';
   }
-})();
+}
 
-(function handPublicBookLinkToTelegramMiniApp() {
-  const match = /^\/book\/(\d+)\/?$/.exec(window.location.pathname || '');
-  if (!match || window.Telegram?.WebApp?.initData) return;
-  const username = String(document.querySelector('meta[name="voxlyra-bot-username"]')?.content || '').trim().replace(/^@/, '');
-  const bookId = Number(match[1]);
-  if (!username || !Number.isInteger(bookId) || bookId <= 0) return;
-  window.location.replace(`https://t.me/${encodeURIComponent(username)}?startapp=book_${bookId}`);
+function voxStartParamForRoute(route = window.location.href) {
+  const safe = voxSafeRoute(route);
+  if (!safe) return '';
+  const url = new URL(safe, window.location.origin);
+  const path = url.pathname;
+  let match = /^\/book\/(\d+)\/?$/.exec(path);
+  if (match) return `book_${match[1]}`;
+  match = /^\/reader\/(\d+)\/?$/.exec(path);
+  if (match) return `reader_${match[1]}`;
+  match = /^\/comic\/(\d+)\/?$/.exec(path);
+  if (match) return `comic_${match[1]}`;
+  match = /^\/audio\/(\d+)\/?$/.exec(path);
+  if (match) return `audio_${match[1]}`;
+  if (path === '/catalog') return 'catalog';
+  if (path === '/comics') return 'comics';
+  if (path === '/audio') return 'audio';
+  if (path === '/library') return 'library';
+  if (path === '/premium') return 'premium';
+  if (path === '/settings') return 'settings';
+  if (path === '/author') return 'author';
+  if (path === '/control') return 'control';
+  return '';
+}
+
+function voxRouteFromStartParam(raw = '') {
+  const value = String(raw || '').trim();
+  const staticRoutes = {
+    catalog: '/catalog', comics: '/comics', audio: '/audio', library: '/library',
+    premium: '/premium', settings: '/settings', author: '/author', control: '/control',
+  };
+  if (staticRoutes[value]) return staticRoutes[value];
+  const match = /^(book|reader|chapter|comic|audio)_(\d+)$/.exec(value);
+  if (!match || Number(match[2]) <= 0) return '';
+  const route = match[1] === 'chapter' ? 'reader' : match[1];
+  return `/${route}/${Number(match[2])}`;
+}
+
+function voxRouteWithTelegramLaunchContext(route) {
+  try {
+    const target = new URL(route, window.location.origin);
+    const current = new URL(window.location.href);
+    current.searchParams.forEach((value, key) => {
+      if (/^tgWebApp/i.test(key) && !target.searchParams.has(key)) target.searchParams.set(key, value);
+    });
+    // Telegram launch authentication normally arrives in the fragment. Preserve
+    // it across the first redirect; a saved comic page is recovered from progress.
+    if (/tgWebAppData=/.test(current.hash || '')) target.hash = current.hash;
+    return `${target.pathname}${target.search}${target.hash}`;
+  } catch (_) {
+    return route;
+  }
+}
+
+function voxTelegramLaunchUrl(route = window.location.href) {
+  const username = String(document.querySelector('meta[name="voxlyra-bot-username"]')?.content || '')
+    .trim().replace(/^@/, '');
+  const startParam = voxStartParamForRoute(route);
+  if (!username) return '';
+  return startParam
+    ? `https://t.me/${encodeURIComponent(username)}?startapp=${encodeURIComponent(startParam)}`
+    : `https://t.me/${encodeURIComponent(username)}?startapp`;
+}
+
+function voxReadRouteState() {
+  try {
+    const value = JSON.parse(localStorage.getItem(VOX_ROUTE_STATE_KEY) || '{}');
+    if (!value || typeof value !== 'object') return null;
+    if (!voxSafeRoute(value.route) || Date.now() - Number(value.savedAt || 0) > VOX_ROUTE_MAX_AGE_MS) return null;
+    return { route: voxSafeRoute(value.route), savedAt: Number(value.savedAt || 0) };
+  } catch (_) {
+    return null;
+  }
+}
+
+function voxSaveRouteState(route = window.location.href) {
+  const safe = voxSafeRoute(route);
+  if (!safe || safe === '/') return;
+  try { localStorage.setItem(VOX_ROUTE_STATE_KEY, JSON.stringify({ route: safe, savedAt: Date.now() })); } catch (_) {}
+}
+
+function voxReadRouteStack() {
+  try {
+    const rows = JSON.parse(sessionStorage.getItem(VOX_ROUTE_STACK_KEY) || '[]');
+    return Array.isArray(rows) ? rows.map(voxSafeRoute).filter(Boolean).slice(-24) : [];
+  } catch (_) { return []; }
+}
+
+function voxWriteRouteStack(rows) {
+  try { sessionStorage.setItem(VOX_ROUTE_STACK_KEY, JSON.stringify(rows.slice(-24))); } catch (_) {}
+}
+
+function voxRegisterCurrentRoute() {
+  const current = voxSafeRoute(window.location.href);
+  if (!current) return;
+  const rows = voxReadRouteStack();
+  if (rows.at(-1) !== current) rows.push(current);
+  voxWriteRouteStack(rows);
+  voxSaveRouteState(current);
+}
+
+(function initTelegramAndLaunchRoute() {
+  const tg = voxTelegramWebApp();
+  if (tg) {
+    try {
+      tg.ready();
+      tg.expand();
+      tg.setHeaderColor?.('#090b18');
+      tg.setBackgroundColor?.('#090b18');
+    } catch (_) {}
+  }
+  document.documentElement.classList.toggle('vox-telegram-auth', voxHasTelegramAuth());
+  document.documentElement.classList.toggle('vox-external-browser', !voxHasTelegramAuth());
+
+  const path = window.location.pathname || '/';
+  if (path !== '/' && path !== '') {
+    voxRegisterCurrentRoute();
+    return;
+  }
+
+  const query = new URLSearchParams(window.location.search);
+  const unsafe = tg?.initDataUnsafe || {};
+  const explicit = String(query.get('tgWebAppStartParam') || unsafe.start_param || '').trim();
+  const explicitRoute = voxRouteFromStartParam(explicit);
+  if (explicitRoute) {
+    try { sessionStorage.removeItem(VOX_SKIP_RESTORE_KEY); } catch (_) {}
+    window.location.replace(voxRouteWithTelegramLaunchContext(explicitRoute));
+    return;
+  }
+
+  let skipRestore = false;
+  try {
+    skipRestore = sessionStorage.getItem(VOX_SKIP_RESTORE_KEY) === '1';
+    sessionStorage.removeItem(VOX_SKIP_RESTORE_KEY);
+  } catch (_) {}
+  if (!skipRestore && voxHasTelegramAuth()) {
+    const saved = voxReadRouteState();
+    if (saved?.route && saved.route !== '/') {
+      window.location.replace(voxRouteWithTelegramLaunchContext(saved.route));
+      return;
+    }
+  }
+  voxRegisterCurrentRoute();
 })();
 
 const root = document.documentElement;
@@ -49,6 +192,10 @@ let meDataPromise = null;
 let autoProgressTimer = null;
 let sleepTimerHandle = null;
 let sleepTimerEndsAt = 0;
+const audioRuntime = {
+  meta: null, recovering: false, retryCount: 0, saveTimer: null,
+  tokenRefreshTimer: null, lastKnownPosition: 0, requestedPlay: false, bound: false,
+};
 let readerTtsMeta = null;
 let readerTtsLoading = false;
 let readerTtsProgressTimer = null;
@@ -61,7 +208,7 @@ let readerTtsLifecycleBound = false;
 const TTS_DEVICE_CACHE_NAME = 'voxlyra-reader-tts-v3-continuity';
 const TTS_LEGACY_DEVICE_CACHE_NAMES = ['voxlyra-reader-tts-v2-quality'];
 const TTS_DEVICE_CACHE_PREFIX = `${window.location.origin}/__voxlyra_tts_cache__/`;
-const READER_TTS_PLAYER_VERSION = 'v1.11.1-final-continuity-1';
+const READER_TTS_PLAYER_VERSION = 'v1.14.0-release-1';
 const READER_TTS_TRANSITION_LEAD_SECONDS = 0.22;
 const READER_TTS_CROSSFADE_MS = 90;
 const READER_TTS_STALL_TIMEOUT_MS = 7000;
@@ -328,8 +475,14 @@ async function resetSettings() {
 
 function tgInitData() { return window.Telegram?.WebApp?.initData || ''; }
 
+function voxRequestId() {
+  try { return crypto.randomUUID(); } catch (_) { return `${Date.now()}-${Math.random().toString(36).slice(2)}`; }
+}
+
 async function apiFetch(url, options = {}) {
   const headers = Object.assign({}, options.headers || {}, { 'X-Telegram-Init-Data': tgInitData() });
+  const method = String(options.method || 'GET').toUpperCase();
+  if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method) && !headers['X-Vox-Request-Id']) headers['X-Vox-Request-Id'] = voxRequestId();
   if (options.body && !(options.body instanceof FormData) && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
   const response = await fetch(url, Object.assign({}, options, { headers }));
   if (!response.ok) {
@@ -625,7 +778,7 @@ async function saveReaderProgress(forcedPercent = null) {
   if (!reader || !tgInitData()) return;
   const percent = forcedPercent === null ? calcReadingPercent() : Number(forcedPercent);
   queueProgressSync('text', Number(reader.dataset.chapterId), percent);
-  const result = await apiFetch(`/api/reader/${reader.dataset.chapterId}/progress`, { method: 'POST', body: JSON.stringify({ position_percent: percent }) });
+  const result = await apiFetch(`/api/reader/${reader.dataset.chapterId}/progress`, { method: 'POST', keepalive: true, body: JSON.stringify({ position_percent: percent }) });
   dropProgressSync('text', Number(reader.dataset.chapterId));
   (result.achievements?.new || []).forEach((item) => notify(`Новое достижение: ${item.title}`));
   const label = document.getElementById('progressLabel');
@@ -1930,11 +2083,21 @@ function setRate(rate) {
 async function saveAudioProgress() {
   const page = document.getElementById('audioPage');
   const player = document.getElementById('voxPlayer');
-  if (!page || !player?.src || !tgInitData()) return;
-  const position = Math.floor(player.currentTime || 0);
+  if (!page || !player?.src || !tgInitData()) return false;
+  const position = Math.max(0, Math.floor(player.currentTime || audioRuntime.lastKnownPosition || 0));
+  audioRuntime.lastKnownPosition = position;
   queueProgressSync('audio', Number(page.dataset.audioId), position);
-  await apiFetch(`/api/audio/${page.dataset.audioId}/progress`, { method: 'POST', body: JSON.stringify({ position_seconds: position }) });
-  dropProgressSync('audio', Number(page.dataset.audioId));
+  try {
+    await apiFetch(`/api/audio/${page.dataset.audioId}/progress`, {
+      method: 'POST',
+      keepalive: true,
+      body: JSON.stringify({ position_seconds: position }),
+    });
+    dropProgressSync('audio', Number(page.dataset.audioId));
+    return true;
+  } catch (_) {
+    return false;
+  }
 }
 
 function updateAudioTime(player) {
@@ -1942,6 +2105,146 @@ function updateAudioTime(player) {
   const duration = document.getElementById('audioDurationLabel');
   if (current) current.textContent = formatTime(player.currentTime || 0);
   if (duration) duration.textContent = formatTime(Number.isFinite(player.duration) ? player.duration : 0);
+  audioRuntime.lastKnownPosition = Math.max(0, Number(player.currentTime || 0));
+  try {
+    if ('mediaSession' in navigator && Number.isFinite(player.duration) && player.duration > 0) {
+      navigator.mediaSession.setPositionState({
+        duration: player.duration,
+        playbackRate: player.playbackRate || 1,
+        position: Math.min(player.duration, Math.max(0, player.currentTime || 0)),
+      });
+    }
+  } catch (_) {}
+}
+
+function setAudioStatus(message, retry = false) {
+  const status = document.getElementById('audioStatusText') || document.getElementById('audioStatus');
+  const retryButton = document.getElementById('audioRetry');
+  if (status) status.textContent = message;
+  if (retryButton) retryButton.hidden = !retry;
+}
+
+function stopAudioPeriodicSave() {
+  clearInterval(audioRuntime.saveTimer);
+  audioRuntime.saveTimer = null;
+}
+
+function startAudioPeriodicSave() {
+  stopAudioPeriodicSave();
+  audioRuntime.saveTimer = setInterval(() => saveAudioProgress().catch(() => {}), 15000);
+}
+
+function configureAudioMediaSession(meta, player) {
+  if (!('mediaSession' in navigator)) return;
+  try {
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: meta?.audio?.title || 'Аудиоглава',
+      artist: meta?.audio?.narrator || 'VoxLyra',
+      album: meta?.audio?.book_title || 'VoxLyra',
+    });
+    navigator.mediaSession.setActionHandler('play', () => player.play().catch(() => {}));
+    navigator.mediaSession.setActionHandler('pause', () => player.pause());
+    navigator.mediaSession.setActionHandler('seekbackward', (details) => {
+      player.currentTime = Math.max(0, player.currentTime - Number(details.seekOffset || getPrefs().rewindStep || 15));
+    });
+    navigator.mediaSession.setActionHandler('seekforward', (details) => {
+      const target = player.currentTime + Number(details.seekOffset || getPrefs().rewindStep || 15);
+      player.currentTime = Number.isFinite(player.duration) ? Math.min(player.duration, target) : target;
+    });
+    navigator.mediaSession.setActionHandler('seekto', (details) => {
+      if (Number.isFinite(details.seekTime)) player.currentTime = Number(details.seekTime);
+    });
+    navigator.mediaSession.setActionHandler('previoustrack', () => document.querySelector('.audio-navigation a:first-child')?.click());
+    navigator.mediaSession.setActionHandler('nexttrack', () => document.getElementById('nextAudioLink')?.click());
+  } catch (_) {}
+}
+
+function bindAudioPlayerEvents(player) {
+  if (audioRuntime.bound) return;
+  audioRuntime.bound = true;
+  player.addEventListener('loadedmetadata', () => {
+    player.playbackRate = getPrefs().audioRate;
+    updateAudioTime(player);
+    setAudioStatus(audioRuntime.lastKnownPosition > 0
+      ? `Продолжаем с ${formatTime(audioRuntime.lastKnownPosition)}`
+      : 'Можно слушать');
+  });
+  player.addEventListener('timeupdate', () => updateAudioTime(player));
+  player.addEventListener('play', () => {
+    audioRuntime.requestedPlay = true;
+    audioRuntime.retryCount = 0;
+    startAudioPeriodicSave();
+    setAudioStatus('Воспроизведение');
+    try { navigator.mediaSession.playbackState = 'playing'; } catch (_) {}
+  });
+  player.addEventListener('pause', () => {
+    audioRuntime.requestedPlay = false;
+    stopAudioPeriodicSave();
+    if (getPrefs().saveOnPause) saveAudioProgress().catch(() => {});
+    try { navigator.mediaSession.playbackState = 'paused'; } catch (_) {}
+  });
+  player.addEventListener('waiting', () => setAudioStatus(navigator.onLine ? 'Подгружаем аудио…' : 'Нет сети. Позиция сохранена.'));
+  player.addEventListener('stalled', () => setAudioStatus('Соединение замедлилось. Восстанавливаем поток…', true));
+  player.addEventListener('error', () => {
+    stopAudioPeriodicSave();
+    recoverAudioPlayback({ autoplay: audioRuntime.requestedPlay || !player.paused }).catch(() => {});
+  });
+  player.addEventListener('ended', () => {
+    stopAudioPeriodicSave();
+    saveAudioProgress().catch(() => {});
+    const next = document.getElementById('nextAudioLink');
+    if (getPrefs().autoplayNext && next) window.location.href = next.href;
+  });
+}
+
+function installAudioStream(meta, { resumeAt = 0, autoplay = false } = {}) {
+  const player = document.getElementById('voxPlayer');
+  if (!player || !meta?.stream_url) throw new Error('Сервер не выдал защищённый аудиопоток.');
+  bindAudioPlayerEvents(player);
+  audioRuntime.meta = meta;
+  audioRuntime.lastKnownPosition = Math.max(0, Number(resumeAt || meta.progress_seconds || 0));
+  player.style.display = 'block';
+  player.src = meta.stream_url;
+  player.preload = 'metadata';
+  player.load();
+  configureAudioMediaSession(meta, player);
+  const restore = () => {
+    const maximum = Number.isFinite(player.duration) ? Math.max(0, player.duration - 0.25) : audioRuntime.lastKnownPosition;
+    if (audioRuntime.lastKnownPosition > 0) player.currentTime = Math.min(maximum, audioRuntime.lastKnownPosition);
+    player.playbackRate = getPrefs().audioRate;
+    if (autoplay) player.play().catch(() => setAudioStatus('Нажмите воспроизведение для продолжения.'));
+  };
+  if (player.readyState >= 1) restore();
+  else player.addEventListener('loadedmetadata', restore, { once: true });
+  clearTimeout(audioRuntime.tokenRefreshTimer);
+  const expiresAt = Number(meta.stream_expires_at || 0) * 1000;
+  if (expiresAt > Date.now()) {
+    audioRuntime.tokenRefreshTimer = setTimeout(() => {
+      recoverAudioPlayback({ autoplay: !player.paused }).catch(() => {});
+    }, Math.max(30000, expiresAt - Date.now() - 5 * 60_000));
+  }
+}
+
+async function recoverAudioPlayback({ autoplay = false } = {}) {
+  const page = document.getElementById('audioPage');
+  const player = document.getElementById('voxPlayer');
+  if (!page || !player || audioRuntime.recovering || !tgInitData()) return;
+  if (!navigator.onLine) { setAudioStatus('Нет сети. После подключения поток восстановится.', true); return; }
+  if (audioRuntime.retryCount >= 3) { setAudioStatus('Не удалось восстановить аудио автоматически.', true); return; }
+  audioRuntime.recovering = true;
+  audioRuntime.retryCount += 1;
+  const resumeAt = Math.max(0, Number(player.currentTime || audioRuntime.lastKnownPosition || 0));
+  setAudioStatus(`Восстанавливаем поток · попытка ${audioRuntime.retryCount}…`);
+  try {
+    const meta = await apiFetch(`/api/audio/${page.dataset.audioId}/meta`);
+    if (!meta.allowed || !meta.stream_url) throw new Error('Доступ к аудио изменился.');
+    installAudioStream(meta, { resumeAt, autoplay });
+    audioRuntime.retryCount = 0;
+  } catch (error) {
+    setAudioStatus(error.message || 'Не удалось восстановить аудио.', true);
+  } finally {
+    audioRuntime.recovering = false;
+  }
 }
 
 function setSleepTimer(minutes) {
@@ -1962,44 +2265,61 @@ function setSleepTimer(minutes) {
   notify(`Таймер сна: ${minutes} мин`);
 }
 
+function renderAudioPaywall(meta) {
+  const paywall = document.getElementById('audioPaywall');
+  const player = document.getElementById('voxPlayer');
+  if (paywall) paywall.hidden = false;
+  if (player) player.style.display = 'none';
+  const title = document.getElementById('audioPaywallTitle');
+  const text = document.getElementById('audioPaywallText');
+  const price = document.getElementById('audioPaywallPrice');
+  const link = document.getElementById('audioPurchaseLink');
+  if (meta.premium_required) {
+    if (title) title.textContent = 'Доступно по VoxLyra Premium';
+    if (text) text.textContent = 'Оформите Premium и вернитесь к аудиоглаве — доступ обновится автоматически.';
+    if (price) price.textContent = '';
+    if (link) { link.href = meta.premium_url || '/premium'; link.textContent = 'Открыть Premium'; link.hidden = false; }
+    setAudioStatus('Эта аудиоглава доступна по VoxLyra Premium.');
+  } else if (meta.can_buy_audio && Number(meta.audio?.price_stars || 0) > 0) {
+    if (title) title.textContent = 'Аудиоглава закрыта';
+    if (text) text.textContent = 'После покупки доступ подтянется автоматически.';
+    if (price) price.textContent = `${Number(meta.audio.price_stars)} Stars`;
+    if (link) { link.href = meta.purchase_url || '#'; link.textContent = 'Купить аудио'; link.hidden = !meta.purchase_url; }
+    setAudioStatus('Для этой аудиоглавы нужен доступ.');
+  } else {
+    if (title) title.textContent = 'Откройте аудио в Telegram';
+    if (text) text.textContent = 'Обновите страницу внутри Telegram. Платёж для этой записи сейчас недоступен.';
+    if (price) price.textContent = '';
+    if (link) link.hidden = true;
+    setAudioStatus('Доступ к аудиоглаве пока не подтверждён.');
+  }
+}
+
 async function initAudioPage() {
   const page = document.getElementById('audioPage');
   if (!page) return;
-  const status = document.getElementById('audioStatus');
-  const paywall = document.getElementById('audioPaywall');
   const player = document.getElementById('voxPlayer');
+  document.getElementById('audioRetry')?.addEventListener('click', () => {
+    audioRuntime.retryCount = 0;
+    recoverAudioPlayback({ autoplay: Boolean(player && !player.paused) }).catch(() => {});
+  });
+  window.addEventListener('online', () => {
+    if (player?.error || !player?.src) recoverAudioPlayback({ autoplay: audioRuntime.requestedPlay }).catch(() => {});
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') saveAudioProgress().catch(() => {});
+  });
   if (!tgInitData()) {
-    if (status) status.textContent = 'Откройте аудио внутри Telegram, чтобы проверить доступ и сохранять позицию.';
+    setAudioStatus('Откройте аудио внутри Telegram, чтобы проверить доступ и сохранять позицию.');
     return;
   }
   try {
     const meta = await apiFetch(`/api/audio/${page.dataset.audioId}/meta`);
-    if (!meta.allowed) {
-      if (status) status.textContent = 'Для этой аудиоглавы нужен доступ.';
-      if (paywall) paywall.hidden = false;
-      if (player) player.style.display = 'none';
-      return;
-    }
-    if (status) status.textContent = meta.progress_seconds ? `Продолжаем с ${formatTime(meta.progress_seconds)}` : 'Можно слушать';
-    const response = await apiFetch(`/api/audio/${page.dataset.audioId}/file`);
-    const blob = await response.blob();
-    if (!player) return;
-    player.src = URL.createObjectURL(blob);
-    player.style.display = 'block';
-    player.addEventListener('loadedmetadata', () => {
-      player.playbackRate = getPrefs().audioRate;
-      if (meta.progress_seconds > 0 && meta.progress_seconds < player.duration) player.currentTime = meta.progress_seconds;
-      updateAudioTime(player);
-    });
-    player.addEventListener('timeupdate', () => updateAudioTime(player));
-    player.addEventListener('pause', () => { if (getPrefs().saveOnPause) saveAudioProgress().catch(() => {}); });
-    player.addEventListener('ended', () => {
-      saveAudioProgress().catch(() => {});
-      const next = document.getElementById('nextAudioLink');
-      if (getPrefs().autoplayNext && next) window.location.href = next.href;
-    });
-  } catch (_) {
-    if (status) status.textContent = 'Не удалось загрузить аудио. Попробуйте ещё раз.';
+    if (!meta.allowed) { renderAudioPaywall(meta); return; }
+    if (!meta.stream_url) throw new Error('Аудиофайл временно недоступен.');
+    installAudioStream(meta, { resumeAt: meta.progress_seconds || 0, autoplay: false });
+  } catch (error) {
+    setAudioStatus(error.message || 'Не удалось загрузить аудио. Попробуйте ещё раз.', true);
   }
 }
 
@@ -4280,8 +4600,188 @@ function bindEvents() {
   });
 }
 
+
+let privacyDeletionPreview = null;
+
+function privacyCountLabel(key) {
+  return {
+    purchases: 'Покупки', bookmarks: 'Закладки', reading_progress: 'Текст', listening_progress: 'Аудио',
+    graphic_progress: 'Комиксы', annotations: 'Заметки', journal: 'Дневник', comments: 'Комментарии',
+    reviews: 'Отзывы', legal_acceptances: 'Документы',
+  }[key] || key;
+}
+
+function renderPrivacyOverview(data) {
+  const root = document.getElementById('privacyOverviewStatus');
+  const legalRoot = document.getElementById('privacyLegalDocuments');
+  if (!root || !legalRoot) return;
+  const privacy = data?.privacy || {};
+  const counts = privacy.counts || {};
+  const status = privacy.account?.status === 'deleted' ? 'Удалён' : 'Активен';
+  root.innerHTML = `<p><b>Статус профиля:</b> ${escapeHtml(status)}</p><div class="privacy-count-grid">${Object.entries(counts).map(([key,value]) => `<div class="privacy-count-item"><b>${Number(value || 0)}</b><span>${escapeHtml(privacyCountLabel(key))}</span></div>`).join('')}</div><p class="privacy-retention-note">${escapeHtml(privacy.retention_note || '')}</p>`;
+  const missing = new Set(privacy.legal?.missing || []);
+  const accepted = privacy.legal?.accepted || [];
+  const documents = privacy.legal?.documents || [];
+  legalRoot.innerHTML = documents.map((doc) => {
+    const active = accepted.find((item) => item.code === doc.code && item.active);
+    const needs = missing.has(doc.code);
+    const statusText = active ? `Принят ${String(active.accepted_at || '').slice(0,10)} · редакция ${active.version}` : 'Не принят';
+    const accept = needs ? `<button type="button" class="secondary compact-button" data-privacy-legal-accept="${escapeHtml(doc.code)}" data-version="${escapeHtml(doc.version)}">Принять редакцию</button>` : '';
+    const withdraw = active && doc.kind === 'consent' ? `<button type="button" class="quiet-link" data-privacy-legal-withdraw="${escapeHtml(doc.code)}">Отозвать</button>` : '';
+    return `<article class="privacy-legal-row"><div><h4>${escapeHtml(doc.title || doc.code)}</h4><p>${escapeHtml(statusText)}</p></div><div class="privacy-legal-actions"><a class="button-link secondary compact-button" href="${escapeHtml(doc.url || '/legal')}">Открыть</a>${accept}${withdraw}</div></article>`;
+  }).join('') || '<p class="muted">Документы не найдены.</p>';
+}
+
+async function loadPrivacyOverview() {
+  if (!document.getElementById('privacySettingsPanel') || !tgInitData()) return;
+  const root = document.getElementById('privacyOverviewStatus');
+  try { renderPrivacyOverview(await apiFetch('/api/privacy/overview')); }
+  catch (error) { if (root) root.innerHTML = `<p class="error-text">${escapeHtml(error.message || 'Не удалось загрузить данные')}</p>`; }
+}
+
+async function downloadPrivacyExport() {
+  const button = document.getElementById('privacyExportButton');
+  if (!button) return;
+  button.disabled = true;
+  try {
+    const response = await fetch('/api/privacy/export', { headers: { 'X-Telegram-Init-Data': tgInitData() }, cache: 'no-store' });
+    if (!response.ok) { let message = 'Не удалось создать экспорт'; try { message = (await response.json()).detail || message; } catch (_) {} throw new Error(message); }
+    const blob = await response.blob();
+    const disposition = response.headers.get('content-disposition') || '';
+    const match = disposition.match(/filename="?([^";]+)"?/i);
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob); link.download = match?.[1] || 'voxlyra_personal_data.json';
+    document.body.appendChild(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(link.href), 1500);
+    notify('Экспорт личных данных создан');
+  } catch (error) { notify(error.message || 'Не удалось создать экспорт'); }
+  finally { button.disabled = false; }
+}
+
+function renderDeletionPreview(preview) {
+  const box = document.getElementById('privacyDeletePreview');
+  if (!box) return;
+  box.hidden = false;
+  const blockers = preview.blockers || [];
+  const action = preview.can_delete_now ? '<button type="button" class="danger-button full" id="privacyDeleteConfirmButton">Удалить профиль окончательно</button>' : '';
+  box.innerHTML = `${blockers.length ? `<p><b>Автоматическое удаление пока невозможно:</b></p><ul>${blockers.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>` : '<p><b>Удаление доступно.</b> Проверьте списки ниже.</p>'}<p>Будет удалено:</p><ul>${(preview.will_delete || []).map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul><p>Будет сохранено в минимальном объёме:</p><ul>${(preview.will_keep_minimized || []).map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>${action}`;
+  document.getElementById('privacyDeleteConfirmButton')?.addEventListener('click', confirmPrivacyDeletion);
+}
+
+async function previewPrivacyDeletion() {
+  const button = document.getElementById('privacyDeletePreviewButton');
+  if (!button) return;
+  button.disabled = true;
+  try {
+    const result = await apiFetch('/api/privacy/delete/preview', { method: 'POST', body: '{}' });
+    privacyDeletionPreview = result.preview || null;
+    renderDeletionPreview(privacyDeletionPreview || {});
+  } catch (error) { notify(error.message || 'Не удалось проверить удаление'); }
+  finally { button.disabled = false; }
+}
+
+async function confirmPrivacyDeletion() {
+  const preview = privacyDeletionPreview;
+  if (!preview?.can_delete_now) return;
+  const typed = window.prompt('Для окончательного удаления введите слово УДАЛИТЬ');
+  if (String(typed || '').trim().toUpperCase() !== 'УДАЛИТЬ') { notify('Удаление отменено'); return; }
+  if (!window.confirm('Профиль и личная история будут удалены. Отменить действие после подтверждения нельзя.')) return;
+  const button = document.getElementById('privacyDeleteConfirmButton');
+  if (button) button.disabled = true;
+  try {
+    const result = await apiFetch('/api/privacy/delete/confirm', { method: 'POST', body: JSON.stringify({ request_id: preview.request_id, confirmation_token: preview.confirmation_token, confirmation_phrase: typed.trim().toUpperCase() }) });
+    window.alert(result.message || 'Профиль удалён.');
+    try { localStorage.clear(); sessionStorage.clear(); } catch (_) {}
+    window.Telegram?.WebApp?.close?.();
+    window.location.replace('/');
+  } catch (error) { notify(error.message || 'Не удалось удалить профиль'); if (button) button.disabled = false; }
+}
+
+function initPrivacySettings() {
+  if (!document.getElementById('privacySettingsPanel')) return;
+  if (!tgInitData()) {
+    const status = document.getElementById('privacyOverviewStatus');
+    const legal = document.getElementById('privacyLegalDocuments');
+    if (status) status.innerHTML = '<p class="muted">Откройте настройки из Telegram, чтобы посмотреть или скачать личные данные.</p>';
+    if (legal) legal.innerHTML = '<p class="muted">Документы доступны для чтения, а принятие и отзыв выполняются только после проверки Telegram-профиля.</p>';
+    ['privacyRefreshButton','privacyExportButton','privacyDeletePreviewButton'].forEach((id) => { const button = document.getElementById(id); if (button) button.disabled = true; });
+    return;
+  }
+  document.getElementById('privacyRefreshButton')?.addEventListener('click', loadPrivacyOverview);
+  document.getElementById('privacyExportButton')?.addEventListener('click', downloadPrivacyExport);
+  document.getElementById('privacyDeletePreviewButton')?.addEventListener('click', previewPrivacyDeletion);
+  document.getElementById('privacyLegalDocuments')?.addEventListener('click', async (event) => {
+    const accept = event.target.closest?.('[data-privacy-legal-accept]');
+    const withdraw = event.target.closest?.('[data-privacy-legal-withdraw]');
+    if (accept) {
+      const code = accept.dataset.privacyLegalAccept;
+      if (!window.confirm('Подтвердите, что вы открыли и прочитали текущую редакцию документа.')) return;
+      accept.disabled = true;
+      try { await apiFetch('/api/legal/accept', { method: 'POST', body: JSON.stringify({ code, version: accept.dataset.version }) }); notify('Принятие документа сохранено'); await loadPrivacyOverview(); }
+      catch (error) { notify(error.message || 'Не удалось сохранить принятие'); }
+      finally { accept.disabled = false; }
+    }
+    if (withdraw) {
+      const code = withdraw.dataset.privacyLegalWithdraw;
+      if (!window.confirm('Отзыв согласия ограничит функции, которым оно необходимо. Продолжить?')) return;
+      withdraw.disabled = true;
+      try { await apiFetch('/api/legal/withdraw', { method: 'POST', body: JSON.stringify({ code }) }); notify('Согласие отозвано'); await loadPrivacyOverview(); }
+      catch (error) { notify(error.message || 'Не удалось отозвать согласие'); }
+      finally { withdraw.disabled = false; }
+    }
+  });
+  loadPrivacyOverview();
+}
+
+function initExternalBrowserMode() {
+  if (voxHasTelegramAuth()) return;
+  const notice = document.getElementById('externalBrowserNotice');
+  const open = document.getElementById('externalBrowserOpen');
+  const launchUrl = voxTelegramLaunchUrl();
+  if (open && launchUrl) open.href = launchUrl;
+  if (notice && launchUrl && window.location.pathname !== '/') notice.hidden = false;
+
+  document.querySelectorAll('.requires-telegram-auth, .telegram-payment-action').forEach((element) => {
+    element.hidden = true;
+    element.setAttribute('aria-hidden', 'true');
+  });
+
+  if (/^\/(reader|comic|audio)\//.test(window.location.pathname || '')) {
+    document.querySelectorAll('.paywall-card, .premium-paywall-card, #audioPaywall, #graphicPreviewNotice').forEach((card) => {
+      if (!card) return;
+      card.hidden = false;
+      card.classList.add('external-telegram-card');
+      card.innerHTML = '<div class="empty-icon">✦</div><h3>Откройте в Telegram</h3><p>Текст, аудио и страницы защищены. В Telegram VoxLyra безопасно проверит доступ и продолжит с нужного места.</p>'
+        + (launchUrl ? `<a class="button-link" href="${launchUrl}">Открыть VoxLyra</a>` : '');
+    });
+  }
+}
+
+function bindRoutePersistence() {
+  document.addEventListener('click', (event) => {
+    const link = event.target.closest?.('a[href]');
+    if (!link) return;
+    let url;
+    try { url = new URL(link.href, window.location.href); } catch (_) { return; }
+    if (url.origin !== window.location.origin) return;
+    if (url.pathname === '/') {
+      try {
+        sessionStorage.setItem(VOX_SKIP_RESTORE_KEY, '1');
+        sessionStorage.removeItem(VOX_ROUTE_STACK_KEY);
+      } catch (_) {}
+      return;
+    }
+    voxSaveRouteState(url.toString());
+  }, { capture: true });
+  window.addEventListener('pagehide', () => voxSaveRouteState());
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') voxSaveRouteState();
+  });
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   initVoxSplash();
+  initExternalBrowserMode();
+  bindRoutePersistence();
   applySettings();
   flushProgressSyncQueue().catch(() => {});
   syncNotificationPreferences();
@@ -4296,19 +4796,21 @@ document.addEventListener('DOMContentLoaded', () => {
   initBookPage();
   initLibrary();
   initPremiumPage();
+  initPrivacySettings();
 });
 
-// v1.9.8 — единый возврат: экранная кнопка, Telegram BackButton и безопасный запасной маршрут.
+// v1.13.35 — единый стек навигации, Telegram BackButton и безопасный запасной маршрут.
 (function initRouteNavigation() {
   const nav = document.getElementById('routeNav');
   const back = document.getElementById('routeBackButton');
-  const tg = window.Telegram?.WebApp;
+  const home = document.querySelector('.route-nav-home');
+  const tg = voxTelegramWebApp();
   const path = window.location.pathname || '/';
   const isHome = path === '/' || path === '';
 
   function fallbackUrl() {
     if (path.startsWith('/book/')) return '/catalog';
-    if (path.startsWith('/reader/') || path.startsWith('/comic/') || path.startsWith('/audio/')) {
+    if (path.startsWith('/reader/') || path.startsWith('/comic/') || /^\/audio\/\d+/.test(path)) {
       const explicit = document.querySelector('[data-reader-book-url], .quiet-back[href^="/book/"]');
       return explicit?.getAttribute('data-reader-book-url') || explicit?.getAttribute('href') || '/library';
     }
@@ -4316,18 +4818,46 @@ document.addEventListener('DOMContentLoaded', () => {
     return '/';
   }
 
-  function canUseHistory() {
-    if (window.history.length <= 1) return false;
-    try {
-      const ref = document.referrer ? new URL(document.referrer) : null;
-      return Boolean(ref && ref.origin === window.location.origin && ref.pathname !== path);
-    } catch (_) { return false; }
+  function stackTarget() {
+    const current = voxSafeRoute(window.location.href);
+    const rows = voxReadRouteStack();
+    while (rows.length && rows.at(-1) === current) rows.pop();
+    const target = rows.pop() || '';
+    voxWriteRouteStack(rows.concat(target ? [target] : []));
+    return target && target !== current ? target : '';
+  }
+
+  function canUseDocumentHistory() {
+    return window.history.length > 1 && Boolean(window.history.state?.readerTts);
+  }
+
+  function prepareHomeNavigation(target) {
+    if (target !== '/') return;
+    try { sessionStorage.setItem(VOX_SKIP_RESTORE_KEY, '1'); } catch (_) {}
   }
 
   function goBack() {
-    if (canUseHistory()) window.history.back();
-    else window.location.assign(fallbackUrl());
+    const target = stackTarget();
+    if (target) {
+      prepareHomeNavigation(target);
+      window.location.replace(voxRouteWithTelegramLaunchContext(target));
+      return;
+    }
+    if (canUseDocumentHistory()) {
+      window.history.back();
+      return;
+    }
+    const fallback = fallbackUrl();
+    prepareHomeNavigation(fallback);
+    window.location.assign(fallback);
   }
+
+  home?.addEventListener('click', () => {
+    try {
+      sessionStorage.setItem(VOX_SKIP_RESTORE_KEY, '1');
+      sessionStorage.removeItem(VOX_ROUTE_STACK_KEY);
+    } catch (_) {}
+  });
 
   if (!isHome) {
     if (nav) nav.hidden = false;
@@ -4336,8 +4866,12 @@ document.addEventListener('DOMContentLoaded', () => {
       tg?.BackButton?.show();
       tg?.BackButton?.onClick(goBack);
     } catch (_) {}
+    window.addEventListener('pagehide', () => {
+      try { tg?.BackButton?.offClick?.(goBack); } catch (_) {}
+    }, { once: true });
   } else {
     if (nav) nav.hidden = true;
     try { tg?.BackButton?.hide(); } catch (_) {}
   }
 })();
+

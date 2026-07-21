@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     OWNER_ID: str = "2097006037"
     DATABASE_PATH: str = "data/voxlyra.sqlite3"
     BACKUP_KEEP_COUNT: int = 7
+    BACKUP_MAX_UNPACKED_MB: int = 8192
+    BACKUP_MAX_FILES: int = 100000
     RUN_WEBAPP: bool = True
     PORT: int = 3000
     WEBAPP_URL: str = ""
@@ -18,9 +20,18 @@ class Settings(BaseSettings):
     BOT_USERNAME: str = "VoxlyraBot"
     PROJECT_NAME: str = "Вокслира"
     PUBLIC_VERSION_VISIBLE: bool = False
-    PROJECT_VERSION: str = "v1.13.30"
+    PROJECT_VERSION: str = "v1.14.0"
     MAX_BOOK_UPLOAD_MB: int = 0
     MAX_BOOK_UNPACKED_MB: int = 2048
+    # Прямая загрузка больших библиотечных ZIP идёт частями. Это аварийный
+    # технический потолок, а не лимит пакета в настройках владельца.
+    LIBRARY_IMPORT_LARGE_UPLOAD_MAX_MB: int = 2048
+    LIBRARY_IMPORT_MAX_ACTIVE_UPLOADS: int = 4
+    LIBRARY_IMPORT_MIN_FREE_DISK_MB: int = 256
+    CHUNK_UPLOAD_MAX_CONCURRENCY: int = 4
+    DB_BUSY_TIMEOUT_MS: int = 15000
+    DB_CACHE_MB: int = 64
+    DB_WAL_AUTOCHECKPOINT_PAGES: int = 2000
     LIBRARY_IMPORT_FAILED_ARCHIVE_HOURS: int = 24
     MAX_COMIC_UPLOAD_MB: int = 512
     MAX_COMIC_UNPACKED_MB: int = 1024
@@ -84,6 +95,15 @@ class Settings(BaseSettings):
     LEGAL_DOCS_BASE_URL: str = ""
     LEGAL_REQUIRE_ON_START: bool = True
     LEGAL_BLOCK_RUB_PAYMENTS_IF_INCOMPLETE: bool = True
+
+    # Безопасность Mini App и приватных API.
+    TMA_INIT_DATA_MAX_AGE_SECONDS: int = 86400
+    TMA_INIT_DATA_FUTURE_SKEW_SECONDS: int = 60
+    CORS_ALLOWED_ORIGINS: str = ""
+    SECURITY_ALLOW_LOCAL_ORIGINS: bool = True
+    SECURITY_MAX_JSON_BYTES: int = 2 * 1024 * 1024
+    SECURITY_SENSITIVE_REQUESTS_PER_MINUTE: int = 20
+    PRIVACY_HASH_SECRET: str = ""
 
     # Шифрование платёжных реквизитов. Рекомендуется отдельный Fernet-ключ.
     DATA_ENCRYPTION_KEY: str = ""

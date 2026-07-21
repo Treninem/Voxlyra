@@ -18,6 +18,27 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _normalize_progress_timestamp(value: object | None) -> str:
+    """Normalize an optional client timestamp for stale offline-progress protection.
+
+    Client clocks are not trusted beyond five minutes into the future, otherwise a
+    broken device clock could permanently block progress from another device.
+    """
+    now = datetime.now(timezone.utc)
+    if value is None or not str(value).strip():
+        return now.isoformat()
+    try:
+        parsed = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return now.isoformat()
+    if parsed > now + timedelta(minutes=5):
+        parsed = now
+    return parsed.isoformat()
+
+
 @asynccontextmanager
 async def connect():
     db_path = settings.DATABASE_PATH
@@ -30,6 +51,13 @@ async def connect():
     # Japanese and other author names, so searches need a Unicode-aware fold.
     await db.create_function("unicode_casefold", 1, lambda value: str(value or "").casefold())
     await db.execute("PRAGMA foreign_keys = ON")
+    await db.execute(f"PRAGMA busy_timeout = {max(1000, int(settings.DB_BUSY_TIMEOUT_MS or 15000))}")
+    await db.execute(f"PRAGMA cache_size = {-max(8, int(settings.DB_CACHE_MB or 64)) * 1024}")
+    await db.execute("PRAGMA temp_store = MEMORY")
+    await db.execute("PRAGMA synchronous = NORMAL")
+    await db.execute(
+        f"PRAGMA wal_autocheckpoint = {max(100, int(settings.DB_WAL_AUTOCHECKPOINT_PAGES or 2000))}"
+    )
     try:
         yield db
     finally:
@@ -72,6 +100,13 @@ async def init_db() -> None:
 
 async def _init_db_impl() -> None:
     async with connect() as db:
+        # WAL allows readers to continue while the import/moderation worker writes.
+        # The settings are persistent and safe to repeat on every Redeploy.
+        await db.execute("PRAGMA journal_mode = WAL")
+        await db.execute("PRAGMA synchronous = NORMAL")
+        await db.execute(
+            f"PRAGMA wal_autocheckpoint = {max(100, int(settings.DB_WAL_AUTOCHECKPOINT_PAGES or 2000))}"
+        )
         await db.executescript(
             """
             CREATE TABLE IF NOT EXISTS users (
@@ -80,6 +115,8 @@ async def _init_db_impl() -> None:
                 username TEXT,
                 full_name TEXT,
                 is_blocked INTEGER NOT NULL DEFAULT 0,
+                account_status TEXT NOT NULL DEFAULT 'active',
+                deleted_at TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -478,6 +515,11 @@ async def _init_db_impl() -> None:
         await _ensure_v11326_reread_schema(db)
         await _ensure_v11327_journal_import_schema(db)
         await _ensure_v11328_journal_import_history_schema(db)
+        await _ensure_v11332_moderation_revision_schema(db)
+        await _ensure_v11333_monetization_schema(db)
+        await _ensure_v11336_privacy_schema(db)
+        await _ensure_v11337_performance_schema(db)
+        await db.execute("PRAGMA optimize")
         await db.commit()
 
 
@@ -1038,9 +1080,9 @@ async def upsert_user(telegram_id: int, username: str | None, full_name: str | N
             INSERT INTO users(telegram_id, username, full_name, created_at, updated_at)
             VALUES(?, ?, ?, ?, ?)
             ON CONFLICT(telegram_id) DO UPDATE SET
-                username=excluded.username,
-                full_name=excluded.full_name,
-                updated_at=excluded.updated_at
+                username=CASE WHEN users.account_status='deleted' THEN users.username ELSE excluded.username END,
+                full_name=CASE WHEN users.account_status='deleted' THEN users.full_name ELSE excluded.full_name END,
+                updated_at=CASE WHEN users.account_status='deleted' THEN users.updated_at ELSE excluded.updated_at END
             """,
             (telegram_id, username, full_name, now, now),
         )
@@ -2874,20 +2916,31 @@ async def set_audio_chapter_status(audio_id: int, status: str) -> bool:
         return cur.rowcount > 0
 
 
-async def save_listening_progress(user_id: int, audio_chapter_id: int, position_seconds: int) -> None:
-    now = utc_now()
+async def save_listening_progress(
+    user_id: int,
+    audio_chapter_id: int,
+    position_seconds: int,
+    *,
+    client_updated_at: object | None = None,
+    protect_newer: bool = False,
+) -> bool:
+    now = _normalize_progress_timestamp(client_updated_at) if protect_newer else utc_now()
     async with connect() as db:
         position = max(0, int(position_seconds))
-        await db.execute(
+        cur = await db.execute(
             """
             INSERT INTO listening_progress(user_id, audio_chapter_id, position_seconds, updated_at)
             VALUES(?, ?, ?, ?)
             ON CONFLICT(user_id, audio_chapter_id) DO UPDATE SET
                 position_seconds=excluded.position_seconds,
                 updated_at=excluded.updated_at
+            WHERE ?=0 OR listening_progress.updated_at<=excluded.updated_at
             """,
-            (user_id, audio_chapter_id, position, now),
+            (int(user_id), int(audio_chapter_id), position, now, 1 if protect_newer else 0),
         )
+        if int(cur.rowcount or 0) <= 0:
+            await db.commit()
+            return False
         cur = await db.execute("SELECT book_id FROM audio_chapters WHERE id=?", (int(audio_chapter_id),))
         audio = await cur.fetchone()
         if audio:
@@ -2901,6 +2954,7 @@ async def save_listening_progress(user_id: int, audio_chapter_id: int, position_
             )
             await _touch_progress_revision_db(db, int(user_id), now)
         await db.commit()
+        return True
 
 
 async def get_listening_progress(user_id: int, audio_chapter_id: int) -> int:
@@ -3448,25 +3502,37 @@ async def get_platform_finance_summary() -> dict[str, int]:
         }
 
 
-async def save_reading_progress(user_id: int, chapter_id: int, position_percent: int) -> None:
+async def save_reading_progress(
+    user_id: int,
+    chapter_id: int,
+    position_percent: int,
+    *,
+    client_updated_at: object | None = None,
+    protect_newer: bool = False,
+) -> bool:
     position_percent = max(0, min(100, int(position_percent)))
-    now = utc_now()
+    now = _normalize_progress_timestamp(client_updated_at) if protect_newer else utc_now()
     async with connect() as db:
-        cur = await db.execute("SELECT book_id FROM chapters WHERE id=?", (chapter_id,))
+        cur = await db.execute("SELECT book_id FROM chapters WHERE id=?", (int(chapter_id),))
         chapter = await cur.fetchone()
         if not chapter:
-            return
+            return False
         book_id = int(chapter["book_id"])
-        await db.execute(
+        cur = await db.execute(
             """
             INSERT INTO reading_progress(user_id, book_id, chapter_id, position_percent, updated_at)
             VALUES(?, ?, ?, ?, ?)
             ON CONFLICT(user_id, chapter_id) DO UPDATE SET
+                book_id=excluded.book_id,
                 position_percent=excluded.position_percent,
                 updated_at=excluded.updated_at
+            WHERE ?=0 OR reading_progress.updated_at<=excluded.updated_at
             """,
-            (user_id, book_id, chapter_id, position_percent, now),
+            (int(user_id), book_id, int(chapter_id), position_percent, now, 1 if protect_newer else 0),
         )
+        if int(cur.rowcount or 0) <= 0:
+            await db.commit()
+            return False
         await _record_history_db(
             db, user_id=int(user_id), content_type="text", target_id=int(chapter_id),
             book_id=book_id, position_value=position_percent, updated_at=now,
@@ -3477,6 +3543,7 @@ async def save_reading_progress(user_id: int, chapter_id: int, position_percent:
         )
         await _touch_progress_revision_db(db, int(user_id), now)
         await db.commit()
+        return True
 
 
 async def get_reading_progress(user_id: int, chapter_id: int) -> int:
@@ -4088,9 +4155,14 @@ async def user_can_access_audio(user_id: int, audio_chapter_id: int) -> bool:
     audio = await get_audio_chapter(audio_chapter_id)
     if not audio:
         return False
-    if int(audio["is_free"] or 0) == 1 or int(audio["price_stars"] or 0) <= 0:
+    mode = _normalize_text_pricing_mode(
+        int(audio["book_price_stars"] or 0), str(audio["pricing_type"] or "")
+    )
+    if mode == "free" or int(audio["is_free"] or 0) == 1:
         return True
-    return await has_purchase_access(user_id, audio_chapter_id=audio_chapter_id)
+    if mode == "premium":
+        return await user_has_premium(int(user_id))
+    return await has_purchase_access(int(user_id), audio_chapter_id=int(audio_chapter_id))
 
 
 
@@ -5677,6 +5749,62 @@ async def _ensure_v185_schema(db: aiosqlite.Connection) -> None:
             "INSERT INTO settings(key, value, updated_at) VALUES(?, ?, ?) ON CONFLICT(key) DO NOTHING",
             (key, value, now),
         )
+
+
+async def _ensure_v11332_moderation_revision_schema(db: aiosqlite.Connection) -> None:
+    """Версионные снимки модерации и безопасная повторная проверка только изменённых частей."""
+    await db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS book_moderation_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            book_id INTEGER NOT NULL,
+            snapshot_kind TEXT NOT NULL,
+            actor_user_id INTEGER,
+            source TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE,
+            FOREIGN KEY(actor_user_id) REFERENCES users(id) ON DELETE SET NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_book_moderation_snapshots_book
+            ON book_moderation_snapshots(book_id, id DESC);
+
+        CREATE TABLE IF NOT EXISTS book_moderation_snapshot_items (
+            snapshot_id INTEGER NOT NULL,
+            item_key TEXT NOT NULL,
+            source_type TEXT NOT NULL,
+            source_id INTEGER,
+            field_name TEXT NOT NULL DEFAULT '',
+            item_number INTEGER,
+            title TEXT NOT NULL DEFAULT '',
+            content_hash TEXT NOT NULL,
+            updated_at TEXT,
+            PRIMARY KEY(snapshot_id, item_key),
+            FOREIGN KEY(snapshot_id) REFERENCES book_moderation_snapshots(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_book_moderation_snapshot_items_source
+            ON book_moderation_snapshot_items(snapshot_id, source_type, source_id);
+
+        CREATE TABLE IF NOT EXISTS book_revision_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            book_id INTEGER NOT NULL,
+            baseline_snapshot_id INTEGER NOT NULL,
+            actor_user_id INTEGER,
+            reason TEXT NOT NULL,
+            finding_ids_json TEXT NOT NULL DEFAULT '[]',
+            requires_manual_confirmation INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'open',
+            created_at TEXT NOT NULL,
+            resubmitted_at TEXT,
+            resolved_at TEXT,
+            resolution TEXT,
+            FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE,
+            FOREIGN KEY(baseline_snapshot_id) REFERENCES book_moderation_snapshots(id) ON DELETE CASCADE,
+            FOREIGN KEY(actor_user_id) REFERENCES users(id) ON DELETE SET NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_book_revision_requests_book
+            ON book_revision_requests(book_id, status, id DESC);
+        """
+    )
 
 
 async def list_books_for_duplicate_check(exclude_book_id: int | None = None) -> list[aiosqlite.Row]:
@@ -7298,20 +7426,31 @@ async def get_adjacent_graphic_chapters(graphic_chapter_id: int) -> dict[str, ai
         return {"previous": previous, "next": next_row}
 
 
-async def save_graphic_reading_progress(user_id: int, graphic_chapter_id: int, page_number: int) -> None:
-    now = utc_now()
+async def save_graphic_reading_progress(
+    user_id: int,
+    graphic_chapter_id: int,
+    page_number: int,
+    *,
+    client_updated_at: object | None = None,
+    protect_newer: bool = False,
+) -> bool:
+    now = _normalize_progress_timestamp(client_updated_at) if protect_newer else utc_now()
     async with connect() as db:
         page = max(1, int(page_number or 1))
-        await db.execute(
+        cur = await db.execute(
             """
             INSERT INTO graphic_reading_progress(user_id, graphic_chapter_id, page_number, updated_at)
             VALUES(?, ?, ?, ?)
             ON CONFLICT(user_id, graphic_chapter_id) DO UPDATE SET
                 page_number=excluded.page_number,
                 updated_at=excluded.updated_at
+            WHERE ?=0 OR graphic_reading_progress.updated_at<=excluded.updated_at
             """,
-            (int(user_id), int(graphic_chapter_id), page, now),
+            (int(user_id), int(graphic_chapter_id), page, now, 1 if protect_newer else 0),
         )
+        if int(cur.rowcount or 0) <= 0:
+            await db.commit()
+            return False
         cur = await db.execute("SELECT book_id FROM graphic_chapters WHERE id=?", (int(graphic_chapter_id),))
         graphic = await cur.fetchone()
         if graphic:
@@ -7325,6 +7464,7 @@ async def save_graphic_reading_progress(user_id: int, graphic_chapter_id: int, p
             )
             await _touch_progress_revision_db(db, int(user_id), now)
         await db.commit()
+        return True
 
 
 async def get_graphic_reading_progress(user_id: int, graphic_chapter_id: int) -> int:
@@ -7990,8 +8130,13 @@ async def user_can_access_graphic(user_id: int, graphic_chapter_id: int) -> bool
         return False
     if str(chapter["moderation_status"] or "approved") != "approved":
         return False
-    if int(chapter["is_free"] or 0) == 1 or int(chapter["price_stars"] or 0) <= 0:
+    mode = _normalize_text_pricing_mode(
+        int(chapter["book_price_stars"] or 0), str(chapter["book_pricing_type"] or "")
+    )
+    if mode == "free" or int(chapter["is_free"] or 0) == 1:
         return True
+    if mode == "premium":
+        return await user_has_premium(int(user_id))
     return await has_purchase_access(int(user_id), graphic_chapter_id=int(graphic_chapter_id))
 
 
@@ -11208,6 +11353,19 @@ async def activate_premium_subscription(
                 raise ValueError("Идентификатор платежа уже использован")
             await db.commit()
             return int(existing["id"])
+        if bool(is_first_recurring):
+            cur = await db.execute(
+                """SELECT id FROM premium_subscriptions
+                   WHERE user_id=? AND status='active' AND auto_renew=1 AND expires_at>?
+                     AND telegram_payment_charge_id!=? ORDER BY expires_at DESC LIMIT 1""",
+                (int(user_id), now, charge_id),
+            )
+            duplicate_subscription = await cur.fetchone()
+            if duplicate_subscription:
+                await db.rollback()
+                raise DuplicatePurchaseError(
+                    "Автопродление Premium уже активно", access_key="premium:auto_renew"
+                )
         # Если Telegram не передал дату (разовая резервная оплата), продлеваем от
         # текущего окончания, а не обнуляем уже оплаченный остаток.
         if not subscription_expiration_date:
@@ -16792,3 +16950,735 @@ async def get_user_reading_dashboard(user_id: int, activity_year: int | None = N
         "completed_goals": sum(1 for item in enabled_goals if item["completed"]),
         "enabled_goals": len(enabled_goals),
     }
+
+
+# ---------------------------------------------------------------------------
+# VoxLyra v1.13.33 — атомарная защита Stars и точные права доступа
+# ---------------------------------------------------------------------------
+
+async def _ensure_v11333_monetization_schema(db: aiosqlite.Connection) -> None:
+    """Create an idempotent entitlement registry and backfill legacy purchases."""
+    from app.services.monetization_guard import access_descriptor_for_purchase_row
+
+    now = utc_now()
+    await db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS purchase_access_claims (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            access_key TEXT NOT NULL,
+            purchase_id INTEGER,
+            charge_id TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'active',
+            expires_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(user_id, access_key),
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY(purchase_id) REFERENCES purchases(id) ON DELETE SET NULL
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_purchase_access_claims_charge
+            ON purchase_access_claims(charge_id) WHERE charge_id!='';
+        CREATE INDEX IF NOT EXISTS idx_purchase_access_claims_status_expiry
+            ON purchase_access_claims(status, expires_at);
+        CREATE INDEX IF NOT EXISTS idx_purchase_access_claims_purchase
+            ON purchase_access_claims(purchase_id);
+
+        CREATE TABLE IF NOT EXISTS monetization_incidents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            event_type TEXT NOT NULL,
+            access_key TEXT NOT NULL DEFAULT '',
+            charge_id TEXT NOT NULL DEFAULT '',
+            purchase_id INTEGER,
+            details_json TEXT NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL DEFAULT 'open',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE SET NULL,
+            FOREIGN KEY(purchase_id) REFERENCES purchases(id) ON DELETE SET NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_monetization_incidents_status
+            ON monetization_incidents(status, created_at DESC);
+        """
+    )
+    defaults = {
+        "monetization_duplicate_guard_enabled": "1",
+        "monetization_auto_refund_duplicate": "1",
+    }
+    for key, value in defaults.items():
+        await db.execute(
+            "INSERT INTO settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO NOTHING",
+            (key, value, now),
+        )
+
+    cur = await db.execute(
+        """
+        SELECT p.* FROM purchases p
+        WHERE p.status IN ('paid','canceling')
+        ORDER BY p.id ASC
+        """
+    )
+    for row in await cur.fetchall():
+        descriptor = access_descriptor_for_purchase_row(row)
+        if descriptor is None:
+            continue
+        await db.execute(
+            """
+            INSERT OR IGNORE INTO purchase_access_claims(
+                user_id,access_key,purchase_id,charge_id,status,expires_at,created_at,updated_at
+            ) VALUES(?,?,?,?, 'active',NULL,?,?)
+            """,
+            (
+                int(row["user_id"]), descriptor.key, int(row["id"]),
+                str(row["telegram_payment_charge_id"] or ""),
+                str(row["created_at"] or now), now,
+            ),
+        )
+
+
+class DuplicatePurchaseError(ValueError):
+    def __init__(self, message: str = "Доступ уже открыт", *, access_key: str = "", purchase_id: int | None = None):
+        super().__init__(message)
+        self.access_key = str(access_key or "")
+        self.purchase_id = int(purchase_id) if purchase_id else None
+
+
+class PurchaseProcessingError(ValueError):
+    pass
+
+
+async def _paid_purchase_for_key(db: aiosqlite.Connection, user_id: int, access_key: str) -> aiosqlite.Row | None:
+    kind, _, raw = str(access_key).partition(":")
+    if kind == "book" and raw.isdigit():
+        cur = await db.execute(
+            """SELECT * FROM purchases WHERE user_id=? AND book_id=?
+               AND chapter_id IS NULL AND audio_chapter_id IS NULL
+               AND graphic_chapter_id IS NULL AND graphic_volume_number IS NULL
+               AND COALESCE(purchase_kind,'content')='content'
+               AND status IN ('paid','canceling') ORDER BY id DESC LIMIT 1""",
+            (int(user_id), int(raw)),
+        )
+    elif kind == "chapter" and raw.isdigit():
+        cur = await db.execute(
+            "SELECT * FROM purchases WHERE user_id=? AND chapter_id=? AND status IN ('paid','canceling') ORDER BY id DESC LIMIT 1",
+            (int(user_id), int(raw)),
+        )
+    elif kind == "audio" and raw.isdigit():
+        cur = await db.execute(
+            "SELECT * FROM purchases WHERE user_id=? AND audio_chapter_id=? AND status IN ('paid','canceling') ORDER BY id DESC LIMIT 1",
+            (int(user_id), int(raw)),
+        )
+    elif kind == "graphic" and raw.isdigit():
+        cur = await db.execute(
+            "SELECT * FROM purchases WHERE user_id=? AND graphic_chapter_id=? AND status IN ('paid','canceling') ORDER BY id DESC LIMIT 1",
+            (int(user_id), int(raw)),
+        )
+    elif kind == "graphic_volume":
+        parts = raw.split(":", 1)
+        if len(parts) != 2 or not all(part.isdigit() for part in parts):
+            return None
+        cur = await db.execute(
+            """SELECT * FROM purchases WHERE user_id=? AND book_id=? AND graphic_volume_number=?
+               AND COALESCE(purchase_kind,'')='graphic_volume'
+               AND status IN ('paid','canceling') ORDER BY id DESC LIMIT 1""",
+            (int(user_id), int(parts[0]), int(parts[1])),
+        )
+    else:
+        return None
+    return await cur.fetchone()
+
+
+async def _claim_or_purchase_conflict(
+    db: aiosqlite.Connection,
+    user_id: int,
+    conflict_keys: tuple[str, ...],
+    *,
+    ignore_charge_id: str = "",
+) -> dict[str, Any] | None:
+    now = utc_now()
+    await db.execute(
+        "DELETE FROM purchase_access_claims WHERE status='processing' AND expires_at IS NOT NULL AND expires_at<=?",
+        (now,),
+    )
+    for key in conflict_keys:
+        cur = await db.execute(
+            """SELECT * FROM purchase_access_claims
+               WHERE user_id=? AND access_key=? AND status IN ('processing','active') LIMIT 1""",
+            (int(user_id), str(key)),
+        )
+        claim = await cur.fetchone()
+        if claim and str(claim["charge_id"] or "") != str(ignore_charge_id or ""):
+            return {
+                "access_key": str(key), "purchase_id": int(claim["purchase_id"]) if claim["purchase_id"] else None,
+                "status": str(claim["status"]), "charge_id": str(claim["charge_id"] or ""),
+            }
+        purchase = await _paid_purchase_for_key(db, int(user_id), str(key))
+        if purchase and str(purchase["telegram_payment_charge_id"] or "") != str(ignore_charge_id or ""):
+            return {
+                "access_key": str(key), "purchase_id": int(purchase["id"]),
+                "status": str(purchase["status"]), "charge_id": str(purchase["telegram_payment_charge_id"] or ""),
+            }
+    return None
+
+
+async def _access_descriptor_for_live_target(target: dict[str, Any] | None):
+    from app.services.monetization_guard import access_descriptor_for_target
+    if not target:
+        return None
+    live = dict(target)
+    if str(live.get("kind") or "") == "graphic" and not int(live.get("volume_number") or 0):
+        target_id = int(live.get("target_id") or 0)
+        if target_id:
+            async with connect() as db:
+                cur = await db.execute("SELECT book_id,volume_number FROM graphic_chapters WHERE id=?", (target_id,))
+                row = await cur.fetchone()
+            if row:
+                live["book_id"] = int(row["book_id"] or live.get("book_id") or 0)
+                live["volume_number"] = int(row["volume_number"] or 0)
+    return access_descriptor_for_target(live)
+
+
+async def get_purchase_conflict(user_id: int, payload: str) -> dict[str, Any] | None:
+    """Return a preflight conflict for unique access, without mutating payment state."""
+    target = await get_purchase_target(str(payload or ""))
+    if not target:
+        return None
+    kind = str(target.get("kind") or "")
+    if kind == "premium":
+        # Recurring Telegram renewals use the same public payload. Blocking here
+        # would reject a legitimate renewal; creation of a second manual invoice
+        # is prevented by the Premium checkout endpoint instead.
+        return None
+    if kind == "chapter_package":
+        book_id = int(target.get("book_id") or 0)
+        if not book_id:
+            return None
+        async with connect() as db:
+            return await _claim_or_purchase_conflict(db, int(user_id), (f"book:{book_id}",))
+    descriptor = await _access_descriptor_for_live_target(target)
+    if descriptor is None:
+        return None
+    async with connect() as db:
+        return await _claim_or_purchase_conflict(db, int(user_id), descriptor.conflict_keys)
+
+
+async def has_purchase_access(
+    user_id: int,
+    *,
+    book_id: int | None = None,
+    chapter_id: int | None = None,
+    audio_chapter_id: int | None = None,
+    graphic_chapter_id: int | None = None,
+) -> bool:
+    """Check exact entitlement. A child purchase never grants the whole book."""
+    uid = int(user_id)
+    if chapter_id is not None and await has_manual_chapter_access(uid, int(chapter_id)):
+        return True
+    async with connect() as db:
+        if book_id is not None and all(value is None for value in (chapter_id, audio_chapter_id, graphic_chapter_id)):
+            return await _paid_purchase_for_key(db, uid, f"book:{int(book_id)}") is not None
+        if chapter_id is not None:
+            cur = await db.execute("SELECT book_id FROM chapters WHERE id=?", (int(chapter_id),))
+            row = await cur.fetchone()
+            if not row:
+                return False
+            if await _paid_purchase_for_key(db, uid, f"book:{int(row['book_id'])}") or await _paid_purchase_for_key(db, uid, f"chapter:{int(chapter_id)}"):
+                return True
+            cur = await db.execute(
+                """SELECT 1 FROM chapter_package_unlocks cpu
+                   JOIN chapter_package_balances cpb ON cpb.id=cpu.balance_id
+                   JOIN purchases p ON p.id=cpu.purchase_id
+                   WHERE cpu.user_id=? AND cpu.chapter_id=? AND cpb.status='active'
+                     AND p.status IN ('paid','canceling') LIMIT 1""",
+                (uid, int(chapter_id)),
+            )
+            return await cur.fetchone() is not None
+        if audio_chapter_id is not None:
+            cur = await db.execute("SELECT book_id FROM audio_chapters WHERE id=?", (int(audio_chapter_id),))
+            row = await cur.fetchone()
+            return bool(row and (
+                await _paid_purchase_for_key(db, uid, f"book:{int(row['book_id'])}")
+                or await _paid_purchase_for_key(db, uid, f"audio:{int(audio_chapter_id)}")
+            ))
+        if graphic_chapter_id is not None:
+            cur = await db.execute("SELECT book_id,volume_number FROM graphic_chapters WHERE id=?", (int(graphic_chapter_id),))
+            row = await cur.fetchone()
+            if not row:
+                return False
+            keys = [f"book:{int(row['book_id'])}", f"graphic:{int(graphic_chapter_id)}"]
+            if int(row["volume_number"] or 0) > 0:
+                keys.append(f"graphic_volume:{int(row['book_id'])}:{int(row['volume_number'])}")
+            for key in keys:
+                if await _paid_purchase_for_key(db, uid, key):
+                    return True
+            cur = await db.execute(
+                """SELECT 1 FROM chapter_package_unlocks cpu
+                   JOIN chapter_package_balances cpb ON cpb.id=cpu.balance_id
+                   JOIN purchases p ON p.id=cpu.purchase_id
+                   WHERE cpu.user_id=? AND cpu.graphic_chapter_id=? AND cpb.status='active'
+                     AND p.status IN ('paid','canceling') LIMIT 1""",
+                (uid, int(graphic_chapter_id)),
+            )
+            return await cur.fetchone() is not None
+    return False
+
+
+_create_paid_purchase_before_v11333 = create_paid_purchase
+
+
+async def create_paid_purchase(
+    *,
+    user_id: int,
+    payload: str,
+    amount_stars: int,
+    telegram_payment_charge_id: str,
+) -> int:
+    """Reserve the entitlement before accounting, preventing parallel duplicates."""
+    uid = int(user_id)
+    charge_id = str(telegram_payment_charge_id or "").strip()
+    if not charge_id:
+        raise ValueError("Не указан идентификатор платежа")
+    target = await get_purchase_target(str(payload))
+    if not target:
+        raise ValueError("Покупка не найдена")
+    canonical_payload = str(payload)
+    if str(payload).startswith("vox:intent:"):
+        intent = await get_payment_intent(str(payload))
+        if intent:
+            canonical_payload = str(intent["canonical_payload"] or payload)
+
+    async with connect() as db:
+        cur = await db.execute(
+            "SELECT * FROM purchases WHERE telegram_payment_charge_id=? ORDER BY id LIMIT 1", (charge_id,)
+        )
+        existing = await cur.fetchone()
+        if existing:
+            if int(existing["user_id"]) != uid or int(existing["amount_stars"] or 0) != int(amount_stars):
+                raise ValueError("Идентификатор платежа уже использован")
+            return int(existing["id"])
+
+    kind = str(target.get("kind") or "")
+    descriptor = await _access_descriptor_for_live_target(target)
+    if kind == "chapter_package":
+        book_id = int(target.get("book_id") or 0)
+        if book_id:
+            async with connect() as db:
+                conflict = await _claim_or_purchase_conflict(db, uid, (f"book:{book_id}",), ignore_charge_id=charge_id)
+                if conflict:
+                    raise DuplicatePurchaseError("Вся книга уже куплена — пакет глав не требуется", access_key=conflict["access_key"], purchase_id=conflict.get("purchase_id"))
+    if descriptor is None:
+        return await _create_paid_purchase_before_v11333(
+            user_id=uid, payload=str(payload), amount_stars=int(amount_stars), telegram_payment_charge_id=charge_id
+        )
+
+    expires = (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat()
+    now = utc_now()
+    async with connect() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        conflict = await _claim_or_purchase_conflict(db, uid, descriptor.conflict_keys, ignore_charge_id=charge_id)
+        if conflict:
+            await db.execute(
+                """INSERT INTO monetization_incidents(user_id,event_type,access_key,charge_id,purchase_id,details_json,status,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,'open',?,?)""",
+                (uid, "duplicate_payment_blocked", conflict["access_key"], charge_id, conflict.get("purchase_id"),
+                 json.dumps({"payload": canonical_payload, "amount_stars": int(amount_stars)}, ensure_ascii=False), now, now),
+            )
+            await db.commit()
+            raise DuplicatePurchaseError("Этот доступ уже был открыт", access_key=conflict["access_key"], purchase_id=conflict.get("purchase_id"))
+        try:
+            reused = await db.execute(
+                """UPDATE purchase_access_claims SET purchase_id=NULL,charge_id=?,status='processing',expires_at=?,updated_at=?
+                   WHERE user_id=? AND access_key=? AND status='released'""",
+                (charge_id, expires, now, uid, descriptor.key),
+            )
+            if reused.rowcount <= 0:
+                await db.execute(
+                    """INSERT INTO purchase_access_claims(user_id,access_key,purchase_id,charge_id,status,expires_at,created_at,updated_at)
+                       VALUES(?,?,NULL,?,'processing',?,?,?)""",
+                    (uid, descriptor.key, charge_id, expires, now, now),
+                )
+        except sqlite3.IntegrityError:
+            await db.rollback()
+            async with connect() as check_db:
+                cur = await check_db.execute("SELECT id FROM purchases WHERE telegram_payment_charge_id=?", (charge_id,))
+                same = await cur.fetchone()
+                if same:
+                    return int(same["id"])
+            raise PurchaseProcessingError("Платёж уже обрабатывается")
+        await db.commit()
+
+    try:
+        purchase_id = await _create_paid_purchase_before_v11333(
+            user_id=uid, payload=str(payload), amount_stars=int(amount_stars), telegram_payment_charge_id=charge_id
+        )
+    except Exception:
+        async with connect() as db:
+            await db.execute(
+                "DELETE FROM purchase_access_claims WHERE user_id=? AND access_key=? AND charge_id=? AND status='processing'",
+                (uid, descriptor.key, charge_id),
+            )
+            await db.commit()
+        raise
+    async with connect() as db:
+        await db.execute(
+            """UPDATE purchase_access_claims SET purchase_id=?,status='active',expires_at=NULL,updated_at=?
+               WHERE user_id=? AND access_key=? AND charge_id=?""",
+            (int(purchase_id), utc_now(), uid, descriptor.key, charge_id),
+        )
+        await db.commit()
+    return int(purchase_id)
+
+
+async def purchase_chapter_from_wallet(user_id: int, chapter_id: int, *, use_bonus: bool = True) -> dict[str, int]:
+    """Atomically buy a chapter and its exact entitlement from the prepaid wallet."""
+    from app.services.bonus_economy import bonus_discount_limit, load_revenue_split_settings
+
+    uid, cid = int(user_id), int(chapter_id)
+    cfg = await load_revenue_split_settings()
+    now = utc_now()
+    async with connect() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        cur = await db.execute(
+            """SELECT c.*, b.title AS book_title, b.author_id, b.pricing_type,
+                      b.price_stars AS book_price_stars,b.publication_status
+               FROM chapters c JOIN books b ON b.id=c.book_id WHERE c.id=?""", (cid,)
+        )
+        chapter = await cur.fetchone()
+        if not chapter or str(chapter["publication_status"] or "") != "published":
+            await db.rollback(); raise ValueError("Глава не найдена")
+        if str(chapter["pricing_type"] or "") != "chapters" or int(chapter["is_free"] or 0) == 1 or int(chapter["price_stars"] or 0) <= 0:
+            await db.rollback(); raise ValueError("Эта глава отдельно не продаётся")
+        descriptor_key = f"chapter:{cid}"
+        conflict = await _claim_or_purchase_conflict(db, uid, (descriptor_key, f"book:{int(chapter['book_id'])}"))
+        if conflict:
+            await db.rollback(); raise ValueError("Глава уже доступна")
+        cur = await db.execute(
+            """SELECT 1 FROM chapter_package_unlocks cpu JOIN chapter_package_balances cpb ON cpb.id=cpu.balance_id
+               JOIN purchases p ON p.id=cpu.purchase_id WHERE cpu.user_id=? AND cpu.chapter_id=?
+               AND cpb.status='active' AND p.status IN ('paid','canceling') LIMIT 1""", (uid, cid)
+        )
+        if await cur.fetchone():
+            await db.rollback(); raise ValueError("Глава уже доступна")
+        charge_id = f"wallet:{uuid.uuid4().hex}"
+        claim_expiry = (datetime.now(timezone.utc)+timedelta(minutes=15)).isoformat()
+        reused = await db.execute(
+            """UPDATE purchase_access_claims SET purchase_id=NULL,charge_id=?,status='processing',expires_at=?,updated_at=?
+               WHERE user_id=? AND access_key=? AND status='released'""",
+            (charge_id, claim_expiry, now, uid, descriptor_key),
+        )
+        if reused.rowcount <= 0:
+            await db.execute(
+                """INSERT INTO purchase_access_claims(user_id,access_key,purchase_id,charge_id,status,expires_at,created_at,updated_at)
+                   VALUES(?,?,NULL,?,'processing',?,?,?)""",
+                (uid, descriptor_key, charge_id, claim_expiry, now, now),
+            )
+        await db.execute("INSERT INTO reader_wallets(user_id,balance_stars,created_at,updated_at) VALUES(?,0,?,?) ON CONFLICT(user_id) DO NOTHING", (uid, now, now))
+        await db.execute("INSERT INTO bonus_wallets(user_id,balance,created_at,updated_at) VALUES(?,0,?,?) ON CONFLICT(user_id) DO NOTHING", (uid, now, now))
+        cur = await db.execute("SELECT balance_stars FROM reader_wallets WHERE user_id=?", (uid,)); wallet = int((await cur.fetchone())["balance_stars"] or 0)
+        cur = await db.execute("SELECT balance FROM bonus_wallets WHERE user_id=?", (uid,)); bonus = int((await cur.fetchone())["balance"] or 0)
+        price = int(chapter["price_stars"] or 0)
+        plan = bonus_discount_limit(price, bonus if use_bonus else 0, points_per_star=cfg.points_per_star,
+                                    author_percent=cfg.author_percent, platform_percent=cfg.platform_percent, bonus_percent=cfg.bonus_percent)
+        wallet_needed = int(plan["wallet_stars_needed"]); bonus_stars = int(plan["bonus_stars_used"]); bonus_points = bonus_stars * cfg.points_per_star
+        if wallet < wallet_needed:
+            await db.rollback(); raise ValueError(f"Недостаточно Stars на балансе. Нужно ещё {wallet_needed-wallet}.")
+        cur = await db.execute("UPDATE reader_wallets SET balance_stars=balance_stars-?,updated_at=? WHERE user_id=? AND balance_stars>=?", (wallet_needed, now, uid, wallet_needed))
+        if cur.rowcount <= 0:
+            await db.rollback(); raise ValueError("Баланс изменился. Повторите покупку.")
+        if bonus_points:
+            cur = await db.execute("UPDATE bonus_wallets SET balance=balance-?,updated_at=? WHERE user_id=? AND balance>=?", (bonus_points, now, uid, bonus_points))
+            if cur.rowcount <= 0:
+                await db.rollback(); raise ValueError("Бонусный баланс изменился. Повторите покупку.")
+        cur = await db.execute(
+            """INSERT INTO purchases(user_id,book_id,chapter_id,amount_stars,status,telegram_payment_charge_id,created_at,payload,purchase_kind,
+                                      original_amount_stars,wallet_stars_used,bonus_points_used,funding_method)
+               VALUES(?,?,?,?,'paid',?,?,?,'content',?,?,?,'wallet')""",
+            (uid, int(chapter["book_id"]), cid, price, charge_id, now, f"vox:chapter:{cid}", price, wallet_needed, bonus_points),
+        )
+        purchase_id = int(cur.lastrowid)
+        await db.execute("UPDATE purchase_access_claims SET purchase_id=?,status='active',expires_at=NULL,updated_at=? WHERE charge_id=?", (purchase_id, now, charge_id))
+        await db.execute("INSERT INTO reader_wallet_transactions(user_id,amount_stars,transaction_type,source_type,source_id,metadata_json,created_at) VALUES(?,?,'chapter_purchase','purchase',?,?,?)",
+                         (uid, -wallet_needed, str(purchase_id), json.dumps({"chapter_id": cid, "bonus_stars": bonus_stars}, ensure_ascii=False), now))
+        if bonus_points:
+            await db.execute("INSERT INTO bonus_transactions(user_id,amount,reason,source_type,source_id,created_at) VALUES(?,?,'chapter_purchase_discount','purchase',?,?)", (uid, -bonus_points, str(purchase_id), now))
+        if chapter["author_id"] is not None:
+            hold_days = int(await get_setting("hold_days_default", "14") or 14); rate_minor = int(await get_setting("payments_stars_author_rate_minor", "100") or 100)
+            available_at = (datetime.now(timezone.utc)+timedelta(days=max(0, hold_days))).isoformat()
+            commission = int(plan["platform_stars"] + plan["bonus_pool_stars"])
+            await db.execute(
+                """INSERT INTO author_ledger(author_id,purchase_id,source_type,source_id,gross_stars,commission_percent,commission_stars,net_stars,
+                                              settlement_rate_minor,net_minor,hold_days,available_at,status,created_at,updated_at,platform_stars,bonus_pool_stars,bonus_discount_stars)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?, 'held',?,?,?,?,?)""",
+                (int(chapter["author_id"]), purchase_id, "chapter", cid, price, 100-cfg.author_percent, commission, int(plan["author_stars"]),
+                 rate_minor, int(plan["author_stars"])*rate_minor, hold_days, available_at, now, now,
+                 int(plan["platform_stars"]), int(plan["bonus_pool_stars"]), bonus_stars),
+            )
+        await db.commit()
+        return {"purchase_id": purchase_id, "price_stars": price, "wallet_stars_used": wallet_needed,
+                "bonus_stars_used": bonus_stars, "bonus_points_used": bonus_points, "wallet_stars": wallet-wallet_needed,
+                "bonus_points": bonus-bonus_points, "author_stars": int(plan["author_stars"]),
+                "platform_stars": max(0, int(plan["platform_stars"]+plan["bonus_pool_stars"])-bonus_stars)}
+
+
+_get_user_premium_status_before_v11333 = get_user_premium_status
+
+
+async def get_user_premium_status(user_id: int) -> dict[str, Any]:
+    """Prefer a currently active subscription over a newer refunded/revoked row."""
+    now_dt = datetime.now(timezone.utc)
+    async with connect() as db:
+        await _expire_premium_subscriptions(db, user_id=int(user_id))
+        await db.commit()
+        cur = await db.execute(
+            """SELECT ps.*,pp.title AS plan_title,pp.price_stars,pp.features_json,pp.duration_days,pp.subscription_period_seconds
+               FROM premium_subscriptions ps LEFT JOIN premium_plans pp ON pp.code=ps.plan_code
+               WHERE ps.user_id=?
+               ORDER BY CASE WHEN ps.status IN ('active','canceled') AND ps.expires_at>? THEN 0 ELSE 1 END,
+                        ps.expires_at DESC,ps.id DESC LIMIT 1""",
+            (int(user_id), now_dt.isoformat()),
+        )
+        row = await cur.fetchone()
+    if not row:
+        return await _get_user_premium_status_before_v11333(int(user_id))
+    expires_dt = _premium_dt(str(row["expires_at"] or ""))
+    active = bool(expires_dt and expires_dt > now_dt and str(row["status"] or "") in {"active", "canceled"})
+    try: features = json.loads(str(row["features_json"] or "[]"))
+    except json.JSONDecodeError: features = []
+    seconds_left = max(0, int((expires_dt-now_dt).total_seconds())) if active and expires_dt else 0
+    return {"active": active, "status": str(row["status"] or "none"), "subscription_id": int(row["id"]),
+            "plan_code": str(row["plan_code"] or ""), "plan_title": str(row["plan_title"] or "VoxLyra Premium"),
+            "price_stars": int(row["price_stars"] or 0), "started_at": str(row["started_at"] or ""),
+            "expires_at": str(row["expires_at"] or ""), "days_left": (seconds_left+86399)//86400,
+            "is_recurring": bool(row["is_recurring"]), "auto_renew": bool(row["auto_renew"]),
+            "is_first_recurring": bool(row["is_first_recurring"]), "telegram_payment_charge_id": str(row["telegram_payment_charge_id"] or ""),
+            "source": str(row["source"] or "payment") if "source" in row.keys() else "payment",
+            "grant_note": str(row["grant_note"] or "") if "grant_note" in row.keys() else "", "features": features}
+
+
+_create_refund_request_before_v11333 = create_refund_request
+
+
+async def create_refund_request(purchase_id: int, user_id: int, reason: str) -> int:
+    purchase = await get_purchase(int(purchase_id))
+    if not purchase or str(purchase["purchase_kind"] or "content") != "premium":
+        return await _create_refund_request_before_v11333(int(purchase_id), int(user_id), reason)
+    reason = str(reason or "").strip()
+    if len(reason) < 10:
+        raise ValueError("Опишите причину подробнее")
+    now_dt = datetime.now(timezone.utc); now = now_dt.isoformat()
+    async with connect() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        cur = await db.execute("SELECT * FROM purchases WHERE id=? AND user_id=?", (int(purchase_id), int(user_id)))
+        row = await cur.fetchone()
+        if not row or str(row["status"] or "") != "paid":
+            await db.rollback(); raise ValueError("Эта покупка уже не доступна для возврата")
+        created = _premium_dt(str(row["created_at"] or "")) or now_dt
+        cur = await db.execute("SELECT value FROM settings WHERE key='refund_window_days'"); cfg = await cur.fetchone()
+        window_days = max(0, int(cfg["value"] if cfg else 14))
+        if window_days and now_dt > created + timedelta(days=window_days):
+            await db.rollback(); raise ValueError("Срок подачи запроса на возврат истёк")
+        cur = await db.execute("SELECT id FROM refund_requests WHERE purchase_id=? AND status IN ('new','pending','refunded') LIMIT 1", (int(purchase_id),))
+        if await cur.fetchone():
+            await db.rollback(); raise ValueError("Запрос по этой покупке уже создан")
+        cur = await db.execute("INSERT INTO refund_requests(purchase_id,user_id,reason,status,created_at,updated_at) VALUES(?,?,?,'new',?,?)",
+                               (int(purchase_id), int(user_id), reason[:1000], now, now))
+        await db.commit(); return int(cur.lastrowid)
+
+
+_finalize_refund_before_v11333 = finalize_refund
+
+
+async def finalize_refund(refund_id: int, handled_by_user_id: int | None, note: str = "Возврат Stars выполнен") -> bool:
+    async with connect() as db:
+        cur = await db.execute("SELECT rr.purchase_id,p.purchase_kind,p.telegram_payment_charge_id,p.user_id FROM refund_requests rr JOIN purchases p ON p.id=rr.purchase_id WHERE rr.id=?", (int(refund_id),))
+        info = await cur.fetchone()
+    ok = await _finalize_refund_before_v11333(int(refund_id), handled_by_user_id, note)
+    if not ok or not info:
+        return ok
+    now = utc_now(); purchase_id = int(info["purchase_id"])
+    async with connect() as db:
+        await db.execute("UPDATE purchase_access_claims SET status='released',updated_at=? WHERE purchase_id=?", (now, purchase_id))
+        if str(info["purchase_kind"] or "") == "premium":
+            await db.execute(
+                """UPDATE premium_subscriptions SET status='refunded',auto_renew=0,canceled_at=COALESCE(canceled_at,?),updated_at=?
+                   WHERE telegram_payment_charge_id=?""", (now, now, str(info["telegram_payment_charge_id"] or ""))
+            )
+            await db.execute("UPDATE premium_author_pools SET status='refunded',updated_at=? WHERE purchase_id=? AND status='pending'", (now, purchase_id))
+            await db.execute("INSERT INTO premium_events(user_id,event_type,plan_code,metadata_json,created_at) VALUES(?,'refund','',?,?)",
+                             (int(info["user_id"]), json.dumps({"purchase_id": purchase_id}, ensure_ascii=False), now))
+        await db.commit()
+    return True
+
+
+async def list_refund_requests(status: str = "new", limit: int = 30) -> list[aiosqlite.Row]:
+    async with connect() as db:
+        cur = await db.execute(
+            """SELECT rr.*,p.amount_stars,p.telegram_payment_charge_id,p.funding_method,p.wallet_stars_used,p.bonus_points_used,
+                      p.purchase_kind,p.graphic_volume_number,p.graphic_chapter_id,p.chapter_package_id,
+                      u.telegram_id,u.username,u.full_name,b.title AS book_title,c.title AS chapter_title,ac.title AS audio_title,
+                      gc.title AS graphic_chapter_title,gvs.title AS graphic_volume_title,cp.title AS chapter_package_title
+               FROM refund_requests rr JOIN purchases p ON p.id=rr.purchase_id JOIN users u ON u.id=rr.user_id
+               LEFT JOIN books b ON b.id=p.book_id LEFT JOIN chapters c ON c.id=p.chapter_id
+               LEFT JOIN audio_chapters ac ON ac.id=p.audio_chapter_id LEFT JOIN graphic_chapters gc ON gc.id=p.graphic_chapter_id
+               LEFT JOIN graphic_volume_settings gvs ON gvs.book_id=p.book_id AND gvs.volume_number=p.graphic_volume_number
+               LEFT JOIN chapter_packages cp ON cp.id=p.chapter_package_id
+               WHERE rr.status=? ORDER BY rr.id ASC LIMIT ?""", (str(status), max(1,int(limit))))
+        return await cur.fetchall()
+
+
+async def get_refund_request(refund_id: int) -> aiosqlite.Row | None:
+    rows = await list_refund_requests("new", 100000)
+    for row in rows:
+        if int(row["id"]) == int(refund_id):
+            return row
+    async with connect() as db:
+        cur = await db.execute(
+            """SELECT rr.*,p.*,p.status AS purchase_status,u.telegram_id,u.username,u.full_name,
+                      b.title AS book_title,c.title AS chapter_title,ac.title AS audio_title,
+                      gc.title AS graphic_chapter_title,gvs.title AS graphic_volume_title,cp.title AS chapter_package_title
+               FROM refund_requests rr JOIN purchases p ON p.id=rr.purchase_id JOIN users u ON u.id=rr.user_id
+               LEFT JOIN books b ON b.id=p.book_id LEFT JOIN chapters c ON c.id=p.chapter_id LEFT JOIN audio_chapters ac ON ac.id=p.audio_chapter_id
+               LEFT JOIN graphic_chapters gc ON gc.id=p.graphic_chapter_id
+               LEFT JOIN graphic_volume_settings gvs ON gvs.book_id=p.book_id AND gvs.volume_number=p.graphic_volume_number
+               LEFT JOIN chapter_packages cp ON cp.id=p.chapter_package_id WHERE rr.id=?""", (int(refund_id),))
+        return await cur.fetchone()
+
+
+async def get_monetization_integrity_report() -> dict[str, Any]:
+    """Owner-safe aggregate audit; contains no payment identifiers or personal data."""
+    from app.services.monetization_guard import access_descriptor_for_purchase_row
+
+    async with connect() as db:
+        cur = await db.execute("SELECT COUNT(*) AS n FROM purchase_access_claims WHERE status='processing' AND expires_at<=?", (utc_now(),))
+        stale = int((await cur.fetchone())["n"] or 0)
+        cur = await db.execute("SELECT COUNT(*) AS n FROM purchase_access_claims pac LEFT JOIN purchases p ON p.id=pac.purchase_id WHERE pac.status='active' AND (p.id IS NULL OR p.status NOT IN ('paid','canceling'))")
+        orphan = int((await cur.fetchone())["n"] or 0)
+        cur = await db.execute("SELECT COUNT(*) AS n FROM (SELECT telegram_payment_charge_id FROM purchases WHERE COALESCE(telegram_payment_charge_id,'')!='' GROUP BY telegram_payment_charge_id HAVING COUNT(*)>1)")
+        duplicate_charges = int((await cur.fetchone())["n"] or 0)
+        cur = await db.execute("SELECT COUNT(*) AS n FROM monetization_incidents WHERE status IN ('open','refund_failed')")
+        incidents = int((await cur.fetchone())["n"] or 0)
+        cur = await db.execute("SELECT COUNT(*) AS n FROM purchases p LEFT JOIN author_ledger al ON al.purchase_id=p.id WHERE p.status='paid' AND p.purchase_kind IN ('content','graphic_volume','chapter_package') AND p.amount_stars>0 AND p.book_id IS NOT NULL AND al.id IS NULL")
+        ledger_missing = int((await cur.fetchone())["n"] or 0)
+        cur = await db.execute("SELECT * FROM purchases WHERE status IN ('paid','canceling') ORDER BY id")
+        purchase_rows = await cur.fetchall()
+        cur = await db.execute("SELECT user_id,access_key,purchase_id,status FROM purchase_access_claims WHERE status='active'")
+        claims = {(int(row["user_id"]), str(row["access_key"])): int(row["purchase_id"] or 0) for row in await cur.fetchall()}
+
+    missing_claims = 0
+    seen_access: dict[tuple[int, str], int] = {}
+    duplicate_access_groups: set[tuple[int, str]] = set()
+    for row in purchase_rows:
+        descriptor = access_descriptor_for_purchase_row(row)
+        if descriptor is None:
+            continue
+        key = (int(row["user_id"]), descriptor.key)
+        if key in seen_access:
+            duplicate_access_groups.add(key)
+        else:
+            seen_access[key] = int(row["id"])
+        if key not in claims:
+            missing_claims += 1
+
+    critical = (stale, orphan, duplicate_charges, ledger_missing, missing_claims, len(duplicate_access_groups))
+    return {
+        "ok": not any(critical),
+        "stale_processing_claims": stale,
+        "orphan_active_claims": orphan,
+        "duplicate_charge_groups": duplicate_charges,
+        "duplicate_access_groups": len(duplicate_access_groups),
+        "paid_access_without_claim": missing_claims,
+        "open_incidents": incidents,
+        "paid_content_without_ledger": ledger_missing,
+    }
+
+
+async def set_monetization_incident_result(charge_id: str, *, refunded: bool, details: str = "") -> None:
+    now = utc_now()
+    status = "resolved" if refunded else "refund_failed"
+    async with connect() as db:
+        await db.execute(
+            """UPDATE monetization_incidents SET status=?,details_json=?,updated_at=?
+               WHERE charge_id=? AND status='open'""",
+            (status, json.dumps({"refund_result": "refunded" if refunded else "failed",
+                                 "refund_details": str(details or "")[:1000]}, ensure_ascii=False),
+             now, str(charge_id or "")),
+        )
+        await db.commit()
+
+
+# v1.13.36 — безопасность, приватность и запросы субъекта данных
+async def _ensure_v11336_privacy_schema(db: aiosqlite.Connection) -> None:
+    cur = await db.execute("PRAGMA table_info(users)")
+    columns = {row[1] for row in await cur.fetchall()}
+    if "account_status" not in columns:
+        await _execute_schema_ddl(db, "ALTER TABLE users ADD COLUMN account_status TEXT NOT NULL DEFAULT 'active'")
+    if "deleted_at" not in columns:
+        await _execute_schema_ddl(db, "ALTER TABLE users ADD COLUMN deleted_at TEXT")
+    await db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS user_data_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            request_type TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'preview',
+            confirmation_hash TEXT NOT NULL DEFAULT '',
+            requested_at TEXT NOT NULL,
+            expires_at TEXT,
+            confirmed_at TEXT,
+            completed_at TEXT,
+            result_json TEXT NOT NULL DEFAULT '{}',
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_user_data_requests_user
+            ON user_data_requests(user_id, request_type, status, requested_at);
+        CREATE INDEX IF NOT EXISTS idx_users_account_status
+            ON users(account_status, updated_at);
+        """
+    )
+
+
+# v1.13.37 — индексы и настройки для библиотек 1000+ книг
+async def _ensure_v11337_performance_schema(db: aiosqlite.Connection) -> None:
+    """Add covering indexes for the hottest catalog, queue and moderation paths."""
+    await db.executescript(
+        """
+        CREATE INDEX IF NOT EXISTS idx_books_publication_updated
+            ON books(publication_status, updated_at DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_books_publication_id
+            ON books(publication_status, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_books_author_publication
+            ON books(author_id, publication_status, updated_at DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_books_author_updated
+            ON books(author_id, updated_at DESC, id DESC, publication_status);
+        CREATE INDEX IF NOT EXISTS idx_books_import_publication
+            ON books(import_batch_id, publication_status, id);
+        CREATE INDEX IF NOT EXISTS idx_chapters_book_number_id
+            ON chapters(book_id, number, id);
+        CREATE INDEX IF NOT EXISTS idx_chapters_book_status_number
+            ON chapters(book_id, status, number, id);
+        CREATE INDEX IF NOT EXISTS idx_audio_chapters_book_number_id
+            ON audio_chapters(book_id, number, id);
+        CREATE INDEX IF NOT EXISTS idx_audio_chapters_book_status_number
+            ON audio_chapters(book_id, status, number, id);
+        CREATE INDEX IF NOT EXISTS idx_reviews_book_status
+            ON reviews(book_id, status, id);
+        CREATE INDEX IF NOT EXISTS idx_purchases_status_book
+            ON purchases(status, book_id, id);
+        CREATE INDEX IF NOT EXISTS idx_purchases_status_chapter
+            ON purchases(status, chapter_id, id);
+        CREATE INDEX IF NOT EXISTS idx_purchases_status_audio
+            ON purchases(status, audio_chapter_id, id);
+        CREATE INDEX IF NOT EXISTS idx_purchases_status_graphic
+            ON purchases(status, graphic_chapter_id, id);
+        CREATE INDEX IF NOT EXISTS idx_purchases_user_status_created
+            ON purchases(user_id, status, created_at DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_book_moderation_status_submitted
+            ON book_moderation_queue(status, submitted_at, book_id);
+        CREATE INDEX IF NOT EXISTS idx_reading_progress_user_updated_book
+            ON reading_progress(user_id, updated_at DESC, book_id);
+        CREATE INDEX IF NOT EXISTS idx_listening_progress_user_updated_audio
+            ON listening_progress(user_id, updated_at DESC, audio_chapter_id);
+        """
+    )

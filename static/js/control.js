@@ -1,5 +1,5 @@
 (() => {
-  const state = { permissions: new Set(), role: '', dashboard: null, active: '', accessUser: null, accessBooks: [], libraryBatchId: null, libraryRefreshTimer: null, bookQuery: '' };
+  const state = { permissions: new Set(), role: '', dashboard: null, active: '', accessUser: null, accessBooks: [], libraryBatchId: null, libraryRefreshTimer: null, bookQuery: '', moderationBookId: null };
   const $ = (id) => document.getElementById(id);
   const can = (code) => state.role === 'owner' || state.permissions.has(code);
   const esc = (value) => escapeHtml(value ?? '');
@@ -10,6 +10,30 @@
     `<button class="control-action ${kind}" type="button" data-action="${esc(action)}">${esc(label)}</button>`;
   const actionLink = (label, href, kind = '') =>
     `<a class="control-action ${kind}" href="${esc(href)}">${esc(label)}</a>`;
+
+  async function downloadLibraryBatchReport(batchId, format) {
+    const response = await fetch(`/api/control/library-import/batch/${Number(batchId)}/report?format=${encodeURIComponent(format)}`, {
+      headers: { 'X-Telegram-Init-Data': tgInitData() },
+      cache: 'no-store',
+    });
+    if (!response.ok) {
+      let message = 'Не удалось скачать отчёт.';
+      try { const data = await response.json(); message = data.detail || message; } catch (_) {}
+      throw new Error(message);
+    }
+    const blob = await response.blob();
+    const disposition = String(response.headers.get('Content-Disposition') || '');
+    const match = disposition.match(/filename="?([^";]+)"?/i);
+    const filename = match?.[1] || `voxlyra_import_batch_${Number(batchId)}.${format}`;
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = filename;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
 
   function showError(message) {
     $('controlLoading').hidden = true;
@@ -125,7 +149,7 @@
           ? actionLink('Открыть текст', `/reader/${Number(item.first_chapter_id)}?moderation=1`)
           : status === 'published' ? actionLink('Открыть книгу', `/book/${Number(item.id)}`) : '';
       let actions = preview;
-      if (status === 'review') actions += `${actionButton('Опубликовать', `book:publish:${item.id}`, 'approve')}${actionButton('На доработку', `book:reject:${item.id}`, 'danger')}`;
+      if (status === 'review') actions += `${actionButton('Проверка и замечания', `book:details:${item.id}`)}${actionButton('Опубликовать', `book:publish:${item.id}`, 'approve')}${actionButton('На доработку', `book:reject:${item.id}`, 'danger')}`;
       if (ownerMode && status === 'published') actions += actionButton('Выложить в канал', `book:repost:${item.id}`, 'approve');
       if (ownerMode && status === 'blocked') actions += actionButton('Перевести в скрытые', `book:hide:${item.id}`);
       else if (ownerMode) actions += actionButton('Заблокировать', `book:block:${item.id}`, 'danger');
@@ -134,6 +158,75 @@
         <div class="control-actions">${actions}</div>
       </article>`;
     }).join('');
+  }
+
+  function moderationLocation(item) {
+    if (String(item.source_type || '') === 'metadata') {
+      const labels = { title: 'Название', description: 'Описание', age_limit: 'Возрастной рейтинг', cover: 'Обложка', content_type: 'Тип произведения', license: 'Права и источник', structure: 'Структура произведения' };
+      return labels[String(item.field_name || '')] || 'Метаданные';
+    }
+    if (item.chapter_number !== null && item.chapter_number !== undefined) {
+      return `Глава ${Number(item.chapter_number)}${item.chapter_title ? ` — ${esc(item.chapter_title)}` : ''}`;
+    }
+    return String(item.source_type || '') === 'graphic' ? 'Графическая глава' : 'Произведение';
+  }
+
+  async function rejectBookFromModeration(bookId) {
+    const checked = Array.from(document.querySelectorAll('[data-moderation-finding]:checked')).map((input) => Number(input.value)).filter(Boolean);
+    const reason = window.prompt('Что автору нужно исправить? Выбранные точные места будут добавлены к сообщению автоматически.');
+    if (reason === null) return;
+    if (reason.trim().length < 8) { notify('Причина слишком короткая'); return; }
+    if (!checked.length && !window.confirm('Точные замечания не выбраны. Возврат потребует ручного подтверждения после исправлений. Продолжить?')) return;
+    await apiFetch(`/api/control/book/${Number(bookId)}/reject`, {
+      method: 'POST',
+      body: JSON.stringify({ reason: reason.trim(), finding_ids: checked }),
+    });
+    notify('Книга возвращена автору с точными замечаниями');
+    await loadBooks(state.bookQuery);
+    await refreshDashboard();
+  }
+
+  async function openBookModeration(bookId) {
+    state.moderationBookId = Number(bookId);
+    const data = await apiFetch(`/api/control/book/${Number(bookId)}/moderation`);
+    const book = data.book || {};
+    const findings = Array.isArray(data.findings) ? data.findings : [];
+    const queue = data.queue || {};
+    openWorkspace(`Проверка: ${book.title || `книга #${Number(bookId)}`}`, 'Выберите конкретные замечания, которые автор должен исправить. Номера строк и фрагменты попадут в уведомление.', 'Точная модерация');
+    $('workspaceTabs').innerHTML = '<button type="button" id="moderationBackToBooks">← К книгам</button><button type="button" id="moderationRefreshBook">Обновить</button>';
+    const summary = data.changes
+      ? `<p><b>Изменено после возврата:</b> метаданные — ${Number(data.changes.metadata || 0)}, текстовые главы — ${Number(data.changes.text_chapters || 0)}, графические главы — ${Number(data.changes.graphic_chapters || 0)}, удалено — ${Number(data.changes.deleted || 0)}.</p>`
+      : '';
+    const reason = String(queue.reasons || data.revision?.reason || '').trim();
+    const findingCards = findings.length ? findings.map((item) => {
+      const chapterLink = item.chapter_id ? `<a class="button-link secondary compact-button" href="/reader/${Number(item.chapter_id)}?moderation=1">Открыть главу</a>` : '';
+      const fragment = String(item.matched_text || item.context || '').trim();
+      return `<article class="control-item ${String(item.severity || '') === 'block' ? 'danger-card' : ''}">
+        <label class="control-item-main moderation-finding-select">
+          <span>${esc(String(item.severity || 'review') === 'block' ? 'Блокирующее замечание' : 'Нужна проверка')} · ${moderationLocation(item)}</span>
+          <h3><input type="checkbox" data-moderation-finding value="${Number(item.id)}" checked> ${esc(item.reason || 'Требуется исправление')}</h3>
+          <p>Строка ${Number(item.line_number || 1)} · позиция ${Number(item.character_offset || 0)}</p>
+          <small>${esc(fragment.slice(0, 900) || 'Точный фрагмент не задан — проверьте указанную область.')}</small>
+        </label><div class="control-actions">${chapterLink}</div>
+      </article>`;
+    }).join('') : '<article class="empty-card"><h3>Автоматических совпадений нет</h3><p>Модератор может оставить ручную инструкцию. После исправления потребуется повторное ручное подтверждение.</p></article>';
+    $('workspaceList').innerHTML = `<section class="panel-card">
+      <div class="section-title slim"><span class="eyebrow">Книга #${Number(book.id || bookId)}</span><h2>${esc(book.title || '')}</h2><p>${esc(book.pen_name || book.source_author_name || 'Автор не указан')} · ${esc(book.age_limit || '')}</p></div>
+      ${reason ? `<div class="package-rule-note"><b>Текущая причина очереди:</b><br>${esc(reason)}</div>` : ''}${summary}
+      <div class="inline-actions"><button type="button" id="moderationSelectAll">Выбрать всё</button><button type="button" id="moderationSelectNone" class="secondary">Снять всё</button></div>
+    </section>${findingCards}<section class="panel-card"><div class="form-actions"><button type="button" id="moderationPublishBook" class="approve">Опубликовать</button><button type="button" id="moderationRejectBook" class="danger">Вернуть выбранное на доработку</button></div></section>`;
+    $('moderationBackToBooks')?.addEventListener('click', () => loadBooks(state.bookQuery).catch(handleError));
+    $('moderationRefreshBook')?.addEventListener('click', () => openBookModeration(bookId).catch(handleError));
+    $('moderationSelectAll')?.addEventListener('click', () => document.querySelectorAll('[data-moderation-finding]').forEach((input) => { input.checked = true; }));
+    $('moderationSelectNone')?.addEventListener('click', () => document.querySelectorAll('[data-moderation-finding]').forEach((input) => { input.checked = false; }));
+    $('moderationRejectBook')?.addEventListener('click', () => rejectBookFromModeration(bookId).catch(handleError));
+    $('moderationPublishBook')?.addEventListener('click', async () => {
+      if (!window.confirm('Опубликовать книгу после ручной проверки?')) return;
+      await apiFetch(`/api/control/book/${Number(bookId)}/publish`, { method: 'POST' });
+      notify('Книга опубликована');
+      await loadBooks(state.bookQuery);
+      await refreshDashboard();
+    });
   }
 
   const libraryJobStatusLabels = {
@@ -154,8 +247,9 @@
     const ownsJob = Boolean(data.can_manage) || Number(item.actor_user_id) === Number(data.app_user_id);
     const canCancel = Boolean(item.can_cancel) && ownsJob;
     const canRetry = Boolean(item.can_retry) && ownsJob;
+    const currentItem = String(item.current_title || item.current_folder || '').trim();
     const progress = ['processing', 'cancelling'].includes(status)
-      ? `<progress max="100" value="${percent}">${percent}%</progress><small>${status === 'cancelling' ? 'Завершается текущая операция' : esc(libraryPhaseLabels[Number(item.phase || 0)] || 'Импорт')} · ${Number(item.processed || 0)} из ${Number(item.total || 0) || '…'} · ${percent}%</small>`
+      ? `<progress max="100" value="${percent}">${percent}%</progress><small>${status === 'cancelling' ? 'Завершается текущая операция' : esc(libraryPhaseLabels[Number(item.phase || 0)] || 'Импорт')} · ${Number(item.processed || 0)} из ${Number(item.total || 0) || '…'} · ${percent}%${currentItem ? ` · сейчас: ${esc(currentItem)}` : ''}</small>`
       : status === 'queued'
         ? `<small>Позиция в очереди: ${Number(item.queue_position || 1)}</small>`
         : `<small>${esc(dateText(item.completed_at || item.heartbeat_at || item.created_at))}</small>`;
@@ -163,6 +257,8 @@
       ? `<p class="danger-text">${esc(String(item.last_error).slice(0, 700))}</p>` : '';
     const stopInfo = ['cancelled', 'cancelling'].includes(status) && item.last_error
       ? `<p>${esc(String(item.last_error).slice(0, 700))}</p>` : '';
+    const restartInfo = Number(item.restart_count || 0)
+      ? `<small>Автовосстановлений после перезапуска: ${Number(item.restart_count || 0)}</small>` : '';
     const retryInfo = ['failed', 'cancelled'].includes(status)
       ? (canRetry
         ? `<small>ZIP сохранён до ${esc(dateText(item.archive_expires_at))} · повторов: ${Number(item.retry_count || 0)}</small>`
@@ -173,7 +269,7 @@
         <span>Задание #${Number(item.id)} · ${esc(libraryJobStatusLabels[status] || status)}</span>
         <h3>${esc(item.archive_name || 'Архив библиотеки')}</h3>
         <p>Добавлено: ${Number(item.added || 0)} · заменено: ${Number(item.replaced_count || 0)} · перенумеровано: ${Number(item.renumbered_count || 0)} · ошибок: ${Number(item.error_count || 0)}</p>
-        ${progress}${error}${stopInfo}${retryInfo}
+        ${progress}${error}${stopInfo}${retryInfo}${restartInfo}
       </div>
       <div class="control-actions">${item.batch_id ? actionButton('Открыть пакет', `librarybatch:details:${Number(item.batch_id)}`) : ''}${canRetry ? actionButton('Повторить', `libraryjob:retry:${Number(item.id)}`) : ''}${canCancel ? actionButton(status === 'processing' ? 'Остановить' : 'Отменить', `libraryjob:cancel:${Number(item.id)}`, 'danger') : ''}</div>
     </article>`;
@@ -211,6 +307,7 @@
     const audit = data.audit || {};
     const statuses = data.book_statuses || {};
     const errors = Array.isArray(data.errors) ? data.errors : [];
+    const errorsTotal = Number(data.errors_total || errors.length);
     const duplicates = Array.isArray(data.duplicates) ? data.duplicates : [];
     const pendingDuplicates = duplicates.filter((item) => String(item.status || '') === 'pending');
     const blocked = Array.isArray(audit.blocked_items) ? audit.blocked_items : [];
@@ -234,10 +331,13 @@
       <div class="control-actions">${data.can_manage ? `${actionButton('Пропустить', `libraryduplicate:skip:${Number(item.id)}`)}${actionButton('Заменить книгу', `libraryduplicate:replace:${Number(item.id)}`, 'danger')}` : ''}</div>
     </article>`).join('') : '<article class="empty-card"><h3>Неразобранных дублей нет</h3><p>Все совпадения уже обработаны.</p></article>';
 
-    const actions = data.can_manage ? `<article class="control-item payment-settings-card">
-      <div class="control-item-main"><span>Действия с пакетом</span><h3>${esc(batch.archive_name || 'Архив')}</h3><p>Публикуются только готовые книги. Заблокированные останутся черновиками. Откат удаляет только новые неопубликованные книги этого пакета; заменённые существующие книги не удаляются.</p></div>
-      <div class="control-actions">${actionButton('Повторить проверку', `librarybatch:audit:${Number(batchId)}`)}${Number(audit.ready || 0) ? actionButton(`Опубликовать готовые: ${Number(audit.ready)}`, `librarybatch:publish:${Number(batchId)}`, 'approve') : ''}${Number(statuses.draft || 0) ? actionButton('Откатить черновики', `librarybatch:rollback:${Number(batchId)}`, 'danger') : ''}</div>
-    </article>` : '';
+    const manageActions = data.can_manage
+      ? `${actionButton('Повторить проверку', `librarybatch:audit:${Number(batchId)}`)}${Number(audit.ready || 0) ? actionButton(`Опубликовать готовые: ${Number(audit.ready)}`, `librarybatch:publish:${Number(batchId)}`, 'approve') : ''}${Number(statuses.draft || 0) ? actionButton('Откатить черновики', `librarybatch:rollback:${Number(batchId)}`, 'danger') : ''}`
+      : '';
+    const actions = `<article class="control-item payment-settings-card">
+      <div class="control-item-main"><span>Отчёт и действия</span><h3>${esc(batch.archive_name || 'Архив')}</h3><p>Полный отчёт содержит все причины брака без ограничения первыми 200 строками. Публикация затрагивает только готовые книги, откат — только новые неопубликованные книги пакета.</p></div>
+      <div class="control-actions"><button type="button" class="control-action" id="libraryBatchReportJson">Скачать JSON</button><button type="button" class="control-action" id="libraryBatchReportCsv">Скачать CSV</button>${manageActions}</div>
+    </article>`;
 
     $('workspaceList').innerHTML = `<div class="control-stat-grid">
       ${statCard('Найдено папок', Number(batch.total_found || 0))}
@@ -250,7 +350,9 @@
     <div class="section-title"><div><span class="eyebrow">Проверка публикации</span><h2>Что мешает публикации</h2><p>Показываются причины и найденные фрагменты, чтобы не искать проблему во всём тексте.</p></div></div>${blockedCards}
     <div class="section-title"><div><span class="eyebrow">Предупреждения</span><h2>Не блокируют публикацию</h2></div></div>${warningCards}
     <div class="section-title"><div><span class="eyebrow">Совпадения</span><h2>Дубли книг</h2></div></div>${duplicateCards}
-    <div class="section-title"><div><span class="eyebrow">Импорт</span><h2>Ошибки папок и файлов</h2></div></div>${errorCards}`;
+    <div class="section-title"><div><span class="eyebrow">Импорт</span><h2>Ошибки папок и файлов</h2>${errorsTotal > errors.length ? `<p>В интерфейсе показаны первые ${errors.length} из ${errorsTotal}. Полный список доступен в JSON/CSV.</p>` : ''}</div></div>${errorCards}`;
+    $('libraryBatchReportJson')?.addEventListener('click', () => downloadLibraryBatchReport(batchId, 'json').catch(handleError));
+    $('libraryBatchReportCsv')?.addEventListener('click', () => downloadLibraryBatchReport(batchId, 'csv').catch(handleError));
   }
 
   async function loadLibraryImport(silent = false) {
@@ -892,6 +994,10 @@
       await apiFetch('/api/control/tts-vosk/selection', { method: 'PATCH', body: JSON.stringify({ gender: verb, speaker_id: Number(id) }) });
       notify(verb === 'female' ? 'Женский голос сохранён' : 'Мужской голос сохранён');
       await loadTtsDiagnostics();
+      return;
+    }
+    if (kind === 'book' && verb === 'details') {
+      await openBookModeration(Number(id));
       return;
     }
     if (kind === 'librarybatch' && verb === 'details') {

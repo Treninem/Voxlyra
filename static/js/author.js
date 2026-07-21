@@ -487,6 +487,83 @@ function toggleProjectPanels(contentType) {
   if (label) label.textContent = contentTypeLabels[contentType] || 'Графическое произведение';
 }
 
+function moderationFieldLabel(value) {
+  return {
+    title: 'Название', description: 'Описание', age_limit: 'Возрастной рейтинг', cover: 'Обложка',
+    content_type: 'Тип произведения', license: 'Права и источник', structure: 'Структура произведения',
+  }[String(value || '')] || 'Метаданные';
+}
+
+function renderAuthorModeration(data) {
+  const panel = document.getElementById('authorModerationPanel');
+  if (!panel) return;
+  const moderation = data.moderation || {};
+  const queue = moderation.queue || null;
+  const revision = moderation.revision || null;
+  const findings = Array.isArray(moderation.findings) ? moderation.findings : [];
+  const bookStatus = String(data.book?.publication_status || '');
+  const visible = Boolean(revision || findings.length || (queue && String(queue.status || '') === 'pending'));
+  panel.hidden = !visible;
+  const submit = document.getElementById('submitBookReview');
+  if (submit) {
+    submit.disabled = bookStatus === 'review';
+    submit.textContent = bookStatus === 'review'
+      ? 'Уже на проверке'
+      : revision
+        ? 'Отправить исправления на повторную проверку'
+        : 'Отправить на проверку';
+  }
+  if (!visible) return;
+  const status = document.getElementById('authorModerationStatus');
+  const title = document.getElementById('authorModerationTitle');
+  const summary = document.getElementById('authorModerationSummary');
+  if (bookStatus === 'review') {
+    status.textContent = 'На проверке';
+    status.className = 'finance-status pending';
+    title.textContent = revision ? 'Исправления отправлены' : 'Произведение проверяется';
+    summary.textContent = 'Модератор увидит только изменённые части и нерешённые замечания к остальному тексту.';
+  } else {
+    status.textContent = 'Нужны исправления';
+    status.className = 'finance-status rejected';
+    title.textContent = 'Что нужно исправить';
+    summary.textContent = 'После исправления повторно отправьте произведение. Неизменённые главы повторно не сканируются.';
+  }
+  const reason = String(revision?.reason || queue?.moderator_note || queue?.reasons || '').trim();
+  const reasonBox = document.getElementById('authorModerationReason');
+  if (reasonBox) {
+    reasonBox.hidden = !reason;
+    reasonBox.textContent = reason;
+  }
+  const changes = moderation.changes || null;
+  const changesBox = document.getElementById('authorModerationChanges');
+  if (changesBox) {
+    changesBox.textContent = changes
+      ? `После возврата изменено: метаданные — ${Number(changes.metadata || 0)}, текстовые главы — ${Number(changes.text_chapters || 0)}, графические главы — ${Number(changes.graphic_chapters || 0)}, удалено — ${Number(changes.deleted || 0)}.`
+      : 'Изменения будут отслеживаться автоматически после возврата на доработку.';
+  }
+  const box = document.getElementById('authorModerationFindings');
+  if (!box) return;
+  if (!findings.length) {
+    box.innerHTML = '<article class="empty-card"><h3>Точных автоматических совпадений нет</h3><p>Следуйте текстовой инструкции модератора. После повторной отправки выполнение проверит сотрудник.</p></article>';
+    return;
+  }
+  box.innerHTML = findings.map((item) => {
+    const metadata = String(item.source_type || '') === 'metadata';
+    const location = metadata
+      ? moderationFieldLabel(item.field_name)
+      : item.chapter_number !== null && item.chapter_number !== undefined
+        ? `Глава ${Number(item.chapter_number)}${item.chapter_title ? ` — ${escapeHtml(item.chapter_title)}` : ''}`
+        : 'Произведение';
+    const fragment = escapeHtml(String(item.matched_text || item.context || '').trim().slice(0, 650));
+    const action = item.chapter_id
+      ? `<button type="button" class="button-link secondary compact-button" data-edit-chapter="${Number(item.chapter_id)}">Открыть главу</button>`
+      : '';
+    return `<article class="author-chapter-row moderation-author-finding">
+      <div><span>${escapeHtml(String(item.severity || '') === 'block' ? 'Обязательно исправить' : 'Проверить')} · ${location}</span><strong>${escapeHtml(item.reason || 'Требуется исправление')}</strong><small>Строка ${Number(item.line_number || 1)} · позиция ${Number(item.character_offset || 0)}${fragment ? ` · ${fragment}` : ''}</small></div>${action}
+    </article>`;
+  }).join('');
+}
+
 function fillBookEditor(data) {
   authorState.book = data;
   const book = data.book;
@@ -495,6 +572,7 @@ function fillBookEditor(data) {
   const type = String(book.content_type || 'book');
   document.getElementById('editorBookTitle').textContent = book.title;
   document.getElementById('editorBookStatus').textContent = `${contentTypeLabels[type] || 'Произведение'} · ${statusLabels[book.publication_status] || book.publication_status} · ${writingLabels[book.writing_status] || book.writing_status}`;
+  renderAuthorModeration(data);
   const openPublishedBook = document.getElementById('openPublishedBook');
   if (openPublishedBook) {
     const published = String(book.publication_status || '') === 'published';

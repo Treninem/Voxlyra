@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -25,15 +26,21 @@ class TMAUser:
     photo_url: str | None = None
 
 
-def _validate_init_data_raw(init_data: str, bot_token: str, max_age_seconds: int = 86400) -> dict[str, str]:
+def _validate_init_data_raw(init_data: str, bot_token: str, max_age_seconds: int | None = None) -> dict[str, str]:
     if not init_data:
         raise TMAAuthError("Откройте этот раздел из Telegram, чтобы сохранить доступ и прогресс.")
     if not bot_token:
         raise TMAAuthError("Сейчас не удалось проверить сессию. Откройте раздел заново из Telegram.")
 
-    pairs = dict(parse_qsl(init_data, keep_blank_values=True, strict_parsing=False))
+    if len(init_data.encode("utf-8")) > 16 * 1024:
+        raise TMAAuthError("Данные сессии Telegram имеют неверный размер. Откройте раздел заново.")
+    parsed_pairs = parse_qsl(init_data, keep_blank_values=True, strict_parsing=False)
+    keys = [key for key, _ in parsed_pairs]
+    if len(keys) != len(set(keys)):
+        raise TMAAuthError("Сессия Telegram содержит повторяющиеся поля. Откройте раздел заново.")
+    pairs = dict(parsed_pairs)
     received_hash = pairs.pop("hash", None)
-    if not received_hash:
+    if not received_hash or not re.fullmatch(r"[0-9a-fA-F]{64}", received_hash):
         raise TMAAuthError("Не удалось проверить сессию Telegram. Откройте раздел заново.")
 
     auth_date_raw = pairs.get("auth_date")
@@ -41,9 +48,11 @@ def _validate_init_data_raw(init_data: str, bot_token: str, max_age_seconds: int
         raise TMAAuthError("Не удалось проверить время сессии Telegram. Откройте раздел заново.")
     auth_date = int(auth_date_raw)
     now = int(time.time())
-    if auth_date > now + 60:
+    future_skew = max(0, int(settings.TMA_INIT_DATA_FUTURE_SKEW_SECONDS))
+    if auth_date > now + future_skew:
         raise TMAAuthError("Время сессии Telegram не прошло проверку. Откройте раздел заново.")
-    if max_age_seconds > 0 and now - auth_date > max_age_seconds:
+    effective_max_age = int(settings.TMA_INIT_DATA_MAX_AGE_SECONDS if max_age_seconds is None else max_age_seconds)
+    if effective_max_age > 0 and now - auth_date > effective_max_age:
         raise TMAAuthError("Сессия Mini App устарела. Откройте раздел заново из Telegram.")
 
     data_check_string = "\n".join(f"{key}={value}" for key, value in sorted(pairs.items()))
@@ -65,11 +74,18 @@ async def authenticate_init_data(init_data: str) -> TMAUser:
     except json.JSONDecodeError as exc:
         raise TMAAuthError("Не удалось прочитать данные Telegram. Откройте раздел заново.") from exc
 
-    telegram_id = int(tg_user["id"])
+    try:
+        telegram_id = int(tg_user["id"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise TMAAuthError("Не удалось определить пользователя Telegram. Откройте раздел заново.") from exc
+    if telegram_id <= 0:
+        raise TMAAuthError("Идентификатор пользователя Telegram не прошёл проверку.")
     username = tg_user.get("username")
     full_name = " ".join(filter(None, [tg_user.get("first_name"), tg_user.get("last_name")])) or username
     photo_url = str(tg_user.get("photo_url") or "").strip() or None
     app_user = await upsert_user(telegram_id=telegram_id, username=username, full_name=full_name)
+    if str(app_user["account_status"] or "active") == "deleted":
+        raise TMAAuthError("Профиль удалён. Для восстановления обратитесь в поддержку.")
     if bool(app_user["is_blocked"]) and telegram_id not in settings.owner_ids:
         raise TMAAuthError("Доступ к платформе ограничен. Обратитесь в поддержку.")
     return TMAUser(

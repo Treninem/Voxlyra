@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import errno
 import json
+import os
 import re
 import shutil
 import time
@@ -22,7 +23,10 @@ UPLOAD_ROOT = Path("storage/temp/chunked_book_uploads")
 CHUNK_SIZE_BYTES = 6 * 1024 * 1024
 MAX_CHUNKS = 10000
 MIN_FREE_SPACE_BYTES = 32 * 1024 * 1024
-STALE_UPLOAD_SECONDS = 6 * 60 * 60
+STALE_UPLOAD_SECONDS = 24 * 60 * 60
+_CHUNK_WRITE_SEMAPHORE = asyncio.Semaphore(
+    max(1, int(getattr(settings, "CHUNK_UPLOAD_MAX_CONCURRENCY", 4) or 4))
+)
 
 
 class ChunkedUploadError(RuntimeError):
@@ -90,6 +94,31 @@ def cleanup_stale_uploads(*, max_age_seconds: int = STALE_UPLOAD_SECONDS) -> int
     return removed
 
 
+def active_upload_count() -> int:
+    """Return the number of live resumable upload folders."""
+    _ensure_upload_root()
+    count = 0
+    for folder in UPLOAD_ROOT.iterdir():
+        if folder.is_dir() and (folder / "meta.json").is_file():
+            count += 1
+    return count
+
+
+def _ensure_upload_capacity() -> None:
+    maximum = max(1, int(getattr(settings, "LIBRARY_IMPORT_MAX_ACTIVE_UPLOADS", 4) or 4))
+    current = active_upload_count()
+    if current >= maximum:
+        raise ChunkedUploadError(
+            f"Одновременно уже выполняется {current} крупных загрузок. "
+            "Дождитесь завершения одной из них или продолжите ранее начатую загрузку."
+        )
+
+
+def _disk_reserve_bytes() -> int:
+    configured = max(0, int(getattr(settings, "LIBRARY_IMPORT_MIN_FREE_DISK_MB", 256) or 0))
+    return max(MIN_FREE_SPACE_BYTES, configured * 1024 * 1024)
+
+
 def _ensure_free_space(required_bytes: int, *, operation: str) -> None:
     _ensure_upload_root()
     try:
@@ -147,8 +176,9 @@ def _create_upload(
         raise ChunkedUploadError(f"Файл превышает допустимый размер {max_mb} МБ.")
 
     cleanup_stale_uploads()
+    _ensure_upload_capacity()
     _ensure_free_space(
-        int(total_size) + MIN_FREE_SPACE_BYTES,
+        int(total_size) + _disk_reserve_bytes(),
         operation="загрузки архива",
     )
 
@@ -230,7 +260,7 @@ def create_or_resume_library_import_upload(
     safe_name = _safe_filename(filename)
     requested_id = str(resume_upload_id or "").strip()
     _ensure_upload_root()
-    cleanup_stale_uploads(max_age_seconds=30 * 60)
+    cleanup_stale_uploads(max_age_seconds=STALE_UPLOAD_SECONDS)
 
     candidates: list[tuple[float, Path, dict[str, Any]]] = []
     for folder in UPLOAD_ROOT.iterdir():
@@ -299,6 +329,31 @@ def create_or_resume_library_import_upload(
     return meta, False
 
 
+def claim_upload_finish(
+    upload_id: str, *, user_id: int, book_id: int, stale_seconds: int = 10 * 60
+) -> bool:
+    """Межпроцессная защита от одновременной сборки одного набора частей."""
+    load_upload(upload_id, user_id=user_id, book_id=book_id)
+    folder = _upload_dir(upload_id)
+    lock_path = folder / "finish.lock"
+    try:
+        descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        try:
+            if time.time() - lock_path.stat().st_mtime > max(60, int(stale_seconds)):
+                lock_path.unlink(missing_ok=True)
+                descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            else:
+                return False
+        except (FileExistsError, OSError):
+            return False
+    try:
+        os.write(descriptor, f"{os.getpid()} {datetime.now(timezone.utc).isoformat()}".encode("utf-8"))
+    finally:
+        os.close(descriptor)
+    return True
+
+
 def load_upload(upload_id: str, *, user_id: int, book_id: int) -> dict[str, Any]:
     folder = _upload_dir(upload_id)
     path = folder / "meta.json"
@@ -335,18 +390,19 @@ async def save_chunk(
     try:
         await asyncio.to_thread(
             _ensure_free_space,
-            2 * 1024 * 1024,
+            max(2 * 1024 * 1024, _disk_reserve_bytes()),
             operation="приёма следующей части архива",
         )
-        async with aiofiles.open(part_path, "wb") as destination:
-            while True:
-                data = await chunk.read(1024 * 1024)
-                if not data:
-                    break
-                written += len(data)
-                if written > CHUNK_SIZE_BYTES + 1024:
-                    raise ChunkedUploadError("Часть файла оказалась слишком большой. Повторите загрузку.")
-                await destination.write(data)
+        async with _CHUNK_WRITE_SEMAPHORE:
+            async with aiofiles.open(part_path, "wb") as destination:
+                while True:
+                    data = await chunk.read(1024 * 1024)
+                    if not data:
+                        break
+                    written += len(data)
+                    if written > CHUNK_SIZE_BYTES + 1024:
+                        raise ChunkedUploadError("Часть файла оказалась слишком большой. Повторите загрузку.")
+                    await destination.write(data)
     except OSError as exc:
         await asyncio.to_thread(part_path.unlink, missing_ok=True)
         raise _storage_write_error(exc) from exc

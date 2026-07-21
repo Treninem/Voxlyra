@@ -36,12 +36,12 @@
   <div class="action-grid premium-actions book-primary-actions">
     {% if graphic_chapters %}<a class="button-link" href="/comic/{{ graphic_chapters[0].id }}">Смотреть</a>{% elif chapters %}<a class="button-link" href="/reader/{{ chapters[0].id }}">Читать</a>{% endif %}
     {% if audios %}<a class="button-link purple-btn" href="/audio/{{ audios[0].id }}">Слушать</a>{% endif %}
-    <button id="bookmarkReading" class="secondary">В библиотеку</button>
-    <button id="bookmarkFavorite" class="secondary">В любимое</button>
-    <button id="subscribeBook" class="secondary subscription-button">🔔 Подписаться на книгу</button>
-    {% if book.author_id %}<button id="subscribeAuthor" class="secondary subscription-button">✦ Подписаться на автора</button>{% endif %}
-    {% if pricing_mode == 'premium' %}<a class="button-link premium-subscription-button full-span" href="/premium">👑 Читать по VoxLyra Premium</a>{% elif book.price_stars|int > 0 and bot_username %}<a class="button-link gold-button full-span" href="https://t.me/{{ bot_username }}?start=buy_book_{{ book.id }}">Купить всю {% if is_graphic %}графическую историю{% else %}книгу{% endif %} · {{ book.price_stars }} Stars · ≈ {{ '%.2f'|format((book.price_stars|int * buyer_star_rate_minor|default(145)) / 100) }} ₽</a>{% endif %}
-    {% if bot_username and channel_promotion_enabled %}<a class="button-link secondary full-span" href="https://t.me/{{ bot_username }}?start=promote_book_{{ book.id }}">📢 Опубликовать книгу в канале</a>{% endif %}
+    <button id="bookmarkReading" class="secondary requires-telegram-auth">В библиотеку</button>
+    <button id="bookmarkFavorite" class="secondary requires-telegram-auth">В любимое</button>
+    <button id="subscribeBook" class="secondary subscription-button requires-telegram-auth">🔔 Подписаться на книгу</button>
+    {% if book.author_id %}<button id="subscribeAuthor" class="secondary subscription-button requires-telegram-auth">✦ Подписаться на автора</button>{% endif %}
+    {% if pricing_mode == 'premium' %}<a class="button-link premium-subscription-button full-span telegram-payment-action" href="/premium">👑 Читать по VoxLyra Premium</a>{% elif book.price_stars|int > 0 and bot_username %}<a class="button-link gold-button full-span telegram-payment-action" href="https://t.me/{{ bot_username }}?start=buy_book_{{ book.id }}">Купить всю {% if is_graphic %}графическую историю{% else %}книгу{% endif %} · {{ book.price_stars }} Stars · ≈ {{ '%.2f'|format((book.price_stars|int * buyer_star_rate_minor|default(145)) / 100) }} ₽</a>{% endif %}
+    {% if bot_username and channel_promotion_enabled %}<a class="button-link secondary full-span requires-telegram-auth" href="https://t.me/{{ bot_username }}?start=promote_book_{{ book.id }}">📢 Опубликовать книгу в канале</a>{% endif %}
   </div>
 
   <section class="description-card">
@@ -74,7 +74,7 @@
         <h3>{{ package.title or ('Пакет на ' ~ package.chapters_count ~ ' глав') }}</h3>
         <p><strong>{{ package.price_stars }} Stars</strong> · ≈ {{ '%.2f'|format((package.price_stars|int * buyer_star_rate_minor|default(145)) / 100) }} ₽</p>
         <small>В среднем {{ '%.2f'|format(package.price_stars|float / package.chapters_count|int) }} Stars за одну выбранную главу. Открытая глава остаётся вашей.</small>
-        {% if bot_username %}<a class="button-link gold-button wide-button" href="https://t.me/{{ bot_username }}?start=buy_package_{{ package.id }}">Купить пакет</a>{% endif %}
+        {% if bot_username %}<a class="button-link gold-button wide-button telegram-payment-action" href="https://t.me/{{ bot_username }}?start=buy_package_{{ package.id }}">Купить пакет</a>{% endif %}
       </article>
       {% endfor %}
     </div>
@@ -89,7 +89,7 @@
       {% set volume_info = graphic_volume_map.get(volume_number|int) if graphic_volume_map else none %}
       <div class="graphic-volume-heading">
         <div><strong>Том {{ volume_number|default(1) }}</strong><span>{{ (volume_info.title if volume_info and volume_info.title else volume_chapters[0].volume_title) or 'Без отдельного названия' }}</span></div>
-        {% if volume_info and volume_info.price_stars|int > 0 and bot_username %}<a class="button-link compact-button gold-button" href="https://t.me/{{ bot_username }}?start=buy_volume_{{ book.id }}_{{ volume_number|int }}">Купить том · {{ volume_info.price_stars }} Stars · ≈ {{ '%.2f'|format((volume_info.price_stars|int * buyer_star_rate_minor|default(145)) / 100) }} ₽</a>{% elif volume_info and volume_info.is_free %}<b class="free-volume-label">Том бесплатный</b>{% endif %}
+        {% if volume_info and volume_info.price_stars|int > 0 and bot_username %}<a class="button-link compact-button gold-button telegram-payment-action" href="https://t.me/{{ bot_username }}?start=buy_volume_{{ book.id }}_{{ volume_number|int }}">Купить том · {{ volume_info.price_stars }} Stars · ≈ {{ '%.2f'|format((volume_info.price_stars|int * buyer_star_rate_minor|default(145)) / 100) }} ₽</a>{% elif volume_info and volume_info.is_free %}<b class="free-volume-label">Том бесплатный</b>{% endif %}
       </div>
       <div class="episode-list">
       {% for chapter in volume_chapters %}
@@ -98,7 +98,7 @@
             <span class="episode-number">{{ '%02d'|format(chapter.number) }}</span>
             <span class="episode-copy"><strong>{{ chapter.title }}</strong><small>{{ chapter.actual_pages_count|default(chapter.pages_count) }} страниц · {% if chapter.reading_mode == 'rtl' %}справа налево{% elif chapter.reading_mode == 'vertical' %}вертикальная лента{% elif chapter.reading_mode == 'spread' %}разворот{% elif chapter.reading_mode == 'single' %}одна страница{% else %}слева направо{% endif %}{% if not chapter.is_free and chapter.preview_pages|int > 0 %} · {{ chapter.preview_pages }} стр. бесплатно{% endif %}</small></span>
           </a>
-          {% if chapter.is_free %}<a class="episode-open-link" href="/comic/{{ chapter.id }}">Открыть</a>{% elif bot_username %}<a class="episode-buy-link" href="https://t.me/{{ bot_username }}?start=buy_graphic_{{ chapter.id }}">{{ chapter.price_stars }} ★</a>{% else %}<b>{{ chapter.price_stars }} ★</b>{% endif %}
+          {% if chapter.is_free %}<a class="episode-open-link" href="/comic/{{ chapter.id }}">Открыть</a>{% elif bot_username %}<a class="episode-buy-link telegram-payment-action" href="https://t.me/{{ bot_username }}?start=buy_graphic_{{ chapter.id }}">{{ chapter.price_stars }} ★</a>{% else %}<b>{{ chapter.price_stars }} ★</b>{% endif %}
         </div>
       {% endfor %}
       </div>

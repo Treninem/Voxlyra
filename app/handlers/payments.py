@@ -1,6 +1,7 @@
 from datetime import datetime
 from aiogram import F, Router
 from aiogram.filters import CommandStart
+from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from pathlib import Path
@@ -11,6 +12,11 @@ from app.config import settings
 from app.db import (
     add_audit,
     create_paid_purchase,
+    get_purchase_conflict,
+    DuplicatePurchaseError,
+    PurchaseProcessingError,
+    get_monetization_integrity_report,
+    set_monetization_incident_result,
     create_payment_intent,
     attach_payment_intent_message,
     cancel_payment_intent,
@@ -266,6 +272,14 @@ async def _send_invoice(message_or_call, kind: str, target_id: int, promo_code: 
         else:
             await message_or_call.answer("Покупка не найдена.")
         return
+    conflict = await get_purchase_conflict(int(user["id"]), target.payload)
+    if conflict:
+        text = "Этот доступ уже открыт. Повторный счёт не создан."
+        if isinstance(message_or_call, CallbackQuery):
+            await message_or_call.answer(text, show_alert=True)
+        else:
+            await message_or_call.answer(text, reply_markup=back_to_main())
+        return
     if target.amount_stars <= 0:
         if promo_code and kind in {"book", "chapter", "audio", "graphic"}:
             try:
@@ -378,8 +392,11 @@ async def start_deeplink(message: Message, state: FSMContext) -> None:
     args = (message.text or "").split(maxsplit=1)
     payload = args[1] if len(args) > 1 else ""
     if payload.startswith("buy_chapter_"):
-        await _show_chapter_wallet_checkout(message, int(payload.replace("buy_chapter_", "")))
-        return
+        raw = payload.replace("buy_chapter_", "", 1)
+        if raw.isdigit() and int(raw) > 0:
+            await _show_chapter_wallet_checkout(message, int(raw))
+            return
+        raise SkipHandler()
     if payload == "wallet":
         cfg = await load_revenue_split_settings()
         summary = await get_wallet_summary((await upsert_user(message.from_user.id, message.from_user.username, message.from_user.full_name))["id"])
@@ -391,45 +408,69 @@ async def start_deeplink(message: Message, state: FSMContext) -> None:
         return
     if payload.startswith("buy_package_"):
         raw = payload.replace("buy_package_", "", 1)
-        if raw.isdigit():
+        if raw.isdigit() and int(raw) > 0:
             await _send_invoice(message, "chapter_package", int(raw))
-        return
+            return
+        raise SkipHandler()
     if payload.startswith("buy_audio_"):
-        await _send_invoice(message, "audio", int(payload.replace("buy_audio_", "")))
-        return
+        raw = payload.replace("buy_audio_", "", 1)
+        if raw.isdigit() and int(raw) > 0:
+            await _send_invoice(message, "audio", int(raw))
+            return
+        raise SkipHandler()
     if payload.startswith("buy_book_"):
-        await _send_invoice(message, "book", int(payload.replace("buy_book_", "")))
-        return
+        raw = payload.replace("buy_book_", "", 1)
+        if raw.isdigit() and int(raw) > 0:
+            await _send_invoice(message, "book", int(raw))
+            return
+        raise SkipHandler()
     if payload.startswith("buy_graphic_"):
         raw = payload.replace("buy_graphic_", "", 1)
-        if raw.isdigit():
+        if raw.isdigit() and int(raw) > 0:
             await _send_invoice(message, "graphic", int(raw))
-        return
+            return
+        raise SkipHandler()
     if payload.startswith("buy_volume_"):
         raw = payload.replace("buy_volume_", "", 1).split("_")
-        if len(raw) == 2 and raw[0].isdigit() and raw[1].isdigit():
+        if len(raw) == 2 and raw[0].isdigit() and raw[1].isdigit() and int(raw[0]) > 0 and int(raw[1]) > 0:
             await _send_invoice(message, "graphic_volume", int(raw[1]), amount_stars=int(raw[0]))
-        return
+            return
+        raise SkipHandler()
     if payload.startswith("promote_book_"):
-        raw = payload.replace("promote_book_", "")
-        if raw.isdigit():
+        raw = payload.replace("promote_book_", "", 1)
+        if raw.isdigit() and int(raw) > 0:
             await _show_channel_promotion(message, int(raw))
-        return
+            return
+        raise SkipHandler()
     if payload.startswith("promo_chapter_"):
-        await state.update_data(kind="chapter", target_id=int(payload.replace("promo_chapter_", "")))
+        raw = payload.replace("promo_chapter_", "", 1)
+        if not raw.isdigit() or int(raw) <= 0:
+            raise SkipHandler()
+        await state.update_data(kind="chapter", target_id=int(raw))
         await state.set_state(PromoApplyState.code)
         await message.answer("Введите промокод для покупки главы.")
         return
     if payload.startswith("promo_audio_"):
-        await state.update_data(kind="audio", target_id=int(payload.replace("promo_audio_", "")))
+        raw = payload.replace("promo_audio_", "", 1)
+        if not raw.isdigit() or int(raw) <= 0:
+            raise SkipHandler()
+        await state.update_data(kind="audio", target_id=int(raw))
         await state.set_state(PromoApplyState.code)
         await message.answer("Введите промокод для покупки аудиоглавы.")
         return
     if payload.startswith("promo_book_"):
-        await state.update_data(kind="book", target_id=int(payload.replace("promo_book_", "")))
+        raw = payload.replace("promo_book_", "", 1)
+        if not raw.isdigit() or int(raw) <= 0:
+            raise SkipHandler()
+        await state.update_data(kind="book", target_id=int(raw))
         await state.set_state(PromoApplyState.code)
         await message.answer("Введите промокод для покупки книги.")
         return
+    # Этот роутер подключён раньше общего /start. Неизвестный параметр
+    # обязан перейти к основному обработчику (book_*, reader_*, ref_* и т. д.),
+    # иначе ссылка внешне срабатывает, но пользователь не получает ни ответа,
+    # ни кнопки открытия Mini App.
+    raise SkipHandler()
 
 
 @router.callback_query(F.data.startswith("channel:promote:"))
@@ -569,6 +610,10 @@ async def pre_checkout_handler(query: PreCheckoutQuery) -> None:
     if int(query.total_amount) != expected:
         await query.answer(ok=False, error_message="Цена изменилась. Откройте покупку заново.")
         return
+    conflict = await get_purchase_conflict(int(user["id"]), str(query.invoice_payload or ""))
+    if conflict:
+        await query.answer(ok=False, error_message="Этот доступ уже открыт. Повторная оплата не требуется.")
+        return
     await query.answer(ok=True)
 
 
@@ -639,6 +684,26 @@ async def successful_payment_handler(message: Message) -> None:
                 is_first_recurring=bool(getattr(payment, "is_first_recurring", False)),
                 invoice_payload=str(payment.invoice_payload or ""),
             )
+        except DuplicatePurchaseError as exc:
+            charge_id = str(payment.telegram_payment_charge_id or "")
+            try:
+                await message.bot.refund_star_payment(
+                    user_id=message.from_user.id,
+                    telegram_payment_charge_id=charge_id,
+                )
+            except Exception as refund_exc:
+                await add_audit(user["id"], "premium_duplicate_refund_failed", "payment", charge_id, str(exc), str(refund_exc))
+                await message.answer(
+                    "Автопродление Premium уже активно. Повторный платёж сохранён для ручного возврата; повторно платить не нужно.",
+                    reply_markup=back_to_main(),
+                )
+                return
+            await add_audit(user["id"], "premium_duplicate_auto_refunded", "payment", charge_id, None, str(exc))
+            await message.answer(
+                "Автопродление Premium уже активно, поэтому повторный первый платёж автоматически возвращён через Telegram Stars.",
+                reply_markup=back_to_main(),
+            )
+            return
         except Exception as exc:
             await add_audit(user["id"], "premium_payment_save_failed", "payment", payment.invoice_payload, None, str(exc))
             await message.answer(
@@ -655,6 +720,27 @@ async def successful_payment_handler(message: Message) -> None:
         )
         return
 
+    if not target or int(target.get("amount_stars") or 0) != int(payment.total_amount):
+        charge_id = str(payment.telegram_payment_charge_id or "")
+        try:
+            await message.bot.refund_star_payment(
+                user_id=message.from_user.id,
+                telegram_payment_charge_id=charge_id,
+            )
+        except Exception as refund_exc:
+            await add_audit(user["id"], "invalid_payment_refund_failed", "payment", charge_id, None, str(refund_exc))
+            await message.answer(
+                "Параметры покупки изменились после оплаты. Автоматический возврат не подтвердился — платёж сохранён для ручной проверки, повторно платить не нужно.",
+                reply_markup=back_to_main(),
+            )
+            return
+        await add_audit(user["id"], "invalid_payment_auto_refunded", "payment", charge_id, None, str(payment.invoice_payload or ""))
+        await message.answer(
+            "Параметры покупки изменились, поэтому платёж автоматически возвращён через Telegram Stars.",
+            reply_markup=back_to_main(),
+        )
+        return
+
     try:
         purchase_id = await create_paid_purchase(
             user_id=user["id"],
@@ -662,6 +748,35 @@ async def successful_payment_handler(message: Message) -> None:
             amount_stars=int(payment.total_amount),
             telegram_payment_charge_id=payment.telegram_payment_charge_id,
         )
+    except DuplicatePurchaseError as exc:
+        charge_id = str(payment.telegram_payment_charge_id or "")
+        try:
+            await message.bot.refund_star_payment(
+                user_id=message.from_user.id,
+                telegram_payment_charge_id=charge_id,
+            )
+        except Exception as refund_exc:
+            await set_monetization_incident_result(charge_id, refunded=False, details=str(refund_exc))
+            await add_audit(user["id"], "duplicate_payment_refund_failed", "payment", charge_id, str(exc), str(refund_exc))
+            await message.answer(
+                "Повторная оплата пересеклась с уже открытым доступом. Автоматический возврат не подтвердился — платёж сохранён для ручной проверки, повторно платить не нужно.",
+                reply_markup=back_to_main(),
+            )
+            return
+        await set_monetization_incident_result(charge_id, refunded=True, details=str(exc))
+        await add_audit(user["id"], "duplicate_payment_auto_refunded", "payment", charge_id, None, str(exc))
+        await message.answer(
+            "Доступ уже был открыт, поэтому повторный платёж автоматически возвращён через Telegram Stars.",
+            reply_markup=back_to_main(),
+        )
+        return
+    except PurchaseProcessingError as exc:
+        await add_audit(user["id"], "payment_already_processing", "payment", payment.invoice_payload, None, str(exc))
+        await message.answer(
+            "Платёж уже обрабатывается. Повторно платить не нужно — откройте раздел «Моё» через несколько секунд.",
+            reply_markup=back_to_main(),
+        )
+        return
     except Exception as exc:
         await add_audit(user["id"], "payment_save_failed", "payment", payment.invoice_payload, None, str(exc))
         await message.answer(
@@ -910,7 +1025,12 @@ async def refund_request_finish(message: Message, state: FSMContext) -> None:
         return
     data = await state.get_data()
     user = await upsert_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
-    refund_id = await create_refund_request(int(data["purchase_id"]), user["id"], reason)
+    try:
+        refund_id = await create_refund_request(int(data["purchase_id"]), user["id"], reason)
+    except ValueError as exc:
+        await state.clear()
+        await message.answer(str(exc), reply_markup=back_to_main())
+        return
     await add_audit(user["id"], "refund_requested", "refund", str(refund_id), None, reason[:200])
     await state.clear()
     await message.answer(
@@ -944,7 +1064,7 @@ async def refund_card(call: CallbackQuery) -> None:
     if not refund:
         await call.answer("Запрос не найден", show_alert=True)
         return
-    target = refund["book_title"] or refund["chapter_title"] or refund["audio_title"] or "Покупка"
+    target = _target_label(refund)
     buyer = refund["username"] or refund["full_name"] or refund["telegram_id"]
     await call.message.edit_text(
         f"<b>Запрос возврата #{refund['id']}</b>\n\n"
@@ -1068,6 +1188,13 @@ async def owner_finance_report(call: CallbackQuery) -> None:
         await call.answer("Недоступно", show_alert=True)
         return
     summary = await get_platform_finance_summary()
+    integrity = await get_monetization_integrity_report()
+    integrity_line = (
+        "✅ Контур покупок: <b>без критических расхождений</b>"
+        if integrity.get("ok") else
+        f"⚠️ Контур покупок: <b>{int(integrity.get('open_incidents', 0))} событий, "
+        f"{int(integrity.get('orphan_active_claims', 0))} осиротевших прав</b>"
+    )
     await call.message.edit_text(
         "<b>💰 Финансы</b>\n\n"
         f"Оплачено: <b>{summary['paid_gross']} Stars</b> · покупок: <b>{summary['paid_count']}</b>\n"
@@ -1078,6 +1205,7 @@ async def owner_finance_report(call: CallbackQuery) -> None:
         f"В заявках авторам: <b>{summary.get('requested_authors', 0)} Stars</b>\n"
         f"Уже выплачено авторам: <b>{summary.get('paid_authors', 0)} Stars</b>\n"
         f"Открытых заявок: <b>{summary.get('payout_requests_open', 0)}</b>\n\n"
+        f"{integrity_line}\n\n"
         "Комиссии, удержания, возвраты и выплаты доступны только по выданным правам.",
         reply_markup=finance_owner_menu(),
     )

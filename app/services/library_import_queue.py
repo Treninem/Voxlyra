@@ -157,6 +157,9 @@ class ImportQueueJob:
     duplicates: int = 0
     error_count: int = 0
     phase: int = 0
+    current_folder: str = ""
+    current_title: str = ""
+    restart_count: int = 0
 
 
 def _row_to_job(row: Any) -> ImportQueueJob:
@@ -178,6 +181,9 @@ def _row_to_job(row: Any) -> ImportQueueJob:
         duplicates=int(row["duplicate_count"] or 0),
         error_count=int(row["error_count"] or 0),
         phase=int(row["phase"] or 0),
+        current_folder=str(row["current_folder"] or "") if "current_folder" in row.keys() else "",
+        current_title=str(row["current_title"] or "") if "current_title" in row.keys() else "",
+        restart_count=int(row["restart_count"] or 0) if "restart_count" in row.keys() else 0,
     )
 
 
@@ -210,6 +216,9 @@ async def ensure_import_queue_schema() -> None:
                     duplicate_count INTEGER NOT NULL DEFAULT 0,
                     error_count INTEGER NOT NULL DEFAULT 0,
                     phase INTEGER NOT NULL DEFAULT 0,
+                    current_folder TEXT,
+                    current_title TEXT,
+                    restart_count INTEGER NOT NULL DEFAULT 0,
                     retry_count INTEGER NOT NULL DEFAULT 0,
                     archive_expires_at TEXT,
                     cancel_requested INTEGER NOT NULL DEFAULT 0,
@@ -224,6 +233,28 @@ async def ensure_import_queue_schema() -> None:
                     ON library_import_jobs(status, id);
                 CREATE INDEX IF NOT EXISTS idx_library_import_jobs_hash
                     ON library_import_jobs(archive_hash, status);
+                CREATE INDEX IF NOT EXISTS idx_library_import_jobs_claim
+                    ON library_import_jobs(status, id, cancel_requested);
+                CREATE INDEX IF NOT EXISTS idx_library_import_jobs_heartbeat
+                    ON library_import_jobs(status, heartbeat_at);
+                CREATE INDEX IF NOT EXISTS idx_library_import_jobs_actor_created
+                    ON library_import_jobs(actor_user_id, created_at DESC, id DESC);
+
+                CREATE TABLE IF NOT EXISTS library_import_upload_receipts (
+                    upload_id TEXT PRIMARY KEY,
+                    actor_user_id INTEGER NOT NULL,
+                    archive_name TEXT NOT NULL,
+                    archive_hash TEXT NOT NULL,
+                    job_id INTEGER NOT NULL,
+                    queue_position INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    FOREIGN KEY(job_id) REFERENCES library_import_jobs(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_library_upload_receipts_expiry
+                    ON library_import_upload_receipts(expires_at);
+                CREATE INDEX IF NOT EXISTS idx_library_upload_receipts_actor_expiry
+                    ON library_import_upload_receipts(actor_user_id, expires_at);
                 """
             )
             cur = await db.execute("PRAGMA table_info(library_import_jobs)")
@@ -235,6 +266,9 @@ async def ensure_import_queue_schema() -> None:
                 "archive_expires_at": "ALTER TABLE library_import_jobs ADD COLUMN archive_expires_at TEXT",
                 "cancel_requested": "ALTER TABLE library_import_jobs ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0",
                 "cancel_requested_at": "ALTER TABLE library_import_jobs ADD COLUMN cancel_requested_at TEXT",
+                "current_folder": "ALTER TABLE library_import_jobs ADD COLUMN current_folder TEXT",
+                "current_title": "ALTER TABLE library_import_jobs ADD COLUMN current_title TEXT",
+                "restart_count": "ALTER TABLE library_import_jobs ADD COLUMN restart_count INTEGER NOT NULL DEFAULT 0",
             }.items():
                 if name not in columns:
                     await db.execute(ddl)
@@ -249,6 +283,7 @@ async def ensure_import_queue_schema() -> None:
                    ON CONFLICT(key) DO NOTHING""",
                 (QUEUE_MODE_ACTOR_SETTING_KEY, now),
             )
+            await db.execute("DELETE FROM library_import_upload_receipts WHERE expires_at<=?", (utc_now(),))
             await db.commit()
         await asyncio.to_thread(IMPORT_UPLOAD_ROOT.mkdir, parents=True, exist_ok=True)
         await asyncio.to_thread(cleanup_stale_uploads)
@@ -325,6 +360,7 @@ async def enqueue_import_job(
     actor_user_id: int,
     chat_id: int,
     progress_message_id: int,
+    idempotency_key: str = "",
 ) -> tuple[int, int]:
     """Ставит уже загруженный ZIP в постоянную очередь и возвращает номер и позицию."""
     await ensure_import_queue_schema()
@@ -333,6 +369,22 @@ async def enqueue_import_job(
         raise ValueError("Загруженный архив не найден")
 
     async with connect() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        clean_key = str(idempotency_key or "").strip()[:128]
+        if clean_key:
+            cur = await db.execute(
+                """SELECT job_id, queue_position, actor_user_id
+                   FROM library_import_upload_receipts
+                   WHERE upload_id=? AND expires_at>? LIMIT 1""",
+                (clean_key, utc_now()),
+            )
+            receipt = await cur.fetchone()
+            if receipt is not None:
+                if int(receipt["actor_user_id"]) != int(actor_user_id):
+                    await db.rollback()
+                    raise ValueError("Эта загрузка принадлежит другому пользователю")
+                await db.commit()
+                return int(receipt["job_id"]), max(1, int(receipt["queue_position"] or 1))
         cur = await db.execute(
             """SELECT id FROM library_import_batches
                WHERE archive_hash=? AND status IN ('completed','published')
@@ -341,6 +393,7 @@ async def enqueue_import_job(
         )
         previous = await cur.fetchone()
         if previous:
+            await db.rollback()
             raise ValueError(f"Этот архив уже импортировался ранее: пакет #{int(previous['id'])}")
 
         cur = await db.execute(
@@ -351,6 +404,7 @@ async def enqueue_import_job(
         )
         existing = await cur.fetchone()
         if existing:
+            await db.rollback()
             raise ValueError(f"Этот архив уже находится в очереди: задание #{int(existing['id'])}")
 
         cur = await db.execute(
@@ -363,6 +417,7 @@ async def enqueue_import_job(
         if failed:
             retained = Path(str(failed["archive_path"] or ""))
             if retained.is_file() and _is_inside(retained, IMPORT_QUEUE_ROOT) and _iso_is_future(failed["archive_expires_at"]):
+                await db.rollback()
                 raise ValueError(
                     f"Этот архив уже сохранён после ошибки в задании #{int(failed['id'])}. "
                     "Используйте кнопку «Повторить», новая загрузка не нужна."
@@ -389,8 +444,52 @@ async def enqueue_import_job(
             (job_id,),
         )
         position = int((await cur.fetchone())[0] or 1)
+        if clean_key:
+            now = datetime.now(timezone.utc)
+            expires = (now + timedelta(hours=max(24, _failed_archive_retention_hours()))).isoformat()
+            await db.execute(
+                """INSERT INTO library_import_upload_receipts(
+                       upload_id, actor_user_id, archive_name, archive_hash, job_id,
+                       queue_position, created_at, expires_at
+                   ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(upload_id) DO UPDATE SET
+                       actor_user_id=excluded.actor_user_id, archive_name=excluded.archive_name,
+                       archive_hash=excluded.archive_hash, job_id=excluded.job_id,
+                       queue_position=excluded.queue_position, created_at=excluded.created_at,
+                       expires_at=excluded.expires_at""",
+                (clean_key, int(actor_user_id), archive_name, archive_hash, job_id, position, now.isoformat(), expires),
+            )
         await db.commit()
     return job_id, position
+
+
+async def get_import_upload_receipt(upload_id: str, *, actor_user_id: int) -> dict[str, Any] | None:
+    """Возвращает результат уже завершённой постановки загрузки в очередь.
+
+    Это делает /finish идемпотентным: если Bothost принял ZIP, но ответ потерялся,
+    повторный запрос получает прежний job_id, а не ошибку «загрузка не найдена».
+    """
+    await ensure_import_queue_schema()
+    clean_key = str(upload_id or "").strip()[:128]
+    if not clean_key:
+        return None
+    async with connect() as db:
+        cur = await db.execute(
+            """SELECT job_id, queue_position, actor_user_id, archive_name, archive_hash, expires_at
+               FROM library_import_upload_receipts
+               WHERE upload_id=? AND expires_at>? LIMIT 1""",
+            (clean_key, utc_now()),
+        )
+        row = await cur.fetchone()
+    if row is None or int(row["actor_user_id"]) != int(actor_user_id):
+        return None
+    return {
+        "job_id": int(row["job_id"]),
+        "position": max(1, int(row["queue_position"] or 1)),
+        "archive_name": str(row["archive_name"] or ""),
+        "archive_hash": str(row["archive_hash"] or ""),
+        "expires_at": str(row["expires_at"] or ""),
+    }
 
 
 async def list_import_jobs(
@@ -417,7 +516,8 @@ async def list_import_jobs(
             SELECT j.id, j.archive_name, j.actor_user_id, j.status, j.batch_id,
                    j.processed, j.total, j.added, j.replaced_count,
                    j.renumbered_count, j.duplicate_count, j.error_count,
-                   j.phase, j.retry_count, j.archive_expires_at, j.archive_path,
+                   j.phase, j.current_folder, j.current_title, j.restart_count,
+                   j.retry_count, j.archive_expires_at, j.archive_path,
                    j.cancel_requested, j.cancel_requested_at, j.last_error, j.created_at, j.started_at,
                    j.heartbeat_at, j.completed_at,
                    CASE WHEN j.status='queued' THEN (
@@ -477,7 +577,7 @@ async def cancel_import_job(
                 """UPDATE library_import_jobs
                    SET status='cancelled', cancel_requested=0, cancel_requested_at=NULL,
                        last_error='Отменено до запуска', archive_expires_at=NULL,
-                       heartbeat_at=?, completed_at=?
+                       current_folder=NULL, current_title=NULL, heartbeat_at=?, completed_at=?
                    WHERE id=? AND status='queued'""",
                 (now, now, int(job_id)),
             )
@@ -558,6 +658,7 @@ async def retry_import_job(
                        replaced_count=0, renumbered_count=0, duplicate_count=0,
                        error_count=0, phase=0, retry_count=COALESCE(retry_count, 0)+1,
                        archive_expires_at=NULL, cancel_requested=0, cancel_requested_at=NULL,
+                       current_folder=NULL, current_title=NULL,
                        last_error=NULL, started_at=NULL, heartbeat_at=?, completed_at=NULL
                    WHERE id=? AND status IN ('failed','cancelled')""",
                 (now, int(job_id)),
@@ -611,12 +712,13 @@ async def _claim_next_job() -> ImportQueueJob | None:
         return _row_to_job(claimed)
 
 
-async def _update_job_progress(job_id: int, data: dict[str, int]) -> None:
+async def _update_job_progress(job_id: int, data: dict[str, Any]) -> None:
     async with connect() as db:
         await db.execute(
             """UPDATE library_import_jobs
                SET batch_id=?, processed=?, total=?, added=?, replaced_count=?,
-                   renumbered_count=?, duplicate_count=?, error_count=?, phase=?, heartbeat_at=?
+                   renumbered_count=?, duplicate_count=?, error_count=?, phase=?,
+                   current_folder=?, current_title=?, heartbeat_at=?
                WHERE id=? AND status IN ('processing','cancelling')""",
             (
                 int(data.get("batch_id", 0)) or None,
@@ -628,6 +730,8 @@ async def _update_job_progress(job_id: int, data: dict[str, int]) -> None:
                 int(data.get("duplicates", 0)),
                 int(data.get("errors", 0)),
                 int(data.get("phase", 0)),
+                str(data.get("current_folder") or "")[:240] or None,
+                str(data.get("current_title") or "")[:300] or None,
                 utc_now(),
                 int(job_id),
             ),
@@ -652,7 +756,7 @@ async def _set_job_completed(job_id: int, result: ImportResult) -> bool:
                SET status='completed', batch_id=?, added=?, replaced_count=?,
                    renumbered_count=?, duplicate_count=?, error_count=?, phase=3,
                    archive_expires_at=NULL, cancel_requested=0, cancel_requested_at=NULL,
-                   heartbeat_at=?, completed_at=?
+                   current_folder=NULL, current_title=NULL, heartbeat_at=?, completed_at=?
                WHERE id=? AND status='processing' AND COALESCE(cancel_requested, 0)=0""",
             (
                 int(result.batch_id),
@@ -677,7 +781,7 @@ async def _set_job_failed(job_id: int, error: str) -> bool:
             """UPDATE library_import_jobs
                SET status='failed', batch_id=NULL, last_error=?, archive_expires_at=?,
                    cancel_requested=0, cancel_requested_at=NULL,
-                   heartbeat_at=?, completed_at=?
+                   current_folder=NULL, current_title=NULL, heartbeat_at=?, completed_at=?
                WHERE id=? AND status='processing' AND COALESCE(cancel_requested, 0)=0""",
             (str(error)[:2000], _failed_archive_expires_at(), now, now, int(job_id)),
         )
@@ -693,7 +797,7 @@ async def _set_job_cancelled_after_processing(job_id: int) -> None:
                SET status='cancelled', batch_id=NULL,
                    last_error='Импорт безопасно остановлен пользователем',
                    archive_expires_at=?, cancel_requested=0, cancel_requested_at=NULL,
-                   heartbeat_at=?, completed_at=?
+                   current_folder=NULL, current_title=NULL, heartbeat_at=?, completed_at=?
                WHERE id=? AND status IN ('processing','cancelling')""",
             (_failed_archive_expires_at(), now, now, int(job_id)),
         )
@@ -727,7 +831,7 @@ async def _safe_edit(bot, job: ImportQueueJob, text: str, reply_markup=None) -> 
         logger.warning("Unexpected import progress error #%s: %s", job.id, exc)
 
 
-def _progress_text(job_id: int, data: dict[str, int]) -> str:
+def _progress_text(job_id: int, data: dict[str, Any]) -> str:
     processed = int(data.get("processed", 0))
     total = int(data.get("total", 0))
     phase = int(data.get("phase", 0))
@@ -739,13 +843,20 @@ def _progress_text(job_id: int, data: dict[str, int]) -> str:
     }.get(phase, "Обрабатываю архив")
     percent = int(processed * 100 / total) if total else 0
     total_text = str(total) if total else "определяется"
+    current_title = str(data.get("current_title") or "").strip()
+    current_folder = str(data.get("current_folder") or "").strip()
+    current_line = ""
+    if current_title or current_folder:
+        label = current_title or "Без названия"
+        suffix = f" · {current_folder}" if current_folder else ""
+        current_line = f"\nСейчас: <b>{html.escape(label[:180])}</b>{html.escape(suffix[:100])}\n"
     return (
         f"<b>⏳ {phase_text}</b>\n\n"
         f"Задание: <b>#{job_id}</b>\n"
         f"Обработано: <b>{processed} из {total_text}</b>"
         + (f" ({percent}%)" if total else "")
-        + "\n"
-        f"Добавлено: <b>{int(data.get('added', 0))}</b>\n"
+        + current_line
+        + f"Добавлено: <b>{int(data.get('added', 0))}</b>\n"
         f"Заменено: <b>{int(data.get('replaced', 0))}</b>\n"
         f"Перенумеровано: <b>{int(data.get('renumbered', 0))}</b>\n"
         f"Дублей: <b>{int(data.get('duplicates', 0))}</b>\n"
@@ -855,15 +966,39 @@ async def discard_incomplete_import_batch(batch_id: int) -> None:
             await asyncio.to_thread(shutil.rmtree, path, True)
 
 
-async def recover_interrupted_import_jobs() -> int:
+async def _job_heartbeat_loop(job_id: int) -> None:
+    """Поддерживает heartbeat во время долгого разбора одной большой книги."""
+    while True:
+        await asyncio.sleep(30)
+        async with connect() as db:
+            changed = await db.execute(
+                """UPDATE library_import_jobs SET heartbeat_at=?
+                   WHERE id=? AND status IN ('processing','cancelling')""",
+                (utc_now(), int(job_id)),
+            )
+            await db.commit()
+        if changed.rowcount != 1:
+            return
+
+
+async def recover_interrupted_import_jobs(*, stale_before: str | None = None) -> int:
     """Восстанавливает оборванные задания, включая запрошенную до перезапуска остановку."""
     await ensure_import_queue_schema()
     async with connect() as db:
-        cur = await db.execute(
-            """SELECT id, status, batch_id, archive_path
-               FROM library_import_jobs
-               WHERE status IN ('processing','cancelling') ORDER BY id"""
-        )
+        if stale_before:
+            cur = await db.execute(
+                """SELECT id, status, batch_id, archive_path
+                   FROM library_import_jobs
+                   WHERE status IN ('processing','cancelling')
+                     AND COALESCE(heartbeat_at, started_at, created_at)<? ORDER BY id""",
+                (stale_before,),
+            )
+        else:
+            cur = await db.execute(
+                """SELECT id, status, batch_id, archive_path
+                   FROM library_import_jobs
+                   WHERE status IN ('processing','cancelling') ORDER BY id"""
+            )
         rows = await cur.fetchall()
     recovered = 0
     for row in rows:
@@ -892,12 +1027,13 @@ async def recover_interrupted_import_jobs() -> int:
                 """UPDATE library_import_jobs
                    SET status=?, batch_id=NULL, processed=0, total=0, added=0,
                        replaced_count=0, renumbered_count=0, duplicate_count=0,
-                       error_count=0, phase=0, archive_expires_at=?, last_error=?,
-                       cancel_requested=0, cancel_requested_at=NULL,
+                       error_count=0, phase=0, current_folder=NULL, current_title=NULL,
+                       restart_count=COALESCE(restart_count, 0)+CASE WHEN ?='queued' THEN 1 ELSE 0 END,
+                       archive_expires_at=?, last_error=?, cancel_requested=0, cancel_requested_at=NULL,
                        started_at=CASE WHEN ?='queued' THEN NULL ELSE started_at END,
                        heartbeat_at=?, completed_at=?
                    WHERE id=?""",
-                (status, expires, error, status, utc_now(), completed_at, int(row["id"])),
+                (status, status, expires, error, status, utc_now(), completed_at, int(row["id"])),
             )
             await db.commit()
         if status == "queued":
@@ -921,11 +1057,30 @@ async def recover_interrupted_import_jobs() -> int:
     return recovered
 
 
+async def recover_stale_import_jobs(*, stale_seconds: int = 15 * 60) -> int:
+    """Возвращает зависшие задания в безопасное состояние без перезапуска приложения."""
+    await ensure_import_queue_schema()
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=max(120, int(stale_seconds)))).isoformat()
+    async with connect() as db:
+        cur = await db.execute(
+            """SELECT COUNT(*) AS count FROM library_import_jobs
+               WHERE status IN ('processing','cancelling')
+                 AND COALESCE(heartbeat_at, started_at, created_at)<?""",
+            (cutoff,),
+        )
+        count = int((await cur.fetchone())["count"] or 0)
+    if not count:
+        return 0
+    logger.warning("Recovering %s stale library import job(s)", count)
+    return await recover_interrupted_import_jobs(stale_before=cutoff)
+
+
 async def process_next_import_job(bot) -> bool:
     job = await _claim_next_job()
     if job is None:
         return False
 
+    asyncio.create_task(_job_heartbeat_loop(job.id))
     last_notification = {"processed": -1, "phase": -1}
 
     async def stop_safely() -> None:
@@ -953,7 +1108,7 @@ async def process_next_import_job(bot) -> bool:
             library_import_failed_menu(job.id),
         )
 
-    async def progress_callback(data: dict[str, int]) -> None:
+    async def progress_callback(data: dict[str, Any]) -> None:
         await _update_job_progress(job.id, data)
         if await _job_cancellation_requested(job.id):
             raise ImportCancellationRequested("Запрошена безопасная остановка")
@@ -969,12 +1124,18 @@ async def process_next_import_job(bot) -> bool:
         if not should_notify:
             return
         last_notification.update(processed=processed, phase=phase)
-        await _safe_edit(
-            bot,
-            job,
-            _progress_text(job.id, data),
-            library_import_active_menu(job.id, processing=True),
-        )
+        try:
+            await asyncio.wait_for(
+                _safe_edit(
+                    bot,
+                    job,
+                    _progress_text(job.id, data),
+                    library_import_active_menu(job.id, processing=True),
+                ),
+                timeout=8,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Timed out updating import progress message for job #%s", job.id)
 
     await _safe_edit(
         bot,
@@ -1062,18 +1223,40 @@ async def library_import_worker_loop(bot) -> None:
     recovered = await recover_interrupted_import_jobs()
     if recovered:
         logger.info("Recovered %s interrupted library import job(s)", recovered)
+
+    async def watchdog_loop() -> None:
+        while True:
+            try:
+                await asyncio.sleep(60)
+                await recover_stale_import_jobs()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Library import watchdog error")
+
+    watchdog_task = asyncio.create_task(watchdog_loop())
     last_cleanup = 0.0
-    while True:
-        try:
-            now = time.monotonic()
-            if now - last_cleanup >= 1800:
-                await _cleanup_orphaned_queue_archives(min_age_seconds=0)
-                last_cleanup = now
-            processed = await process_next_import_job(bot)
-            if not processed:
-                await asyncio.sleep(2)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("Library import queue loop error")
-            await asyncio.sleep(3)
+    try:
+        while True:
+            try:
+                now = time.monotonic()
+                if now - last_cleanup >= 1800:
+                    await _cleanup_orphaned_queue_archives(min_age_seconds=0)
+                    async with connect() as db:
+                        await db.execute(
+                            "DELETE FROM library_import_upload_receipts WHERE expires_at<=?",
+                            (utc_now(),),
+                        )
+                        await db.commit()
+                    last_cleanup = now
+                processed = await process_next_import_job(bot)
+                if not processed:
+                    await asyncio.sleep(2)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Library import queue loop error")
+                await asyncio.sleep(3)
+    finally:
+        watchdog_task.cancel()
+        await asyncio.gather(watchdog_task, return_exceptions=True)

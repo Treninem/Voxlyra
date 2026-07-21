@@ -23,7 +23,13 @@ from app.db import (
 from app.services.channel import build_new_book_post
 from app.services.duplicate_books import duplicate_warning_text, find_book_duplicates
 from app.services.cover_storage import ensure_book_cover_file
-from app.services.automatic_moderation import evaluate_book_for_auto_publication
+from app.services.automatic_moderation import evaluate_book_for_auto_publication, resolve_book_moderation_findings
+from app.services.moderation_revisions import (
+    capture_moderation_snapshot,
+    get_open_revision_request,
+    mark_revision_resubmitted,
+    resolve_revision_request,
+)
 from app.services.moderation_alerts import notify_book_needs_moderation
 
 
@@ -59,8 +65,12 @@ def _book_link(book_id: int) -> str:
     username = settings.BOT_USERNAME.strip().lstrip("@")
     web_url = settings.WEBAPP_URL.strip().rstrip("/")
     if username and web_url:
+        # The channel contains one clean target button. Direct Mini App links
+        # pass the book identifier as start_param.
         return f"https://t.me/{username}?startapp=book_{book_id}"
     if username:
+        # If the Main Mini App is not configured, open the bot. The general
+        # /start handler now receives this payload after the payment router skips it.
         return f"https://t.me/{username}?start=book_{book_id}"
     if web_url:
         return f"{web_url}/book/{book_id}"
@@ -296,29 +306,60 @@ async def finish_book_content_workflow(
     actor_telegram_id: int,
     source: str,
 ) -> PublicationResult:
-    """Завершает любой путь загрузки одной безопасной логикой публикации."""
+    """Завершает любой путь загрузки одной безопасной логикой публикации.
+
+    После возврата на доработку используется сохранённый снимок книги: повторная
+    автомодерация проверяет только реально изменённые метаданные и главы, но не
+    забывает замечания к неизменённым частям.
+    """
     book = await get_book(book_id)
     if not book:
         return PublicationResult(False, "failed", "Книга не найдена", workflow_status="failed")
 
-    if book["publication_status"] == "published":
-        # Изменения текста опубликованной книги проходят автоматическую проверку.
-        # Безопасные правки публикуются без участия модератора; сомнительные остаются
-        # черновиком и создают одно объединённое задание проверки.
+    revision_request = await get_open_revision_request(book_id)
+    revision_mode = revision_request is not None or book["publication_status"] == "published"
+
+    if revision_mode:
         check = await evaluate_book_for_auto_publication(
             book_id, actor_telegram_id=actor_telegram_id, revision_mode=True
         )
         if check.auto_publish or not check.reasons:
-            await publish_book_content(book_id)
-            await resolve_book_moderation(
-                book_id, resolution="revision_auto_approved", actor_user_id=actor_user_id,
-                note="Изменение текста прошло автоматическую проверку",
+            if book["publication_status"] == "published":
+                await publish_book_content(book_id)
+                result = PublicationResult(True, "already_sent", workflow_status="published")
+            else:
+                result = await publish_book_and_channel(
+                    bot,
+                    book_id,
+                    actor_user_id=actor_user_id,
+                )
+            if result.published:
+                await resolve_book_moderation(
+                    book_id, resolution="revision_auto_approved", actor_user_id=actor_user_id,
+                    note="Изменённые части прошли автоматическую проверку",
+                )
+                await resolve_book_moderation_findings(book_id)
+                await resolve_revision_request(book_id, "auto_approved")
+                await capture_moderation_snapshot(
+                    book_id, snapshot_kind="approved", actor_user_id=actor_user_id, source=source
+                )
+            await add_audit(
+                actor_user_id, "book_revision_auto_approved", "book", str(book_id), source,
+                f"published;changed={check.changed_summary}",
             )
-            await add_audit(actor_user_id, "book_revision_auto_approved", "book", str(book_id), source, "published")
-            return PublicationResult(True, "already_sent", workflow_status="published")
+            return result
+
+        if book["publication_status"] != "review":
+            submitted = await submit_book_for_review(book_id, actor_user_id)
+            if not submitted:
+                await set_book_publication_status(book_id, "review")
+        await mark_revision_resubmitted(book_id)
         await enqueue_book_moderation(book_id, check.reasons, risk_level="revision")
         await notify_book_needs_moderation(bot, book_id=book_id, reasons=check.reasons, reminder=False)
-        await add_audit(actor_user_id, "book_revision_manual_review", "book", str(book_id), source, " | ".join(check.reasons)[:1000])
+        await add_audit(
+            actor_user_id, "book_revision_manual_review", "book", str(book_id), source,
+            (" | ".join(check.reasons) + f" | changed={check.changed_summary}")[:1000],
+        )
         return PublicationResult(False, "", workflow_status="review", duplicate_text="\n".join(check.reasons))
 
     check = await evaluate_book_for_auto_publication(
@@ -337,6 +378,10 @@ async def finish_book_content_workflow(
                 resolution="published",
                 actor_user_id=actor_user_id,
                 note="Автоматическая проверка пройдена",
+            )
+            await resolve_book_moderation_findings(book_id)
+            await capture_moderation_snapshot(
+                book_id, snapshot_kind="approved", actor_user_id=actor_user_id, source=source
             )
         await add_audit(
             actor_user_id,

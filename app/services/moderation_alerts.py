@@ -9,6 +9,7 @@ from aiogram.enums import ParseMode
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.config import settings
+from app.services.security import pseudonymous_log_id
 from app.db import (
     add_audit,
     get_book,
@@ -84,7 +85,7 @@ async def notify_book_needs_moderation(
             totals["sent"] += 1
         except Exception as exc:
             totals["failed"] += 1
-            logger.warning("Moderation alert failed for %s: %s", telegram_id, exc)
+            logger.warning("Moderation alert failed for user %s: %s", pseudonymous_log_id(telegram_id), exc)
     await mark_book_moderation_notified(int(book_id), reminder=reminder)
     await add_audit(
         None,

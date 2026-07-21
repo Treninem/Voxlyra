@@ -84,6 +84,24 @@
   <article class="setting-card premium-settings-card"><div><h3>VoxLyra Premium</h3><p>Управление подпиской, премиальной рамкой, карточками цитат и личной статистикой.</p></div><a class="button-link full" href="/premium">Открыть Premium</a></article>
 </section>
 
+<section class="settings-group-title"><h2>🔐 Приватность и документы</h2></section>
+<section class="settings-panel privacy-settings-panel" id="privacySettingsPanel">
+  <article class="setting-card privacy-overview-card">
+    <div class="setting-head"><div><h3>Мои данные</h3><p>Посмотрите, какие личные разделы сохранены, скачайте полный экспорт или проверьте историю запросов.</p></div><button type="button" class="secondary compact-button" id="privacyRefreshButton">Обновить</button></div>
+    <div id="privacyOverviewStatus" class="privacy-overview-status"><p class="muted">Данные загружаются…</p></div>
+    <button type="button" class="secondary full" id="privacyExportButton">Скачать мои данные JSON</button>
+  </article>
+  <article class="setting-card privacy-legal-card">
+    <div><h3>Обязательные документы</h3><p>Редакция и дата каждого принятия сохраняются отдельно. Обычное обновление приложения не просит принять документы заново.</p></div>
+    <div id="privacyLegalDocuments" class="privacy-legal-documents"><p class="muted">Проверяем документы…</p></div>
+  </article>
+  <article class="setting-card danger-zone privacy-delete-card">
+    <div><h3>Удаление профиля</h3><p>Перед удалением будет показан точный список удаляемых и сохраняемых данных. Требуется отдельное подтверждение, действующее 30 минут.</p></div>
+    <button type="button" id="privacyDeletePreviewButton" class="danger-button full">Проверить удаление профиля</button>
+    <div id="privacyDeletePreview" class="privacy-delete-preview" hidden></div>
+  </article>
+</section>
+
 <section class="settings-group-title"><h2>⚙️ Сброс</h2></section>
 <section class="settings-panel">
   <article class="setting-card danger-zone"><div><h3>Сброс настроек</h3><p>Вернуть оформление, чтение, аудио и уведомления к исходным значениям.</p></div><button type="button" id="resetLocalSettings" class="secondary full">Сбросить настройки</button></article>

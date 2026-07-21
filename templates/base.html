@@ -15,6 +15,7 @@
   <link rel="stylesheet" href="/static/css/style.css?v={{ asset_version }}">
   <link rel="stylesheet" href="/static/css/hotfix-v1117.css?v={{ asset_version }}">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script>document.documentElement.classList.toggle("vox-external-browser",!window.Telegram?.WebApp?.initData);document.documentElement.classList.toggle("vox-telegram-auth",!!window.Telegram?.WebApp?.initData)</script>
 </head>
 <body class="{% block body_class %}{% endblock %}">
   <div class="app-ambient" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i></div>
@@ -35,6 +36,10 @@
     <button class="route-nav-back" id="routeBackButton" type="button" aria-label="Вернуться назад">← <span>Назад</span></button>
     <a class="route-nav-home" href="/" aria-label="Перейти в главное меню">⌂ <span>В меню</span></a>
   </nav>
+  <aside class="external-browser-notice" id="externalBrowserNotice" hidden aria-live="polite">
+    <div><strong>VoxLyra работает внутри Telegram</strong><span>Каталог можно посмотреть здесь, а чтение, покупки, личная библиотека и прогресс открываются после безопасной проверки Telegram.</span></div>
+    <a class="button-link compact-button" id="externalBrowserOpen" href="#">Открыть в Telegram</a>
+  </aside>
   <main class="app-shell">
     {% block content %}{% endblock %}
   </main>

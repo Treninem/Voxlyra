@@ -9,7 +9,7 @@ from app.db import (
     get_admin_permissions, get_author_profile, get_bonus_balance, get_referral_stats,
     list_bonus_transactions, list_reader_wallet_transactions, get_wallet_summary,
     register_referral, upsert_user, get_user_preferences, set_user_preference,
-    reset_user_preferences, get_book,
+    reset_user_preferences, get_book, get_chapter, get_graphic_chapter, get_audio_chapter,
 )
 from app.keyboards import back_to_main, bonuses_menu, main_menu, more_menu, user_settings_menu, user_notifications_menu, user_theme_menu, user_font_menu
 from app.handlers.legal import send_next_required_document
@@ -78,6 +78,69 @@ async def build_context(message_or_call) -> tuple[bool, bool, bool, int]:
     return is_owner, bool(perms), bool(author_profile), user["id"]
 
 
+async def _deep_link_target(payload: str) -> tuple[str, str, str] | None:
+    """Resolve a safe content deep link into (relative URL, title, subtitle)."""
+    value = str(payload or "").strip()
+    static_targets = {
+        "catalog": ("/catalog", "Каталог", "Выберите книгу или комикс."),
+        "library": ("/library", "Моя библиотека", "Продолжите чтение и откройте личные списки."),
+        "audio": ("/audio", "Аудиокниги", "Откройте доступные аудиоглавы."),
+        "comics": ("/comics", "Комиксы", "Откройте каталог графических историй."),
+        "premium": ("/premium", "VoxLyra Premium", "Управление подпиской и преимуществами."),
+        "settings": ("/settings", "Настройки", "Оформление и параметры чтения."),
+        "author": ("/author", "Кабинет автора", "Книги, главы и публикация."),
+        "control": ("/control", "Центр управления", "Доступ определяется вашей ролью в VoxLyra."),
+    }
+    if value in static_targets:
+        return static_targets[value]
+
+    for prefix, route_prefix in (("book_", "/book/"), ("reader_", "/reader/"), ("chapter_", "/reader/"), ("comic_", "/comic/"), ("audio_", "/audio/")):
+        if not value.startswith(prefix):
+            continue
+        raw_id = value[len(prefix):]
+        if not raw_id.isdigit() or int(raw_id) <= 0:
+            return None
+        target_id = int(raw_id)
+        if prefix == "book_":
+            row = await get_book(target_id)
+            if not row or str(row["publication_status"] or "") != "published":
+                return None
+            return f"{route_prefix}{target_id}", str(row["title"] or "Книга"), f"Автор: {row['pen_name'] or 'не указан'}"
+        if prefix in {"reader_", "chapter_"}:
+            row = await get_chapter(target_id)
+            if not row or str(row["publication_status"] or "") != "published" or str(row["status"] or "") != "published":
+                return None
+            return f"{route_prefix}{target_id}", str(row["title"] or "Глава"), str(row["book_title"] or "Книга")
+        if prefix == "comic_":
+            row = await get_graphic_chapter(target_id)
+            if not row or str(row["publication_status"] or "") != "published" or str(row["status"] or "") != "published":
+                return None
+            return f"{route_prefix}{target_id}", str(row["title"] or "Глава"), str(row["book_title"] or "Графическая история")
+        row = await get_audio_chapter(target_id)
+        if not row or str(row["publication_status"] or "") != "published" or str(row["status"] or "") != "published":
+            return None
+        return f"{route_prefix}{target_id}", str(row["title"] or "Аудиоглава"), str(row["book_title"] or "Аудиокнига")
+    return None
+
+
+async def _send_deep_link_target(message: Message, payload: str) -> bool:
+    target = await _deep_link_target(payload)
+    if target is None:
+        return False
+    relative_url, title, subtitle = target
+    web_url = settings.WEBAPP_URL.strip().rstrip("/")
+    kb = InlineKeyboardBuilder()
+    if web_url:
+        kb.button(text="Открыть в VoxLyra", web_app=WebAppInfo(url=f"{web_url}{relative_url}"))
+    kb.button(text="Главное меню", callback_data="menu:main")
+    kb.adjust(1)
+    await message.answer(
+        f"<b>{title}</b>\n\n{subtitle}\n\nОткройте нужный экран внутри VoxLyra.",
+        reply_markup=kb.as_markup(),
+    )
+    return True
+
+
 @router.message(CommandStart())
 async def cmd_start(message: Message) -> None:
     is_owner, has_admin, has_author, user_id = await build_context(message)
@@ -109,27 +172,8 @@ async def cmd_start(message: Message) -> None:
                     reply_markup=kb.as_markup(),
                 )
                 return
-    if payload.startswith("book_"):
-        raw_book_id = payload.replace("book_", "", 1)
-        if raw_book_id.isdigit():
-            book = await get_book(int(raw_book_id))
-            if book and book["publication_status"] == "published":
-                kb = InlineKeyboardBuilder()
-                web_url = settings.WEBAPP_URL.strip().rstrip("/")
-                if web_url:
-                    kb.button(
-                        text="📖 Открыть книгу",
-                        web_app=WebAppInfo(url=f"{web_url}/book/{int(raw_book_id)}"),
-                    )
-                kb.button(text="🏠 Главное меню", callback_data="menu:main")
-                kb.adjust(1)
-                await message.answer(
-                    f"<b>📖 {book['title']}</b>\n\n"
-                    f"Автор: <b>{book['pen_name'] or 'не указан'}</b>\n\n"
-                    "Книга доступна в Вокслире.",
-                    reply_markup=kb.as_markup(),
-                )
-                return
+    if await _send_deep_link_target(message, payload):
+        return
     text = (
         "<b>✨ Добро пожаловать в Вокслиру</b>\n\n"
         "Здесь истории можно читать, слушать и сохранять в свою личную библиотеку.\n\n"

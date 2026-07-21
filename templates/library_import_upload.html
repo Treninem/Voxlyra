@@ -12,6 +12,8 @@
     * { box-sizing: border-box; }
     body { margin: 0; min-height: 100vh; color: #f6f7ff; background: radial-gradient(circle at 20% 0%, #24285f 0, transparent 38%), radial-gradient(circle at 100% 35%, #34205e 0, transparent 36%), #080a16; }
     main { width: min(680px, 100%); margin: 0 auto; padding: max(26px, env(safe-area-inset-top)) 18px max(32px, env(safe-area-inset-bottom)); }
+    .upload-back { width: auto; margin: 0 0 14px; padding: 10px 14px; border: 1px solid rgba(255,255,255,.14); border-radius: 14px; color: #e8e9f7; font-size: 14px; font-weight: 700; background: rgba(18,21,48,.76); box-shadow: none; cursor: pointer; }
+    .upload-back:hover { background: rgba(42,45,91,.86); }
     .card { padding: 24px; border: 1px solid rgba(255,255,255,.12); border-radius: 26px; background: linear-gradient(145deg, rgba(25,28,63,.96), rgba(11,13,31,.96)); box-shadow: 0 24px 70px rgba(0,0,0,.38); }
     .mark { display: grid; place-items: center; width: 58px; height: 58px; margin-bottom: 17px; border-radius: 18px; font-size: 30px; background: linear-gradient(145deg, #8b5cf6, #4f46e5); box-shadow: 0 12px 32px rgba(93,72,219,.38); }
     h1 { margin: 0; font-size: 27px; line-height: 1.15; }
@@ -34,10 +36,11 @@
 </head>
 <body>
 <main>
+  <button class="upload-back" id="uploadBackButton" type="button">← Вернуться</button>
   <section class="card">
     <div class="mark">📚</div>
     <h1>Загрузка большого ZIP</h1>
-    <p class="lead">Выберите тот же архив библиотеки. Он загрузится напрямую в VoxLyra частями и автоматически попадёт в фоновую очередь.</p>
+    <p class="lead">Выберите тот же архив библиотеки. Крупный ZIP загрузится напрямую в VoxLyra частями и автоматически попадёт в фоновую очередь.</p>
 
     <label class="picker" for="archive">
       <strong>Выбрать ZIP-архив</strong>
@@ -51,7 +54,7 @@
       <div class="progress-line"><span id="progressText">0%</span><span id="sizeText"></span></div>
     </div>
     <div class="status" id="status" role="status" aria-live="polite"></div>
-    <p class="note">После постановки архива в очередь окно можно закрыть. Импорт продолжится на сервере, а прогресс появится в сообщении бота.</p>
+    <p class="note">Эта страница предназначена именно для крупных архивов и принимает ZIP до <strong>{{ large_upload_max_mb }} МБ</strong>. После постановки архива в очередь окно можно закрыть. Незавершённая загрузка хранится до 24 часов и продолжится после повторного открытия; импорт продолжится на сервере, а прогресс появится в сообщении бота.</p>
   </section>
 </main>
 <script>
@@ -59,7 +62,32 @@
   const tg = window.Telegram?.WebApp;
   if (tg) { tg.ready(); tg.expand(); }
 
+  const backButton = document.getElementById('uploadBackButton');
+  const hasSameOriginReferrer = (() => {
+    try { return Boolean(document.referrer) && new URL(document.referrer).origin === window.location.origin; }
+    catch (_) { return false; }
+  })();
+  const goBack = () => {
+    if (hasSameOriginReferrer && window.history.length > 1) {
+      window.history.back();
+      return;
+    }
+    if (tg?.close) {
+      tg.close();
+      return;
+    }
+    window.location.assign('/control?section=library-import');
+  };
+  backButton?.addEventListener('click', goBack);
+  if (tg?.BackButton) {
+    tg.BackButton.show();
+    tg.BackButton.onClick(goBack);
+    window.addEventListener('pagehide', () => tg.BackButton.offClick(goBack), { once: true });
+  }
+
   const token = {{ upload_token | tojson }};
+  const maxUploadMb = Number({{ large_upload_max_mb | tojson }} || 0);
+  const maxUploadBytes = maxUploadMb > 0 ? maxUploadMb * 1024 * 1024 : 0;
   const input = document.getElementById('archive');
   const button = document.getElementById('uploadButton');
   const fileName = document.getElementById('fileName');
@@ -180,13 +208,25 @@
     if (!file) {
       fileName.textContent = 'Файл ещё не выбран';
       button.disabled = true;
+      status.className = 'status';
+      status.textContent = '';
       return;
     }
     fileName.textContent = `${file.name} · ${formatBytes(file.size)}`;
-    button.disabled = !file.name.toLowerCase().endsWith('.zip');
+    const isZip = file.name.toLowerCase().endsWith('.zip');
+    const tooLarge = maxUploadBytes > 0 && file.size > maxUploadBytes;
+    button.disabled = !isZip || tooLarge;
     button.textContent = 'Загрузить и начать импорт';
-    status.className = 'status';
-    status.textContent = button.disabled ? 'Нужен файл с расширением .zip' : '';
+    status.className = tooLarge ? 'status error' : 'status';
+    if (!isZip) {
+      status.textContent = 'Нужен файл с расширением .zip';
+    } else if (tooLarge) {
+      status.textContent = `Этот ZIP больше допустимого лимита ${maxUploadMb} МБ для прямой загрузки.`;
+    } else if (file.size > 200 * 1024 * 1024) {
+      status.textContent = 'Это крупный архив. Он будет загружен по частям, а уже принятые части не отправятся повторно.';
+    } else {
+      status.textContent = '';
+    }
     setProgress(0, file.size);
   });
 
@@ -235,6 +275,7 @@
 
       const uploadId = String(start.upload_id || '');
       if (!uploadId) throw new Error('Сервер не создал задание загрузки.');
+      if (start.resumed) status.textContent = 'Продолжаю ранее начатую загрузку — принятые части не отправляются повторно…';
       try { localStorage.setItem(storageKey, uploadId); } catch (_) {}
 
       const chunkSize = Math.max(256 * 1024, Number(start.chunk_size || 1024 * 1024));
@@ -294,16 +335,21 @@
       try { localStorage.removeItem(storageKey); } catch (_) {}
       setProgress(file.size, file.size);
       status.className = 'status success';
-      status.textContent = `Архив принят. Задание №${finish.job_id} поставлено в очередь. Ботом можно пользоваться.`;
+      status.textContent = finish.idempotent
+        ? `Архив уже был принят ранее. Задание №${finish.job_id} найдено в очереди без повторного импорта.`
+        : `Архив принят. Задание №${finish.job_id} поставлено в очередь. Ботом можно пользоваться.`;
       button.textContent = 'Архив принят';
       if (tg?.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
     } catch (error) {
       status.className = 'status error';
       const message = String(error?.message || 'Загрузка остановлена.');
-      status.textContent = `${message} Нажмите «Продолжить загрузку» — уже принятые части повторно не отправятся.`;
-      button.disabled = false;
+      const canRetry = Boolean(error?.retryable);
+      status.textContent = canRetry
+        ? `${message} Нажмите «Продолжить загрузку» — уже принятые части повторно не отправятся.`
+        : message;
+      button.disabled = !canRetry;
       input.disabled = false;
-      button.textContent = 'Продолжить загрузку';
+      button.textContent = canRetry ? 'Продолжить загрузку' : 'Выберите другой ZIP';
       if (tg?.HapticFeedback) tg.HapticFeedback.notificationOccurred('error');
     }
   });

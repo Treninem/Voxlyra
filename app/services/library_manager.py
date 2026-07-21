@@ -31,7 +31,7 @@ IMPORT_WORK_ROOT = DEFAULT_STORAGE_ROOT / "import_work"
 MIN_IMPORT_FREE_BYTES = 32 * 1024 * 1024
 STALE_IMPORT_WORK_SECONDS = 2 * 60 * 60
 
-ProgressCallback = Callable[[dict[str, int]], Awaitable[None]]
+ProgressCallback = Callable[[dict[str, Any]], Awaitable[None]]
 MAX_FILES_PER_BOOK_FOLDER = 12
 MAX_COMPRESSION_RATIO = 250
 RIGHTS_HOLDER_TYPES = {"public_domain", "person", "publisher", "platform", "other"}
@@ -520,14 +520,14 @@ async def ensure_library_schema() -> None:
             CREATE TABLE IF NOT EXISTS library_import_settings (
                 id INTEGER PRIMARY KEY CHECK(id=1),
                 max_books INTEGER NOT NULL DEFAULT 0,
-                max_archive_mb INTEGER NOT NULL DEFAULT 200,
+                max_archive_mb INTEGER NOT NULL DEFAULT 1024,
                 max_unpacked_mb INTEGER NOT NULL DEFAULT 4096,
                 duplicate_policy TEXT NOT NULL DEFAULT 'ask',
                 updated_at TEXT NOT NULL
             );
             INSERT OR IGNORE INTO library_import_settings(
                 id, max_books, max_archive_mb, max_unpacked_mb, duplicate_policy, updated_at
-            ) VALUES(1, 0, 200, 4096, 'ask', '');
+            ) VALUES(1, 0, 1024, 4096, 'ask', '');
 
             CREATE TABLE IF NOT EXISTS library_channel_queue (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -554,6 +554,7 @@ async def ensure_library_schema() -> None:
             "channel_interval_minutes": "ALTER TABLE library_import_settings ADD COLUMN channel_interval_minutes INTEGER NOT NULL DEFAULT 60",
             "channel_posts_per_run": "ALTER TABLE library_import_settings ADD COLUMN channel_posts_per_run INTEGER NOT NULL DEFAULT 5",
             "legacy_book_limit_removed": "ALTER TABLE library_import_settings ADD COLUMN legacy_book_limit_removed INTEGER NOT NULL DEFAULT 0",
+            "legacy_archive_limit_expanded": "ALTER TABLE library_import_settings ADD COLUMN legacy_archive_limit_expanded INTEGER NOT NULL DEFAULT 0",
         }.items():
             if name not in setting_columns:
                 await db.execute(ddl)
@@ -573,6 +574,16 @@ async def ensure_library_schema() -> None:
                SET max_books=CASE WHEN max_books=500 THEN 0 ELSE max_books END,
                    legacy_book_limit_removed=1
                WHERE id=1 AND COALESCE(legacy_book_limit_removed, 0)=0"""
+        )
+        # v1.13.37: старый заводской потолок 200 МБ блокировал прямую
+        # загрузку больших ZIP, хотя они уже передаются безопасными частями.
+        # Миграция независима от прежнего флага лимита книг, поэтому срабатывает
+        # и на давно обновлённых базах, где legacy_book_limit_removed уже равен 1.
+        await db.execute(
+            """UPDATE library_import_settings
+               SET max_archive_mb=CASE WHEN max_archive_mb=200 THEN 1024 ELSE max_archive_mb END,
+                   legacy_archive_limit_expanded=1
+               WHERE id=1 AND COALESCE(legacy_archive_limit_expanded, 0)=0"""
         )
         cur = await db.execute("PRAGMA table_info(books)")
         existing = {row[1] for row in await cur.fetchall()}
@@ -816,6 +827,8 @@ async def import_library_zip(
     batch_id = await _create_batch(archive_name, archive_hash, actor_user_id)
     result = ImportResult(batch_id=batch_id)
     total_found = 0
+    current_folder = ""
+    current_title = ""
 
     async def report(processed: int, *, phase: int = 0) -> None:
         if progress_callback is None:
@@ -830,6 +843,8 @@ async def import_library_zip(
             "duplicates": result.duplicates,
             "errors": len(result.errors),
             "phase": phase,
+            "current_folder": current_folder,
+            "current_title": current_title,
         })
 
     await report(0, phase=0)
@@ -872,6 +887,9 @@ async def import_library_zip(
 
     for processed_index, folder_info in enumerate(folders, 1):
         folder_name = str(folder_info["name"])
+        current_folder = folder_name
+        current_title = ""
+        await report(processed_index - 1, phase=2)
         folder_unpacked = max(0, int(folder_info.get("unpacked_size") or 0))
         _ensure_library_free_space(
             folder_unpacked + MIN_IMPORT_FREE_BYTES,
@@ -913,6 +931,7 @@ async def import_library_zip(
                 embedded = await _run_blocking(_embedded_book_metadata, book_files[0]) if book_files else {}
                 metadata = _merge_import_metadata(metadata, embedded, description_path)
                 item.title = str(metadata.get("title") or "Без названия").strip()
+                current_title = item.title
                 if metadata_error:
                     item.reasons.append(metadata_error)
                 if not cover_files:
@@ -1233,6 +1252,8 @@ async def import_library_zip(
                 raise
 
     await _finish_batch(batch_id, result, total_found)
+    current_folder = ""
+    current_title = ""
     await report(total_found if max_books <= 0 else min(total_found, max_books), phase=3)
     return result
 
@@ -1692,7 +1713,7 @@ async def get_import_settings() -> dict[str, Any]:
         cur = await db.execute("SELECT * FROM library_import_settings WHERE id=1")
         row = await cur.fetchone()
         return dict(row) if row else {
-            "max_books": 0, "max_archive_mb": 200,
+            "max_books": 0, "max_archive_mb": 1024,
             "max_unpacked_mb": 4096, "duplicate_policy": "ask",
             "channel_auto_post": 1, "channel_interval_minutes": 60,
             "channel_posts_per_run": 5,
@@ -1707,7 +1728,9 @@ async def update_import_settings(*, max_books: int | None = None, max_archive_mb
     current = await get_import_settings()
     values = {
         "max_books": (lambda value: 0 if value <= 0 else min(100000, value))(int(max_books if max_books is not None else current["max_books"])),
-        "max_archive_mb": max(10, min(2000, int(max_archive_mb if max_archive_mb is not None else current["max_archive_mb"]))),
+        "max_archive_mb": (lambda value: 0 if value <= 0 else min(2000, max(10, value)))(
+            int(max_archive_mb if max_archive_mb is not None else current["max_archive_mb"])
+        ),
         "max_unpacked_mb": max(100, min(20000, int(max_unpacked_mb if max_unpacked_mb is not None else current["max_unpacked_mb"]))),
         "duplicate_policy": str(duplicate_policy if duplicate_policy is not None else current["duplicate_policy"]),
         "channel_auto_post": int(bool(channel_auto_post if channel_auto_post is not None else current.get("channel_auto_post", 1))),

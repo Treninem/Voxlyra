@@ -8,6 +8,7 @@ from aiogram.enums import ParseMode
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 
 from app.config import settings
+from app.services.security import pseudonymous_log_id
 from app.db import (
     claim_notification_delivery,
     finish_notification_delivery,
@@ -203,7 +204,7 @@ async def send_user_notification(
         await delivery_bot.send_message(**kwargs)
         return "sent"
     except Exception as exc:  # Telegram may reject delivery when the user blocked the bot.
-        logger.warning("Notification delivery failed for Telegram user %s: %s", telegram_id, exc)
+        logger.warning("Notification delivery failed for user %s: %s", pseudonymous_log_id(telegram_id), exc)
         return "failed"
     finally:
         if owns_bot:
