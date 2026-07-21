@@ -921,9 +921,24 @@ def create_app() -> FastAPI:
             application.state.startup_stage = "database"
             application.state.startup_error = ""
             logger.info("Application bootstrap: database initialization started")
+            init_task = asyncio.create_task(init_db(), name="voxlyra-database-initialization")
+            started_at = time.monotonic()
             try:
-                await init_db()
+                while not init_task.done():
+                    done, _ = await asyncio.wait({init_task}, timeout=10)
+                    if done:
+                        break
+                    elapsed = int(time.monotonic() - started_at)
+                    application.state.startup_elapsed_seconds = elapsed
+                    logger.info(
+                        "Application bootstrap: database initialization still running (%s seconds)",
+                        elapsed,
+                    )
+                await init_task
             except asyncio.CancelledError:
+                if not init_task.done():
+                    init_task.cancel()
+                await asyncio.gather(init_task, return_exceptions=True)
                 raise
             except Exception as exc:
                 application.state.startup_error = str(exc)[:240]
@@ -935,6 +950,7 @@ def create_app() -> FastAPI:
                 delay = min(60, delay * 2)
                 continue
             application.state.database_ready = True
+            application.state.startup_elapsed_seconds = int(time.monotonic() - started_at)
             logger.info("Application bootstrap: database ready")
 
         application.state.startup_stage = "tts"
@@ -964,6 +980,7 @@ def create_app() -> FastAPI:
         application.state.startup_ready = False
         application.state.database_ready = False
         application.state.tts_ready = False
+        application.state.startup_elapsed_seconds = 0
         application.state.tts_sessions = TTSSessionManager(build_default_generation_queue())
         bootstrap_task = asyncio.create_task(
             bootstrap_application(application),
@@ -986,6 +1003,7 @@ def create_app() -> FastAPI:
     app.state.startup_ready = False
     app.state.database_ready = False
     app.state.tts_ready = False
+    app.state.startup_elapsed_seconds = 0
     # CORS нужен только для явно перечисленных внешних origin. Обычный Mini App
     # работает same-origin и не требует wildcard-доступа ко всем приватным API.
     app.add_middleware(
@@ -1886,34 +1904,48 @@ def create_app() -> FastAPI:
     @app.get("/health")
     async def health(request: Request):
         """Always-answering process probe for Bothost."""
+        database_ready = bool(getattr(request.app.state, "database_ready", False))
         return {
             "ok": True,
+            "process_ready": True,
+            "application_ready": bool(getattr(request.app.state, "startup_ready", False)),
             "project": settings.PROJECT_NAME,
             "startup_stage": str(getattr(request.app.state, "startup_stage", "starting")),
-            "database_ready": bool(getattr(request.app.state, "database_ready", False)),
+            "startup_elapsed_seconds": int(getattr(request.app.state, "startup_elapsed_seconds", 0) or 0),
+            "database_ready": database_ready,
         }
 
     @app.get("/readiness")
     async def readiness(request: Request):
-        """Bothost readiness checks only the HTTP runtime, SQLite and disk.
+        """Always-successful platform probe with explicit application state.
 
-        Optional Telegram/channel/TTS configuration belongs to the protected
-        owner diagnostics and must not cause a deployment restart loop while a
-        bot connection or a background model download is temporarily unavailable.
+        Some hosting supervisors treat a JSON ``ok=false`` as an unhealthy
+        container even when the HTTP status is 200. A long first migration then
+        causes a restart loop before it can finish. The process/port probe is
+        therefore always ``ok=true``; strict database/disk state is exposed in
+        separate fields and in the protected owner diagnostics.
         """
-        if not bool(getattr(request.app.state, "database_ready", False)):
+        database_ready = bool(getattr(request.app.state, "database_ready", False))
+        if not database_ready:
             return {
-                "ok": False,
+                "ok": True,
+                "process_ready": True,
+                "application_ready": False,
                 "database_ok": False,
                 "disk_ok": True,
                 "startup_stage": str(getattr(request.app.state, "startup_stage", "database")),
+                "startup_elapsed_seconds": int(getattr(request.app.state, "startup_elapsed_seconds", 0) or 0),
             }
         runtime = await runtime_readiness()
+        strict_ok = bool(runtime["ok"])
         return {
-            "ok": bool(runtime["ok"]),
+            "ok": True,
+            "process_ready": True,
+            "application_ready": strict_ok,
             "database_ok": bool(runtime.get("database_ok")),
             "disk_ok": bool(runtime.get("disk_ok")),
             "startup_stage": str(getattr(request.app.state, "startup_stage", "ready")),
+            "startup_elapsed_seconds": int(getattr(request.app.state, "startup_elapsed_seconds", 0) or 0),
         }
 
     @app.get("/legal", response_class=HTMLResponse)

@@ -37,6 +37,11 @@ COPY . .
 
 EXPOSE 3000
 
+# Give first database migrations time to finish. The probe checks only that the
+# HTTP process is alive; strict application readiness is reported in JSON.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=90s --retries=3 \
+    CMD python -c "import json,os,urllib.request; data=json.load(urllib.request.urlopen('http://127.0.0.1:'+os.getenv('PORT','3000')+'/health', timeout=3)); raise SystemExit(0 if data.get('ok') else 1)" || exit 1
+
 RUN mkdir -p data storage/covers storage/books storage/audio storage/tts storage/tts/models/vosk storage/comics storage/temp storage/legal \
     && chmod +x scripts/start.sh
 

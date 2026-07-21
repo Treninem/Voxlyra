@@ -32,9 +32,12 @@ rm -f \
   storage/legal/voxlyra_refund_policy.pdf \
   storage/legal/voxlyra_refund_policy.pdf.sha256
 
-# The large Russian model is bootstrapped in background and never blocks the
-# Bothost HTTP start. Piper remains available while the model is unavailable.
-case "${TTS_VOSK_ENABLED:-true}" in
+# The large Russian model is optional and is NOT downloaded automatically on a
+# fresh/restarted Bothost container. Automatic multi-hundred-MB downloads can
+# consume the startup CPU/disk budget and trigger a platform restart loop.
+# Set TTS_VOSK_AUTO_BOOTSTRAP=true explicitly after the base service is stable.
+# Piper remains available while the Vosk model is absent.
+case "${TTS_VOSK_AUTO_BOOTSTRAP:-false}" in
   0|false|False|FALSE|no|No|NO) ;;
   *)
     (

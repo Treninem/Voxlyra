@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     BOT_USERNAME: str = "VoxlyraBot"
     PROJECT_NAME: str = "Вокслира"
     PUBLIC_VERSION_VISIBLE: bool = False
-    PROJECT_VERSION: str = "v1.14.0.1"
+    PROJECT_VERSION: str = "v1.14.0.2"
     MAX_BOOK_UPLOAD_MB: int = 0
     MAX_BOOK_UNPACKED_MB: int = 2048
     # Прямая загрузка больших библиотечных ZIP идёт частями. Это аварийный
@@ -60,6 +60,9 @@ class Settings(BaseSettings):
     TTS_QWEN_URL: str = ""
     TTS_MOSS_URL: str = ""
     TTS_VOSK_ENABLED: bool = True
+    # Загрузка крупной Vosk-модели при старте отключена по умолчанию.
+    # Она включается отдельно после стабильного запуска приложения.
+    TTS_VOSK_AUTO_BOOTSTRAP: bool = False
     TTS_VOSK_MODEL_NAME: str = "vosk-model-tts-ru-0.9-multi"
     TTS_VOSK_MODEL_DIR: str = "storage/tts/models/vosk"
     TTS_VOSK_FEMALE_SPEAKER: int = 2
