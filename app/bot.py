@@ -52,6 +52,22 @@ def _dispatcher() -> Dispatcher:
     return dp
 
 
+
+
+async def _supervise_library_import_worker(bot: Bot) -> None:
+    """Keep the persistent import queue alive even if one startup pass fails."""
+    delay = 2
+    while True:
+        try:
+            await library_import_worker_loop(bot)
+            raise RuntimeError("Library import worker stopped unexpectedly")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Library import worker crashed; restarting in %s seconds", delay)
+            await asyncio.sleep(delay)
+            delay = min(30, max(2, delay * 2))
+
 async def run_bot() -> None:
     mark_bot_starting()
     if not settings.BOT_TOKEN:
@@ -97,7 +113,7 @@ async def run_bot() -> None:
             asyncio.create_task(premium_author_settlement_loop(), name="premium-settlements"),
             asyncio.create_task(library_channel_scheduler_loop(bot), name="library-channel"),
             asyncio.create_task(author_channel_scheduler_loop(bot), name="author-channel"),
-            asyncio.create_task(library_import_worker_loop(bot), name="library-import"),
+            asyncio.create_task(_supervise_library_import_worker(bot), name="library-import-supervisor"),
             asyncio.create_task(runtime_maintenance_loop(), name="runtime-maintenance"),
         ]
         await dp.start_polling(bot)

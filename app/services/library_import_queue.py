@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import gc
 import html
 import logging
 import os
 import shutil
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -44,6 +46,48 @@ QUEUE_MODES = {"running", "paused", "maintenance"}
 
 _QUEUE_SCHEMA_LOCK = asyncio.Lock()
 _QUEUE_SCHEMA_READY: set[str] = set()
+_WORKER_STATE_LOCK = threading.Lock()
+_WORKER_WAKE_EVENT: asyncio.Event | None = None
+_WORKER_STATE: dict[str, Any] = {
+    "alive": False,
+    "status": "not_started",
+    "started_at": "",
+    "heartbeat_at": "",
+    "last_error": "",
+    "restart_count": 0,
+    "current_job_id": None,
+}
+
+
+def _update_worker_state(**values: Any) -> None:
+    with _WORKER_STATE_LOCK:
+        _WORKER_STATE.update(values)
+
+
+def get_import_queue_worker_state() -> dict[str, Any]:
+    """Return a safe in-process snapshot for owner diagnostics and Mini App."""
+    with _WORKER_STATE_LOCK:
+        return dict(_WORKER_STATE)
+
+
+def wake_import_worker() -> None:
+    """Wake the queue after enqueue/resume without waiting for the poll interval."""
+    event = _WORKER_WAKE_EVENT
+    if event is not None:
+        event.set()
+
+
+def _release_import_memory() -> None:
+    """Return temporary parser allocations on memory-constrained Bothost plans."""
+    gc.collect()
+    try:
+        import ctypes
+
+        trim = getattr(ctypes.CDLL("libc.so.6"), "malloc_trim", None)
+        if trim is not None:
+            trim(0)
+    except Exception:
+        pass
 
 
 def _normalize_queue_mode(value: Any) -> str:
@@ -336,6 +380,8 @@ async def set_import_queue_mode(mode: str, *, actor_user_id: int) -> dict[str, A
             (QUEUE_MODE_ACTOR_SETTING_KEY, str(int(actor_user_id)), now),
         )
         await db.commit()
+    if normalized == "running":
+        wake_import_worker()
     return await get_import_queue_control_state()
 
 
@@ -384,6 +430,7 @@ async def enqueue_import_job(
                     await db.rollback()
                     raise ValueError("Эта загрузка принадлежит другому пользователю")
                 await db.commit()
+                wake_import_worker()
                 return int(receipt["job_id"]), max(1, int(receipt["queue_position"] or 1))
         cur = await db.execute(
             """SELECT id FROM library_import_batches
@@ -460,6 +507,8 @@ async def enqueue_import_job(
                 (clean_key, int(actor_user_id), archive_name, archive_hash, job_id, position, now.isoformat(), expires),
             )
         await db.commit()
+    wake_import_worker()
+    logger.info("Library import job #%s queued at position %s", job_id, position)
     return job_id, position
 
 
@@ -709,7 +758,10 @@ async def _claim_next_job() -> ImportQueueJob | None:
         await db.commit()
         cur = await db.execute("SELECT * FROM library_import_jobs WHERE id=?", (job_id,))
         claimed = await cur.fetchone()
-        return _row_to_job(claimed)
+        job = _row_to_job(claimed)
+        _update_worker_state(current_job_id=job.id, heartbeat_at=utc_now(), status="processing")
+        logger.info("Library import worker claimed job #%s: %s", job.id, job.archive_name)
+        return job
 
 
 async def _update_job_progress(job_id: int, data: dict[str, Any]) -> None:
@@ -1219,28 +1271,68 @@ async def process_next_import_job(bot) -> bool:
 
 
 async def library_import_worker_loop(bot) -> None:
-    await ensure_import_queue_schema()
-    recovered = await recover_interrupted_import_jobs()
-    if recovered:
-        logger.info("Recovered %s interrupted library import job(s)", recovered)
-
-    async def watchdog_loop() -> None:
-        while True:
-            try:
-                await asyncio.sleep(60)
-                await recover_stale_import_jobs()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.exception("Library import watchdog error")
-
-    watchdog_task = asyncio.create_task(watchdog_loop())
-    last_cleanup = 0.0
+    global _WORKER_WAKE_EVENT
+    _WORKER_WAKE_EVENT = asyncio.Event()
+    now = utc_now()
+    with _WORKER_STATE_LOCK:
+        restart_count = int(_WORKER_STATE.get("restart_count") or 0)
+        if _WORKER_STATE.get("status") not in {"not_started", "stopped"}:
+            restart_count += 1
+    _update_worker_state(
+        alive=True,
+        status="starting",
+        started_at=now,
+        heartbeat_at=now,
+        last_error="",
+        restart_count=restart_count,
+        current_job_id=None,
+    )
+    logger.info("Library import worker starting")
+    watchdog_task: asyncio.Task[Any] | None = None
     try:
+        await ensure_import_queue_schema()
+
+        # Old/broken builds could leave a non-running mode without recording who
+        # changed it. Resume only that orphaned state; an intentional owner pause
+        # (actor id present) remains untouched.
+        async with connect() as db:
+            mode, _, actor_user_id = await _read_queue_mode(db)
+            cur = await db.execute("SELECT COUNT(*) FROM library_import_jobs WHERE status='queued'")
+            queued_count = int((await cur.fetchone())[0] or 0)
+            if queued_count and mode != "running" and actor_user_id is None:
+                await db.execute(
+                    "UPDATE settings SET value='running', updated_at=? WHERE key=?",
+                    (utc_now(), QUEUE_MODE_SETTING_KEY),
+                )
+                await db.commit()
+                mode = "running"
+                logger.warning("Automatically resumed orphaned library import queue with %s queued job(s)", queued_count)
+
+        recovered = await recover_interrupted_import_jobs()
+        if recovered:
+            logger.info("Recovered %s interrupted library import job(s)", recovered)
+
+        async def watchdog_loop() -> None:
+            while True:
+                try:
+                    await asyncio.sleep(60)
+                    _update_worker_state(heartbeat_at=utc_now())
+                    await recover_stale_import_jobs()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.exception("Library import watchdog error")
+                    _update_worker_state(last_error=str(exc)[:240], heartbeat_at=utc_now())
+
+        watchdog_task = asyncio.create_task(watchdog_loop(), name="library-import-watchdog")
+        last_cleanup = 0.0
+        _update_worker_state(alive=True, status="idle", heartbeat_at=utc_now())
+        logger.info("Library import worker ready")
         while True:
             try:
-                now = time.monotonic()
-                if now - last_cleanup >= 1800:
+                _update_worker_state(alive=True, heartbeat_at=utc_now())
+                now_mono = time.monotonic()
+                if now_mono - last_cleanup >= 1800:
                     await _cleanup_orphaned_queue_archives(min_age_seconds=0)
                     async with connect() as db:
                         await db.execute(
@@ -1248,15 +1340,55 @@ async def library_import_worker_loop(bot) -> None:
                             (utc_now(),),
                         )
                         await db.commit()
-                    last_cleanup = now
+                    last_cleanup = now_mono
                 processed = await process_next_import_job(bot)
-                if not processed:
+                if processed:
+                    _release_import_memory()
+                    _update_worker_state(
+                        alive=True,
+                        status="idle",
+                        heartbeat_at=utc_now(),
+                        last_error="",
+                        current_job_id=None,
+                    )
+                    continue
+                _update_worker_state(alive=True, status="idle", heartbeat_at=utc_now(), current_job_id=None)
+                event = _WORKER_WAKE_EVENT
+                if event is None:
                     await asyncio.sleep(2)
+                else:
+                    try:
+                        await asyncio.wait_for(event.wait(), timeout=2)
+                    except asyncio.TimeoutError:
+                        pass
+                    event.clear()
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as exc:
                 logger.exception("Library import queue loop error")
+                _update_worker_state(
+                    alive=True,
+                    status="error_retrying",
+                    heartbeat_at=utc_now(),
+                    last_error=str(exc)[:240],
+                    current_job_id=None,
+                )
                 await asyncio.sleep(3)
+    except asyncio.CancelledError:
+        _update_worker_state(alive=False, status="stopped", heartbeat_at=utc_now(), current_job_id=None)
+        raise
+    except Exception as exc:
+        _update_worker_state(
+            alive=False,
+            status="failed",
+            heartbeat_at=utc_now(),
+            last_error=str(exc)[:240],
+            current_job_id=None,
+        )
+        logger.exception("Library import worker terminated")
+        raise
     finally:
-        watchdog_task.cancel()
-        await asyncio.gather(watchdog_task, return_exceptions=True)
+        if watchdog_task is not None:
+            watchdog_task.cancel()
+            await asyncio.gather(watchdog_task, return_exceptions=True)
+        _WORKER_WAKE_EVENT = None

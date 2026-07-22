@@ -344,10 +344,12 @@ from app.services.library_import_queue import (
     ensure_import_queue_schema,
     enqueue_import_job,
     get_import_queue_control_state,
+    get_import_queue_worker_state,
     get_import_upload_receipt,
     list_import_jobs,
     retry_import_job,
     set_import_queue_mode,
+    wake_import_worker,
 )
 from app.services.library_import_upload import (
     LibraryImportUploadTokenError,
@@ -1265,6 +1267,7 @@ def create_app() -> FastAPI:
             "can_manage": can_manage,
             "can_control_queue": bool(is_owner),
             "queue_control": queue_control,
+            "queue_worker": get_import_queue_worker_state(),
             "settings": dict(cfg),
             "learning": learning,
             "queue": queue,
@@ -1332,6 +1335,29 @@ def create_app() -> FastAPI:
             mode,
         )
         return {"ok": True, "queue_control": state}
+
+    @app.post("/api/control/library-import/queue-kick")
+    async def api_control_library_import_queue_kick(
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user, is_owner, _ = await control_session(x_telegram_init_data, "library_import_manage")
+        if not is_owner:
+            raise HTTPException(status_code=403, detail="Перезапустить очередь может только владелец.")
+        state = await set_import_queue_mode("running", actor_user_id=int(user.app_user_id))
+        wake_import_worker()
+        await add_audit(
+            user.app_user_id,
+            "library_import_queue_kick",
+            "settings",
+            "library_import_queue_mode",
+            str(state.get("mode") or "running"),
+            "running",
+        )
+        return {
+            "ok": True,
+            "queue_control": state,
+            "queue_worker": get_import_queue_worker_state(),
+        }
 
     @app.patch("/api/control/library-import/auto-moderation")
     async def api_control_library_import_auto_moderation(
@@ -1664,11 +1690,21 @@ def create_app() -> FastAPI:
             return
         delivery_bot = Bot(token=settings.BOT_TOKEN)
         try:
-            position_text = (
-                "начинается сейчас"
-                if int(position) == 1
-                else f"позиция в очереди: <b>{int(position)}</b>"
-            )
+            queue_state = await get_import_queue_control_state()
+            queue_mode = str(queue_state.get("mode") or "running")
+            if queue_mode == "running":
+                position_text = (
+                    "запустится в течение нескольких секунд"
+                    if int(position) == 1
+                    else f"позиция в очереди: <b>{int(position)}</b>"
+                )
+                queue_note = "Архив обрабатывается в фоне. Ботом можно пользоваться без ожидания."
+            else:
+                position_text = f"поставлен в очередь на позицию <b>{int(position)}</b>"
+                queue_note = (
+                    "Очередь сейчас приостановлена. Откройте «Управление библиотекой» и нажмите "
+                    "«Продолжить очередь» — повторно загружать ZIP не нужно."
+                )
             await delivery_bot.edit_message_text(
                 chat_id=int(chat_id),
                 message_id=int(progress_message_id),
@@ -1676,8 +1712,9 @@ def create_app() -> FastAPI:
                     "<b>✅ Большой архив принят</b>\n\n"
                     f"Задание: <b>#{int(job_id)}</b>\n"
                     f"Импорт {position_text}. Прогресс будет обновляться в этом сообщении.\n\n"
-                    "Архив обрабатывается в фоне. Ботом можно пользоваться без ожидания."
+                    f"{queue_note}"
                 ),
+                parse_mode=ParseMode.HTML,
             )
         except Exception:
             pass

@@ -39,6 +39,7 @@ from app.services.library_import_queue import (
     calculate_archive_hash,
     cancel_import_job,
     enqueue_import_job,
+    get_import_queue_control_state,
     retry_import_job,
 )
 from app.services.library_import_upload import create_library_import_upload_token
@@ -384,12 +385,22 @@ async def library_import_receive(message: Message, state: FSMContext) -> None:
         return
 
     await state.clear()
-    position_text = "начинается сейчас" if position == 1 else f"позиция в очереди: <b>{position}</b>"
+    queue_state = await get_import_queue_control_state()
+    queue_mode = str(queue_state.get("mode") or "running")
+    if queue_mode == "running":
+        position_text = "запустится в течение нескольких секунд" if position == 1 else f"позиция в очереди: <b>{position}</b>"
+        queue_note = "Во время импорта можно пользоваться ботом, читать книги и открывать другие разделы."
+    else:
+        position_text = f"поставлен в очередь на позицию <b>{position}</b>"
+        queue_note = (
+            "Очередь сейчас приостановлена. Откройте управление библиотекой и нажмите "
+            "«Продолжить очередь». Повторно отправлять ZIP не нужно."
+        )
     await progress.edit_text(
         "<b>✅ Архив принят</b>\n\n"
         f"Задание: <b>#{job_id}</b>\n"
         f"Импорт {position_text}. Прогресс будет обновляться в этом сообщении.\n\n"
-        "Во время импорта можно пользоваться ботом, читать книги и открывать другие разделы.",
+        f"{queue_note}",
         reply_markup=library_import_active_menu(job_id, processing=False),
     )
 

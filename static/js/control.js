@@ -259,6 +259,14 @@
       ? `<p>${esc(String(item.last_error).slice(0, 700))}</p>` : '';
     const restartInfo = Number(item.restart_count || 0)
       ? `<small>Автовосстановлений после перезапуска: ${Number(item.restart_count || 0)}</small>` : '';
+    const queueMode = String((data.queue_control || {}).mode || 'running');
+    const worker = data.queue_worker || {};
+    const workerOffline = worker.alive === false || ['failed', 'error_retrying'].includes(String(worker.status || ''));
+    const queueWarning = status === 'queued' && queueMode !== 'running'
+      ? '<p class="danger-text">Очередь приостановлена. Нажмите «Запустить очередь» — ZIP повторно загружать не нужно.</p>'
+      : status === 'queued' && workerOffline
+        ? '<p class="danger-text">Обработчик очереди перезапускается. Нажмите «Запустить очередь», если ожидание продолжается.</p>'
+        : '';
     const retryInfo = ['failed', 'cancelled'].includes(status)
       ? (canRetry
         ? `<small>ZIP сохранён до ${esc(dateText(item.archive_expires_at))} · повторов: ${Number(item.retry_count || 0)}</small>`
@@ -269,9 +277,9 @@
         <span>Задание #${Number(item.id)} · ${esc(libraryJobStatusLabels[status] || status)}</span>
         <h3>${esc(item.archive_name || 'Архив библиотеки')}</h3>
         <p>Добавлено: ${Number(item.added || 0)} · заменено: ${Number(item.replaced_count || 0)} · перенумеровано: ${Number(item.renumbered_count || 0)} · ошибок: ${Number(item.error_count || 0)}</p>
-        ${progress}${error}${stopInfo}${retryInfo}${restartInfo}
+        ${progress}${queueWarning}${error}${stopInfo}${retryInfo}${restartInfo}
       </div>
-      <div class="control-actions">${item.batch_id ? actionButton('Открыть пакет', `librarybatch:details:${Number(item.batch_id)}`) : ''}${canRetry ? actionButton('Повторить', `libraryjob:retry:${Number(item.id)}`) : ''}${canCancel ? actionButton(status === 'processing' ? 'Остановить' : 'Отменить', `libraryjob:cancel:${Number(item.id)}`, 'danger') : ''}</div>
+      <div class="control-actions">${status === 'queued' && Boolean(data.can_control_queue) ? '<button type="button" class="control-action approve" data-library-queue-kick>Запустить очередь</button>' : ''}${item.batch_id ? actionButton('Открыть пакет', `librarybatch:details:${Number(item.batch_id)}`) : ''}${canRetry ? actionButton('Повторить', `libraryjob:retry:${Number(item.id)}`) : ''}${canCancel ? actionButton(status === 'processing' ? 'Остановить' : 'Отменить', `libraryjob:cancel:${Number(item.id)}`, 'danger') : ''}</div>
     </article>`;
   }
 
@@ -368,7 +376,11 @@
     const learning = data.learning || {};
     const queue = data.queue || {};
     const queueControl = data.queue_control || { mode: 'running' };
+    const queueWorker = data.queue_worker || { alive: false, status: 'not_started' };
     const queueMode = String(queueControl.mode || 'running');
+    const workerStatus = String(queueWorker.status || 'not_started');
+    const workerAlive = queueWorker.alive === true;
+    const workerLabels = { not_started: 'Не запущен', starting: 'Запускается', idle: 'Готов', processing: 'Обрабатывает', error_retrying: 'Перезапускается', failed: 'Ошибка', stopped: 'Остановлен' };
     const queueModeLabels = { running: 'Работает', paused: 'Пауза', maintenance: 'Обслуживание' };
     const jobs = Array.isArray(data.jobs) ? data.jobs : [];
     const batches = Array.isArray(data.batches) ? data.batches : [];
@@ -390,19 +402,20 @@
         ? (queueControl.draining ? 'Текущее задание завершится. Новые не запускаются до окончания обслуживания.' : 'Новые задания не запускаются до окончания обслуживания.')
         : (queueControl.draining ? 'Текущее задание завершится. Следующие останутся в очереди.' : 'Следующие задания останутся в очереди до продолжения.');
     const queueModeActions = data.can_control_queue
-      ? queueMode === 'running'
+      ? `${queueCount > 0 ? '<button type="button" id="libraryQueueKick" class="approve">Запустить очередь сейчас</button>' : ''}${queueMode === 'running'
         ? '<button type="button" id="libraryQueuePause" class="secondary">Поставить на паузу</button><button type="button" id="libraryQueueMaintenance" class="danger">Режим обслуживания</button>'
-        : `<button type="button" id="libraryQueueResume" class="approve">Продолжить очередь</button>${queueMode === 'paused' ? '<button type="button" id="libraryQueueMaintenance" class="danger">Режим обслуживания</button>' : '<button type="button" id="libraryQueuePause" class="secondary">Обычная пауза</button>'}`
+        : `<button type="button" id="libraryQueueResume" class="approve">Продолжить очередь</button>${queueMode === 'paused' ? '<button type="button" id="libraryQueueMaintenance" class="danger">Режим обслуживания</button>' : '<button type="button" id="libraryQueuePause" class="secondary">Обычная пауза</button>'}`} `
       : '';
     $('workspaceList').innerHTML = `<div class="control-stat-grid">
       ${statCard('В очереди', queueCount)}
       ${statCard('Режим очереди', queueModeLabels[queueMode] || queueMode)}
+      ${statCard('Обработчик', workerLabels[workerStatus] || workerStatus)}
       ${statCard('Автомодерация', learning.enabled ? 'Включена' : 'Выключена')}
       ${statCard('Решений для обучения', Number(learning.approved || 0) + Number(learning.rejected || 0))}
       ${statCard('Доверенных категорий', (learning.trusted_categories || []).length)}
     </div>
     <article class="control-item payment-settings-card">
-      <div class="control-item-main"><span>Управление очередью</span><h3>${esc(queueModeLabels[queueMode] || queueMode)}</h3><p>${esc(queueModeText)}</p><small>Пауза и обслуживание сохраняются после перезапуска сервера. Уже выполняющееся задание не обрывается.</small></div>
+      <div class="control-item-main"><span>Управление очередью</span><h3>${esc(queueModeLabels[queueMode] || queueMode)} · ${esc(workerLabels[workerStatus] || workerStatus)}</h3><p>${esc(queueModeText)}</p>${queueWorker.last_error ? `<p class="danger-text">Последняя ошибка обработчика: ${esc(String(queueWorker.last_error).slice(0, 300))}</p>` : ''}<small>Пауза и обслуживание сохраняются после перезапуска сервера. Уже выполняющееся задание не обрывается.</small></div>
       <div class="control-actions">${queueModeActions}</div>
     </article>
     <article class="control-item payment-settings-card">
@@ -444,6 +457,13 @@
     $('libraryQueuePause')?.addEventListener('click', () => changeQueueMode('paused').catch(handleError));
     $('libraryQueueMaintenance')?.addEventListener('click', () => changeQueueMode('maintenance').catch(handleError));
     $('libraryQueueResume')?.addEventListener('click', () => changeQueueMode('running').catch(handleError));
+    const kickQueue = async () => {
+      await apiFetch('/api/control/library-import/queue-kick', { method: 'POST' });
+      notify('Очередь запущена');
+      await loadLibraryImport();
+    };
+    $('libraryQueueKick')?.addEventListener('click', () => kickQueue().catch(handleError));
+    document.querySelectorAll('[data-library-queue-kick]').forEach((button) => button.addEventListener('click', () => kickQueue().catch(handleError)));
     if (activeJobs.length && state.active === 'library_import') {
       state.libraryRefreshTimer = window.setTimeout(() => {
         state.libraryRefreshTimer = null;
