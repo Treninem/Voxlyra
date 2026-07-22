@@ -9,7 +9,7 @@ export MALLOC_ARENA_MAX="${MALLOC_ARENA_MAX:-2}"
 export MALLOC_TRIM_THRESHOLD_="${MALLOC_TRIM_THRESHOLD_:-131072}"
 export VOSK_MODEL_PATH=/app/storage/tts/models/vosk
 export TTS_VOSK_MODEL_DIR=/app/storage/tts/models/vosk
-mkdir -p data storage/covers storage/books storage/audio storage/tts storage/tts/models/vosk storage/comics storage/temp storage/legal
+mkdir -p data data/chunked_uploads data/library_import_queue/uploads storage/covers storage/books storage/audio storage/tts storage/tts/models/vosk storage/comics storage/temp storage/legal
 
 # Remove only stale/broken import artifacts. Fresh chunk sessions are preserved
 # so a 250+ MB upload can continue after Redeploy instead of starting from zero.

@@ -35,11 +35,11 @@ from app.services.author_channel_queue import (
     get_author_channel_status, retry_failed_author_posts, update_author_channel_settings,
 )
 from app.services.library_import_queue import (
-    IMPORT_UPLOAD_ROOT,
     calculate_archive_hash,
     cancel_import_job,
     enqueue_import_job,
     get_import_queue_control_state,
+    persist_import_archive,
     retry_import_job,
 )
 from app.services.library_import_upload import create_library_import_upload_token
@@ -335,11 +335,13 @@ async def library_import_receive(message: Message, state: FSMContext) -> None:
             message, state, progress, filename=filename, file_size=int(document.file_size or 0)
         )
         return
-    await asyncio.to_thread(IMPORT_UPLOAD_ROOT.mkdir, parents=True, exist_ok=True)
-    zip_path = IMPORT_UPLOAD_ROOT / f"{uuid.uuid4().hex}.zip"
+    temp_root = Path(str(getattr(settings, "CHUNK_UPLOAD_ROOT", "data/chunked_uploads") or "data/chunked_uploads"))
+    await asyncio.to_thread(temp_root.mkdir, parents=True, exist_ok=True)
+    zip_path = temp_root / f"telegram-{uuid.uuid4().hex}.partial"
 
     try:
         await message.bot.download(document, destination=zip_path)
+        zip_path = await persist_import_archive(zip_path)
         archive_hash = await calculate_archive_hash(zip_path)
         job_id, position = await enqueue_import_job(
             archive_path=zip_path,

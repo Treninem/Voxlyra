@@ -338,7 +338,6 @@ from app.services.chunked_upload import (
     save_chunk,
 )
 from app.services.library_import_queue import (
-    IMPORT_UPLOAD_ROOT,
     calculate_archive_hash,
     cancel_import_job,
     ensure_import_queue_schema,
@@ -347,6 +346,7 @@ from app.services.library_import_queue import (
     get_import_queue_worker_state,
     get_import_upload_receipt,
     list_import_jobs,
+    persist_import_archive,
     retry_import_job,
     set_import_queue_mode,
     wake_import_worker,
@@ -1864,9 +1864,7 @@ def create_app() -> FastAPI:
                     total_chunks=total_chunks,
                 )
             )
-            await asyncio.to_thread(IMPORT_UPLOAD_ROOT.mkdir, parents=True, exist_ok=True)
-            queue_path = IMPORT_UPLOAD_ROOT / f"{uuid.uuid4().hex}.zip"
-            await asyncio.to_thread(shutil.move, str(assembled_path), str(queue_path))
+            queue_path = await persist_import_archive(assembled_path)
             archive_hash = await calculate_archive_hash(queue_path)
             job_id, position = await enqueue_import_job(
                 archive_path=queue_path,

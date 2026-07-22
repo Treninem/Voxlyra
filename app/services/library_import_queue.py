@@ -9,6 +9,7 @@ import os
 import shutil
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -37,8 +38,12 @@ class ImportCancellationRequested(RuntimeError):
     """Внутренний сигнал кооперативной остановки между целостными операциями."""
 
 
-IMPORT_QUEUE_ROOT = DEFAULT_STORAGE_ROOT / "import_queue"
+IMPORT_QUEUE_ROOT = Path(
+    str(getattr(settings, "LIBRARY_IMPORT_QUEUE_ROOT", "data/library_import_queue") or "data/library_import_queue")
+)
 IMPORT_UPLOAD_ROOT = IMPORT_QUEUE_ROOT / "uploads"
+LEGACY_IMPORT_QUEUE_ROOT = DEFAULT_STORAGE_ROOT / "import_queue"
+LEGACY_IMPORT_UPLOAD_ROOT = LEGACY_IMPORT_QUEUE_ROOT / "uploads"
 
 QUEUE_MODE_SETTING_KEY = "library_import_queue_mode"
 QUEUE_MODE_ACTOR_SETTING_KEY = "library_import_queue_mode_actor"
@@ -75,6 +80,134 @@ def wake_import_worker() -> None:
     event = _WORKER_WAKE_EVENT
     if event is not None:
         event.set()
+
+
+def _portable_archive_path(path: Path) -> str:
+    """Store a path relative to the application root when possible."""
+    try:
+        return str(path.resolve().relative_to(Path.cwd().resolve()))
+    except (OSError, ValueError):
+        try:
+            return str(path.resolve())
+        except OSError:
+            return str(path)
+
+
+def resolve_import_archive_path(value: str | Path) -> Path:
+    """Resolve an archive after Redeploy even if an old container path was stored."""
+    raw = Path(str(value or ""))
+    candidates: list[Path] = []
+    if str(raw):
+        candidates.append(raw)
+    if raw.name:
+        candidates.extend((IMPORT_UPLOAD_ROOT / raw.name, LEGACY_IMPORT_UPLOAD_ROOT / raw.name))
+    seen: set[str] = set()
+    for candidate in candidates:
+        try:
+            marker = str(candidate.resolve())
+        except OSError:
+            marker = str(candidate)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        if candidate.is_file():
+            return candidate
+    return IMPORT_UPLOAD_ROOT / raw.name if raw.name else raw
+
+
+def _persist_import_archive_sync(source: Path) -> Path:
+    """Atomically move/copy a completed ZIP into the persistent queue root."""
+    if not source.is_file():
+        raise ValueError("Загруженный архив не найден")
+    IMPORT_UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
+    target = IMPORT_UPLOAD_ROOT / f"{uuid.uuid4().hex}.zip"
+    partial = target.with_suffix(".zip.partial")
+    partial.unlink(missing_ok=True)
+    copied_source = False
+    try:
+        try:
+            same_device = source.stat().st_dev == IMPORT_UPLOAD_ROOT.stat().st_dev
+        except OSError:
+            same_device = False
+        if same_device:
+            # os.replace is atomic on one filesystem: a restart can leave either
+            # the old source or the complete final ZIP, never a half-written file.
+            os.replace(source, target)
+        else:
+            with source.open("rb") as src, partial.open("wb") as dst:
+                shutil.copyfileobj(src, dst, length=4 * 1024 * 1024)
+                dst.flush()
+                os.fsync(dst.fileno())
+            copied_source = True
+            os.replace(partial, target)
+        with target.open("rb") as handle:
+            os.fsync(handle.fileno())
+        try:
+            directory_fd = os.open(str(IMPORT_UPLOAD_ROOT), os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except OSError:
+            pass
+        if copied_source:
+            source.unlink(missing_ok=True)
+        return target
+    finally:
+        partial.unlink(missing_ok=True)
+
+
+async def persist_import_archive(source: str | Path) -> Path:
+    """Persist a completed archive before the queue row is committed."""
+    return await asyncio.to_thread(_persist_import_archive_sync, Path(source))
+
+
+async def _migrate_legacy_queue_archives() -> int:
+    """Move old queue ZIPs into the DB-adjacent persistent directory and repair rows."""
+    await asyncio.to_thread(IMPORT_UPLOAD_ROOT.mkdir, parents=True, exist_ok=True)
+    moved = 0
+    try:
+        same_root = LEGACY_IMPORT_UPLOAD_ROOT.resolve() == IMPORT_UPLOAD_ROOT.resolve()
+    except OSError:
+        same_root = False
+    if not same_root and LEGACY_IMPORT_UPLOAD_ROOT.is_dir():
+        for source in list(LEGACY_IMPORT_UPLOAD_ROOT.glob("*.zip")):
+            target = IMPORT_UPLOAD_ROOT / source.name
+            if target.exists():
+                continue
+            try:
+                await asyncio.to_thread(os.replace, source, target)
+                moved += 1
+            except OSError:
+                try:
+                    await asyncio.to_thread(shutil.copy2, source, target)
+                    await asyncio.to_thread(source.unlink)
+                    moved += 1
+                except OSError:
+                    target.unlink(missing_ok=True)
+
+    async with connect() as db:
+        cur = await db.execute(
+            """SELECT id, archive_path FROM library_import_jobs
+               WHERE status IN ('queued','processing','cancelling','failed','cancelled')"""
+        )
+        rows = await cur.fetchall()
+        changed = 0
+        for row in rows:
+            resolved = resolve_import_archive_path(str(row["archive_path"] or ""))
+            if not resolved.is_file():
+                continue
+            portable = _portable_archive_path(resolved)
+            if portable == str(row["archive_path"] or ""):
+                continue
+            await db.execute(
+                "UPDATE library_import_jobs SET archive_path=? WHERE id=?",
+                (portable, int(row["id"])),
+            )
+            changed += 1
+        if changed:
+            await db.commit()
+    return moved
 
 
 def _release_import_memory() -> None:
@@ -165,7 +298,7 @@ async def _cleanup_orphaned_queue_archives(*, min_age_seconds: int = 10 * 60) ->
             (now_iso,),
         )
         await db.commit()
-    keep = {str(Path(str(row["archive_path"])).resolve()) for row in rows}
+    keep = {str(resolve_import_archive_path(str(row["archive_path"])).resolve()) for row in rows}
     now = time.time()
     removed = 0
     for path in IMPORT_UPLOAD_ROOT.glob("*.zip"):
@@ -330,6 +463,7 @@ async def ensure_import_queue_schema() -> None:
             await db.execute("DELETE FROM library_import_upload_receipts WHERE expires_at<=?", (utc_now(),))
             await db.commit()
         await asyncio.to_thread(IMPORT_UPLOAD_ROOT.mkdir, parents=True, exist_ok=True)
+        await _migrate_legacy_queue_archives()
         await asyncio.to_thread(cleanup_stale_uploads)
         await asyncio.to_thread(cleanup_stale_import_work)
         await _cleanup_orphaned_queue_archives()
@@ -410,9 +544,12 @@ async def enqueue_import_job(
 ) -> tuple[int, int]:
     """Ставит уже загруженный ZIP в постоянную очередь и возвращает номер и позицию."""
     await ensure_import_queue_schema()
-    archive_path = Path(archive_path)
+    archive_path = resolve_import_archive_path(archive_path)
     if not archive_path.is_file():
         raise ValueError("Загруженный архив не найден")
+    if not _is_inside(archive_path, IMPORT_QUEUE_ROOT):
+        archive_path = await persist_import_archive(archive_path)
+    stored_archive_path = _portable_archive_path(archive_path)
 
     async with connect() as db:
         await db.execute("BEGIN IMMEDIATE")
@@ -455,14 +592,14 @@ async def enqueue_import_job(
             raise ValueError(f"Этот архив уже находится в очереди: задание #{int(existing['id'])}")
 
         cur = await db.execute(
-            """SELECT id, archive_path, archive_expires_at FROM library_import_jobs
+            """SELECT id, archive_path, archive_expires_at, actor_user_id FROM library_import_jobs
                WHERE archive_hash=? AND status IN ('failed','cancelled')
                ORDER BY id DESC LIMIT 1""",
             (archive_hash,),
         )
         failed = await cur.fetchone()
         if failed:
-            retained = Path(str(failed["archive_path"] or ""))
+            retained = resolve_import_archive_path(str(failed["archive_path"] or ""))
             if retained.is_file() and _is_inside(retained, IMPORT_QUEUE_ROOT) and _iso_is_future(failed["archive_expires_at"]):
                 await db.rollback()
                 raise ValueError(
@@ -470,22 +607,46 @@ async def enqueue_import_job(
                     "Используйте кнопку «Повторить», новая загрузка не нужна."
                 )
 
-        cur = await db.execute(
-            """INSERT INTO library_import_jobs(
-                   archive_name, archive_path, archive_hash, actor_user_id,
-                   chat_id, progress_message_id, status, created_at
-               ) VALUES(?, ?, ?, ?, ?, ?, 'queued', ?)""",
-            (
-                archive_name,
-                str(archive_path),
-                archive_hash,
-                int(actor_user_id),
-                int(chat_id),
-                int(progress_message_id),
-                utc_now(),
-            ),
+        reuse_failed = bool(
+            failed
+            and int(failed["actor_user_id"] or 0) == int(actor_user_id)
+            and not resolve_import_archive_path(str(failed["archive_path"] or "")).is_file()
         )
-        job_id = int(cur.lastrowid)
+        if reuse_failed:
+            job_id = int(failed["id"])
+            now = utc_now()
+            await db.execute(
+                """UPDATE library_import_jobs
+                   SET archive_name=?, archive_path=?, archive_hash=?, actor_user_id=?,
+                       chat_id=?, progress_message_id=?, status='queued', batch_id=NULL,
+                       processed=0, total=0, added=0, replaced_count=0,
+                       renumbered_count=0, duplicate_count=0, error_count=0, phase=0,
+                       current_folder=NULL, current_title=NULL, archive_expires_at=NULL,
+                       cancel_requested=0, cancel_requested_at=NULL, last_error=NULL,
+                       started_at=NULL, heartbeat_at=?, completed_at=NULL
+                   WHERE id=? AND status IN ('failed','cancelled')""",
+                (
+                    archive_name, stored_archive_path, archive_hash, int(actor_user_id),
+                    int(chat_id), int(progress_message_id), now, job_id,
+                ),
+            )
+        else:
+            cur = await db.execute(
+                """INSERT INTO library_import_jobs(
+                       archive_name, archive_path, archive_hash, actor_user_id,
+                       chat_id, progress_message_id, status, created_at
+                   ) VALUES(?, ?, ?, ?, ?, ?, 'queued', ?)""",
+                (
+                    archive_name,
+                    stored_archive_path,
+                    archive_hash,
+                    int(actor_user_id),
+                    int(chat_id),
+                    int(progress_message_id),
+                    utc_now(),
+                ),
+            )
+            job_id = int(cur.lastrowid)
         cur = await db.execute(
             "SELECT COUNT(*) FROM library_import_jobs WHERE status='queued' AND id<=?",
             (job_id,),
@@ -588,7 +749,7 @@ async def list_import_jobs(
         total = max(0, int(item.get("total") or 0))
         item["progress_percent"] = min(100, int(processed * 100 / total)) if total else 0
         item["can_cancel"] = str(item.get("status") or "") in {"queued", "processing"}
-        archive_path = Path(str(item.pop("archive_path", "") or ""))
+        archive_path = resolve_import_archive_path(str(item.pop("archive_path", "") or ""))
         item["archive_available"] = bool(archive_path.is_file() and _is_inside(archive_path, IMPORT_QUEUE_ROOT))
         item["can_retry"] = bool(
             str(item.get("status") or "") in {"failed", "cancelled"}
@@ -685,7 +846,7 @@ async def retry_import_job(
             await db.commit()
             return {"ok": False, "reason": "not_retryable", "status": retryable_status}
 
-        archive_path = Path(str(row["archive_path"] or ""))
+        archive_path = resolve_import_archive_path(str(row["archive_path"] or ""))
         available = archive_path.is_file() and _is_inside(archive_path, IMPORT_QUEUE_ROOT)
         unexpired = _iso_is_future(row["archive_expires_at"])
         if not available or not unexpired:
@@ -952,7 +1113,7 @@ def _is_inside(path: Path, root: Path) -> bool:
 
 
 async def _cleanup_archive(job: ImportQueueJob) -> None:
-    archive_path = Path(job.archive_path)
+    archive_path = resolve_import_archive_path(job.archive_path)
     try:
         if archive_path.is_file() and _is_inside(archive_path, IMPORT_QUEUE_ROOT):
             await asyncio.to_thread(archive_path.unlink)
@@ -1057,7 +1218,7 @@ async def recover_interrupted_import_jobs(*, stale_before: str | None = None) ->
         batch_id = int(row["batch_id"]) if row["batch_id"] is not None else None
         if batch_id:
             await discard_incomplete_import_batch(batch_id)
-        archive_path = Path(str(row["archive_path"]))
+        archive_path = resolve_import_archive_path(str(row["archive_path"]))
         was_cancelling = str(row["status"]) == "cancelling"
         if was_cancelling and archive_path.is_file():
             status = "cancelled"
@@ -1200,7 +1361,7 @@ async def process_next_import_job(bot) -> bool:
 
     try:
         result = await import_library_zip(
-            Path(job.archive_path),
+            resolve_import_archive_path(job.archive_path),
             job.archive_name,
             job.actor_user_id,
             progress_callback=progress_callback,

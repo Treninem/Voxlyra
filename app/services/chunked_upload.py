@@ -19,7 +19,8 @@ from app.config import settings
 from app.services.book_parser import SUPPORTED_BOOK_EXTENSIONS
 from app.services.graphic_types import SUPPORTED_GRAPHIC_EXTENSIONS
 
-UPLOAD_ROOT = Path("storage/temp/chunked_book_uploads")
+UPLOAD_ROOT = Path(str(getattr(settings, "CHUNK_UPLOAD_ROOT", "data/chunked_uploads") or "data/chunked_uploads"))
+LEGACY_UPLOAD_ROOT = Path("storage/temp/chunked_book_uploads")
 CHUNK_SIZE_BYTES = 6 * 1024 * 1024
 MAX_CHUNKS = 10000
 MIN_FREE_SPACE_BYTES = 32 * 1024 * 1024
@@ -37,8 +38,36 @@ def _format_mb(value: int) -> str:
     return f"{max(0, int(value)) / 1024 / 1024:.1f} МБ"
 
 
+def _migrate_legacy_upload_root() -> int:
+    """Best-effort migration for in-place updates from the old storage path."""
+    try:
+        if LEGACY_UPLOAD_ROOT.resolve() == UPLOAD_ROOT.resolve() or not LEGACY_UPLOAD_ROOT.is_dir():
+            return 0
+    except OSError:
+        return 0
+    moved = 0
+    for folder in list(LEGACY_UPLOAD_ROOT.iterdir()):
+        if not folder.is_dir():
+            continue
+        target = UPLOAD_ROOT / folder.name
+        if target.exists():
+            continue
+        try:
+            os.replace(folder, target)
+            moved += 1
+        except OSError:
+            try:
+                shutil.copytree(folder, target)
+                shutil.rmtree(folder, ignore_errors=True)
+                moved += 1
+            except OSError:
+                shutil.rmtree(target, ignore_errors=True)
+    return moved
+
+
 def _ensure_upload_root() -> None:
     UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
+    _migrate_legacy_upload_root()
 
 
 def _write_meta_file(folder: Path, meta: dict[str, Any]) -> None:

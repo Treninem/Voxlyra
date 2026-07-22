@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     BOT_USERNAME: str = "VoxlyraBot"
     PROJECT_NAME: str = "Вокслира"
     PUBLIC_VERSION_VISIBLE: bool = False
-    PROJECT_VERSION: str = "v1.14.0.4"
+    PROJECT_VERSION: str = "v1.14.0.5"
     MAX_BOOK_UPLOAD_MB: int = 0
     MAX_BOOK_UNPACKED_MB: int = 2048
     # Прямая загрузка больших библиотечных ZIP идёт частями. Это аварийный
@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     LIBRARY_IMPORT_LARGE_UPLOAD_MAX_MB: int = 2048
     LIBRARY_IMPORT_MAX_ACTIVE_UPLOADS: int = 4
     LIBRARY_IMPORT_MIN_FREE_DISK_MB: int = 256
+    # Большие ZIP и незавершённые части должны лежать рядом с постоянной
+    # базой, а не в эфемерной папке storage. На Bothost каталог data уже
+    # используется для SQLite и переживает Redeploy.
+    LIBRARY_IMPORT_QUEUE_ROOT: str = "data/library_import_queue"
+    CHUNK_UPLOAD_ROOT: str = "data/chunked_uploads"
     CHUNK_UPLOAD_MAX_CONCURRENCY: int = 4
     DB_BUSY_TIMEOUT_MS: int = 15000
     DB_CACHE_MB: int = 8

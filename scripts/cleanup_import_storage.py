@@ -18,10 +18,99 @@ from datetime import datetime
 from pathlib import Path
 
 ROOT = Path.cwd()
-DATABASE = ROOT / os.environ.get("DATABASE_PATH", "data/voxlyra.sqlite3")
-CHUNK_ROOT = ROOT / "storage" / "temp" / "chunked_book_uploads"
+
+
+def _configured_path(name: str, default: str) -> Path:
+    value = Path(os.environ.get(name, default) or default)
+    return value if value.is_absolute() else ROOT / value
+
+
+DATABASE = _configured_path("DATABASE_PATH", "data/voxlyra.sqlite3")
+CHUNK_ROOT = _configured_path("CHUNK_UPLOAD_ROOT", "data/chunked_uploads")
+QUEUE_ROOT = _configured_path("LIBRARY_IMPORT_QUEUE_ROOT", "data/library_import_queue")
+QUEUE_UPLOAD_ROOT = QUEUE_ROOT / "uploads"
+LEGACY_CHUNK_ROOT = ROOT / "storage" / "temp" / "chunked_book_uploads"
+LEGACY_QUEUE_UPLOAD_ROOT = ROOT / "storage" / "library" / "import_queue" / "uploads"
 IMPORT_WORK_ROOT = ROOT / "storage" / "library" / "import_work"
-QUEUE_UPLOAD_ROOT = ROOT / "storage" / "library" / "import_queue" / "uploads"
+
+
+def migrate_legacy_storage() -> tuple[int, int]:
+    """Move still-present old import data into the DB-adjacent persistent roots."""
+    CHUNK_ROOT.mkdir(parents=True, exist_ok=True)
+    QUEUE_UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
+    moved_sessions = 0
+    moved_archives = 0
+
+    try:
+        same_chunks = LEGACY_CHUNK_ROOT.resolve() == CHUNK_ROOT.resolve()
+    except OSError:
+        same_chunks = False
+    if not same_chunks and LEGACY_CHUNK_ROOT.is_dir():
+        for source in list(LEGACY_CHUNK_ROOT.iterdir()):
+            if not source.is_dir():
+                continue
+            target = CHUNK_ROOT / source.name
+            if target.exists():
+                continue
+            try:
+                os.replace(source, target)
+                moved_sessions += 1
+            except OSError:
+                try:
+                    shutil.copytree(source, target)
+                    shutil.rmtree(source, ignore_errors=True)
+                    moved_sessions += 1
+                except OSError:
+                    shutil.rmtree(target, ignore_errors=True)
+
+    try:
+        same_queue = LEGACY_QUEUE_UPLOAD_ROOT.resolve() == QUEUE_UPLOAD_ROOT.resolve()
+    except OSError:
+        same_queue = False
+    moved_by_name: dict[str, Path] = {}
+    if not same_queue and LEGACY_QUEUE_UPLOAD_ROOT.is_dir():
+        for source in list(LEGACY_QUEUE_UPLOAD_ROOT.glob("*.zip")):
+            target = QUEUE_UPLOAD_ROOT / source.name
+            if target.exists():
+                moved_by_name[source.name] = target
+                continue
+            try:
+                os.replace(source, target)
+                moved_archives += 1
+                moved_by_name[source.name] = target
+            except OSError:
+                try:
+                    shutil.copy2(source, target)
+                    source.unlink(missing_ok=True)
+                    moved_archives += 1
+                    moved_by_name[source.name] = target
+                except OSError:
+                    target.unlink(missing_ok=True)
+
+    if DATABASE.is_file() and moved_by_name:
+        try:
+            with sqlite3.connect(DATABASE, timeout=3) as db:
+                rows = db.execute(
+                    "SELECT id, archive_path FROM library_import_jobs "
+                    "WHERE status IN ('queued','processing','cancelling','failed','cancelled')"
+                ).fetchall()
+                for job_id, raw_path in rows:
+                    name = Path(str(raw_path or "")).name
+                    target = moved_by_name.get(name)
+                    if target is None or not target.is_file():
+                        continue
+                    try:
+                        portable = str(target.resolve().relative_to(ROOT.resolve()))
+                    except (OSError, ValueError):
+                        portable = str(target)
+                    db.execute(
+                        "UPDATE library_import_jobs SET archive_path=? WHERE id=?",
+                        (portable, int(job_id)),
+                    )
+                db.commit()
+        except sqlite3.Error:
+            pass
+    return moved_sessions, moved_archives
 
 
 def _retention_seconds() -> int:
@@ -71,7 +160,16 @@ def cleanup_library_upload_sessions() -> tuple[int, int]:
     now = time.time()
     retention = _retention_seconds()
     CHUNK_ROOT.mkdir(parents=True, exist_ok=True)
-    for folder in list(CHUNK_ROOT.iterdir()):
+    for item in list(CHUNK_ROOT.iterdir()):
+        if item.is_file():
+            try:
+                if now - item.stat().st_mtime >= retention:
+                    item.unlink(missing_ok=True)
+                    removed += 1
+            except OSError:
+                pass
+            continue
+        folder = item
         if not folder.is_dir():
             continue
         meta_path = folder / "meta.json"
@@ -127,7 +225,17 @@ def active_queue_archives() -> set[str] | None:
                     "SELECT archive_path FROM library_import_jobs "
                     "WHERE status IN ('queued','processing','cancelling')"
                 ).fetchall()
-        return {str(Path(str(row[0])).resolve()) for row in rows if row and row[0]}
+        result: set[str] = set()
+        for row in rows:
+            if not row or not row[0]:
+                continue
+            raw = Path(str(row[0]))
+            candidates = (raw, QUEUE_UPLOAD_ROOT / raw.name, LEGACY_QUEUE_UPLOAD_ROOT / raw.name)
+            for candidate in candidates:
+                if candidate.is_file():
+                    result.add(str(candidate.resolve()))
+                    break
+        return result
     except (sqlite3.Error, OSError):
         return None
 
@@ -140,6 +248,13 @@ def remove_orphan_queue_archives() -> int:
     removed = 0
     now = time.time()
     retention = _retention_seconds()
+    for partial in QUEUE_UPLOAD_ROOT.glob("*.partial"):
+        try:
+            if now - partial.stat().st_mtime >= min(retention, 10 * 60):
+                partial.unlink(missing_ok=True)
+                removed += 1
+        except OSError:
+            pass
     for path in QUEUE_UPLOAD_ROOT.glob("*.zip"):
         try:
             if str(path.resolve()) in keep:
@@ -175,12 +290,14 @@ def remove_old_system_temp() -> int:
 
 
 def main() -> None:
+    migrated_sessions, migrated_archives = migrate_legacy_storage()
     stale_chunks, preserved_chunks = cleanup_library_upload_sessions()
     work = remove_children(IMPORT_WORK_ROOT)
     orphans = remove_orphan_queue_archives()
     system_temp = remove_old_system_temp()
     print(
         "Import startup cleanup: "
+        f"migrated_upload_sessions={migrated_sessions} migrated_queue_archives={migrated_archives} "
         f"stale_upload_sessions={stale_chunks} preserved_upload_sessions={preserved_chunks} "
         f"work_dirs={work} orphan_archives={orphans} system_temp={system_temp}",
         flush=True,
