@@ -107,12 +107,16 @@
   </div>
 </section>
 
-<section class="book-list premium-grid catalog-grid" id="catalogGrid">
+<section class="book-list premium-grid catalog-grid" id="catalogGrid" data-default-filter="all" data-page-size="{{ catalog_page_size|default(36) }}">
   {% if books %}
     {% for book in books %}{{ book_card(book) }}{% endfor %}
   {% else %}
     {{ empty_state('no-books', 'Пока здесь тихо', 'Когда появятся опубликованные книги и графические произведения, они будут ждать вас на этой витрине.', extra_class='catalog-empty-state') }}
   {% endif %}
 </section>
-<div id="catalogEmptySearch" hidden>{{ empty_state('nothing-found', 'Ничего не нашлось', 'Попробуйте другое название или снимите фильтр.') }}</div>
+<div id="catalogEmptySearch" hidden>{{ empty_state('nothing-found', 'Ничего не нашлось', 'Проверьте написание или попробуйте часть названия, имя автора, жанр либо ID книги.') }}</div>
+<div class="catalog-results-footer" id="catalogResultsFooter">
+  <span id="catalogResultCount">Показано {{ books|length }} из {{ catalog_total|default(books|length) }}</span>
+  <button type="button" class="button-link secondary catalog-load-more" id="catalogLoadMore"{% if not catalog_has_more %} hidden{% endif %}>Показать ещё</button>
+</div>
 {% endblock %}

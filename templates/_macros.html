@@ -23,6 +23,7 @@
 {% set type_label = {'comic':'Комикс','manga':'Манга','manhwa':'Манхва','webtoon':'Вебтун','graphic_novel':'Графический роман'}.get(content_type, 'Книга') %}
 <article class="book-card premium-book-card {{ mode }}{% if is_graphic %} graphic-book-card{% endif %}"
    data-catalog-card
+   data-book-id="{{ book.id }}"
    data-title="{{ (book.title or '')|lower }}"
    data-author="{{ (book.pen_name or '')|lower }}"
    data-audio="{{ 1 if has_audio else 0 }}"

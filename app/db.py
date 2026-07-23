@@ -1,8 +1,11 @@
 import asyncio
 import json
 import os
+import re
 import sqlite3
+import unicodedata
 import uuid
+from difflib import SequenceMatcher
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -16,6 +19,20 @@ from app.permissions import DELEGABLE_PERMISSION_CODES
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def normalize_book_search_text(value: object | None) -> str:
+    """Canonical text used by every book search surface.
+
+    It removes punctuation and combining marks, treats ``ё`` as ``е`` and
+    collapses whitespace.  The same transformation is registered in SQLite so
+    server-side and browser-side searches cannot disagree on Russian titles.
+    """
+    text = str(value or "").casefold().replace("ё", "е")
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(char for char in text if not unicodedata.combining(char))
+    text = re.sub(r"[^\w]+", " ", text, flags=re.UNICODE).replace("_", " ")
+    return " ".join(text.split())
 
 
 def _normalize_progress_timestamp(value: object | None) -> str:
@@ -50,6 +67,7 @@ async def connect():
     # SQLite lower()/NOCASE handle ASCII only. The project stores Russian,
     # Japanese and other author names, so searches need a Unicode-aware fold.
     await db.create_function("unicode_casefold", 1, lambda value: str(value or "").casefold())
+    await db.create_function("book_search_normalize", 1, normalize_book_search_text)
     await db.execute("PRAGMA foreign_keys = ON")
     await db.execute(f"PRAGMA busy_timeout = {max(1000, int(settings.DB_BUSY_TIMEOUT_MS or 15000))}")
     configured_cache_mb = max(4, int(settings.DB_CACHE_MB or 8))
@@ -19629,3 +19647,344 @@ async def create_paid_purchase(*, user_id: int, payload: str, amount_stars: int,
 
 
 # v1.14.0.16 — five reward levels and first expansion toward 100
+
+# v1.14.0.23 — unified, full-database book search
+
+def _book_word_similarity(left: str, right: str) -> float:
+    if not left or not right:
+        return 0.0
+    if left == right:
+        return 1.0
+    if min(len(left), len(right)) >= 3 and (left.startswith(right) or right.startswith(left)):
+        return 0.95
+    if min(len(left), len(right)) >= 3 and (left in right or right in left):
+        return 0.88
+    return SequenceMatcher(None, left, right).ratio()
+
+
+def _book_search_score(row: dict[str, Any], query: str) -> float:
+    normalized = normalize_book_search_text(query)
+    if not normalized:
+        return 1.0
+    book_id = int(row.get("id") or 0)
+    if normalized.isdigit() and int(normalized) == book_id:
+        return 1_000_000.0
+
+    title = normalize_book_search_text(row.get("title"))
+    pen_name = normalize_book_search_text(row.get("pen_name"))
+    source_author = normalize_book_search_text(row.get("source_author_name"))
+    genres = normalize_book_search_text(row.get("genre_labels"))
+    description = normalize_book_search_text(row.get("description"))
+    authors = " ".join(part for part in (pen_name, source_author) if part)
+    combined = " ".join(part for part in (title, authors, genres, description) if part)
+
+    if title == normalized:
+        return 950_000.0
+    if title.startswith(normalized):
+        return 900_000.0 - min(len(title), 10_000)
+    if normalized in title:
+        return 850_000.0 - title.index(normalized)
+    if authors == normalized:
+        return 800_000.0
+    if any(author == normalized for author in (pen_name, source_author) if author):
+        return 790_000.0
+    if normalized in authors:
+        return 760_000.0 - authors.index(normalized)
+    if normalized in genres:
+        return 710_000.0
+    if normalized in combined:
+        return 680_000.0
+
+    query_words = normalized.split()
+    if not query_words:
+        return 0.0
+    title_words = title.split()
+    author_words = authors.split()
+    genre_words = genres.split()
+    combined_words = combined.split()
+
+    # Word order does not matter.  Every requested word must either be present or
+    # be a close spelling match. Short words are intentionally stricter to avoid
+    # flooding results with unrelated books.
+    def match_words(words: list[str], *, long_threshold: float, short_threshold: float) -> tuple[int, float]:
+        matched = 0
+        total = 0.0
+        for query_word in query_words:
+            best = max((_book_word_similarity(query_word, word) for word in words), default=0.0)
+            threshold = short_threshold if len(query_word) <= 3 else long_threshold
+            if best >= threshold:
+                matched += 1
+            total += best
+        return matched, total / max(1, len(query_words))
+
+    title_matched, title_similarity = match_words(title_words, long_threshold=0.70, short_threshold=0.92)
+    if title_matched == len(query_words):
+        return 620_000.0 + title_similarity * 10_000.0
+
+    author_matched, author_similarity = match_words(author_words, long_threshold=0.74, short_threshold=0.94)
+    if author_matched == len(query_words):
+        return 570_000.0 + author_similarity * 10_000.0
+
+    genre_matched, genre_similarity = match_words(genre_words, long_threshold=0.78, short_threshold=0.95)
+    if genre_matched == len(query_words):
+        return 520_000.0 + genre_similarity * 8_000.0
+
+    combined_matched, combined_similarity = match_words(combined_words, long_threshold=0.76, short_threshold=0.95)
+    if combined_matched == len(query_words):
+        return 470_000.0 + combined_similarity * 8_000.0
+
+    # Whole-phrase typo tolerance is useful for one long title fragment but is
+    # disabled for very short queries where fuzzy matching would be noisy.
+    if len(normalized) >= 5:
+        title_ratio = SequenceMatcher(None, normalized, title).ratio() if title else 0.0
+        author_ratio = SequenceMatcher(None, normalized, authors).ratio() if authors else 0.0
+        if title_ratio >= 0.62:
+            return 390_000.0 + title_ratio * 10_000.0
+        if author_ratio >= 0.68:
+            return 350_000.0 + author_ratio * 8_000.0
+    return 0.0
+
+
+async def _book_search_index(
+    *,
+    status_scope: str = "published",
+    author_user_id: int | None = None,
+    filter_code: str = "all",
+) -> list[dict[str, Any]]:
+    clauses: list[str] = []
+    params: list[Any] = []
+    if status_scope == "published":
+        clauses.append("b.publication_status='published'")
+    elif status_scope == "grantable":
+        clauses.append("b.publication_status!='deleted'")
+    else:
+        clauses.append("b.publication_status!='deleted'")
+    if author_user_id is not None:
+        clauses.append("ap.user_id=?")
+        params.append(int(author_user_id))
+
+    clean_filter = str(filter_code or "all").strip().lower()
+    if clean_filter == "graphic":
+        clauses.append("b.content_type!='book'")
+    elif clean_filter in {"comic", "manga", "manhwa", "webtoon", "graphic_novel"}:
+        clauses.append("b.content_type=?")
+        params.append(clean_filter)
+    elif clean_filter == "audio":
+        clauses.append("EXISTS(SELECT 1 FROM audio_chapters acf WHERE acf.book_id=b.id AND acf.status='published')")
+    elif clean_filter == "free":
+        clauses.append("((COALESCE(b.pricing_type,'')!='premium' AND COALESCE(b.price_stars,0)<=0) OR EXISTS(SELECT 1 FROM chapters cf WHERE cf.book_id=b.id AND cf.status='published' AND cf.is_free=1) OR EXISTS(SELECT 1 FROM graphic_chapters gcf WHERE gcf.book_id=b.id AND gcf.status='published' AND gcf.is_free=1))")
+    elif clean_filter == "popular":
+        clauses.append("(EXISTS(SELECT 1 FROM purchases pf WHERE pf.status='paid' AND (pf.book_id=b.id OR pf.chapter_id IN (SELECT id FROM chapters WHERE book_id=b.id) OR pf.audio_chapter_id IN (SELECT id FROM audio_chapters WHERE book_id=b.id) OR pf.graphic_chapter_id IN (SELECT id FROM graphic_chapters WHERE book_id=b.id))) OR EXISTS(SELECT 1 FROM reviews rf WHERE rf.book_id=b.id AND rf.status='published'))")
+
+    async with connect() as db:
+        cur = await db.execute(
+            f"""
+            SELECT b.id,b.title,b.description,b.content_type,b.publication_status,b.updated_at,b.created_at,
+                   b.price_stars,b.pricing_type,b.cover_path,b.source_author_name,b.author_id,
+                   COALESCE(ap.pen_name,b.source_author_name,'') AS pen_name,
+                   COALESCE((SELECT GROUP_CONCAT(v.option_label,'||') FROM book_option_values v WHERE v.book_id=b.id AND v.option_group IN ('genres','tags')), '') AS genre_labels
+            FROM books b
+            LEFT JOIN author_profiles ap ON ap.id=b.author_id
+            WHERE {' AND '.join(clauses)}
+            """,
+            tuple(params),
+        )
+        return [{key: row[key] for key in row.keys()} for row in await cur.fetchall()]
+
+
+def _rank_book_index(rows: list[dict[str, Any]], query: str) -> list[dict[str, Any]]:
+    normalized = normalize_book_search_text(query)
+    ranked: list[dict[str, Any]] = []
+    if not normalized:
+        return sorted(
+            rows,
+            key=lambda row: (str(row.get("updated_at") or row.get("created_at") or ""), int(row.get("id") or 0)),
+            reverse=True,
+        )
+    for row in rows:
+        score = _book_search_score(row, normalized)
+        if score <= 0:
+            continue
+        item = dict(row)
+        item["search_score"] = score
+        ranked.append(item)
+    ranked.sort(
+        key=lambda row: (
+            float(row.get("search_score") or 0),
+            str(row.get("updated_at") or row.get("created_at") or ""),
+            int(row.get("id") or 0),
+        ),
+        reverse=True,
+    )
+    return ranked
+
+
+async def _catalog_rows_for_ids(book_ids: list[int]) -> list[dict[str, Any]]:
+    ids = [int(value) for value in book_ids if int(value) > 0]
+    if not ids:
+        return []
+    placeholders = ",".join("?" for _ in ids)
+    async with connect() as db:
+        cur = await db.execute(
+            f"""
+            SELECT b.*, COALESCE(a.pen_name,b.source_author_name) AS pen_name,
+                   COALESCE((SELECT AVG(r.rating) FROM reviews r WHERE r.book_id=b.id AND r.status='published'),0) AS rating,
+                   (SELECT COUNT(*) FROM reviews r WHERE r.book_id=b.id AND r.status='published') AS reviews_count,
+                   (SELECT COUNT(*) FROM chapters c WHERE c.book_id=b.id AND c.status='published') AS text_chapters_count,
+                   (SELECT COUNT(*) FROM graphic_chapters gc WHERE gc.book_id=b.id AND gc.status='published') AS graphic_chapters_count,
+                   ((SELECT COUNT(*) FROM chapters c WHERE c.book_id=b.id AND c.status='published') +
+                    (SELECT COUNT(*) FROM graphic_chapters gc WHERE gc.book_id=b.id AND gc.status='published')) AS chapters_count,
+                   (SELECT COALESCE(SUM(gc.pages_count),0) FROM graphic_chapters gc WHERE gc.book_id=b.id AND gc.status='published') AS graphic_pages_count,
+                   (SELECT COUNT(*) FROM audio_chapters ac WHERE ac.book_id=b.id AND ac.status='published') AS audio_count,
+                   ((SELECT COUNT(*) FROM chapters c WHERE c.book_id=b.id AND c.status='published' AND c.is_free=1) +
+                    (SELECT COUNT(*) FROM graphic_chapters gc WHERE gc.book_id=b.id AND gc.status='published' AND gc.is_free=1)) AS free_chapters_count,
+                   (SELECT c.id FROM chapters c WHERE c.book_id=b.id AND c.status='published' ORDER BY c.number,c.id LIMIT 1) AS first_chapter_id,
+                   (SELECT gc.id FROM graphic_chapters gc WHERE gc.book_id=b.id AND gc.status='published' ORDER BY gc.number,gc.id LIMIT 1) AS first_graphic_chapter_id,
+                   (SELECT ac.id FROM audio_chapters ac WHERE ac.book_id=b.id AND ac.status='published' ORDER BY ac.number,ac.id LIMIT 1) AS first_audio_id,
+                   (SELECT GROUP_CONCAT(v.option_label,'||') FROM book_option_values v WHERE v.book_id=b.id AND v.option_group='genres') AS genre_labels,
+                   (SELECT COUNT(*) FROM bookmarks bm WHERE bm.book_id=b.id) AS bookmark_count,
+                   (SELECT COUNT(DISTINCT rp.user_id) FROM reading_progress rp WHERE rp.book_id=b.id) AS reader_count,
+                   (SELECT COUNT(*) FROM purchases p WHERE p.status='paid' AND (
+                       p.book_id=b.id OR p.chapter_id IN (SELECT c3.id FROM chapters c3 WHERE c3.book_id=b.id) OR
+                       p.audio_chapter_id IN (SELECT ac3.id FROM audio_chapters ac3 WHERE ac3.book_id=b.id) OR
+                       p.graphic_chapter_id IN (SELECT gc3.id FROM graphic_chapters gc3 WHERE gc3.book_id=b.id)
+                   )) AS purchase_count
+            FROM books b
+            LEFT JOIN author_profiles a ON a.id=b.author_id
+            WHERE b.id IN ({placeholders}) AND b.publication_status='published'
+            """,
+            tuple(ids),
+        )
+        rows = [{key: row[key] for key in row.keys()} for row in await cur.fetchall()]
+    order = {book_id: index for index, book_id in enumerate(ids)}
+    rows.sort(key=lambda row: order.get(int(row.get("id") or 0), len(order)))
+    for row in rows:
+        row.setdefault("catalog_promoted", False)
+    return rows
+
+
+async def search_catalog_books_page(
+    query: str = "",
+    *,
+    filter_code: str = "all",
+    page: int = 1,
+    page_size: int = 30,
+    exclude_ids: set[int] | list[int] | tuple[int, ...] | None = None,
+) -> dict[str, Any]:
+    """Search every published book with stable pagination and typo tolerance."""
+    safe_page = max(1, int(page or 1))
+    safe_size = max(6, min(60, int(page_size or 30)))
+    index_rows = await _book_search_index(status_scope="published", filter_code=filter_code)
+    ranked = _rank_book_index(index_rows, query)
+    total = len(ranked)
+    excluded = {int(value) for value in (exclude_ids or []) if int(value) > 0}
+    if excluded:
+        ranked = [row for row in ranked if int(row.get("id") or 0) not in excluded]
+        start = 0
+    else:
+        start = (safe_page - 1) * safe_size
+    selected = ranked[start:start + safe_size]
+    items = await _catalog_rows_for_ids([int(row["id"]) for row in selected])
+    score_by_id = {int(row["id"]): float(row.get("search_score") or 0) for row in selected}
+    for item in items:
+        item["search_score"] = score_by_id.get(int(item.get("id") or 0), 0.0)
+    return {
+        "items": items,
+        "total": total,
+        "page": safe_page,
+        "page_size": safe_size,
+        "has_more": len(excluded) + start + len(selected) < total,
+        "query": str(query or "").strip(),
+        "filter": str(filter_code or "all"),
+    }
+
+
+async def search_books(query: str, limit: int = 20) -> list[aiosqlite.Row]:
+    """Owner/moderator search across every non-deleted book."""
+    ranked = _rank_book_index(await _book_search_index(status_scope="all"), query)
+    selected_ids = [int(row["id"]) for row in ranked[:max(1, min(250, int(limit)))]]
+    if not selected_ids:
+        return []
+    placeholders = ",".join("?" for _ in selected_ids)
+    async with connect() as db:
+        cur = await db.execute(
+            f"""
+            SELECT b.*, COALESCE(ap.pen_name,b.source_author_name) AS pen_name,
+                   (SELECT c.id FROM chapters c WHERE c.book_id=b.id ORDER BY c.number,c.id LIMIT 1) AS first_chapter_id,
+                   (SELECT gc.id FROM graphic_chapters gc WHERE gc.book_id=b.id ORDER BY gc.number,gc.id LIMIT 1) AS first_graphic_chapter_id
+            FROM books b LEFT JOIN author_profiles ap ON ap.id=b.author_id
+            WHERE b.id IN ({placeholders})
+            """,
+            tuple(selected_ids),
+        )
+        rows = list(await cur.fetchall())
+    order = {book_id: index for index, book_id in enumerate(selected_ids)}
+    rows.sort(key=lambda row: order.get(int(row["id"]), len(order)))
+    return rows
+
+
+async def list_grantable_books(query: str = "", limit: int | None = None) -> list[aiosqlite.Row]:
+    """All non-deleted books, searchable by normalized title, both author fields and ID."""
+    clean = str(query or "").strip()
+    index_rows = await _book_search_index(status_scope="grantable")
+    ranked = _rank_book_index(index_rows, clean)
+    if limit is not None:
+        ranked = ranked[:max(1, min(10000, int(limit)))]
+    selected_ids = [int(row["id"]) for row in ranked]
+    if not selected_ids:
+        return []
+    placeholders = ",".join("?" for _ in selected_ids)
+    async with connect() as db:
+        cur = await db.execute(
+            f"""
+            SELECT b.id,b.title,b.publication_status,b.pricing_type,b.price_stars,b.source_author_name,
+                   COALESCE(ap.pen_name,b.source_author_name,'') AS pen_name,
+                   COUNT(CASE WHEN c.status!='deleted' THEN 1 END) AS chapters_count
+            FROM books b
+            LEFT JOIN author_profiles ap ON ap.id=b.author_id
+            LEFT JOIN chapters c ON c.book_id=b.id
+            WHERE b.id IN ({placeholders})
+            GROUP BY b.id
+            """,
+            tuple(selected_ids),
+        )
+        rows = list(await cur.fetchall())
+    order = {book_id: index for index, book_id in enumerate(selected_ids)}
+    rows.sort(key=lambda row: order.get(int(row["id"]), len(order)))
+    return rows
+
+
+async def search_catalog_promotion_books(
+    query: str = "",
+    *,
+    user_id: int | None = None,
+    owner: bool = False,
+    limit: int = 40,
+) -> list[dict[str, Any]]:
+    index_rows = await _book_search_index(
+        status_scope="published",
+        author_user_id=None if owner else int(user_id or 0),
+    )
+    ranked = _rank_book_index(index_rows, query)
+    selected_ids = [int(row["id"]) for row in ranked[:max(1, min(200, int(limit)))]]
+    if not selected_ids:
+        return []
+    placeholders = ",".join("?" for _ in selected_ids)
+    now = utc_now()
+    async with connect() as db:
+        await _expire_catalog_promotions(db)
+        cur = await db.execute(
+            f"""
+            SELECT b.id,b.title,b.cover_path,b.content_type,b.publication_status,b.author_id,b.source_author_name,
+                   COALESCE(ap.pen_name,b.source_author_name,'') AS pen_name,
+                   EXISTS(SELECT 1 FROM catalog_promotions cp WHERE cp.book_id=b.id AND cp.status='active' AND cp.expires_at>?) AS promoted
+            FROM books b LEFT JOIN author_profiles ap ON ap.id=b.author_id
+            WHERE b.id IN ({placeholders})
+            """,
+            (now, *selected_ids),
+        )
+        rows = [{key: row[key] for key in row.keys()} for row in await cur.fetchall()]
+        await db.commit()
+    order = {book_id: index for index, book_id in enumerate(selected_ids)}
+    rows.sort(key=lambda row: order.get(int(row.get("id") or 0), len(order)))
+    return rows

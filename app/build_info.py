@@ -5,12 +5,12 @@
 передаётся.
 """
 
-OWNER_BUILD_VERSION = "v1.14.0.22"
-OWNER_BUILD_NAME = "isolated Telegram profile avatars"
+OWNER_BUILD_VERSION = "v1.14.0.23"
+OWNER_BUILD_NAME = "full-database ranked book search"
 
 
 def owner_build_label() -> str:
     return f"{OWNER_BUILD_VERSION} · {OWNER_BUILD_NAME}"
 
 
-WORKING_BUILD_STAGE = "v1.14.0.22 · per-account profile avatar cache isolation"
+WORKING_BUILD_STAGE = "v1.14.0.23 · complete catalog search, pagination and typo tolerance"

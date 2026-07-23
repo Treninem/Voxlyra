@@ -21,8 +21,12 @@
   </div>
 </section>
 {% if books %}
-<section class="book-list premium-grid catalog-grid" id="catalogGrid">{% for book in books %}{{ book_card(book) }}{% endfor %}</section>
-<div id="catalogEmptySearch" hidden>{{ empty_state('nothing-found', 'В этом разделе пока пусто', 'Выберите другой тип или измените запрос.') }}</div>
+<section class="book-list premium-grid catalog-grid" id="catalogGrid" data-default-filter="graphic" data-page-size="{{ catalog_page_size|default(36) }}">{% for book in books %}{{ book_card(book) }}{% endfor %}</section>
+<div id="catalogEmptySearch" hidden>{{ empty_state('nothing-found', 'В этом разделе пока пусто', 'Попробуйте часть названия, автора, жанр или ID произведения.') }}</div>
+<div class="catalog-results-footer" id="catalogResultsFooter">
+  <span id="catalogResultCount">Показано {{ books|length }} из {{ catalog_total|default(books|length) }}</span>
+  <button type="button" class="button-link secondary catalog-load-more" id="catalogLoadMore"{% if not catalog_has_more %} hidden{% endif %}>Показать ещё</button>
+</div>
 {% else %}
 {{ empty_state('no-books', 'Графических произведений пока нет', 'Раздел уже работает. Первый автор может добавить комикс, мангу, манхву, вебтун или графический роман.', '/author?new=graphic', 'Добавить графическое произведение', heading='h2', extra_class='comics-empty-state') }}
 {% endif %}

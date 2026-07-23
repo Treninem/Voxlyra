@@ -200,6 +200,7 @@ from app.db import (
     resolve_comment_complaints,
     publish_book_content,
     list_catalog_books,
+    search_catalog_books_page,
     list_chapters_for_book,
     list_author_chapter_summaries,
     list_chapter_packages_for_book,
@@ -2241,25 +2242,68 @@ def create_app() -> FastAPI:
         await add_audit(user.app_user_id, "legal_consent_withdrawn_web", "legal_document", doc.code, doc.version, "withdrawn")
         return {"ok": True, "code": doc.code, "message": "Согласие отозвано. Функции, которым оно необходимо, будут ограничены."}
 
+    async def _catalog_page_context() -> dict[str, Any]:
+        showcase_books = await attach_rankings(await list_catalog_books(limit=80, include_drafts=False))
+        catalogue_index = await search_catalog_books_page("", filter_code="all", page=1, page_size=36)
+        grid_books = await attach_rankings(await list_catalog_books(limit=36, include_drafts=False))
+        sections = _showcase_sections(showcase_books)
+        return {
+            "books": grid_books,
+            "catalog_total": int(catalogue_index["total"]),
+            "catalog_has_more": int(catalogue_index["total"]) > len(grid_books),
+            "catalog_page_size": int(catalogue_index["page_size"]),
+            **sections,
+            **(await price_context()),
+        }
+
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request):
-        books = await attach_rankings(await list_catalog_books(limit=80, include_drafts=False))
-        sections = _showcase_sections(books)
-        return templates.TemplateResponse(
-            request,
-            "catalog.html",
-            common_context({"books": books, **sections, **(await price_context())}),
-        )
+        return templates.TemplateResponse(request, "catalog.html", common_context(await _catalog_page_context()))
 
     @app.get("/catalog", response_class=HTMLResponse)
     async def catalog(request: Request):
-        books = await attach_rankings(await list_catalog_books(limit=80, include_drafts=False))
-        sections = _showcase_sections(books)
-        return templates.TemplateResponse(
-            request,
-            "catalog.html",
-            common_context({"books": books, **sections, **(await price_context())}),
+        return templates.TemplateResponse(request, "catalog.html", common_context(await _catalog_page_context()))
+
+    @app.get("/api/catalog/search")
+    async def api_catalog_search(
+        q: str = "",
+        filter: str = "all",
+        page: int = 1,
+        page_size: int = 36,
+        exclude: str = "",
+    ):
+        excluded_ids = {int(value) for value in str(exclude or "").split(",") if value.strip().isdigit() and int(value) > 0}
+        clean_query = str(q or "").strip()
+        clean_filter = str(filter or "all").strip().lower()
+        safe_size = max(6, min(60, int(page_size or 36)))
+        if not clean_query and clean_filter == "all" and max(1, int(page or 1)) == 1 and not excluded_ids:
+            index = await search_catalog_books_page("", filter_code="all", page=1, page_size=safe_size)
+            result = {**index, "items": await list_catalog_books(limit=safe_size, include_drafts=False)}
+            result["has_more"] = int(result["total"]) > len(result["items"])
+        else:
+            result = await search_catalog_books_page(
+                clean_query,
+                filter_code=clean_filter,
+                page=max(1, int(page or 1)),
+                page_size=safe_size,
+                exclude_ids=excluded_ids,
+            )
+        result["items"] = await attach_rankings(result["items"], category="comic" if str(filter or "") in GRAPHIC_CONTENT_TYPES or str(filter or "") == "graphic" else "book")
+        prices = await price_context()
+        html = templates.env.get_template("_catalog_results.html").render(
+            books=result["items"],
+            buyer_star_rate_minor=prices["buyer_star_rate_minor"],
         )
+        return {
+            "ok": True,
+            "html": html,
+            "total": int(result["total"]),
+            "page": int(result["page"]),
+            "page_size": int(result["page_size"]),
+            "has_more": bool(result["has_more"]),
+            "query": result["query"],
+            "filter": result["filter"],
+        }
 
     @app.get("/api/recommendations/for-you")
     async def api_recommendations_for_you(
@@ -2310,13 +2354,18 @@ def create_app() -> FastAPI:
 
     @app.get("/comics", response_class=HTMLResponse)
     async def comics_catalog(request: Request):
-        rows = await list_catalog_books(limit=120, include_drafts=False)
-        graphic_rows = [row for row in rows if str(row["content_type"] or "book") in GRAPHIC_CONTENT_TYPES]
-        books = await attach_rankings(graphic_rows, category="comic")
+        first_page = await search_catalog_books_page("", filter_code="graphic", page=1, page_size=36)
+        books = await attach_rankings(first_page["items"], category="comic")
         return templates.TemplateResponse(
             request,
             "comics.html",
-            common_context({"books": books, **(await price_context())}),
+            common_context({
+                "books": books,
+                "catalog_total": int(first_page["total"]),
+                "catalog_has_more": bool(first_page["has_more"]),
+                "catalog_page_size": int(first_page["page_size"]),
+                **(await price_context()),
+            }),
         )
 
     @app.get("/book/{book_id}", response_class=HTMLResponse)
@@ -7390,7 +7439,7 @@ def create_app() -> FastAPI:
     ):
         _, is_owner, _ = await control_session(x_telegram_init_data, "mod_books")
         clean = str(q or "").strip()
-        rows = await search_books(clean, limit=50) if is_owner else await list_books_for_moderation()
+        rows = await search_books(clean, limit=120) if is_owner else await list_books_for_moderation()
         return {
             "ok": True,
             "owner": bool(is_owner),

@@ -2537,41 +2537,104 @@ function catalogTextScore(card, normalizedQuery) {
   return 0;
 }
 
-function applyCatalogFilter() {
+const catalogSearchRuntime = {
+  page: 1, total: 0, hasMore: false, loading: false, timer: null,
+  controller: null, query: '', filter: '', initialized: false,
+};
+
+function currentCatalogFilter() {
+  const grid = document.getElementById('catalogGrid');
+  return document.querySelector('[data-catalog-filter].active')?.dataset.catalogFilter
+    || grid?.dataset.defaultFilter || 'all';
+}
+
+function initializeCatalogSearchRuntime() {
+  if (catalogSearchRuntime.initialized) return;
   const grid = document.getElementById('catalogGrid');
   if (!grid) return;
-  const query = normalizeCatalogText(document.getElementById('catalogSearch')?.value || '');
-  const active = document.querySelector('[data-catalog-filter].active')?.dataset.catalogFilter || 'all';
-  const cards = Array.from(grid.querySelectorAll('[data-catalog-card]'));
-  cards.forEach((card, index) => {
-    if (!card.dataset.catalogOrder) card.dataset.catalogOrder = String(index);
-  });
+  catalogSearchRuntime.initialized = true;
+  catalogSearchRuntime.page = 1;
+  catalogSearchRuntime.filter = currentCatalogFilter();
+  catalogSearchRuntime.query = String(document.getElementById('catalogSearch')?.value || '').trim();
+  catalogSearchRuntime.total = Number((document.getElementById('catalogResultCount')?.textContent || '').match(/из\s+(\d+)/i)?.[1] || grid.querySelectorAll('[data-catalog-card]').length);
+  catalogSearchRuntime.hasMore = !document.getElementById('catalogLoadMore')?.hidden;
+}
 
-  const exactTitleExists = Boolean(query) && cards.some((card) => normalizeCatalogText(card.dataset.title || '') === query);
-  let visible = 0;
-  const ranked = cards.map((card) => {
-    const title = normalizeCatalogText(card.dataset.title || '');
-    const score = exactTitleExists ? (title === query ? 100000 : 0) : catalogTextScore(card, query);
-    const matchesText = !query || score > 0;
-    const matchesFilter = active === 'all'
-      || (active === 'graphic' && card.dataset.graphic === '1')
-      || (active === 'audio' && card.dataset.audio === '1')
-      || (active === 'free' && card.dataset.free === '1')
-      || (active === 'popular' && Number(card.dataset.popular || 0) > 0)
-      || (['comic', 'manga', 'manhwa', 'webtoon', 'graphic_novel'].includes(active) && card.dataset.contentType === active);
-    const show = matchesText && matchesFilter;
-    card.hidden = !show;
-    if (show) visible += 1;
-    return { card, score, original: Number(card.dataset.catalogOrder || 0) };
-  });
-
-  ranked.sort((left, right) => {
-    if (!query) return left.original - right.original;
-    return right.score - left.score || left.original - right.original;
-  }).forEach(({ card }) => grid.appendChild(card));
-
+function updateCatalogResultUi(data) {
+  const grid = document.getElementById('catalogGrid');
+  if (!grid) return;
+  const shown = grid.querySelectorAll('[data-catalog-card]').length;
+  const total = Number(data?.total || 0);
+  const count = document.getElementById('catalogResultCount');
+  if (count) count.textContent = total ? `Показано ${shown} из ${total}` : 'Совпадений нет';
+  const more = document.getElementById('catalogLoadMore');
+  if (more) {
+    more.hidden = !Boolean(data?.has_more);
+    more.disabled = false;
+    more.textContent = 'Показать ещё';
+  }
   const empty = document.getElementById('catalogEmptySearch');
-  if (empty) empty.hidden = visible !== 0;
+  if (empty) empty.hidden = total !== 0;
+  grid.setAttribute('aria-busy', 'false');
+}
+
+async function loadCatalogSearchPage({ reset = false } = {}) {
+  const grid = document.getElementById('catalogGrid');
+  if (!grid) return;
+  initializeCatalogSearchRuntime();
+  const input = document.getElementById('catalogSearch');
+  const rawQuery = String(input?.value || '').trim();
+  const filter = currentCatalogFilter();
+  const pageSize = Math.max(6, Math.min(60, Number(grid.dataset.pageSize || 36)));
+  const page = reset ? 1 : catalogSearchRuntime.page + 1;
+
+  if (reset && catalogSearchRuntime.controller) catalogSearchRuntime.controller.abort();
+  const controller = new AbortController();
+  catalogSearchRuntime.controller = controller;
+  catalogSearchRuntime.loading = true;
+  grid.setAttribute('aria-busy', 'true');
+  const count = document.getElementById('catalogResultCount');
+  if (reset && count) count.textContent = rawQuery ? 'Ищем по всей библиотеке…' : 'Загружаем каталог…';
+  const more = document.getElementById('catalogLoadMore');
+  if (more) {
+    more.disabled = true;
+    more.textContent = 'Загружаем…';
+  }
+
+  try {
+    const params = new URLSearchParams({ q: rawQuery, filter, page: String(page), page_size: String(pageSize) });
+    if (!reset) {
+      const visibleIds = Array.from(grid.querySelectorAll('[data-catalog-card][data-book-id]'))
+        .map((card) => Number(card.dataset.bookId || 0)).filter((value) => value > 0);
+      if (visibleIds.length) params.set('exclude', visibleIds.join(','));
+    }
+    const data = await apiFetch(`/api/catalog/search?${params.toString()}`, { signal: controller.signal, cache: 'no-store' });
+    if (controller.signal.aborted) return;
+    if (reset) grid.innerHTML = String(data.html || '');
+    else grid.insertAdjacentHTML('beforeend', String(data.html || ''));
+    catalogSearchRuntime.page = Number(data.page || page);
+    catalogSearchRuntime.total = Number(data.total || 0);
+    catalogSearchRuntime.hasMore = Boolean(data.has_more);
+    catalogSearchRuntime.query = rawQuery;
+    catalogSearchRuntime.filter = filter;
+    updateCatalogResultUi(data);
+  } catch (error) {
+    if (error?.name === 'AbortError') return;
+    if (count) count.textContent = 'Не удалось выполнить поиск';
+    if (more) { more.disabled = false; more.textContent = 'Повторить'; }
+    notify(error.message || 'Поиск временно недоступен');
+  } finally {
+    if (catalogSearchRuntime.controller === controller) catalogSearchRuntime.controller = null;
+    catalogSearchRuntime.loading = false;
+    grid.setAttribute('aria-busy', 'false');
+  }
+}
+
+function applyCatalogFilter() {
+  if (!document.getElementById('catalogGrid')) return;
+  initializeCatalogSearchRuntime();
+  window.clearTimeout(catalogSearchRuntime.timer);
+  catalogSearchRuntime.timer = window.setTimeout(() => loadCatalogSearchPage({ reset: true }), 260);
 }
 
 
@@ -4432,6 +4495,7 @@ function bindEvents() {
     if (target.id === 'audioBack') { event.preventDefault(); seekAudio(-getPrefs().rewindStep); return; }
     if (target.id === 'audioForward') { event.preventDefault(); seekAudio(getPrefs().rewindStep); return; }
     if (target.matches('[data-sleep-minutes]')) { event.preventDefault(); setSleepTimer(Number(target.dataset.sleepMinutes)); return; }
+    if (target.id === 'catalogLoadMore') { event.preventDefault(); await loadCatalogSearchPage({ reset: false }); return; }
     if (target.matches('[data-catalog-filter]')) { event.preventDefault(); document.querySelectorAll('[data-catalog-filter]').forEach((btn) => btn.classList.remove('active')); target.classList.add('active'); applyCatalogFilter(); return; }
     if (target.matches('[data-open-graphic-filter]')) {
       event.preventDefault();

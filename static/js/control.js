@@ -1272,17 +1272,32 @@
     renderAccessUserResults(data.items || []);
   }
 
+  function normalizeAccessBookText(value) {
+    return String(value || '').toLocaleLowerCase('ru-RU').replaceAll('ё', 'е')
+      .normalize('NFKD').replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^\p{L}\p{N}]+/gu, ' ').trim().replace(/\s+/g, ' ');
+  }
+
   function accessBookSearchText(book) {
-    return `${book.id || ''} ${book.title || ''} ${book.pen_name || ''}`.toLocaleLowerCase('ru-RU');
+    return normalizeAccessBookText(`${book.id || ''} ${book.title || ''} ${book.pen_name || ''} ${book.source_author_name || ''}`);
+  }
+
+  function accessBookMatches(book, query) {
+    const needle = normalizeAccessBookText(query);
+    if (!needle) return true;
+    if (/^\d+$/.test(needle) && Number(needle) === Number(book.id || 0)) return true;
+    const haystack = accessBookSearchText(book);
+    if (haystack.includes(needle)) return true;
+    return needle.split(' ').filter(Boolean).every((word) => haystack.split(' ').some((candidate) => candidate === word || candidate.startsWith(word) || (word.length >= 4 && candidate.includes(word))));
   }
 
   function renderAccessBookOptions(query = '') {
     const select = $('accessBookSelect');
     if (!select) return;
-    const needle = String(query || '').trim().toLocaleLowerCase('ru-RU');
+    const needle = normalizeAccessBookText(query);
     const current = String(select.value || '');
     const items = needle
-      ? state.accessBooks.filter((book) => accessBookSearchText(book).includes(needle))
+      ? state.accessBooks.filter((book) => accessBookMatches(book, needle))
       : state.accessBooks;
     select.innerHTML = '<option value="">Выберите книгу</option>' + items.map((book) => `<option value="${Number(book.id)}">#${Number(book.id)} · ${esc(book.title)} · ${Number(book.chapters_count || 0)} глав${book.pen_name ? ` · ${esc(book.pen_name)}` : ''}</option>`).join('');
     if (current && items.some((book) => String(book.id) === current)) select.value = current;
