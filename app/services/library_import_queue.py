@@ -20,7 +20,7 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from app.config import settings
 from app.db import connect, utc_now
 from app.keyboards import library_batch_menu, library_import_active_menu, library_import_failed_menu, navigation_menu
-from app.services.chunked_upload import cleanup_stale_uploads
+from app.services.chunked_upload import cleanup_stale_uploads, cleanup_upload
 from app.services.library_manager import (
     DEFAULT_STORAGE_ROOT,
     ImportResult,
@@ -42,7 +42,7 @@ IMPORT_QUEUE_ROOT = Path(
     str(getattr(settings, "LIBRARY_IMPORT_QUEUE_ROOT", "data/library_import_queue") or "data/library_import_queue")
 )
 IMPORT_UPLOAD_ROOT = IMPORT_QUEUE_ROOT / "uploads"
-LEGACY_IMPORT_QUEUE_ROOT = DEFAULT_STORAGE_ROOT / "import_queue"
+LEGACY_IMPORT_QUEUE_ROOT = Path("storage/library/import_queue")
 LEGACY_IMPORT_UPLOAD_ROOT = LEGACY_IMPORT_QUEUE_ROOT / "uploads"
 
 QUEUE_MODE_SETTING_KEY = "library_import_queue_mode"
@@ -93,6 +93,13 @@ def _portable_archive_path(path: Path) -> str:
             return str(path)
 
 
+def import_upload_target_path(upload_id: str) -> Path:
+    clean_id = str(upload_id or "").strip().lower()
+    if not clean_id or not all(ch in "0123456789abcdef" for ch in clean_id):
+        raise ValueError("Некорректный идентификатор загрузки")
+    return IMPORT_UPLOAD_ROOT / f"{clean_id[:64]}.zip"
+
+
 def resolve_import_archive_path(value: str | Path) -> Path:
     """Resolve an archive after Redeploy even if an old container path was stored."""
     raw = Path(str(value or ""))
@@ -115,12 +122,23 @@ def resolve_import_archive_path(value: str | Path) -> Path:
     return IMPORT_UPLOAD_ROOT / raw.name if raw.name else raw
 
 
-def _persist_import_archive_sync(source: Path) -> Path:
-    """Atomically move/copy a completed ZIP into the persistent queue root."""
+def _persist_import_archive_sync(source: Path, stable_name: str = "") -> Path:
+    """Atomically move/copy a completed ZIP into the persistent queue root.
+
+    ``stable_name`` is used for chunked library uploads. A deterministic target
+    lets startup recovery find an archive even when the process stops after the
+    filesystem move but before the queue transaction is committed.
+    """
     if not source.is_file():
         raise ValueError("Загруженный архив не найден")
     IMPORT_UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
-    target = IMPORT_UPLOAD_ROOT / f"{uuid.uuid4().hex}.zip"
+    clean_name = str(stable_name or "").strip().lower()
+    if clean_name and not all(ch in "0123456789abcdef" for ch in clean_name):
+        clean_name = ""
+    clean_name = clean_name[:64]
+    target = IMPORT_UPLOAD_ROOT / f"{clean_name or uuid.uuid4().hex}.zip"
+    if target.is_file():
+        return target
     partial = target.with_suffix(".zip.partial")
     partial.unlink(missing_ok=True)
     copied_source = False
@@ -157,9 +175,9 @@ def _persist_import_archive_sync(source: Path) -> Path:
         partial.unlink(missing_ok=True)
 
 
-async def persist_import_archive(source: str | Path) -> Path:
+async def persist_import_archive(source: str | Path, *, stable_name: str = "") -> Path:
     """Persist a completed archive before the queue row is committed."""
-    return await asyncio.to_thread(_persist_import_archive_sync, Path(source))
+    return await asyncio.to_thread(_persist_import_archive_sync, Path(source), stable_name)
 
 
 async def _migrate_legacy_queue_archives() -> int:
@@ -266,6 +284,16 @@ def _iso_is_future(value: Any) -> bool:
         return False
 
 
+def _iso_is_older_than(value: Any, *, hours: int) -> bool:
+    try:
+        parsed = datetime.fromisoformat(str(value or ""))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed < datetime.now(timezone.utc) - timedelta(hours=max(1, int(hours)))
+    except (TypeError, ValueError):
+        return False
+
+
 def _friendly_import_error(exc: BaseException) -> str:
     message = str(exc or "").strip()
     lowered = message.lower()
@@ -276,6 +304,12 @@ def _friendly_import_error(exc: BaseException) -> str:
         return (
             "На сервере недостаточно свободного места. Незавершённый пакет очищен автоматически. "
             "Освободите место или увеличьте диск, затем повторите сохранённое задание импорта."
+        )
+    if any(marker in lowered for marker in ("оперативной памяти", "memoryerror", "cannot allocate memory")):
+        return (
+            message or
+            "Для обработки книги недостаточно оперативной памяти. Архив сохранён; "
+            "освободите память или увеличьте тариф и повторите задание без новой загрузки."
         )
     return message or "Неизвестная ошибка импорта"
 
@@ -292,6 +326,11 @@ async def _cleanup_orphaned_queue_archives(*, min_age_seconds: int = 10 * 60) ->
             (now_iso,),
         )
         rows = await cur.fetchall()
+        handoff_cur = await db.execute(
+            """SELECT archive_path FROM library_import_upload_handoffs
+               WHERE status IN ('assembling','prepared')"""
+        )
+        handoff_rows = await handoff_cur.fetchall()
         await db.execute(
             """UPDATE library_import_jobs SET archive_expires_at=NULL
                WHERE status IN ('failed','cancelled') AND archive_expires_at IS NOT NULL AND archive_expires_at<=?""",
@@ -299,6 +338,10 @@ async def _cleanup_orphaned_queue_archives(*, min_age_seconds: int = 10 * 60) ->
         )
         await db.commit()
     keep = {str(resolve_import_archive_path(str(row["archive_path"])).resolve()) for row in rows}
+    keep.update(
+        str(resolve_import_archive_path(str(row["archive_path"])).resolve())
+        for row in handoff_rows if str(row["archive_path"] or "").strip()
+    )
     now = time.time()
     removed = 0
     for path in IMPORT_UPLOAD_ROOT.glob("*.zip"):
@@ -432,6 +475,22 @@ async def ensure_import_queue_schema() -> None:
                     ON library_import_upload_receipts(expires_at);
                 CREATE INDEX IF NOT EXISTS idx_library_upload_receipts_actor_expiry
                     ON library_import_upload_receipts(actor_user_id, expires_at);
+
+                CREATE TABLE IF NOT EXISTS library_import_upload_handoffs (
+                    upload_id TEXT PRIMARY KEY,
+                    actor_user_id INTEGER NOT NULL,
+                    archive_name TEXT NOT NULL,
+                    archive_path TEXT NOT NULL,
+                    archive_hash TEXT NOT NULL DEFAULT '',
+                    chat_id INTEGER NOT NULL,
+                    progress_message_id INTEGER NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'assembling',
+                    last_error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_library_upload_handoffs_status
+                    ON library_import_upload_handoffs(status, updated_at);
                 """
             )
             cur = await db.execute("PRAGMA table_info(library_import_jobs)")
@@ -481,6 +540,11 @@ async def get_import_queue_control_state() -> dict[str, Any]:
                GROUP BY status"""
         )
         counts = {str(row["status"]): int(row["count"] or 0) for row in await cur.fetchall()}
+        handoff_cur = await db.execute(
+            """SELECT COUNT(*) AS count FROM library_import_upload_handoffs
+               WHERE status IN ('assembling','prepared')"""
+        )
+        pending_handoffs = int((await handoff_cur.fetchone())["count"] or 0)
     active_count = int(counts.get("processing", 0)) + int(counts.get("cancelling", 0))
     queued_count = int(counts.get("queued", 0))
     return {
@@ -489,6 +553,7 @@ async def get_import_queue_control_state() -> dict[str, Any]:
         "draining": bool(mode != "running" and active_count),
         "queued": queued_count,
         "active": active_count,
+        "pending_handoffs": pending_handoffs,
         "changed_at": changed_at,
         "changed_by_user_id": actor_user_id,
     }
@@ -530,6 +595,97 @@ async def calculate_archive_hash(path: str | Path) -> str:
         return digest.hexdigest()
 
     return await asyncio.to_thread(calculate)
+
+
+async def prepare_import_upload_handoff(
+    *,
+    upload_id: str,
+    actor_user_id: int,
+    archive_name: str,
+    archive_path: str | Path,
+    chat_id: int,
+    progress_message_id: int,
+) -> None:
+    """Persist the filesystem-to-queue handoff before moving the completed ZIP.
+
+    This row closes the only non-transactional gap in chunked imports. If the
+    process is restarted after the ZIP is moved but before the queue job is
+    committed, startup recovery can still calculate the hash and enqueue it.
+    """
+    await ensure_import_queue_schema()
+    clean_id = str(upload_id or "").strip()[:128]
+    if not clean_id:
+        raise ValueError("Не указан идентификатор загрузки")
+    now = utc_now()
+    async with connect() as db:
+        await db.execute(
+            """INSERT INTO library_import_upload_handoffs(
+                   upload_id, actor_user_id, archive_name, archive_path, archive_hash,
+                   chat_id, progress_message_id, status, last_error, created_at, updated_at
+               ) VALUES(?, ?, ?, ?, '', ?, ?, 'assembling', NULL, ?, ?)
+               ON CONFLICT(upload_id) DO UPDATE SET
+                   actor_user_id=excluded.actor_user_id,
+                   archive_name=excluded.archive_name,
+                   archive_path=excluded.archive_path,
+                   chat_id=excluded.chat_id,
+                   progress_message_id=excluded.progress_message_id,
+                   status=CASE WHEN library_import_upload_handoffs.status='queued'
+                               THEN library_import_upload_handoffs.status ELSE 'assembling' END,
+                   last_error=NULL, updated_at=excluded.updated_at""",
+            (
+                clean_id, int(actor_user_id), str(archive_name or "library.zip")[:240],
+                _portable_archive_path(Path(archive_path)), int(chat_id), int(progress_message_id), now, now,
+            ),
+        )
+        await db.commit()
+
+
+async def mark_import_upload_handoff_prepared(
+    upload_id: str, *, archive_path: str | Path, archive_hash: str
+) -> None:
+    await ensure_import_queue_schema()
+    async with connect() as db:
+        await db.execute(
+            """UPDATE library_import_upload_handoffs
+               SET archive_path=?, archive_hash=?, status='prepared', last_error=NULL, updated_at=?
+               WHERE upload_id=?""",
+            (
+                _portable_archive_path(Path(archive_path)), str(archive_hash or "")[:128],
+                utc_now(), str(upload_id or "").strip()[:128],
+            ),
+        )
+        await db.commit()
+
+
+async def get_import_upload_handoff(upload_id: str, *, actor_user_id: int) -> dict[str, Any] | None:
+    await ensure_import_queue_schema()
+    clean_id = str(upload_id or "").strip()[:128]
+    if not clean_id:
+        return None
+    async with connect() as db:
+        cur = await db.execute(
+            """SELECT upload_id, actor_user_id, archive_name, archive_path, archive_hash,
+                      chat_id, progress_message_id, status, last_error, created_at, updated_at
+               FROM library_import_upload_handoffs WHERE upload_id=? LIMIT 1""",
+            (clean_id,),
+        )
+        row = await cur.fetchone()
+    if row is None or int(row["actor_user_id"] or 0) != int(actor_user_id):
+        return None
+    item = dict(row)
+    path = resolve_import_archive_path(str(item.get("archive_path") or ""))
+    item["archive_path"] = str(path)
+    item["archive_available"] = bool(path.is_file() and _is_inside(path, IMPORT_QUEUE_ROOT))
+    return item
+
+
+async def _delete_import_upload_handoff(upload_id: str) -> None:
+    async with connect() as db:
+        await db.execute(
+            "DELETE FROM library_import_upload_handoffs WHERE upload_id=?",
+            (str(upload_id or "").strip()[:128],),
+        )
+        await db.commit()
 
 
 async def enqueue_import_job(
@@ -667,6 +823,10 @@ async def enqueue_import_job(
                        expires_at=excluded.expires_at""",
                 (clean_key, int(actor_user_id), archive_name, archive_hash, job_id, position, now.isoformat(), expires),
             )
+            await db.execute(
+                "DELETE FROM library_import_upload_handoffs WHERE upload_id=?",
+                (clean_key,),
+            )
         await db.commit()
     wake_import_worker()
     logger.info("Library import job #%s queued at position %s", job_id, position)
@@ -700,6 +860,78 @@ async def get_import_upload_receipt(upload_id: str, *, actor_user_id: int) -> di
         "archive_hash": str(row["archive_hash"] or ""),
         "expires_at": str(row["expires_at"] or ""),
     }
+
+
+async def recover_import_upload_handoffs() -> int:
+    """Finish durable ZIP handoffs left between file persistence and queue commit."""
+    await ensure_import_queue_schema()
+    async with connect() as db:
+        cur = await db.execute(
+            """SELECT upload_id, actor_user_id, archive_name, archive_path, archive_hash,
+                      chat_id, progress_message_id, status, updated_at
+               FROM library_import_upload_handoffs
+               WHERE status IN ('assembling','prepared') ORDER BY created_at"""
+        )
+        rows = await cur.fetchall()
+    recovered = 0
+    for row in rows:
+        upload_id = str(row["upload_id"] or "")
+        archive_path = resolve_import_archive_path(str(row["archive_path"] or ""))
+        if not archive_path.is_file() or not _is_inside(archive_path, IMPORT_QUEUE_ROOT):
+            # The chunk session may still contain parts or an assembled file. Keep
+            # fresh handoffs so the user's next /finish request can continue safely,
+            # but remove abandoned markers after the same 24h retention window.
+            if _iso_is_older_than(
+                row["updated_at"], hours=max(24, _failed_archive_retention_hours())
+            ):
+                await _delete_import_upload_handoff(upload_id)
+                await asyncio.to_thread(cleanup_upload, upload_id)
+                logger.info("Removed stale library upload handoff %s", upload_id)
+            continue
+        try:
+            archive_hash = str(row["archive_hash"] or "").strip()
+            if not archive_hash:
+                archive_hash = await calculate_archive_hash(archive_path)
+                await mark_import_upload_handoff_prepared(
+                    upload_id, archive_path=archive_path, archive_hash=archive_hash
+                )
+            await enqueue_import_job(
+                archive_path=archive_path,
+                archive_name=str(row["archive_name"] or "library.zip"),
+                archive_hash=archive_hash,
+                actor_user_id=int(row["actor_user_id"]),
+                chat_id=int(row["chat_id"]),
+                progress_message_id=int(row["progress_message_id"]),
+                idempotency_key=upload_id,
+            )
+            await asyncio.to_thread(cleanup_upload, upload_id)
+            recovered += 1
+            logger.warning("Recovered interrupted library upload handoff %s", upload_id)
+        except ValueError as exc:
+            message = str(exc)
+            if "уже находится в очереди" in message or "уже импортировался ранее" in message:
+                # The queue/batch won the race. The archive is no longer an orphan;
+                # remove only the stale handoff marker.
+                await _delete_import_upload_handoff(upload_id)
+                await asyncio.to_thread(cleanup_upload, upload_id)
+                logger.info("Closed already-committed library upload handoff %s: %s", upload_id, message)
+            else:
+                async with connect() as db:
+                    await db.execute(
+                        "UPDATE library_import_upload_handoffs SET last_error=?, updated_at=? WHERE upload_id=?",
+                        (message[:1000], utc_now(), upload_id),
+                    )
+                    await db.commit()
+                logger.warning("Could not recover library upload handoff %s: %s", upload_id, message)
+        except Exception as exc:
+            async with connect() as db:
+                await db.execute(
+                    "UPDATE library_import_upload_handoffs SET last_error=?, updated_at=? WHERE upload_id=?",
+                    (str(exc)[:1000], utc_now(), upload_id),
+                )
+                await db.commit()
+            logger.exception("Could not recover library upload handoff %s", upload_id)
+    return recovered
 
 
 async def list_import_jobs(
@@ -1452,6 +1684,9 @@ async def library_import_worker_loop(bot) -> None:
     watchdog_task: asyncio.Task[Any] | None = None
     try:
         await ensure_import_queue_schema()
+        recovered_handoffs = await recover_import_upload_handoffs()
+        if recovered_handoffs:
+            logger.info("Recovered %s completed library upload handoff(s)", recovered_handoffs)
 
         # Old/broken builds could leave a non-running mode without recording who
         # changed it. Resume only that orphaned state; an intentional owner pause
