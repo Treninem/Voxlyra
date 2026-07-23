@@ -201,6 +201,7 @@ from app.db import (
     publish_book_content,
     list_catalog_books,
     search_catalog_books_page,
+    find_hidden_exact_book_matches,
     list_chapters_for_book,
     list_author_chapter_summaries,
     list_chapter_packages_for_book,
@@ -1160,10 +1161,16 @@ def create_app() -> FastAPI:
         response.headers["X-Request-Id"] = request_id
         for key, value in security_headers().items():
             response.headers.setdefault(key, value)
-        if request.url.path.startswith(("/api/me", "/api/privacy", "/api/legal/status")):
+        no_cache_path = (
+            request.url.path.startswith(("/api/me", "/api/privacy", "/api/legal/status", "/api/catalog/search"))
+            or request.url.path in {"/", "/catalog", "/comics", "/static/js/app.js"}
+            or str(response.headers.get("content-type") or "").lower().startswith("text/html")
+        )
+        if no_cache_path:
             response.headers["Cache-Control"] = "private, no-store, no-cache, must-revalidate, max-age=0"
             response.headers["Pragma"] = "no-cache"
             response.headers["Expires"] = "0"
+        response.headers["X-VoxLyra-Build"] = OWNER_BUILD_VERSION
         return response
     app.mount("/static", StaticFiles(directory="static"), name="static")
 
@@ -2271,6 +2278,7 @@ def create_app() -> FastAPI:
         page: int = 1,
         page_size: int = 36,
         exclude: str = "",
+        x_telegram_init_data: str | None = Header(default=None),
     ):
         excluded_ids = {int(value) for value in str(exclude or "").split(",") if value.strip().isdigit() and int(value) > 0}
         clean_query = str(q or "").strip()
@@ -2289,6 +2297,14 @@ def create_app() -> FastAPI:
                 exclude_ids=excluded_ids,
             )
         result["items"] = await attach_rankings(result["items"], category="comic" if str(filter or "") in GRAPHIC_CONTENT_TYPES or str(filter or "") == "graphic" else "book")
+        hidden_matches: list[dict[str, Any]] = []
+        if clean_query and int(result.get("total") or 0) == 0 and x_telegram_init_data:
+            try:
+                current_user = await _tma_user(x_telegram_init_data)
+                if int(current_user.telegram_id) in settings.owner_ids:
+                    hidden_matches = await find_hidden_exact_book_matches(clean_query)
+            except HTTPException:
+                hidden_matches = []
         prices = await price_context()
         html = templates.env.get_template("_catalog_results.html").render(
             books=result["items"],
@@ -2303,6 +2319,8 @@ def create_app() -> FastAPI:
             "has_more": bool(result["has_more"]),
             "query": result["query"],
             "filter": result["filter"],
+            "hidden_matches": hidden_matches,
+            "build": OWNER_BUILD_VERSION,
         }
 
     @app.get("/api/recommendations/for-you")

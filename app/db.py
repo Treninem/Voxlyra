@@ -19675,8 +19675,11 @@ def _book_search_score(row: dict[str, Any], query: str) -> float:
     source_author = normalize_book_search_text(row.get("source_author_name"))
     genres = normalize_book_search_text(row.get("genre_labels"))
     description = normalize_book_search_text(row.get("description"))
+    source_name = normalize_book_search_text(row.get("source_name"))
+    source_file_name = normalize_book_search_text(re.sub(r"\.[a-z0-9]{1,8}$", "", str(row.get("source_file_name") or ""), flags=re.IGNORECASE))
     authors = " ".join(part for part in (pen_name, source_author) if part)
-    combined = " ".join(part for part in (title, authors, genres, description) if part)
+    aliases = " ".join(part for part in (source_name, source_file_name) if part)
+    combined = " ".join(part for part in (title, aliases, authors, genres, description) if part)
 
     if title == normalized:
         return 950_000.0
@@ -19684,6 +19687,10 @@ def _book_search_score(row: dict[str, Any], query: str) -> float:
         return 900_000.0 - min(len(title), 10_000)
     if normalized in title:
         return 850_000.0 - title.index(normalized)
+    if aliases == normalized or any(alias == normalized for alias in (source_name, source_file_name) if alias):
+        return 825_000.0
+    if normalized in aliases:
+        return 810_000.0 - aliases.index(normalized)
     if authors == normalized:
         return 800_000.0
     if any(author == normalized for author in (pen_name, source_author) if author):
@@ -19780,7 +19787,7 @@ async def _book_search_index(
         cur = await db.execute(
             f"""
             SELECT b.id,b.title,b.description,b.content_type,b.publication_status,b.updated_at,b.created_at,
-                   b.price_stars,b.pricing_type,b.cover_path,b.source_author_name,b.author_id,
+                   b.price_stars,b.pricing_type,b.cover_path,b.source_author_name,b.source_file_name,b.source_name,b.author_id,
                    COALESCE(ap.pen_name,b.source_author_name,'') AS pen_name,
                    COALESCE((SELECT GROUP_CONCAT(v.option_label,'||') FROM book_option_values v WHERE v.book_id=b.id AND v.option_group IN ('genres','tags')), '') AS genre_labels
             FROM books b
@@ -19863,6 +19870,92 @@ async def _catalog_rows_for_ids(book_ids: list[int]) -> list[dict[str, Any]]:
     return rows
 
 
+
+async def _direct_catalog_title_ids(query: str, *, filter_code: str = "all", limit: int = 100) -> list[int]:
+    """Return exact/prefix title matches directly from SQLite.
+
+    This is deliberately independent from the in-memory fuzzy ranker. It protects
+    exact Cyrillic titles from stale indexes, invisible punctuation, imported
+    filenames and future ranker regressions.
+    """
+    normalized = normalize_book_search_text(query)
+    if not normalized:
+        return []
+    clauses = ["b.publication_status='published'"]
+    params: list[Any] = []
+    clean_filter = str(filter_code or "all").strip().lower()
+    if clean_filter == "graphic":
+        clauses.append("b.content_type!='book'")
+    elif clean_filter in {"comic", "manga", "manhwa", "webtoon", "graphic_novel"}:
+        clauses.append("b.content_type=?")
+        params.append(clean_filter)
+    elif clean_filter == "audio":
+        clauses.append("EXISTS(SELECT 1 FROM audio_chapters acf WHERE acf.book_id=b.id AND acf.status='published')")
+    elif clean_filter == "free":
+        clauses.append("((COALESCE(b.pricing_type,'')!='premium' AND COALESCE(b.price_stars,0)<=0) OR EXISTS(SELECT 1 FROM chapters cf WHERE cf.book_id=b.id AND cf.status='published' AND cf.is_free=1) OR EXISTS(SELECT 1 FROM graphic_chapters gcf WHERE gcf.book_id=b.id AND gcf.status='published' AND gcf.is_free=1))")
+    elif clean_filter == "popular":
+        clauses.append("(EXISTS(SELECT 1 FROM purchases pf WHERE pf.status='paid' AND (pf.book_id=b.id OR pf.chapter_id IN (SELECT id FROM chapters WHERE book_id=b.id) OR pf.audio_chapter_id IN (SELECT id FROM audio_chapters WHERE book_id=b.id) OR pf.graphic_chapter_id IN (SELECT id FROM graphic_chapters WHERE book_id=b.id))) OR EXISTS(SELECT 1 FROM reviews rf WHERE rf.book_id=b.id AND rf.status='published'))")
+
+    # Search title first, then original import label / filename. The CASE order
+    # guarantees that a literal title is never displaced by a fuzzy result.
+    params.extend([normalized, normalized, normalized, normalized, f"{normalized}%", f"%{normalized}%", max(1, min(250, int(limit)))])
+    async with connect() as db:
+        cur = await db.execute(
+            f"""
+            SELECT b.id
+            FROM books b
+            WHERE {' AND '.join(clauses)}
+              AND (
+                    book_search_normalize(b.title)=?
+                 OR book_search_normalize(COALESCE(b.source_name,''))=?
+                 OR book_search_normalize(COALESCE(b.source_file_name,''))=?
+                 OR CAST(b.id AS TEXT)=?
+                 OR book_search_normalize(b.title) LIKE ?
+                 OR book_search_normalize(b.title) LIKE ?
+              )
+            ORDER BY CASE
+                WHEN book_search_normalize(b.title)=? THEN 0
+                WHEN CAST(b.id AS TEXT)=? THEN 1
+                WHEN book_search_normalize(COALESCE(b.source_name,''))=? THEN 2
+                WHEN book_search_normalize(COALESCE(b.source_file_name,''))=? THEN 3
+                WHEN book_search_normalize(b.title) LIKE ? THEN 4
+                ELSE 5 END,
+                b.updated_at DESC, b.id DESC
+            LIMIT ?
+            """,
+            tuple(params[:-1] + [normalized, normalized, normalized, normalized, f"{normalized}%", params[-1]]),
+        )
+        return [int(row["id"]) for row in await cur.fetchall()]
+
+
+async def find_hidden_exact_book_matches(query: str, limit: int = 8) -> list[dict[str, Any]]:
+    """Owner diagnostic for an exact title that exists but is not public."""
+    normalized = normalize_book_search_text(query)
+    if not normalized:
+        return []
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT b.id,b.title,b.publication_status,b.source_author_name,
+                   COALESCE(ap.pen_name,b.source_author_name,'') AS pen_name
+            FROM books b
+            LEFT JOIN author_profiles ap ON ap.id=b.author_id
+            WHERE b.publication_status!='published'
+              AND b.publication_status!='deleted'
+              AND (
+                    book_search_normalize(b.title)=?
+                 OR book_search_normalize(COALESCE(b.source_name,''))=?
+                 OR book_search_normalize(COALESCE(b.source_file_name,''))=?
+                 OR CAST(b.id AS TEXT)=?
+              )
+            ORDER BY b.updated_at DESC,b.id DESC
+            LIMIT ?
+            """,
+            (normalized, normalized, normalized, normalized, max(1, min(20, int(limit)))),
+        )
+        return [{key: row[key] for key in row.keys()} for row in await cur.fetchall()]
+
+
 async def search_catalog_books_page(
     query: str = "",
     *,
@@ -19876,6 +19969,20 @@ async def search_catalog_books_page(
     safe_size = max(6, min(60, int(page_size or 30)))
     index_rows = await _book_search_index(status_scope="published", filter_code=filter_code)
     ranked = _rank_book_index(index_rows, query)
+    direct_ids = await _direct_catalog_title_ids(query, filter_code=filter_code) if str(query or "").strip() else []
+    if direct_ids:
+        by_id = {int(row.get("id") or 0): row for row in ranked}
+        index_by_id = {int(row.get("id") or 0): row for row in index_rows}
+        direct_rows: list[dict[str, Any]] = []
+        for book_id in direct_ids:
+            row = by_id.get(int(book_id)) or index_by_id.get(int(book_id))
+            if row is None:
+                continue
+            item = dict(row)
+            item["search_score"] = max(float(item.get("search_score") or 0), 990_000.0)
+            direct_rows.append(item)
+        direct_set = {int(row.get("id") or 0) for row in direct_rows}
+        ranked = direct_rows + [row for row in ranked if int(row.get("id") or 0) not in direct_set]
     total = len(ranked)
     excluded = {int(value) for value in (exclude_ids or []) if int(value) > 0}
     if excluded:

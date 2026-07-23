@@ -2566,7 +2566,16 @@ function updateCatalogResultUi(data) {
   const shown = grid.querySelectorAll('[data-catalog-card]').length;
   const total = Number(data?.total || 0);
   const count = document.getElementById('catalogResultCount');
-  if (count) count.textContent = total ? `Показано ${shown} из ${total}` : 'Совпадений нет';
+  const hiddenMatches = Array.isArray(data?.hidden_matches) ? data.hidden_matches : [];
+  if (count) {
+    if (total) count.textContent = `Показано ${shown} из ${total}`;
+    else if (hiddenMatches.length) {
+      const item = hiddenMatches[0] || {};
+      const statusLabels = { draft: 'черновик', review: 'на проверке', rejected: 'отклонена', blocked: 'заблокирована' };
+      const status = statusLabels[String(item.publication_status || '')] || String(item.publication_status || 'не опубликована');
+      count.textContent = `Книга #${Number(item.id || 0)} найдена, но сейчас не показывается в каталоге: ${status}`;
+    } else count.textContent = 'Совпадений нет';
+  }
   const more = document.getElementById('catalogLoadMore');
   if (more) {
     more.hidden = !Boolean(data?.has_more);
@@ -2574,7 +2583,21 @@ function updateCatalogResultUi(data) {
     more.textContent = 'Показать ещё';
   }
   const empty = document.getElementById('catalogEmptySearch');
-  if (empty) empty.hidden = total !== 0;
+  if (empty) {
+    empty.hidden = total !== 0;
+    const title = empty.querySelector('h2, h3, strong');
+    const text = empty.querySelector('p');
+    if (hiddenMatches.length) {
+      const item = hiddenMatches[0] || {};
+      const statusLabels = { draft: 'черновик', review: 'на проверке', rejected: 'отклонена', blocked: 'заблокирована' };
+      const status = statusLabels[String(item.publication_status || '')] || String(item.publication_status || 'не опубликована');
+      if (title) title.textContent = 'Книга существует, но не опубликована';
+      if (text) text.textContent = `#${Number(item.id || 0)} · ${String(item.title || '')}. Текущий статус: ${status}. После публикации книга появится в общем поиске.`;
+    } else {
+      if (title) title.textContent = 'Ничего не нашлось';
+      if (text) text.textContent = 'Проверьте написание или попробуйте часть названия, имя автора, жанр либо ID книги.';
+    }
+  }
   grid.setAttribute('aria-busy', 'false');
 }
 
@@ -2602,7 +2625,10 @@ async function loadCatalogSearchPage({ reset = false } = {}) {
   }
 
   try {
-    const params = new URLSearchParams({ q: rawQuery, filter, page: String(page), page_size: String(pageSize) });
+    const params = new URLSearchParams({
+      q: rawQuery, filter, page: String(page), page_size: String(pageSize),
+      _ts: String(Date.now()),
+    });
     if (!reset) {
       const visibleIds = Array.from(grid.querySelectorAll('[data-catalog-card][data-book-id]'))
         .map((card) => Number(card.dataset.bookId || 0)).filter((value) => value > 0);
