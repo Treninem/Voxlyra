@@ -1159,8 +1159,10 @@ def create_app() -> FastAPI:
         response.headers["X-Request-Id"] = request_id
         for key, value in security_headers().items():
             response.headers.setdefault(key, value)
-        if request.url.path.startswith(("/api/privacy", "/api/legal/status")):
-            response.headers["Cache-Control"] = "private, no-store, max-age=0"
+        if request.url.path.startswith(("/api/me", "/api/privacy", "/api/legal/status")):
+            response.headers["Cache-Control"] = "private, no-store, no-cache, must-revalidate, max-age=0"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
         return response
     app.mount("/static", StaticFiles(directory="static"), name="static")
 
@@ -2999,24 +3001,41 @@ def create_app() -> FastAPI:
         return _cover_file_response(path, private=False)
 
     @app.get("/api/me/avatar")
-    async def api_me_avatar(x_telegram_init_data: str | None = Header(default=None)):
+    async def api_me_avatar(
+        uid: int | None = None,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
         user = await _tma_user(x_telegram_init_data)
+        # uid is not trusted as authentication; it is only a per-user browser-cache key.
+        # Reject a mismatched key so one Telegram account can never request another account's photo.
+        if uid is not None and int(uid) != int(user.telegram_id):
+            raise HTTPException(
+                status_code=403,
+                detail="Фото профиля принадлежит другой сессии Telegram.",
+                headers={
+                    "Cache-Control": "private, no-store, no-cache, must-revalidate, max-age=0",
+                    "Pragma": "no-cache",
+                    "Expires": "0",
+                },
+            )
         path = await ensure_profile_avatar(user.telegram_id)
+        no_cache_headers = {
+            "Cache-Control": "private, no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+            "X-Content-Type-Options": "nosniff",
+        }
         if not path:
             raise HTTPException(
                 status_code=404,
                 detail="Фото профиля не найдено.",
-                headers={"Cache-Control": "private, no-store, max-age=0"},
+                headers=no_cache_headers,
             )
         media_type = {
             ".png": "image/png", ".webp": "image/webp",
             ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
         }.get(path.suffix.lower(), "image/jpeg")
-        return FileResponse(
-            path,
-            media_type=media_type,
-            headers={"Cache-Control": "private, max-age=21600", "X-Content-Type-Options": "nosniff"},
-        )
+        return FileResponse(path, media_type=media_type, headers=no_cache_headers)
 
     @app.get("/api/me")
     async def api_me(x_telegram_init_data: str | None = Header(default=None)):

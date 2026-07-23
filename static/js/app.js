@@ -3882,7 +3882,9 @@ async function initLibrary() {
     showInitialFallback();
     if (profileIcon) {
       profileIcon.addEventListener('error', showInitialFallback);
-      apiFetch('/api/me/avatar')
+      const avatarTelegramId = Number(data.user?.telegram_id || 0);
+      const avatarUrl = `/api/me/avatar?uid=${encodeURIComponent(String(avatarTelegramId))}&v=${encodeURIComponent(String(avatarTelegramId))}`;
+      apiFetch(avatarUrl, { cache: 'no-store' })
         .then((response) => response.blob())
         .then((blob) => {
           if (!blob || blob.size <= 0) throw new Error('Пустое фото профиля');
