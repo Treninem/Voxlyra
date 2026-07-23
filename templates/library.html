@@ -7,8 +7,8 @@
 <section class="hero compact library-hero illustrated-hero library-illustrated-hero">
   <div class="illustrated-hero-backdrop" aria-hidden="true"></div>
   <div class="profile-medallion frame-standard" id="libraryProfileFrame" aria-label="Профиль пользователя">
-    <img src="/static/img/miniapp/icons/profile.webp?v={{ asset_version }}" alt="Профиль" id="libraryProfileIcon">
-    <span id="libraryProfileInitial" hidden>В</span>
+    <img alt="Фото профиля" id="libraryProfileIcon" hidden>
+    <span id="libraryProfileInitial">В</span>
   </div>
   <div class="hero-copy library-hero-copy">
     <span class="eyebrow">Личная полка</span>
@@ -35,6 +35,12 @@
 <a class="author-studio-entry control-center-entry" id="ownerBooksEntry" href="/control?section=books" hidden><img src="/static/img/miniapp/icons/library.webp?v={{ asset_version }}" alt="" aria-hidden="true"><div><b>Управление книгами</b><small>Поиск, проверка и публикация в канал</small></div><i>›</i></a>
 <section class="achievement-panel library-achievements" id="libraryAchievementPanel" hidden>
   <div class="section-title split-title slim"><div><span class="eyebrow">Личный прогресс</span><h2>Мои достижения</h2><p>Бронзовые, серебряные, золотые и платиновые награды за ваш путь в VoxLyra.</p></div><button class="secondary compact-button" id="toggleAllAchievements" type="button">Все награды</button></div>
+  <div class="achievement-collector-summary" id="achievementCollectorSummary">
+    <div><span class="eyebrow">Уровень коллекционера</span><strong id="achievementCollectorLevel">Новичок</strong><small id="achievementCollectorCount">0 из 0 наград</small></div>
+    <div class="achievement-points"><b id="achievementCollectorPoints">0</b><span>очков</span></div>
+    <div class="achievement-level-progress"><i id="achievementCollectorProgress"></i></div>
+    <small id="achievementCollectorNext">До следующего уровня: 100 очков</small>
+  </div>
   <div class="achievement-showcase-block">
     <div class="achievement-showcase-heading"><div><span class="eyebrow">Витрина профиля</span><b>Три любимые награды</b></div><button class="secondary compact-button" id="editAchievementShowcase" type="button">Настроить</button></div>
     <div class="achievement-showcase-grid" id="achievementShowcase"></div>
