@@ -10,7 +10,7 @@ export MALLOC_TRIM_THRESHOLD_="${MALLOC_TRIM_THRESHOLD_:-131072}"
 export VOSK_MODEL_PATH=/app/storage/tts/models/vosk
 export TTS_VOSK_MODEL_DIR=/app/storage/tts/models/vosk
 mkdir -p data data/chunked_uploads data/library_import_queue/uploads data/library_storage \
-  data/covers data/books data/audio data/comics data/backups \
+  data/covers data/profile_avatars data/books data/audio data/comics data/backups \
   storage/library_import_work storage/tts storage/tts/models/vosk storage/temp storage/legal
 
 # Remove stale bytecode from older update archives before Python starts. Runtime
