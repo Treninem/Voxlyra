@@ -14,6 +14,7 @@
     <div class="book-hero-copy">
       <div class="book-hero-kicker">
         <span class="eyebrow">{{ type_label }} · {{ book.age_limit }} · {{ book.pen_name or 'Автор не указан' }}</span>
+        {% if book.catalog_promoted|default(false) %}<span class="catalog-promotion-badge catalog-promotion-large">Продвижение в ротации</span>{% endif %}
         {% if book.top_rank|default(0)|int > 0 %}
         <span class="top-rank-badge top-rank-large top-rank-{{ book.top_period }} top-rank-place-{% if book.top_rank|int <= 3 %}{{ book.top_rank }}{% elif book.top_rank|int <= 10 %}top10{% else %}top99{% endif %}"
               title="Топ {{ book.top_category_label }}: {{ book.top_tooltip }}">#{{ book.top_rank }} {{ book.top_period_label }}</span>
@@ -42,6 +43,7 @@
     {% if book.author_id %}<button id="subscribeAuthor" class="secondary subscription-button requires-telegram-auth">✦ Подписаться на автора</button>{% endif %}
     {% if pricing_mode == 'premium' %}<a class="button-link premium-subscription-button full-span telegram-payment-action" href="/premium">👑 Читать по VoxLyra Premium</a>{% elif book.price_stars|int > 0 and bot_username %}<a class="button-link gold-button full-span telegram-payment-action" href="https://t.me/{{ bot_username }}?start=buy_book_{{ book.id }}">Купить всю {% if is_graphic %}графическую историю{% else %}книгу{% endif %} · {{ book.price_stars }} Stars · ≈ {{ '%.2f'|format((book.price_stars|int * buyer_star_rate_minor|default(145)) / 100) }} ₽</a>{% endif %}
     {% if bot_username and channel_promotion_enabled %}<a class="button-link secondary full-span requires-telegram-auth" href="https://t.me/{{ bot_username }}?start=promote_book_{{ book.id }}">📢 Опубликовать книгу в канале</a>{% endif %}
+    {% if bot_username %}<a id="catalogPromotionButton" class="button-link catalog-promotion-action full-span requires-telegram-auth" href="https://t.me/{{ bot_username }}?start=top_book_{{ book.id }}" hidden>🚀 Поднять в каталоге</a>{% endif %}
   </div>
 
   <section class="description-card">
