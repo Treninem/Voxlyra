@@ -16,14 +16,23 @@ from app.db import (
 from app.services.duplicate_books import duplicate_warning_text, find_book_duplicates
 from app.services.moderation_learning import get_trusted_moderation_categories, is_auto_moderation_enabled
 from app.services.moderation_revisions import RevisionChangeSet, get_revision_change_set
+from app.services.moderation_rulebook import scan_rulebook
+from app.services.cover_storage import find_cover_file
 
 _URL_RE = re.compile(r"(?:https?://|www\.|t\.me/|telegram\.me/)[^\s<>{}\[\]]+", re.IGNORECASE)
 _ALLOWED_INTERNAL_URL_RE = re.compile(r"https?://(?:t\.me/)?(?:voxlyrabot|voxlyra\.bothost\.tech)(?:/|$)", re.IGNORECASE)
-_PROFANITY_RE = re.compile(r"(?iu)(?<![а-яё])(?:х(?:у[йея]|ер)|пизд|еб(?:а|л|у|ан)|бля(?:д|т)|мудак|сук[аи])")
-_FORBIDDEN_PROMO_RE = re.compile(r"(?iu)(?:подпиш(?:ись|итесь)|реклама|промокод|казино|ставки|букмекер|наркотик|купить\s+доступ)")
+_PROFANITY_RE = re.compile(
+    r"(?iu)(?<![а-яё])(?:"
+    r"х(?:у[йея](?:[а-яё]*)?|ер(?:ня|ню|ней|ом|ы|у|а)?)|"
+    r"пизд[а-яё]*|[её]б(?:а|л|у|ан)[а-яё]*|бля(?:д|т)[а-яё]*|"
+    r"мудак[а-яё]*|сук(?:а|и|у|ой|е|ам|ами|ах)"
+    r")(?![а-яё])"
+)
 _LONG_REPEAT_RE = re.compile(r"(.)\1{24,}", re.DOTALL)
 _EXTERNAL_PAYMENT_RE = re.compile(
-    r"(?:перевед(?:и|ите)|оплат(?:а|ить)|скин(?:ь|ьте)).{0,45}(?:карт(?:у|е)|сбер|тинькофф|qiwi|кошел[её]к)",
+    r"(?iu)\b(?:перевед(?:и|ите)|оплат(?:и|ите)|скин(?:ь|ьте))\b.{0,60}"
+    r"\b(?:на\s+карт(?:у|е)|сбер|тинькофф|qiwi|кошел[её]к)\b.{0,110}"
+    r"(?:реквизит|номер\s+карт|пишите|обращайтесь|телеграм|telegram|@[a-z0-9_]{3,}|(?:\d[ -]?){8,}|по\s+ссылке)",
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -44,6 +53,8 @@ class ModerationFinding:
     character_offset: int = 0
     line_number: int = 1
     content_hash: str = ""
+    rule_id: str = ""
+    confidence: str = "high"
 
     @property
     def scope(self) -> tuple[str, str]:
@@ -93,6 +104,8 @@ async def ensure_moderation_findings_schema() -> None:
                 content_hash TEXT NOT NULL DEFAULT '',
                 revision_request_id INTEGER,
                 selected_for_revision INTEGER NOT NULL DEFAULT 0,
+                rule_id TEXT NOT NULL DEFAULT '',
+                confidence TEXT NOT NULL DEFAULT 'high',
                 FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE,
                 FOREIGN KEY(chapter_id) REFERENCES chapters(id) ON DELETE CASCADE,
                 FOREIGN KEY(revision_request_id) REFERENCES book_revision_requests(id) ON DELETE SET NULL
@@ -112,6 +125,8 @@ async def ensure_moderation_findings_schema() -> None:
             "content_hash": "ALTER TABLE book_moderation_findings ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''",
             "revision_request_id": "ALTER TABLE book_moderation_findings ADD COLUMN revision_request_id INTEGER",
             "selected_for_revision": "ALTER TABLE book_moderation_findings ADD COLUMN selected_for_revision INTEGER NOT NULL DEFAULT 0",
+            "rule_id": "ALTER TABLE book_moderation_findings ADD COLUMN rule_id TEXT NOT NULL DEFAULT ''",
+            "confidence": "ALTER TABLE book_moderation_findings ADD COLUMN confidence TEXT NOT NULL DEFAULT 'high'",
         }
         for column, sql in migrations.items():
             if column not in existing:
@@ -124,6 +139,23 @@ async def ensure_moderation_findings_schema() -> None:
                 field_name=CASE WHEN chapter_id IS NULL AND COALESCE(field_name,'')='' THEN 'structure' ELSE COALESCE(field_name,'') END
             WHERE COALESCE(source_type,'')='' OR (source_id IS NULL AND chapter_id IS NOT NULL)
             """
+        )
+        # v1.14.0.20: the legacy scanner treated isolated ambiguous words
+        # as advertising. Resolve those stale findings once; the context-aware
+        # rulebook will add them again only when a real call-to-action exists.
+        await db.execute(
+            """
+            UPDATE book_moderation_findings
+            SET status='resolved', resolved_at=?
+            WHERE status='open'
+              AND category='promotion'
+              AND reason LIKE 'Реклама или запрещённый призыв%'
+              AND LOWER(TRIM(matched_text)) IN (
+                  'ставка','ставки','казино','букмекер','наркотик','реклама',
+                  'промокод','подпишись','подпишитесь','купить доступ'
+              )
+            """,
+            (utc_now(),),
         )
         await db.commit()
 
@@ -173,6 +205,41 @@ def _finding(
         )
         if len(result) >= limit:
             break
+    return result
+
+
+def _rulebook_findings(
+    text: str,
+    *,
+    scope: str,
+    chapter: Any | None = None,
+    source_type: str = "text",
+    source_id: int | None = None,
+    field_name: str = "",
+) -> list[ModerationFinding]:
+    """Convert deterministic knowledge-base matches into precise findings."""
+    result: list[ModerationFinding] = []
+    for item in scan_rulebook(text, scope=scope):
+        chapter_id = int(chapter["id"]) if chapter is not None and chapter["id"] is not None else None
+        result.append(
+            ModerationFinding(
+                category=item.category,
+                severity=item.severity,
+                reason=item.reason,
+                matched_text=item.matched_text[:300],
+                context=_context(text, item.start, item.end),
+                source_type=source_type,
+                source_id=source_id if source_id is not None else chapter_id,
+                field_name=field_name,
+                chapter_id=chapter_id,
+                chapter_number=int(chapter["number"] or 0) if chapter is not None else None,
+                chapter_title=str(chapter["title"] or "") if chapter is not None else "",
+                character_offset=item.start,
+                line_number=text.count("\n", 0, item.start) + 1,
+                rule_id=item.rule_id,
+                confidence=item.confidence,
+            )
+        )
     return result
 
 
@@ -253,14 +320,15 @@ async def replace_book_moderation_findings(
                 INSERT INTO book_moderation_findings(
                     book_id, chapter_id, chapter_number, chapter_title, category, severity,
                     reason, matched_text, context, character_offset, line_number, status, created_at,
-                    source_type, source_id, field_name, content_hash, selected_for_revision
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)
+                    source_type, source_id, field_name, content_hash, selected_for_revision,
+                    rule_id, confidence
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?)
                 """,
                 (
                     int(book_id), item.chapter_id, item.chapter_number, item.chapter_title,
                     item.category, item.severity, item.reason, item.matched_text, item.context,
                     item.character_offset, item.line_number, "open", now, item.source_type,
-                    item.source_id, item.field_name, item.content_hash,
+                    item.source_id, item.field_name, item.content_hash, item.rule_id, item.confidence,
                 ),
             )
         await db.commit()
@@ -323,9 +391,8 @@ def _metadata_pattern_findings(field_name: str, text: str, age_digits: int) -> l
         _EXTERNAL_PAYMENT_RE, text, category="external_payment", severity="block",
         reason=f"Возможная оплата вне VoxLyra в поле «{label}»", source_type="metadata", field_name=field_name, limit=10,
     )
-    result += _finding(
-        _FORBIDDEN_PROMO_RE, text, category="promotion", severity="block",
-        reason=f"Реклама или запрещённый призыв в поле «{label}»", source_type="metadata", field_name=field_name, limit=10,
+    result += _rulebook_findings(
+        text, scope="metadata", source_type="metadata", field_name=field_name,
     )
     if age_digits < 18:
         result += _finding(
@@ -385,34 +452,43 @@ async def evaluate_book_for_auto_publication(
         if change_set.has_baseline:
             if not change_set.has_changes:
                 existing = await _open_findings(int(book_id))
-                reasons = ["После возврата на доработку изменения не обнаружены."]
-                block, review = _reason_summary(existing)
-                reasons.extend(block + review)
-                return AutoModerationResult(
-                    False,
-                    list(dict.fromkeys(reasons)),
-                    checked_chapters=0,
-                    total_characters=total_characters,
-                    findings=[],
-                    changed_summary=change_set.summary,
-                    revision_request_id=change_set.request_id,
-                )
-            scan_metadata_fields = set(change_set.changed_metadata_fields)
-            text_ids = set(change_set.changed_text_ids)
-            graphic_ids = set(change_set.changed_graphic_ids)
-            if {"age_limit", "content_type"} & scan_metadata_fields:
-                text_ids.update(int(row["id"]) for row in active_chapters)
-            if "content_type" in scan_metadata_fields:
-                graphic_ids.update(int(row["id"]) for row in graphics)
-            text_to_scan = [row for row in active_chapters if int(row["id"]) in text_ids]
-            graphics_to_scan = [row for row in graphics if int(row["id"]) in graphic_ids]
-            scopes_to_refresh = set(change_set.changed_scopes) | set(change_set.deleted_scopes)
-            if text_ids or graphic_ids or ({"content_type"} & scan_metadata_fields):
-                scopes_to_refresh.add(("metadata", "structure"))
-            if {"age_limit", "content_type"} & scan_metadata_fields:
-                scopes_to_refresh.update(("text", str(int(row["id"]))) for row in active_chapters)
-            if "content_type" in scan_metadata_fields:
-                scopes_to_refresh.update(("graphic", str(int(row["id"]))) for row in graphics)
+                if existing:
+                    reasons = ["После возврата на доработку изменения не обнаружены."]
+                    block, review = _reason_summary(existing)
+                    reasons.extend(block + review)
+                    return AutoModerationResult(
+                        False,
+                        list(dict.fromkeys(reasons)),
+                        checked_chapters=0,
+                        total_characters=total_characters,
+                        findings=[],
+                        changed_summary=change_set.summary,
+                        revision_request_id=change_set.request_id,
+                    )
+                # Legacy false positives may have been resolved by the new rulebook.
+                # In that case allow a clean full recheck without forcing the
+                # author to make a meaningless edit only to change the hash.
+                scan_metadata_fields = {"title", "description", "age_limit", "cover", "content_type", "license", "structure"}
+                text_to_scan = list(active_chapters)
+                graphics_to_scan = list(graphics)
+                scopes_to_refresh = None
+            else:
+                scan_metadata_fields = set(change_set.changed_metadata_fields)
+                text_ids = set(change_set.changed_text_ids)
+                graphic_ids = set(change_set.changed_graphic_ids)
+                if {"age_limit", "content_type"} & scan_metadata_fields:
+                    text_ids.update(int(row["id"]) for row in active_chapters)
+                if "content_type" in scan_metadata_fields:
+                    graphic_ids.update(int(row["id"]) for row in graphics)
+                text_to_scan = [row for row in active_chapters if int(row["id"]) in text_ids]
+                graphics_to_scan = [row for row in graphics if int(row["id"]) in graphic_ids]
+                scopes_to_refresh = set(change_set.changed_scopes) | set(change_set.deleted_scopes)
+                if text_ids or graphic_ids or ({"content_type"} & scan_metadata_fields):
+                    scopes_to_refresh.add(("metadata", "structure"))
+                if {"age_limit", "content_type"} & scan_metadata_fields:
+                    scopes_to_refresh.update(("text", str(int(row["id"]))) for row in active_chapters)
+                if "content_type" in scan_metadata_fields:
+                    scopes_to_refresh.update(("graphic", str(int(row["id"]))) for row in graphics)
 
     findings: list[ModerationFinding] = []
 
@@ -427,8 +503,14 @@ async def evaluate_book_for_auto_publication(
         if len(description) < 60:
             findings.append(_simple_finding(category="short_description", severity="review", reason="Описание слишком короткое или отсутствует.", field_name="description", matched_text=description[:300]))
     if "cover" in scan_metadata_fields:
-        if not str(book["cover_path"] or "").strip() and not str(book["cover_file_id"] or "").strip():
-            findings.append(_simple_finding(category="missing_cover", severity="review", reason="Обложка не загружена.", field_name="cover"))
+        cover_path = str(book["cover_path"] or "").strip()
+        cover_file_id = str(book["cover_file_id"] or "").strip()
+        local_cover = find_cover_file(int(book_id), cover_path)
+        if not local_cover and not cover_file_id:
+            findings.append(_simple_finding(
+                category="missing_cover", severity="block",
+                reason="Нужно загрузить обложку книги.", field_name="cover",
+            ))
 
     if scopes_to_refresh is None or ("metadata", "structure") in scopes_to_refresh:
         if is_graphic:
@@ -454,7 +536,7 @@ async def evaluate_book_for_auto_publication(
             continue
         findings += _finding(_URL_RE, text, category="external_link", severity="block", reason="Внешняя ссылка", chapter=chapter, allow_internal=True)
         findings += _finding(_EXTERNAL_PAYMENT_RE, text, category="external_payment", severity="block", reason="Возможная оплата вне VoxLyra", chapter=chapter, limit=20)
-        findings += _finding(_FORBIDDEN_PROMO_RE, text, category="promotion", severity="block", reason="Реклама или запрещённый призыв", chapter=chapter, limit=30)
+        findings += _rulebook_findings(text, scope="text", chapter=chapter)
         findings += _finding(_LONG_REPEAT_RE, text, category="damaged_text", severity="block", reason="Повреждённый текст или спам", chapter=chapter, limit=10)
         profanity_category = "profanity_underage" if age_digits < 18 else "profanity"
         profanity_severity = "block" if age_digits < 18 else "review"
@@ -531,9 +613,10 @@ def evaluate_metadata_text(value: str, *, age_limit: str = "0+", field_name: str
     match = _EXTERNAL_PAYMENT_RE.search(text)
     if match:
         reasons.append(f"В поле «{field_name}» найдена просьба об оплате вне VoxLyra: {match.group(0)[:120]}")
-    match = _FORBIDDEN_PROMO_RE.search(text)
-    if match:
-        reasons.append(f"В поле «{field_name}» обнаружена реклама или запрещённый призыв: {match.group(0)[:120]}")
+    rule_matches = scan_rulebook(text, scope="metadata")
+    if rule_matches:
+        match = rule_matches[0]
+        reasons.append(f"В поле «{field_name}» найдено подтверждённое нарушение: {match.reason} — {match.matched_text[:120]}")
     age_digits = int(re.sub(r"\D", "", age_limit or "0+") or 0)
     match = _PROFANITY_RE.search(text)
     if match and age_digits < 18:

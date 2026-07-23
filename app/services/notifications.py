@@ -27,6 +27,14 @@ def _clean(value: object, limit: int = 240) -> str:
     return text[:limit]
 
 
+
+
+def _clean_multiline(value: object, limit: int = 3000) -> str:
+    lines = [" ".join(line.split()) for line in str(value or "").replace("\r", "").split("\n")]
+    text = "\n".join(line for line in lines if line).strip()
+    return text[:limit]
+
+
 def book_moderation_message(
     title: object,
     status: str,
@@ -37,7 +45,7 @@ def book_moderation_message(
     safe_title = _clean(title, 160) or "Книга"
     if status == "published":
         return f"📚 Книга опубликована\n\n«{safe_title}» прошла проверку и появилась в Вокслире."
-    safe_reason = _clean(reason, 1200)
+    safe_reason = _clean_multiline(reason, 3000)
     reason_block = f"\n\nЧто нужно исправить:\n{safe_reason}" if safe_reason else ""
     return (
         "📚 Книга возвращена на доработку\n\n"

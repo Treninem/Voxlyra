@@ -15,6 +15,7 @@ from app.db import (
     create_author_profile,
     update_author_profile,
     update_book_description,
+    update_book_cover_file_id,
     update_book_price,
     update_book_title,
     update_book_age_limit,
@@ -60,6 +61,7 @@ from app.db import (
 from app.keyboards import (
     age_menu,
     author_book_card_menu,
+    book_cover_edit_menu,
     author_books_menu,
     book_delete_confirm_menu,
     author_menu,
@@ -118,6 +120,10 @@ from app.catalog_options import (
 )
 
 logger = logging.getLogger(__name__)
+
+AUTHOR_BOOK_STORAGE_ROOT = Path(str(settings.AUTHOR_BOOK_STORAGE_ROOT or "data/books"))
+AUDIO_STORAGE_ROOT = Path(str(settings.AUDIO_STORAGE_ROOT or "data/audio"))
+
 
 router = Router()
 
@@ -257,6 +263,7 @@ class EditAuthorProfile(StatesGroup):
 
 class EditBookDetails(StatesGroup):
     title = State()
+    cover = State()
     description = State()
     price = State()
     chapter_sales = State()
@@ -1166,11 +1173,102 @@ async def author_book_card(call: CallbackQuery) -> None:
         f"Публикация: <b>{PUBLICATION_RU.get(book['publication_status'], book['publication_status'])}</b>\n"
         f"Скачивание: <b>{'разрешено' if book['allow_download'] else 'запрещено'}</b>\n"
         f"Цена всей книги: <b>{book['price_stars']} Stars</b>\n"
+        f"Обложка: <b>{'установлена' if (book['cover_file_id'] or book['cover_path']) else 'не установлена'}</b>\n"
         f"Цены отдельных глав задаются в разделе «Главы».\n\n"
         f"{book['description'] or ''}"
     )
     await call.message.edit_text(text[:4096], reply_markup=author_book_card_menu(book_id, book["publication_status"]))
     await call.answer()
+
+
+@router.callback_query(EditBookDetails.cover, F.data.startswith("book:edit_cover_cancel:"))
+async def book_edit_cover_cancel(call: CallbackQuery, state: FSMContext) -> None:
+    book_id = int(call.data.split(":")[-1])
+    book = await get_book(book_id)
+    await state.clear()
+    await call.message.edit_text(
+        "Изменение обложки отменено.",
+        reply_markup=author_book_card_menu(book_id, str(book["publication_status"] if book else "draft")),
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("book:edit_cover:"))
+async def book_edit_cover_start(call: CallbackQuery, state: FSMContext) -> None:
+    book_id = int(call.data.split(":")[-1])
+    ok, _ = await _author_can_edit_book(call, book_id)
+    if not ok:
+        await call.answer("Книга не найдена или недоступна", show_alert=True)
+        return
+    await state.update_data(book_id=book_id)
+    await state.set_state(EditBookDetails.cover)
+    await call.message.edit_text(
+        "<b>Обложка книги</b>\n\n"
+        "Отправьте новую обложку как фотографию или файл JPG, PNG либо WEBP. "
+        "Обложку можно добавить даже если при создании книги вы нажали «Пропустить», "
+        "а также заменить позже у черновика, книги на проверке или опубликованной книги.",
+        reply_markup=book_cover_edit_menu(book_id),
+    )
+    await call.answer()
+
+
+async def _save_edited_book_cover(message: Message, state: FSMContext, bot: Bot, file_id: str) -> None:
+    data = await state.get_data()
+    book_id = int(data.get("book_id") or 0)
+    user = await upsert_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
+    if not book_id or not await book_belongs_to_author(book_id, user["id"]):
+        await state.clear()
+        await message.answer("Книга не найдена или недоступна.", reply_markup=author_menu(True))
+        return
+    try:
+        stored_path = await download_book_cover(bot, book_id, str(file_id))
+    except Exception:
+        logger.exception("Could not replace cover for book_id=%s", book_id)
+        await message.answer(
+            "Не удалось сохранить обложку. Отправьте изображение ещё раз.",
+            reply_markup=book_cover_edit_menu(book_id),
+        )
+        return
+    if not await update_book_cover_file_id(book_id, user["id"], str(file_id)):
+        await state.clear()
+        await message.answer("Книга не найдена или недоступна.", reply_markup=author_menu(True))
+        return
+    await add_audit(user["id"], "book_cover_updated", "book", str(book_id), None, stored_path)
+    await state.clear()
+    book = await get_book(book_id)
+    await message.answer(
+        "✅ Обложка добавлена и сохранена. Она уже будет использоваться в карточке книги и при следующей проверке.",
+        reply_markup=author_book_card_menu(book_id, str(book["publication_status"] if book else "draft")),
+    )
+
+
+@router.message(EditBookDetails.cover, F.photo)
+async def book_edit_cover_photo(message: Message, state: FSMContext, bot: Bot) -> None:
+    await _save_edited_book_cover(message, state, bot, message.photo[-1].file_id)
+
+
+@router.message(EditBookDetails.cover, F.document)
+async def book_edit_cover_document(message: Message, state: FSMContext, bot: Bot) -> None:
+    document = message.document
+    filename = (document.file_name or "").lower()
+    mime = (document.mime_type or "").lower()
+    if not (mime.startswith("image/") or filename.endswith((".jpg", ".jpeg", ".png", ".webp"))):
+        data = await state.get_data()
+        await message.answer(
+            "Для обложки отправьте изображение JPG, PNG или WEBP.",
+            reply_markup=book_cover_edit_menu(int(data.get("book_id") or 0)),
+        )
+        return
+    await _save_edited_book_cover(message, state, bot, document.file_id)
+
+
+@router.message(EditBookDetails.cover)
+async def book_edit_cover_invalid(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    await message.answer(
+        "Отправьте обложку изображением или файлом JPG, PNG либо WEBP.",
+        reply_markup=book_cover_edit_menu(int(data.get("book_id") or 0)),
+    )
 
 
 @router.callback_query(F.data.startswith("book:edit_description:"))
@@ -1825,7 +1923,7 @@ async def chapter_upload_file(message: Message, state: FSMContext, bot: Bot) -> 
         )
         return
 
-    upload_dir = Path("storage/books") / str(book_id)
+    upload_dir = AUTHOR_BOOK_STORAGE_ROOT / str(book_id)
     upload_dir.mkdir(parents=True, exist_ok=True)
     safe_path = upload_dir / f"upload_{message.message_id}{ext}"
     try:
@@ -2613,7 +2711,7 @@ async def _save_telegram_audio(message: Message, bot: Bot, state: FSMContext, fi
     if file_size and file_size > 200 * 1024 * 1024:
         await message.answer("Файл слишком большой. Сейчас лимит 200 МБ на аудиоглаву.")
         return
-    upload_dir = Path("storage/audio") / str(book_id)
+    upload_dir = AUDIO_STORAGE_ROOT / str(book_id)
     upload_dir.mkdir(parents=True, exist_ok=True)
     safe_path = upload_dir / f"audio_{message.message_id}{ext}"
     with safe_path.open("wb") as destination:
@@ -2735,7 +2833,7 @@ async def audio_zip_file(message: Message, state: FSMContext, bot: Bot) -> None:
     if doc.file_size and doc.file_size > 250 * 1024 * 1024:
         await message.answer("ZIP слишком большой. Сейчас лимит 250 МБ.")
         return
-    upload_dir = Path("storage/audio") / str(book_id)
+    upload_dir = AUDIO_STORAGE_ROOT / str(book_id)
     upload_dir.mkdir(parents=True, exist_ok=True)
     zip_path = upload_dir / f"audio_zip_{message.message_id}.zip"
     with zip_path.open("wb") as destination:

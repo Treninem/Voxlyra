@@ -457,7 +457,8 @@ async def get_author_moderation_state(book_id: int) -> dict[str, Any]:
                 """
                 SELECT id, source_type, source_id, field_name, chapter_id, chapter_number,
                        chapter_title, category, severity, reason, matched_text, context,
-                       character_offset, line_number, selected_for_revision, created_at
+                       character_offset, line_number, selected_for_revision, created_at,
+                       rule_id, confidence
                 FROM book_moderation_findings
                 WHERE book_id=? AND status='open'
                 ORDER BY selected_for_revision DESC,
@@ -504,17 +505,31 @@ def format_structured_revision_reason(manual_reason: str, findings: list[dict[st
         parts.append(clean_manual)
     if findings:
         parts.append("\nТочные места, которые нужно исправить:")
+        metadata_labels = {
+            "title": "Название книги",
+            "description": "Описание книги",
+            "cover": "Обложка книги",
+            "age_limit": "Возрастное ограничение",
+            "content_type": "Тип произведения",
+            "license": "Лицензия",
+            "structure": "Структура произведения",
+        }
         for index, item in enumerate(findings[:40], start=1):
-            if item.get("source_type") == "metadata":
-                location = f"Метаданные: {item.get('field_name') or 'поле книги'}"
-            elif item.get("chapter_number") is not None:
+            source_type = str(item.get("source_type") or "")
+            fragment = str(item.get("matched_text") or item.get("context") or "").strip()
+            fragment = " ".join(fragment.split())[:220]
+            reason = str(item.get("reason") or "требуется исправление")
+            if source_type == "metadata":
+                field_name = str(item.get("field_name") or "structure")
+                location = metadata_labels.get(field_name, "Данные книги")
+                parts.append(f"{index}. {location}: {reason}" + (f" — «{fragment}»" if fragment and fragment != reason else ""))
+                continue
+            if item.get("chapter_number") is not None:
                 location = f"Глава {item.get('chapter_number')}"
                 if str(item.get("chapter_title") or "").strip():
                     location += f" — {item.get('chapter_title')}"
             else:
                 location = "Произведение"
             line = int(item.get("line_number") or 1)
-            fragment = str(item.get("matched_text") or item.get("context") or "").strip()
-            fragment = " ".join(fragment.split())[:220]
-            parts.append(f"{index}. {location}, строка {line}: {item.get('reason') or 'требуется исправление'}" + (f" — «{fragment}»" if fragment else ""))
+            parts.append(f"{index}. {location}, строка {line}: {reason}" + (f" — «{fragment}»" if fragment else ""))
     return "\n".join(parts).strip()[:8000]

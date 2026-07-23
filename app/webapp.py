@@ -11,7 +11,9 @@ import logging
 from html import escape
 import hmac
 import json
+import os
 import shutil
+import tempfile
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -108,6 +110,24 @@ from app.db import (
     get_personal_reading_insights,
     sync_user_achievements,
     set_user_achievement_showcase,
+    get_achievement_program_settings,
+    set_achievement_program_settings,
+    get_achievement_owner_summary,
+    get_achievement_artwork_catalog,
+    create_manual_achievement_definition,
+    set_manual_achievement_active,
+    grant_manual_achievement,
+    revoke_manual_achievement,
+    get_manual_achievement_admin_summary,
+    get_catalog_promotion_settings,
+    set_catalog_promotion_settings,
+    create_owner_catalog_promotion,
+    cancel_catalog_promotion,
+    list_catalog_promotions,
+    search_catalog_promotion_books,
+    get_catalog_promotion_availability,
+    get_active_catalog_promotion_for_book,
+    record_catalog_promotion_click,
     get_user_by_id,
     search_users,
     search_books,
@@ -411,6 +431,18 @@ from app.services.web_import_store import (
 from app.services.publication import finish_book_content_workflow, publish_book_and_channel
 from app.services.cover_storage import ensure_book_cover_file
 from app.services.profile_avatar import ensure_profile_avatar
+from app.services.achievement_artwork import (
+    AchievementArtworkError,
+    MAX_PNG_BYTES as ACHIEVEMENT_ART_MAX_PNG_BYTES,
+    MAX_ZIP_BYTES as ACHIEVEMENT_ART_MAX_ZIP_BYTES,
+    build_status as build_achievement_artwork_status,
+    effective_path as effective_achievement_artwork_path,
+    import_zip as import_achievement_artwork_zip,
+    install_png as install_achievement_artwork_png,
+    manifest_file as achievement_artwork_manifest_file,
+    remove_override as remove_achievement_artwork_override,
+    replaceable_items_by_code as achievement_artwork_items_by_code,
+)
 from app.services.moderation_alerts import notify_moderation_resolved
 from app.services.tts_providers import (
     TTSProviderError,
@@ -930,6 +962,30 @@ def _showcase_sections(books: list[Any]) -> dict[str, list[Any]]:
     }
 
 
+async def _upload_to_temporary_file(upload: UploadFile, *, max_bytes: int, suffix: str) -> Path:
+    fd, raw_path = tempfile.mkstemp(prefix="voxlyra-upload-", suffix=suffix)
+    path = Path(raw_path)
+    total = 0
+    try:
+        with os.fdopen(fd, "wb") as output:
+            while True:
+                chunk = await upload.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    raise HTTPException(status_code=413, detail=f"Файл превышает допустимый размер {max_bytes // (1024 * 1024)} МБ.")
+                output.write(chunk)
+        if total <= 0:
+            raise HTTPException(status_code=400, detail="Загруженный файл пуст.")
+        return path
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
+    finally:
+        await upload.close()
+
+
 def create_app() -> FastAPI:
     logger = logging.getLogger(__name__)
 
@@ -1107,6 +1163,16 @@ def create_app() -> FastAPI:
             response.headers["Cache-Control"] = "private, no-store, max-age=0"
         return response
     app.mount("/static", StaticFiles(directory="static"), name="static")
+
+    @app.get("/media/achievements/{filename}", include_in_schema=False)
+    async def achievement_artwork_media(filename: str) -> FileResponse:
+        path = effective_achievement_artwork_path(filename)
+        if not path:
+            raise HTTPException(status_code=404, detail="Изображение награды не найдено.")
+        response = FileResponse(path, media_type="image/png")
+        response.headers["Cache-Control"] = "private, no-cache, max-age=0, must-revalidate"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        return response
 
     @app.get("/favicon.ico", include_in_schema=False)
     async def favicon() -> FileResponse:
@@ -2257,7 +2323,12 @@ def create_app() -> FastAPI:
         if book_row and book_row["publication_status"] != "published":
             book_row = None
         if book_row:
+            active_catalog_promotion = await get_active_catalog_promotion_for_book(book_id)
             book_row = await attach_ranking(book_row)
+            if active_catalog_promotion:
+                book_row["catalog_promoted"] = True
+                book_row["catalog_promotion_expires_at"] = active_catalog_promotion.get("expires_at")
+                await record_catalog_promotion_click(book_id)
         chapters = await list_chapters_for_book(book_id, published_only=True) if book_row else []
         graphic_chapters = await list_graphic_chapters_for_book(book_id, published_only=True) if book_row else []
         graphic_volumes = await list_graphic_volumes_for_book(book_id, published_only=True) if book_row else []
@@ -2504,6 +2575,339 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=409, detail="Подписка уже завершена.")
         await add_audit(user.app_user_id, "premium_renew_enabled" if enabled else "premium_renew_canceled", "premium", str(status.get("subscription_id") or ""), None, "")
         return {"ok": True, "subscription": await get_user_premium_status(user.app_user_id)}
+
+    @app.get("/api/control/achievement-artwork")
+    async def api_control_achievement_artwork(x_telegram_init_data: str | None = Header(default=None)):
+        _, is_owner, _ = await control_session(x_telegram_init_data)
+        if not is_owner:
+            raise HTTPException(status_code=403, detail="Изображения наград доступны только владельцу.")
+        catalog = await get_achievement_artwork_catalog()
+        return {"ok": True, **build_achievement_artwork_status(catalog)}
+
+    @app.get("/api/control/achievement-artwork/manifest")
+    async def api_control_achievement_artwork_manifest(
+        format: str = "md",
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        _, is_owner, _ = await control_session(x_telegram_init_data)
+        if not is_owner:
+            raise HTTPException(status_code=403, detail="Манифест наград доступен только владельцу.")
+        selected = "json" if str(format).lower() == "json" else "md"
+        path = achievement_artwork_manifest_file(selected)
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="Манифест не найден.")
+        return FileResponse(
+            path,
+            media_type="application/json" if selected == "json" else "text/markdown; charset=utf-8",
+            filename=f"VoxLyra_ACHIEVEMENTS_ART_MANIFEST_100.{selected}",
+        )
+
+    @app.post("/api/control/achievement-artwork/import")
+    async def api_control_achievement_artwork_import(
+        file: UploadFile = File(...),
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        actor, is_owner, _ = await control_session(x_telegram_init_data)
+        if not is_owner:
+            raise HTTPException(status_code=403, detail="Импорт изображений наград доступен только владельцу.")
+        filename = str(file.filename or "")
+        if not filename.lower().endswith(".zip"):
+            raise HTTPException(status_code=400, detail="Для массового импорта нужен ZIP-архив.")
+        temporary = await _upload_to_temporary_file(
+            file, max_bytes=ACHIEVEMENT_ART_MAX_ZIP_BYTES, suffix=".zip"
+        )
+        try:
+            try:
+                result = await asyncio.to_thread(import_achievement_artwork_zip, temporary)
+            except AchievementArtworkError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        finally:
+            temporary.unlink(missing_ok=True)
+        await add_audit(
+            actor.app_user_id,
+            "achievement_artwork_bulk_imported",
+            "achievement_artwork",
+            "bulk",
+            None,
+            json.dumps(
+                {
+                    "installed_count": int(result.get("installed_count") or 0),
+                    "error_count": int(result.get("error_count") or 0),
+                },
+                ensure_ascii=False,
+            ),
+        )
+        catalog = await get_achievement_artwork_catalog()
+        return {"ok": True, "result": result, **build_achievement_artwork_status(catalog)}
+
+    @app.post("/api/control/achievement-artwork/{code}")
+    async def api_control_achievement_artwork_upload(
+        code: str,
+        file: UploadFile = File(...),
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        actor, is_owner, _ = await control_session(x_telegram_init_data)
+        if not is_owner:
+            raise HTTPException(status_code=403, detail="Замена изображений наград доступна только владельцу.")
+        definition = achievement_artwork_items_by_code().get(str(code))
+        if not definition:
+            raise HTTPException(status_code=404, detail="Награда защищена или отсутствует в манифесте замены.")
+        expected_filename = str(definition.get("filename") or "")
+        uploaded_filename = Path(str(file.filename or "")).name
+        if uploaded_filename != expected_filename:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Имя файла должно быть строго {expected_filename}.",
+            )
+        temporary = await _upload_to_temporary_file(
+            file, max_bytes=ACHIEVEMENT_ART_MAX_PNG_BYTES, suffix=".png"
+        )
+        try:
+            try:
+                result = await asyncio.to_thread(install_achievement_artwork_png, expected_filename, temporary)
+            except AchievementArtworkError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        finally:
+            temporary.unlink(missing_ok=True)
+        await add_audit(
+            actor.app_user_id,
+            "achievement_artwork_replaced",
+            "achievement_artwork",
+            str(code),
+            None,
+            json.dumps(
+                {
+                    "filename": expected_filename,
+                    "sha256": result.get("sha256"),
+                    "size_bytes": result.get("size_bytes"),
+                },
+                ensure_ascii=False,
+            ),
+        )
+        catalog = await get_achievement_artwork_catalog()
+        return {"ok": True, "result": result, **build_achievement_artwork_status(catalog)}
+
+    @app.delete("/api/control/achievement-artwork/{code}")
+    async def api_control_achievement_artwork_reset(
+        code: str,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        actor, is_owner, _ = await control_session(x_telegram_init_data)
+        if not is_owner:
+            raise HTTPException(status_code=403, detail="Сброс изображений наград доступен только владельцу.")
+        definition = achievement_artwork_items_by_code().get(str(code))
+        if not definition:
+            raise HTTPException(status_code=404, detail="Награда защищена или отсутствует в манифесте замены.")
+        filename = str(definition.get("filename") or "")
+        try:
+            removed = await asyncio.to_thread(remove_achievement_artwork_override, filename)
+        except AchievementArtworkError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if removed:
+            await add_audit(
+                actor.app_user_id,
+                "achievement_artwork_reset",
+                "achievement_artwork",
+                str(code),
+                None,
+                json.dumps({"filename": filename}, ensure_ascii=False),
+            )
+        catalog = await get_achievement_artwork_catalog()
+        return {"ok": True, "removed": removed, **build_achievement_artwork_status(catalog)}
+
+    @app.get("/api/control/achievements")
+    async def api_control_achievements(x_telegram_init_data: str | None = Header(default=None)):
+        _, is_owner, _ = await control_session(x_telegram_init_data)
+        if not is_owner:
+            raise HTTPException(status_code=403, detail="Настройки наград доступны только владельцу.")
+        return {
+            "ok": True,
+            "settings": await get_achievement_program_settings(),
+            "summary": await get_achievement_owner_summary(),
+            "manual": await get_manual_achievement_admin_summary(),
+        }
+
+    @app.patch("/api/control/achievements")
+    async def api_control_achievements_update(
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user, is_owner, _ = await control_session(x_telegram_init_data)
+        if not is_owner:
+            raise HTTPException(status_code=403, detail="Настройки наград доступны только владельцу.")
+        try:
+            program = await set_achievement_program_settings(payload or {})
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        await add_audit(
+            user.app_user_id,
+            "achievement_program_updated",
+            "settings",
+            "achievement_program_v2",
+            None,
+            json.dumps(program, ensure_ascii=False, separators=(",", ":")),
+        )
+        return {
+            "ok": True,
+            "settings": program,
+            "summary": await get_achievement_owner_summary(),
+        }
+
+    @app.get("/api/control/achievements/users")
+    async def api_control_achievement_users(
+        q: str = "",
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        _, is_owner, _ = await control_session(x_telegram_init_data)
+        if not is_owner:
+            raise HTTPException(status_code=403, detail="Ручные награды доступны только владельцу.")
+        clean = str(q or "").strip()
+        if len(clean) < 2:
+            return {"ok": True, "items": []}
+        rows = await search_users(clean, limit=20)
+        return {
+            "ok": True,
+            "items": [
+                {
+                    "id": int(row["id"]),
+                    "telegram_id": int(row["telegram_id"]),
+                    "username": str(row["username"] or ""),
+                    "full_name": str(row["full_name"] or ""),
+                    "pen_name": str(row["pen_name"] or ""),
+                }
+                for row in rows
+            ],
+        }
+
+    @app.post("/api/control/achievements/manual/definition")
+    async def api_control_achievement_definition(
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        actor, is_owner, _ = await control_session(x_telegram_init_data)
+        if not is_owner:
+            raise HTTPException(status_code=403, detail="Создавать особые награды может только владелец.")
+        try:
+            item = await create_manual_achievement_definition(payload or {})
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        await add_audit(actor.app_user_id, "manual_achievement_created", "achievement", str(item["code"]), None, json.dumps(item, ensure_ascii=False))
+        return {"ok": True, "item": item, "manual": await get_manual_achievement_admin_summary()}
+
+    @app.patch("/api/control/achievements/manual/definition/{code}")
+    async def api_control_achievement_definition_state(
+        code: str,
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        actor, is_owner, _ = await control_session(x_telegram_init_data)
+        if not is_owner:
+            raise HTTPException(status_code=403, detail="Изменять особые награды может только владелец.")
+        raw = (payload or {}).get("active", True)
+        active = raw if isinstance(raw, bool) else str(raw).strip().lower() in {"1", "true", "yes", "on"}
+        if not await set_manual_achievement_active(code, active):
+            raise HTTPException(status_code=404, detail="Особая награда не найдена.")
+        await add_audit(actor.app_user_id, "manual_achievement_enabled" if active else "manual_achievement_disabled", "achievement", code)
+        return {"ok": True, "manual": await get_manual_achievement_admin_summary()}
+
+    @app.post("/api/control/achievements/manual/grant")
+    async def api_control_achievement_grant(
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        actor, is_owner, _ = await control_session(x_telegram_init_data)
+        if not is_owner:
+            raise HTTPException(status_code=403, detail="Выдавать особые награды может только владелец.")
+        try:
+            user_id = int((payload or {}).get("user_id") or 0)
+            code = str((payload or {}).get("code") or "")
+            reason = str((payload or {}).get("reason") or "").strip()
+            result = await grant_manual_achievement(user_id, code, reason)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        await add_audit(actor.app_user_id, "manual_achievement_granted", "user", str(user_id), None, json.dumps({"code": result["code"], "reason": reason}, ensure_ascii=False))
+        return {"ok": True, "result": result, "manual": await get_manual_achievement_admin_summary()}
+
+    @app.post("/api/control/achievements/manual/revoke")
+    async def api_control_achievement_revoke(
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        actor, is_owner, _ = await control_session(x_telegram_init_data)
+        if not is_owner:
+            raise HTTPException(status_code=403, detail="Отзывать особые награды может только владелец.")
+        try:
+            user_id = int((payload or {}).get("user_id") or 0)
+            code = str((payload or {}).get("code") or "")
+            ok = await revoke_manual_achievement(user_id, code)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if not ok:
+            raise HTTPException(status_code=404, detail="У пользователя нет этой особой награды.")
+        await add_audit(actor.app_user_id, "manual_achievement_revoked", "user", str(user_id), None, json.dumps({"code": code}, ensure_ascii=False))
+        return {"ok": True, "manual": await get_manual_achievement_admin_summary()}
+
+    @app.get("/api/control/catalog-promotions")
+    async def api_control_catalog_promotions(
+        q: str = "",
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        _, is_owner, _ = await control_session(x_telegram_init_data)
+        if not is_owner:
+            raise HTTPException(status_code=403, detail="Управление топом каталога доступно только владельцу.")
+        clean = str(q or "").strip()
+        return {
+            "ok": True,
+            "settings": await get_catalog_promotion_settings(),
+            "items": await list_catalog_promotions(limit=60),
+            "books": await search_catalog_promotion_books(clean, owner=True, limit=50),
+            "query": clean,
+        }
+
+    @app.patch("/api/control/catalog-promotions")
+    async def api_control_catalog_promotion_settings(
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        actor, is_owner, _ = await control_session(x_telegram_init_data)
+        if not is_owner:
+            raise HTTPException(status_code=403, detail="Настройки топа доступны только владельцу.")
+        try:
+            result = await set_catalog_promotion_settings(payload or {})
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        await add_audit(actor.app_user_id, "catalog_promotion_settings_updated", "settings", "catalog_promotion", None, json.dumps(result, ensure_ascii=False))
+        return {"ok": True, "settings": result}
+
+    @app.post("/api/control/catalog-promotions")
+    async def api_control_catalog_promotion_create(
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        actor, is_owner, _ = await control_session(x_telegram_init_data)
+        if not is_owner:
+            raise HTTPException(status_code=403, detail="Бесплатно продвигать любые книги может только владелец.")
+        try:
+            book_id = int((payload or {}).get("book_id") or 0)
+            duration = int((payload or {}).get("duration_hours") or 0) or None
+            item = await create_owner_catalog_promotion(book_id, actor.app_user_id, duration)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        await add_audit(actor.app_user_id, "owner_catalog_promotion_started", "book", str(book_id), None, json.dumps({"promotion_id": item.get("id"), "expires_at": item.get("expires_at")}, ensure_ascii=False))
+        return {"ok": True, "item": item, "items": await list_catalog_promotions(limit=60)}
+
+    @app.post("/api/control/catalog-promotions/{promotion_id}/cancel")
+    async def api_control_catalog_promotion_cancel(
+        promotion_id: int,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        actor, is_owner, _ = await control_session(x_telegram_init_data)
+        if not is_owner:
+            raise HTTPException(status_code=403, detail="Останавливать продвижение может только владелец.")
+        if not await cancel_catalog_promotion(promotion_id):
+            raise HTTPException(status_code=404, detail="Активное продвижение не найдено.")
+        await add_audit(actor.app_user_id, "catalog_promotion_canceled", "catalog_promotion", str(promotion_id))
+        return {"ok": True, "items": await list_catalog_promotions(limit=60)}
 
     @app.get("/api/control/premium")
     async def api_control_premium(x_telegram_init_data: str | None = Header(default=None)):
@@ -3457,6 +3861,10 @@ def create_app() -> FastAPI:
         if book_row["author_id"] is not None:
             author_subscription = await get_author_subscription(user.app_user_id, int(book_row["author_id"]))
         reviews = await list_reviews_for_book(book_id, limit=20)
+        is_owner = user.telegram_id in settings.owner_ids
+        catalog_promotion = await get_catalog_promotion_availability(
+            book_id, user.app_user_id, owner=is_owner
+        )
         return {
             "ok": True,
             "bookmark": _row_to_dict(bookmark) if bookmark else None,
@@ -3465,6 +3873,11 @@ def create_app() -> FastAPI:
             "author_id": int(book_row["author_id"]) if book_row["author_id"] is not None else None,
             "my_review": _row_to_dict(review) if review else None,
             "reviews": _rows_to_dicts(reviews),
+            "catalog_promotion": {
+                **catalog_promotion,
+                "is_owner": bool(is_owner),
+                "can_manage": bool(is_owner or catalog_promotion.get("reason") != "not_owner"),
+            },
         }
 
     @app.post("/api/book/{book_id}/bookmark")
@@ -6544,6 +6957,7 @@ def create_app() -> FastAPI:
             result["today"] = await get_owner_today_stats()
         if is_owner:
             result["premium"] = await get_premium_owner_summary()
+            result["catalog_promotions_active"] = len(await list_catalog_promotions(limit=100, active_only=True))
             result["monetization_integrity"] = await get_monetization_integrity_report()
         if is_owner or permissions.intersection({"view_finance", "refunds", "payouts"}):
             result["finance"] = await get_platform_finance_summary()
@@ -6585,7 +6999,8 @@ def create_app() -> FastAPI:
         x_telegram_init_data: str | None = Header(default=None),
     ):
         await control_session(x_telegram_init_data, "grant_access")
-        return {"ok": True, "items": _rows_to_dicts(await list_grantable_books(q, limit=60))}
+        rows = await list_grantable_books(q, limit=None)
+        return {"ok": True, "items": _rows_to_dicts(rows), "count": len(rows)}
 
     @app.post("/api/control/access/chapters/preview")
     async def api_control_access_chapters_preview(

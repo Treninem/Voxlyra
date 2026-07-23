@@ -10,6 +10,11 @@ PROTECTED_CATEGORIES = {
     "external_link",
     "external_payment",
     "promotion",
+    "illegal_trade",
+    "missing_cover",
+    "duplicate",
+    "empty_book",
+    "empty_graphic",
     "damaged_text",
     "profanity_underage",
 }

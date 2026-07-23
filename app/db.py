@@ -524,6 +524,7 @@ async def _init_db_impl() -> None:
         await _ensure_v11333_monetization_schema(db)
         await _ensure_v11336_privacy_schema(db)
         await _ensure_v11337_performance_schema(db)
+        await _ensure_v114015_catalog_promotion_schema(db)
         await db.execute("PRAGMA optimize")
         await db.commit()
 
@@ -1309,6 +1310,24 @@ async def update_book_cover_path(book_id: int, cover_path: str | None) -> bool:
         cur = await db.execute(
             "UPDATE books SET cover_path=?, updated_at=? WHERE id=?",
             (cover_path, now, int(book_id)),
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def update_book_cover_file_id(book_id: int, author_user_id: int, cover_file_id: str) -> bool:
+    """Save a newly uploaded Telegram cover for a book owned by the author."""
+    now = utc_now()
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            UPDATE books
+            SET cover_file_id=?, updated_at=?
+            WHERE id=?
+              AND publication_status!='deleted'
+              AND author_id=(SELECT id FROM author_profiles WHERE user_id=?)
+            """,
+            (str(cover_file_id), now, int(book_id), int(author_user_id)),
         )
         await db.commit()
         return cur.rowcount > 0
@@ -10638,112 +10657,424 @@ async def get_purchase_target(payload: str) -> dict[str, Any] | None:
 
 _ACHIEVEMENT_CATALOG: dict[str, dict[str, Any]] = {
     "first_chapter": {
-        "title": "Первая глава", "description": "Прочитать первую главу до конца.", "icon": "📖", "icon_asset": "/static/img/achievements/first_chapter.png", "group": "reader", "category": "reading", "rarity": "common", "goal": 1
+        "title": "Первая глава", "description": "Прочитать первую главу до конца.", "icon": "📖", "icon_asset": "/media/achievements/first_chapter.png", "group": "reader", "category": "reading", "rarity": "common", "goal": 1
     },
     "hundred_chapters": {
-        "title": "100 глав", "description": "Прочитать сто глав до конца.", "icon": "💯", "icon_asset": "/static/img/achievements/hundred_chapters.png", "group": "reader", "category": "reading", "rarity": "epic", "goal": 100
+        "title": "100 глав", "description": "Прочитать сто глав до конца.", "icon": "💯", "icon_asset": "/media/achievements/hundred_chapters.png", "group": "reader", "category": "reading", "rarity": "epic", "goal": 100
     },
     "night_reader": {
-        "title": "Ночной читатель", "description": "Читать поздним вечером или ночью.", "icon": "🌙", "icon_asset": "/static/img/achievements/night_reader.png", "group": "reader", "category": "reading", "rarity": "rare", "goal": 1
+        "title": "Ночной читатель", "description": "Читать поздним вечером или ночью.", "icon": "🌙", "icon_asset": "/media/achievements/night_reader.png", "group": "reader", "category": "reading", "rarity": "rare", "goal": 1
     },
     "collector": {
-        "title": "Коллекционер", "description": "Сохранить десять произведений в библиотеке.", "icon": "📚", "icon_asset": "/static/img/achievements/collector.png", "group": "reader", "category": "reading", "rarity": "rare", "goal": 10
+        "title": "Коллекционер", "description": "Сохранить десять произведений в библиотеке.", "icon": "📚", "icon_asset": "/media/achievements/collector.png", "group": "reader", "category": "reading", "rarity": "rare", "goal": 10
     },
     "first_review": {
-        "title": "Первый отзыв", "description": "Оставить первый опубликованный отзыв.", "icon": "⭐", "icon_asset": "/static/img/achievements/first_review.png", "group": "reader", "category": "community", "rarity": "common", "goal": 1
+        "title": "Первый отзыв", "description": "Оставить первый опубликованный отзыв.", "icon": "⭐", "icon_asset": "/media/achievements/first_review.png", "group": "reader", "category": "community", "rarity": "common", "goal": 1
     },
     "first_comment": {
-        "title": "Первый комментарий", "description": "Опубликовать первый комментарий к главе.", "icon": "💬", "icon_asset": "/static/img/achievements/first_comment.png", "group": "reader", "category": "community", "rarity": "common", "goal": 1
+        "title": "Первый комментарий", "description": "Опубликовать первый комментарий к главе.", "icon": "💬", "icon_asset": "/media/achievements/first_comment.png", "group": "reader", "category": "community", "rarity": "common", "goal": 1
     },
     "reading_streak_7": {
-        "title": "Серия 7 дней", "description": "Читать, слушать или смотреть комиксы семь дней подряд.", "icon": "🔥", "icon_asset": "/static/img/achievements/reading_streak_7.png", "group": "reader", "category": "reading", "rarity": "rare", "goal": 7
+        "title": "Серия 7 дней", "description": "Читать, слушать или смотреть комиксы семь дней подряд.", "icon": "🔥", "icon_asset": "/media/achievements/reading_streak_7.png", "group": "reader", "category": "reading", "rarity": "rare", "goal": 7
     },
     "reading_streak_30": {
-        "title": "Верный читатель", "description": "Сохранять активную серию тридцать дней подряд.", "icon": "✦", "icon_asset": "/static/img/achievements/reading_streak_30.png", "group": "reader", "category": "reading", "rarity": "legendary", "goal": 30
+        "title": "Верный читатель", "description": "Сохранять активную серию тридцать дней подряд.", "icon": "✦", "icon_asset": "/media/achievements/reading_streak_30.png", "group": "reader", "category": "reading", "rarity": "legendary", "goal": 30
     },
     "audio_hour": {
-        "title": "Час аудио", "description": "Прослушать суммарно шестьдесят минут аудиокниг.", "icon": "🎧", "icon_asset": "/static/img/achievements/audio_hour.png", "group": "reader", "category": "audio", "rarity": "rare", "goal": 60
+        "title": "Час аудио", "description": "Прослушать суммарно шестьдесят минут аудиокниг.", "icon": "🎧", "icon_asset": "/media/achievements/audio_hour.png", "group": "reader", "category": "audio", "rarity": "rare", "goal": 60
     },
     "comic_explorer": {
-        "title": "Исследователь комиксов", "description": "Открыть первую графическую главу.", "icon": "🖼", "icon_asset": "/static/img/achievements/comic_explorer.png", "group": "reader", "category": "comic", "rarity": "common", "goal": 1
+        "title": "Исследователь комиксов", "description": "Открыть первую графическую главу.", "icon": "🖼", "icon_asset": "/media/achievements/comic_explorer.png", "group": "reader", "category": "comic", "rarity": "common", "goal": 1
     },
     "comic_hundred_pages": {
-        "title": "100 страниц комиксов", "description": "Просмотреть сто страниц комиксов, манги или манхвы.", "icon": "💠", "icon_asset": "/static/img/achievements/comic_hundred_pages.png", "group": "reader", "category": "comic", "rarity": "epic", "goal": 100
+        "title": "100 страниц комиксов", "description": "Просмотреть сто страниц комиксов, манги или манхвы.", "icon": "💠", "icon_asset": "/media/achievements/comic_hundred_pages.png", "group": "reader", "category": "comic", "rarity": "epic", "goal": 100
     },
     "first_note": {
-        "title": "Первая заметка", "description": "Сохранить первую личную заметку во время чтения.", "icon": "🖋", "icon_asset": "/static/img/achievements/first_note.png", "group": "reader", "category": "reading", "rarity": "common", "goal": 1
+        "title": "Первая заметка", "description": "Сохранить первую личную заметку во время чтения.", "icon": "🖋", "icon_asset": "/media/achievements/first_note.png", "group": "reader", "category": "reading", "rarity": "common", "goal": 1
     },
     "quote_collector": {
-        "title": "Хранитель цитат", "description": "Сохранить десять цитат из произведений.", "icon": "📜", "icon_asset": "/static/img/achievements/quote_collector.png", "group": "reader", "category": "reading", "rarity": "rare", "goal": 10
+        "title": "Хранитель цитат", "description": "Сохранить десять цитат из произведений.", "icon": "📜", "icon_asset": "/media/achievements/quote_collector.png", "group": "reader", "category": "reading", "rarity": "rare", "goal": 10
     },
     "premium_member": {
-        "title": "VoxLyra Premium", "description": "Впервые оформить Premium и получить премиальный знак.", "icon": "👑", "icon_asset": "/static/img/achievements/premium_member.png", "group": "reader", "category": "premium", "rarity": "legendary", "goal": 1
+        "title": "VoxLyra Premium", "description": "Впервые оформить Premium и получить премиальный знак.", "icon": "👑", "icon_asset": "/media/achievements/premium_member.png", "group": "reader", "category": "premium", "rarity": "legendary", "goal": 1
     },
     "first_book": {
-        "title": "Первая книга", "description": "Опубликовать первое произведение.", "icon": "✍️", "icon_asset": "/static/img/achievements/first_book.png", "group": "author", "category": "author", "rarity": "rare", "goal": 1
+        "title": "Первая книга", "description": "Опубликовать первое произведение.", "icon": "✍️", "icon_asset": "/media/achievements/first_book.png", "group": "author", "category": "author", "rarity": "rare", "goal": 1
     },
     "author_ten_chapters": {
-        "title": "Автор 10 глав", "description": "Опубликовать десять текстовых или графических глав.", "icon": "🪶", "icon_asset": "/static/img/achievements/author_ten_chapters.png", "group": "author", "category": "author", "rarity": "rare", "goal": 10
+        "title": "Автор 10 глав", "description": "Опубликовать десять текстовых или графических глав.", "icon": "🪶", "icon_asset": "/media/achievements/author_ten_chapters.png", "group": "author", "category": "author", "rarity": "rare", "goal": 10
     },
     "author_hundred_chapters": {
-        "title": "Автор 100 глав", "description": "Опубликовать сто текстовых или графических глав.", "icon": "🏛", "icon_asset": "/static/img/achievements/author_hundred_chapters.png", "group": "author", "category": "author", "rarity": "epic", "goal": 100
+        "title": "Автор 100 глав", "description": "Опубликовать сто текстовых или графических глав.", "icon": "🏛", "icon_asset": "/media/achievements/author_hundred_chapters.png", "group": "author", "category": "author", "rarity": "epic", "goal": 100
     },
     "author_ten_books": {
-        "title": "Автор 10 книг", "description": "Опубликовать десять самостоятельных произведений.", "icon": "📚", "icon_asset": "/static/img/achievements/author_ten_books.png", "group": "author", "category": "author", "rarity": "epic", "goal": 10
+        "title": "Автор 10 книг", "description": "Опубликовать десять самостоятельных произведений.", "icon": "📚", "icon_asset": "/media/achievements/author_ten_books.png", "group": "author", "category": "author", "rarity": "epic", "goal": 10
     },
     "author_hundred_reactions": {
-        "title": "100 реакций читателей", "description": "Получить сто реакций на опубликованные главы.", "icon": "💜", "icon_asset": "/static/img/achievements/author_hundred_reactions.png", "group": "author", "category": "author", "rarity": "epic", "goal": 100
+        "title": "100 реакций читателей", "description": "Получить сто реакций на опубликованные главы.", "icon": "💜", "icon_asset": "/media/achievements/author_hundred_reactions.png", "group": "author", "category": "author", "rarity": "epic", "goal": 100
     },
     "thousand_readers": {
-        "title": "1000 читателей", "description": "Собрать тысячу уникальных читателей.", "icon": "👥", "icon_asset": "/static/img/achievements/thousand_readers.png", "group": "author", "category": "author", "rarity": "legendary", "goal": 1000
+        "title": "1000 читателей", "description": "Собрать тысячу уникальных читателей.", "icon": "👥", "icon_asset": "/media/achievements/thousand_readers.png", "group": "author", "category": "author", "rarity": "legendary", "goal": 1000
     },
     "author_month": {
-        "title": "Автор месяца", "description": "Стать первым по уникальным читателям месяца.", "icon": "🏆", "icon_asset": "/static/img/achievements/author_month.png", "group": "author", "category": "author", "rarity": "legendary", "goal": 1
+        "title": "Автор месяца", "description": "Стать первым по уникальным читателям месяца.", "icon": "🏆", "icon_asset": "/media/achievements/author_month.png", "group": "author", "category": "author", "rarity": "mythic", "goal": 1
     },
     "five_hundred_chapters": {
-        "title": "500 глав", "description": "Прочитать пятьсот глав до конца.", "icon": "📚", "icon_asset": "/static/img/achievements/five_hundred_chapters.png", "group": "reader", "category": "reading", "rarity": "legendary", "goal": 500
+        "title": "500 глав", "description": "Прочитать пятьсот глав до конца.", "icon": "📚", "icon_asset": "/media/achievements/five_hundred_chapters.png", "group": "reader", "category": "reading", "rarity": "legendary", "goal": 500
     },
     "thousand_chapters": {
-        "title": "1000 глав", "description": "Прочитать тысячу глав до конца.", "icon": "✦", "icon_asset": "/static/img/achievements/thousand_chapters.png", "group": "reader", "category": "reading", "rarity": "legendary", "goal": 1000
+        "title": "1000 глав", "description": "Прочитать тысячу глав до конца.", "icon": "✦", "icon_asset": "/media/achievements/thousand_chapters.png", "group": "reader", "category": "reading", "rarity": "legendary", "goal": 1000
     },
     "collector_fifty": {
-        "title": "Большая библиотека", "description": "Сохранить пятьдесят произведений в личной библиотеке.", "icon": "🏛", "icon_asset": "/static/img/achievements/collector_fifty.png", "group": "reader", "category": "reading", "rarity": "epic", "goal": 50
+        "title": "Большая библиотека", "description": "Сохранить пятьдесят произведений в личной библиотеке.", "icon": "🏛", "icon_asset": "/media/achievements/collector_fifty.png", "group": "reader", "category": "reading", "rarity": "epic", "goal": 50
     },
     "audio_ten_hours": {
-        "title": "10 часов аудио", "description": "Прослушать суммарно десять часов аудиокниг.", "icon": "🎧", "icon_asset": "/static/img/achievements/audio_ten_hours.png", "group": "reader", "category": "audio", "rarity": "epic", "goal": 600
+        "title": "10 часов аудио", "description": "Прослушать суммарно десять часов аудиокниг.", "icon": "🎧", "icon_asset": "/media/achievements/audio_ten_hours.png", "group": "reader", "category": "audio", "rarity": "epic", "goal": 600
     },
     "comic_thousand_pages": {
-        "title": "1000 страниц комиксов", "description": "Просмотреть тысячу страниц графических произведений.", "icon": "💠", "icon_asset": "/static/img/achievements/comic_thousand_pages.png", "group": "reader", "category": "comic", "rarity": "legendary", "goal": 1000
+        "title": "1000 страниц комиксов", "description": "Просмотреть тысячу страниц графических произведений.", "icon": "💠", "icon_asset": "/media/achievements/comic_thousand_pages.png", "group": "reader", "category": "comic", "rarity": "legendary", "goal": 1000
     },
     "author_five_hundred_chapters": {
-        "title": "Автор 500 глав", "description": "Опубликовать пятьсот текстовых или графических глав.", "icon": "🪶", "icon_asset": "/static/img/achievements/author_five_hundred_chapters.png", "group": "author", "category": "author", "rarity": "legendary", "goal": 500
+        "title": "Автор 500 глав", "description": "Опубликовать пятьсот текстовых или графических глав.", "icon": "🪶", "icon_asset": "/media/achievements/author_five_hundred_chapters.png", "group": "author", "category": "author", "rarity": "legendary", "goal": 500
     },
     "author_fifty_books": {
-        "title": "Автор 50 книг", "description": "Опубликовать пятьдесят самостоятельных произведений.", "icon": "📚", "icon_asset": "/static/img/achievements/author_fifty_books.png", "group": "author", "category": "author", "rarity": "legendary", "goal": 50
+        "title": "Автор 50 книг", "description": "Опубликовать пятьдесят самостоятельных произведений.", "icon": "📚", "icon_asset": "/media/achievements/author_fifty_books.png", "group": "author", "category": "author", "rarity": "legendary", "goal": 50
     },
     "author_thousand_reactions": {
-        "title": "1000 реакций", "description": "Получить тысячу реакций читателей на опубликованные главы.", "icon": "💜", "icon_asset": "/static/img/achievements/author_thousand_reactions.png", "group": "author", "category": "author", "rarity": "legendary", "goal": 1000
+        "title": "1000 реакций", "description": "Получить тысячу реакций читателей на опубликованные главы.", "icon": "💜", "icon_asset": "/media/achievements/author_thousand_reactions.png", "group": "author", "category": "author", "rarity": "legendary", "goal": 1000
+    },
+    "two_thousand_chapters": {
+        "title": "2500 глав", "description": "Завершить две тысячи пятьсот текстовых глав.", "icon": "✦", "icon_asset": "/media/achievements/two_thousand_chapters.png", "group": "reader", "category": "reading", "rarity": "legendary", "goal": 2500
+    },
+    "collector_hundred": {
+        "title": "Личная библиотека 100", "description": "Сохранить сто произведений в личной библиотеке.", "icon": "🏛", "icon_asset": "/media/achievements/collector_hundred.png", "group": "reader", "category": "reading", "rarity": "legendary", "goal": 100
+    },
+    "reviewer_fifty": {
+        "title": "Критик VoxLyra", "description": "Опубликовать пятьдесят отзывов на произведения.", "icon": "⭐", "icon_asset": "/media/achievements/reviewer_fifty.png", "group": "reader", "category": "community", "rarity": "epic", "goal": 50
+    },
+    "commentator_hundred": {
+        "title": "Голос сообщества", "description": "Опубликовать сто комментариев к главам.", "icon": "💬", "icon_asset": "/media/achievements/commentator_hundred.png", "group": "reader", "category": "community", "rarity": "epic", "goal": 100
+    },
+    "audio_hundred_hours": {
+        "title": "100 часов аудио", "description": "Прослушать суммарно сто часов аудиокниг.", "icon": "🎧", "icon_asset": "/media/achievements/audio_hundred_hours.png", "group": "reader", "category": "audio", "rarity": "legendary", "goal": 6000
+    },
+    "comic_five_thousand_pages": {
+        "title": "5000 страниц", "description": "Просмотреть пять тысяч страниц комиксов, манги или манхвы.", "icon": "💠", "icon_asset": "/media/achievements/comic_five_thousand_pages.png", "group": "reader", "category": "comic", "rarity": "legendary", "goal": 5000
+    },
+    "author_hundred_books": {
+        "title": "Автор 100 книг", "description": "Опубликовать сто самостоятельных произведений.", "icon": "📚", "icon_asset": "/media/achievements/author_hundred_books.png", "group": "author", "category": "author", "rarity": "mythic", "goal": 100
+    },
+    "author_ten_thousand_reactions": {
+        "title": "10 000 реакций", "description": "Получить десять тысяч реакций читателей на опубликованные главы.", "icon": "💜", "icon_asset": "/media/achievements/author_ten_thousand_reactions.png", "group": "author", "category": "author", "rarity": "mythic", "goal": 10000
+    },
+    "reader_twenty_five_chapters": {
+        "title": "Первые 25 глав", "description": "Завершить двадцать пять текстовых глав.", "icon": "📖", "icon_asset": "/media/achievements/reader_twenty_five_chapters.png", "group": "reader", "category": "reading", "rarity": "common", "goal": 25
+    },
+    "reader_two_hundred_fifty_chapters": {
+        "title": "250 глав", "description": "Завершить двести пятьдесят текстовых глав.", "icon": "📚", "icon_asset": "/media/achievements/reader_two_hundred_fifty_chapters.png", "group": "reader", "category": "reading", "rarity": "rare", "goal": 250
+    },
+    "reader_five_thousand_chapters": {
+        "title": "Хронист 5000", "description": "Завершить пять тысяч текстовых глав — рубеж преданного читателя.", "icon": "✦", "icon_asset": "/media/achievements/reader_five_thousand_chapters.png", "group": "reader", "category": "reading", "rarity": "mythic", "goal": 5000
+    },
+    "reading_streak_14": {
+        "title": "Две недели вместе", "description": "Сохранять подтверждённую активность четырнадцать дней подряд.", "icon": "🔥", "icon_asset": "/media/achievements/reading_streak_14.png", "group": "reader", "category": "reading", "rarity": "rare", "goal": 14
+    },
+    "reading_streak_100": {
+        "title": "Сто дней пути", "description": "Сохранять подтверждённую активность сто дней подряд.", "icon": "🔥", "icon_asset": "/media/achievements/reading_streak_100.png", "group": "reader", "category": "reading", "rarity": "legendary", "goal": 100
+    },
+    "reading_streak_365": {
+        "title": "Год с VoxLyra", "description": "Сохранять подтверждённую активность триста шестьдесят пять дней подряд.", "icon": "✦", "icon_asset": "/media/achievements/reading_streak_365.png", "group": "reader", "category": "reading", "rarity": "mythic", "goal": 365
+    },
+    "collector_twenty_five": {
+        "title": "Полка на 25", "description": "Сохранить двадцать пять произведений в личной библиотеке.", "icon": "📚", "icon_asset": "/media/achievements/collector_twenty_five.png", "group": "reader", "category": "reading", "rarity": "rare", "goal": 25
+    },
+    "collector_two_hundred_fifty": {
+        "title": "Архивариус", "description": "Сохранить двести пятьдесят произведений в личной библиотеке.", "icon": "🏛", "icon_asset": "/media/achievements/collector_two_hundred_fifty.png", "group": "reader", "category": "reading", "rarity": "legendary", "goal": 250
+    },
+    "reviewer_ten": {
+        "title": "Вдумчивый критик", "description": "Опубликовать десять содержательных отзывов на произведения.", "icon": "⭐", "icon_asset": "/media/achievements/reviewer_ten.png", "group": "reader", "category": "community", "rarity": "rare", "goal": 10
+    },
+    "commentator_twenty_five": {
+        "title": "Участник обсуждений", "description": "Опубликовать двадцать пять комментариев к главам.", "icon": "💬", "icon_asset": "/media/achievements/commentator_twenty_five.png", "group": "reader", "category": "community", "rarity": "rare", "goal": 25
+    },
+    "audio_twenty_five_hours": {
+        "title": "25 часов звучания", "description": "Прослушать суммарно двадцать пять часов аудиокниг.", "icon": "🎧", "icon_asset": "/media/achievements/audio_twenty_five_hours.png", "group": "reader", "category": "audio", "rarity": "epic", "goal": 1500
+    },
+    "audio_five_hundred_hours": {
+        "title": "Голос эпох", "description": "Прослушать суммарно пятьсот часов аудиокниг.", "icon": "✦", "icon_asset": "/media/achievements/audio_five_hundred_hours.png", "group": "reader", "category": "audio", "rarity": "mythic", "goal": 30000
+    },
+    "comic_twenty_five_thousand_pages": {
+        "title": "Галерея миров", "description": "Просмотреть двадцать пять тысяч страниц комиксов, манги или манхвы.", "icon": "💠", "icon_asset": "/media/achievements/comic_twenty_five_thousand_pages.png", "group": "reader", "category": "comic", "rarity": "mythic", "goal": 25000
+    },
+    "quote_fifty": {
+        "title": "Хранитель 50 цитат", "description": "Сохранить пятьдесят значимых цитат из произведений.", "icon": "📜", "icon_asset": "/media/achievements/quote_fifty.png", "group": "reader", "category": "reading", "rarity": "epic", "goal": 50
+    },
+    "author_fifty_chapters": {
+        "title": "Автор 50 глав", "description": "Опубликовать пятьдесят текстовых или графических глав.", "icon": "🪶", "icon_asset": "/media/achievements/author_fifty_chapters.png", "group": "author", "category": "author", "rarity": "rare", "goal": 50
+    },
+    "author_two_hundred_fifty_chapters": {
+        "title": "Автор 250 глав", "description": "Опубликовать двести пятьдесят текстовых или графических глав.", "icon": "🪶", "icon_asset": "/media/achievements/author_two_hundred_fifty_chapters.png", "group": "author", "category": "author", "rarity": "epic", "goal": 250
+    },
+    "author_thousand_chapters": {
+        "title": "Автор 1000 глав", "description": "Опубликовать тысячу текстовых или графических глав.", "icon": "🏛", "icon_asset": "/media/achievements/author_thousand_chapters.png", "group": "author", "category": "author", "rarity": "legendary", "goal": 1000
+    },
+    "author_five_books": {
+        "title": "Автор 5 книг", "description": "Опубликовать пять самостоятельных произведений.", "icon": "📚", "icon_asset": "/media/achievements/author_five_books.png", "group": "author", "category": "author", "rarity": "rare", "goal": 5
+    },
+    "author_hundred_readers": {
+        "title": "Первые 100 читателей", "description": "Собрать сто уникальных читателей своих произведений.", "icon": "👥", "icon_asset": "/media/achievements/author_hundred_readers.png", "group": "author", "category": "author", "rarity": "epic", "goal": 100
+    },
+    "author_ten_thousand_readers": {
+        "title": "Аудитория 10 000", "description": "Собрать десять тысяч уникальных читателей своих произведений.", "icon": "✦", "icon_asset": "/media/achievements/author_ten_thousand_readers.png", "group": "author", "category": "author", "rarity": "mythic", "goal": 10000
+    },
+    "completed_book_1": {
+        "title": 'Завершённая история', "description": 'Полностью прочитать первое произведение.', "icon": '✦',
+        "icon_asset": "/media/achievements/completed_book_1.png", "group": "reader",
+        "category": "reading", "rarity": "common", "goal": 1
+    },
+    "completed_books_5": {
+        "title": 'Пять завершённых миров', "description": 'Полностью прочитать пять произведений.', "icon": '✦',
+        "icon_asset": "/media/achievements/completed_books_5.png", "group": "reader",
+        "category": "reading", "rarity": "rare", "goal": 5
+    },
+    "completed_books_25": {
+        "title": 'Созвездие историй', "description": 'Полностью прочитать двадцать пять произведений.', "icon": '✦',
+        "icon_asset": "/media/achievements/completed_books_25.png", "group": "reader",
+        "category": "reading", "rarity": "epic", "goal": 25
+    },
+    "completed_books_100": {
+        "title": 'Страж сотни миров', "description": 'Полностью прочитать сто произведений.', "icon": '✦',
+        "icon_asset": "/media/achievements/completed_books_100.png", "group": "reader",
+        "category": "reading", "rarity": "legendary", "goal": 100
+    },
+    "completed_books_250": {
+        "title": 'Владыка библиотеки', "description": 'Полностью прочитать двести пятьдесят произведений.', "icon": '✦',
+        "icon_asset": "/media/achievements/completed_books_250.png", "group": "reader",
+        "category": "reading", "rarity": "mythic", "goal": 250
+    },
+    "active_days_30": {
+        "title": 'Месяц активности', "description": 'Быть активным в VoxLyra в тридцать разные дни.', "icon": '✦',
+        "icon_asset": "/media/achievements/active_days_30.png", "group": "reader",
+        "category": "reading", "rarity": "rare", "goal": 30
+    },
+    "active_days_100": {
+        "title": 'Сто дней открытий', "description": 'Быть активным в VoxLyra в сто разные дни.', "icon": '✦',
+        "icon_asset": "/media/achievements/active_days_100.png", "group": "reader",
+        "category": "reading", "rarity": "epic", "goal": 100
+    },
+    "active_days_365": {
+        "title": 'Год открытий', "description": 'Быть активным в VoxLyra в 365 разные дни.', "icon": '✦',
+        "icon_asset": "/media/achievements/active_days_365.png", "group": "reader",
+        "category": "reading", "rarity": "legendary", "goal": 365
+    },
+    "active_days_1000": {
+        "title": 'Тысяча дней с VoxLyra', "description": 'Быть активным в VoxLyra в тысячу разные дни.', "icon": '✦',
+        "icon_asset": "/media/achievements/active_days_1000.png", "group": "reader",
+        "category": "reading", "rarity": "mythic", "goal": 1000
+    },
+    "genres_5": {
+        "title": 'Пять жанров', "description": 'Завершить чтение глав в пяти разных жанрах.', "icon": '✦',
+        "icon_asset": "/media/achievements/genres_5.png", "group": "reader",
+        "category": "reading", "rarity": "rare", "goal": 5
+    },
+    "genres_10": {
+        "title": 'Карта жанров', "description": 'Завершить чтение глав в десяти разных жанрах.', "icon": '✦',
+        "icon_asset": "/media/achievements/genres_10.png", "group": "reader",
+        "category": "reading", "rarity": "epic", "goal": 10
+    },
+    "genres_20": {
+        "title": 'Путешественник миров', "description": 'Завершить чтение глав в двадцати разных жанрах.', "icon": '✦',
+        "icon_asset": "/media/achievements/genres_20.png", "group": "reader",
+        "category": "reading", "rarity": "legendary", "goal": 20
+    },
+    "notes_10": {
+        "title": 'Десять мыслей', "description": 'Сохранить десять личных заметок во время чтения.', "icon": '✦',
+        "icon_asset": "/media/achievements/notes_10.png", "group": "reader",
+        "category": "reading", "rarity": "rare", "goal": 10
+    },
+    "notes_50": {
+        "title": 'Летописец мыслей', "description": 'Сохранить пятьдесят личных заметок.', "icon": '✦',
+        "icon_asset": "/media/achievements/notes_50.png", "group": "reader",
+        "category": "reading", "rarity": "epic", "goal": 50
+    },
+    "notes_200": {
+        "title": 'Архив мыслей', "description": 'Сохранить двести личных заметок.', "icon": '✦',
+        "icon_asset": "/media/achievements/notes_200.png", "group": "reader",
+        "category": "reading", "rarity": "legendary", "goal": 200
+    },
+    "quotes_100": {
+        "title": 'Сотня строк', "description": 'Сохранить сто значимых цитат.', "icon": '✦',
+        "icon_asset": "/media/achievements/quotes_100.png", "group": "reader",
+        "category": "reading", "rarity": "legendary", "goal": 100
+    },
+    "quotes_250": {
+        "title": 'Голос тысячелетий', "description": 'Сохранить двести пятьдесят значимых цитат.', "icon": '✦',
+        "icon_asset": "/media/achievements/quotes_250.png", "group": "reader",
+        "category": "reading", "rarity": "mythic", "goal": 250
+    },
+    "graphic_chapters_25": {
+        "title": 'Двадцать пять панелей', "description": 'Полностью просмотреть двадцать пять графических глав.', "icon": '🖼',
+        "icon_asset": "/media/achievements/graphic_chapters_25.png", "group": "reader",
+        "category": "comic", "rarity": "rare", "goal": 25
+    },
+    "graphic_chapters_250": {
+        "title": 'Мастер визуальных миров', "description": 'Полностью просмотреть двести пятьдесят графических глав.', "icon": '🖼',
+        "icon_asset": "/media/achievements/graphic_chapters_250.png", "group": "reader",
+        "category": "comic", "rarity": "epic", "goal": 250
+    },
+    "graphic_chapters_1000": {
+        "title": 'Хранитель галерей', "description": 'Полностью просмотреть тысячу графических глав.', "icon": '🖼',
+        "icon_asset": "/media/achievements/graphic_chapters_1000.png", "group": "reader",
+        "category": "comic", "rarity": "legendary", "goal": 1000
+    },
+    "audio_chapters_10": {
+        "title": 'Десять голосов', "description": 'Полностью прослушать десять аудиоглав.', "icon": '🎧',
+        "icon_asset": "/media/achievements/audio_chapters_10.png", "group": "reader",
+        "category": "audio", "rarity": "rare", "goal": 10
+    },
+    "audio_chapters_100": {
+        "title": 'Сотня голосов', "description": 'Полностью прослушать сто аудиоглав.', "icon": '🎧',
+        "icon_asset": "/media/achievements/audio_chapters_100.png", "group": "reader",
+        "category": "audio", "rarity": "epic", "goal": 100
+    },
+    "audio_chapters_500": {
+        "title": 'Хранитель звучащих миров', "description": 'Полностью прослушать пятьсот аудиоглав.', "icon": '🎧',
+        "icon_asset": "/media/achievements/audio_chapters_500.png", "group": "reader",
+        "category": "audio", "rarity": "legendary", "goal": 500
+    },
+    "reviews_200": {
+        "title": 'Мастер критики', "description": 'Опубликовать двести содержательных отзывов.', "icon": '⭐',
+        "icon_asset": "/media/achievements/reviews_200.png", "group": "reader",
+        "category": "community", "rarity": "legendary", "goal": 200
+    },
+    "reviews_500": {
+        "title": 'Верховный критик', "description": 'Опубликовать пятьсот содержательных отзывов.', "icon": '⭐',
+        "icon_asset": "/media/achievements/reviews_500.png", "group": "reader",
+        "category": "community", "rarity": "mythic", "goal": 500
+    },
+    "comments_500": {
+        "title": 'Голос пятисот обсуждений', "description": 'Опубликовать пятьсот комментариев к главам.', "icon": '💬',
+        "icon_asset": "/media/achievements/comments_500.png", "group": "reader",
+        "category": "community", "rarity": "legendary", "goal": 500
+    },
+    "comments_1000": {
+        "title": 'Сердце сообщества', "description": 'Опубликовать тысячу комментариев к главам.', "icon": '💬',
+        "icon_asset": "/media/achievements/comments_1000.png", "group": "reader",
+        "category": "community", "rarity": "mythic", "goal": 1000
+    },
+    "author_completed_book_1": {
+        "title": 'Завершённое произведение', "description": 'Завершить и опубликовать первое полноценное произведение.', "icon": '🪶',
+        "icon_asset": "/media/achievements/author_completed_book_1.png", "group": "author",
+        "category": "author", "rarity": "rare", "goal": 1
+    },
+    "author_completed_books_5": {
+        "title": 'Пять завершённых произведений', "description": 'Завершить и опубликовать пять произведений.', "icon": '🪶',
+        "icon_asset": "/media/achievements/author_completed_books_5.png", "group": "author",
+        "category": "author", "rarity": "epic", "goal": 5
+    },
+    "author_completed_books_20": {
+        "title": 'Мастер завершённых историй', "description": 'Завершить и опубликовать двадцать произведений.', "icon": '🪶',
+        "icon_asset": "/media/achievements/author_completed_books_20.png", "group": "author",
+        "category": "author", "rarity": "legendary", "goal": 20
+    },
+    "author_completed_books_50": {
+        "title": 'Создатель эпох', "description": 'Завершить и опубликовать пятьдесят произведений.', "icon": '🪶',
+        "icon_asset": "/media/achievements/author_completed_books_50.png", "group": "author",
+        "category": "author", "rarity": "mythic", "goal": 50
+    },
+    "author_words_100k": {
+        "title": 'Сто тысяч слов', "description": 'Опубликовать сто тысяч слов авторского текста.', "icon": '🪶',
+        "icon_asset": "/media/achievements/author_words_100k.png", "group": "author",
+        "category": "author", "rarity": "rare", "goal": 100000
+    },
+    "author_words_1m": {
+        "title": 'Миллион слов', "description": 'Опубликовать один миллион слов авторского текста.', "icon": '🪶',
+        "icon_asset": "/media/achievements/author_words_1m.png", "group": "author",
+        "category": "author", "rarity": "epic", "goal": 1000000
+    },
+    "author_words_5m": {
+        "title": 'Пять миллионов слов', "description": 'Опубликовать пять миллионов слов авторского текста.', "icon": '🪶',
+        "icon_asset": "/media/achievements/author_words_5m.png", "group": "author",
+        "category": "author", "rarity": "legendary", "goal": 5000000
+    },
+    "author_words_10m": {
+        "title": 'Летописец эпох', "description": 'Опубликовать десять миллионов слов авторского текста.', "icon": '🪶',
+        "icon_asset": "/media/achievements/author_words_10m.png", "group": "author",
+        "category": "author", "rarity": "mythic", "goal": 10000000
+    },
+    "author_rating_50": {
+        "title": 'Признанное качество', "description": 'Сохранить среднюю оценку не ниже 4,7 при минимум пятидесяти отзывах.', "icon": '🪶',
+        "icon_asset": "/media/achievements/author_rating_50.png", "group": "author",
+        "category": "author", "rarity": "epic", "goal": 50
+    },
+    "author_rating_250": {
+        "title": 'Эталон VoxLyra', "description": 'Сохранить среднюю оценку не ниже 4,7 при минимум 250 отзывах.', "icon": '🪶',
+        "icon_asset": "/media/achievements/author_rating_250.png", "group": "author",
+        "category": "author", "rarity": "legendary", "goal": 250
+    },
+    "author_library_additions_1000": {
+        "title": 'Тысяча библиотек', "description": 'Произведения автора добавили в личные библиотеки тысячу раз.', "icon": '🪶',
+        "icon_asset": "/media/achievements/author_library_additions_1000.png", "group": "author",
+        "category": "author", "rarity": "legendary", "goal": 1000
+    },
+    "author_hundred_thousand_readers": {
+        "title": 'Аудитория 100 000', "description": 'Собрать сто тысяч уникальных читателей.', "icon": '🪶',
+        "icon_asset": "/media/achievements/author_hundred_thousand_readers.png", "group": "author",
+        "category": "author", "rarity": "mythic", "goal": 100000
+    },
+    "author_hundred_thousand_reactions": {
+        "title": 'Сто тысяч откликов', "description": 'Получить сто тысяч реакций читателей.', "icon": '🪶',
+        "icon_asset": "/media/achievements/author_hundred_thousand_reactions.png", "group": "author",
+        "category": "author", "rarity": "mythic", "goal": 100000
     },
 }
 
+
+_RARE_ACHIEVEMENT_CATALOG: dict[str, dict[str, Any]] = {
+    "founding_member": {
+        "title": "Первые хранители",
+        "description": "Быть среди читателей VoxLyra до контрольной даты раннего сообщества.",
+        "icon": "✦",
+        "icon_asset": "/media/achievements/founding_member.png",
+        "group": "reader",
+        "category": "rare",
+        "rarity": "mythic",
+        "goal": 1,
+        "special": True,
+    },
+    "all_rounder": {
+        "title": "Голос всех миров",
+        "description": "Открыть достижения в чтении, аудио, комиксах и общении.",
+        "icon": "✦",
+        "icon_asset": "/media/achievements/all_rounder.png",
+        "group": "reader",
+        "category": "rare",
+        "rarity": "mythic",
+        "goal": 4,
+        "special": True,
+    },
+}
 
 _ACHIEVEMENT_TIER_BY_RARITY: dict[str, str] = {
     "common": "bronze",
     "rare": "silver",
     "epic": "gold",
     "legendary": "platinum",
+    "mythic": "legend",
 }
 _ACHIEVEMENT_TIER_LABELS: dict[str, str] = {
     "bronze": "Бронза",
     "silver": "Серебро",
     "gold": "Золото",
     "platinum": "Платина",
+    "legend": "Легенда",
 }
 _ACHIEVEMENT_POINTS_BY_RARITY: dict[str, int] = {
     "common": 10,
     "rare": 25,
     "epic": 60,
     "legendary": 150,
+    "mythic": 300,
 }
 _ACHIEVEMENT_COLLECTOR_LEVELS: tuple[tuple[int, str], ...] = (
     (0, "Новичок"),
@@ -10752,21 +11083,268 @@ _ACHIEVEMENT_COLLECTOR_LEVELS: tuple[tuple[int, str], ...] = (
     (500, "Хранитель"),
     (1000, "Легенда VoxLyra"),
 )
+_ACHIEVEMENT_PROGRAM_SETTING_KEY = "achievement_program_v2"
+_MANUAL_ACHIEVEMENT_CATALOG_SETTING_KEY = "achievement_manual_catalog_v1"
+_ACHIEVEMENT_RARITIES = {"common", "rare", "epic", "legendary", "mythic"}
 
 
-def _achievement_points(info: dict[str, Any]) -> int:
-    return _ACHIEVEMENT_POINTS_BY_RARITY.get(str(info.get("rarity") or "common"), 10)
+def _default_achievement_program() -> dict[str, Any]:
+    return {
+        "points": dict(_ACHIEVEMENT_POINTS_BY_RARITY),
+        "levels": [
+            {"threshold": threshold, "name": name}
+            for threshold, name in _ACHIEVEMENT_COLLECTOR_LEVELS
+        ],
+        "rare": {
+            "founding_member_enabled": True,
+            "founding_cutoff_date": "2026-07-23",
+            "all_rounder_enabled": True,
+        },
+        "season": {
+            "enabled": True,
+            "code": "summer_2026",
+            "title": "Летний марафон 2026",
+            "description": "Завершить тридцать глав во время летнего сезона VoxLyra.",
+            "start_date": "2026-06-01",
+            "end_date": "2026-08-31",
+            "goal": 30,
+            "rarity": "epic",
+            "custom_points": 100,
+        },
+    }
 
 
-def _achievement_collector_summary(total_points: int, unlocked_count: int, total_count: int) -> dict[str, Any]:
+def _program_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _achievement_date(value: Any, field_name: str, *, allow_empty: bool = False) -> str:
+    clean = str(value or "").strip()
+    if not clean and allow_empty:
+        return ""
+    try:
+        parsed = datetime.fromisoformat(clean).date()
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Поле «{field_name}» должно быть датой ГГГГ-ММ-ДД.") from exc
+    return parsed.isoformat()
+
+
+def _achievement_campaign_slug(value: Any) -> str:
+    clean = str(value or "").strip().lower()
+    normalized = []
+    previous_separator = False
+    for char in clean:
+        if char.isalnum():
+            normalized.append(char)
+            previous_separator = False
+        elif not previous_separator:
+            normalized.append("_")
+            previous_separator = True
+    result = "".join(normalized).strip("_")[:40]
+    return result or "season"
+
+
+def _normalize_achievement_program(payload: Any, *, partial: bool = False) -> dict[str, Any]:
+    defaults = _default_achievement_program()
+    source = payload if isinstance(payload, dict) else {}
+
+    points_source = source.get("points") if isinstance(source.get("points"), dict) else {}
+    points = {}
+    for rarity, default_value in defaults["points"].items():
+        raw = points_source.get(rarity, default_value)
+        try:
+            value = int(raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Очки наград должны быть целыми числами.") from exc
+        points[rarity] = max(1, min(10000, value))
+
+    levels_source = source.get("levels") if isinstance(source.get("levels"), list) else defaults["levels"]
+    levels: list[dict[str, Any]] = []
+    for index, default_level in enumerate(defaults["levels"]):
+        item = levels_source[index] if index < len(levels_source) and isinstance(levels_source[index], dict) else default_level
+        name = str(item.get("name") or default_level["name"]).strip()[:48] or default_level["name"]
+        try:
+            threshold = int(item.get("threshold", default_level["threshold"]))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Пороги уровней должны быть целыми числами.") from exc
+        if index == 0:
+            threshold = 0
+        threshold = max(0, min(10_000_000, threshold))
+        if levels and threshold <= int(levels[-1]["threshold"]):
+            raise ValueError("Каждый следующий уровень должен иметь больший порог очков.")
+        levels.append({"threshold": threshold, "name": name})
+
+    rare_source = source.get("rare") if isinstance(source.get("rare"), dict) else {}
+    rare = {
+        "founding_member_enabled": _program_bool(
+            rare_source.get("founding_member_enabled"), defaults["rare"]["founding_member_enabled"]
+        ),
+        "founding_cutoff_date": _achievement_date(
+            rare_source.get("founding_cutoff_date", defaults["rare"]["founding_cutoff_date"]),
+            "Дата первых хранителей",
+        ),
+        "all_rounder_enabled": _program_bool(
+            rare_source.get("all_rounder_enabled"), defaults["rare"]["all_rounder_enabled"]
+        ),
+    }
+
+    season_source = source.get("season") if isinstance(source.get("season"), dict) else {}
+    season = dict(defaults["season"])
+    season.update({key: value for key, value in season_source.items() if key in season})
+    season["enabled"] = _program_bool(season.get("enabled"), defaults["season"]["enabled"])
+    season["code"] = _achievement_campaign_slug(season.get("code"))
+    season["title"] = str(season.get("title") or defaults["season"]["title"]).strip()[:80]
+    season["description"] = str(season.get("description") or defaults["season"]["description"]).strip()[:240]
+    season["start_date"] = _achievement_date(season.get("start_date"), "Начало сезона")
+    season["end_date"] = _achievement_date(season.get("end_date"), "Окончание сезона")
+    if season["end_date"] < season["start_date"]:
+        raise ValueError("Окончание сезона не может быть раньше начала.")
+    try:
+        season["goal"] = max(1, min(1_000_000, int(season.get("goal") or 1)))
+        season["custom_points"] = max(0, min(10000, int(season.get("custom_points") or 0)))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Цель и очки сезона должны быть целыми числами.") from exc
+    rarity = str(season.get("rarity") or "epic").strip().lower()
+    season["rarity"] = rarity if rarity in _ACHIEVEMENT_RARITIES else "epic"
+    if season["enabled"] and (not season["title"] or not season["description"]):
+        raise ValueError("Для активного сезона нужны название и описание.")
+
+    return {"points": points, "levels": levels, "rare": rare, "season": season}
+
+
+async def get_achievement_program_settings() -> dict[str, Any]:
+    raw = await get_setting(_ACHIEVEMENT_PROGRAM_SETTING_KEY, "")
+    if not raw:
+        return _default_achievement_program()
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return _default_achievement_program()
+    try:
+        return _normalize_achievement_program(parsed)
+    except ValueError:
+        return _default_achievement_program()
+
+
+async def set_achievement_program_settings(payload: dict[str, Any]) -> dict[str, Any]:
+    normalized = _normalize_achievement_program(payload)
+    await set_setting(
+        _ACHIEVEMENT_PROGRAM_SETTING_KEY,
+        json.dumps(normalized, ensure_ascii=False, separators=(",", ":")),
+    )
+    return normalized
+
+
+async def get_achievement_artwork_catalog() -> list[dict[str, Any]]:
+    """Возвращает все 100 запланированных изображений, даже если особая награда временно выключена."""
+    program = await get_achievement_program_settings()
+    catalog: dict[str, dict[str, Any]] = {code: dict(info) for code, info in _ACHIEVEMENT_CATALOG.items()}
+    rare = program.get("rare") if isinstance(program.get("rare"), dict) else {}
+    founding = dict(_RARE_ACHIEVEMENT_CATALOG["founding_member"])
+    founding["active"] = _program_bool(rare.get("founding_member_enabled"), True)
+    catalog["founding_member"] = founding
+    all_rounder = dict(_RARE_ACHIEVEMENT_CATALOG["all_rounder"])
+    all_rounder["active"] = _program_bool(rare.get("all_rounder_enabled"), True)
+    catalog["all_rounder"] = all_rounder
+    season = program.get("season") if isinstance(program.get("season"), dict) else _default_achievement_program()["season"]
+    season_info = _season_achievement_info(season)
+    season_info["active"] = _program_bool(season.get("enabled"), False)
+    catalog[_season_achievement_code(season)] = season_info
+    result: list[dict[str, Any]] = []
+    for code, info in catalog.items():
+        tier, tier_label = _achievement_tier(info)
+        result.append({"code": code, **info, "tier": tier, "tier_label": tier_label})
+    return result
+
+
+async def get_achievement_owner_summary() -> dict[str, Any]:
+    async with connect() as db:
+        cur = await db.execute("SELECT COUNT(*) AS cnt, COUNT(DISTINCT user_id) AS users FROM user_achievements")
+        totals = await cur.fetchone()
+        cur = await db.execute(
+            "SELECT achievement_code, COUNT(*) AS cnt FROM user_achievements "
+            "GROUP BY achievement_code ORDER BY cnt DESC, achievement_code LIMIT 12"
+        )
+        popular = [
+            {"code": str(row["achievement_code"]), "awarded": int(row["cnt"] or 0)}
+            for row in await cur.fetchall()
+        ]
+        cur = await db.execute("SELECT COUNT(DISTINCT user_id) AS cnt FROM achievement_showcase")
+        showcase_users = int((await cur.fetchone())["cnt"] or 0)
+    program = await get_achievement_program_settings()
+    rare = program.get("rare") if isinstance(program.get("rare"), dict) else {}
+    automatic_total = len(_ACHIEVEMENT_CATALOG)
+    automatic_total += 1 if _program_bool(rare.get("founding_member_enabled"), True) else 0
+    automatic_total += 1 if _program_bool(rare.get("all_rounder_enabled"), True) else 0
+    season = program.get("season") if isinstance(program.get("season"), dict) else {}
+    automatic_total += 1 if _program_bool(season.get("enabled"), False) else 0
+    return {
+        "awards_total": int(totals["cnt"] or 0),
+        "users_with_awards": int(totals["users"] or 0),
+        "showcase_users": showcase_users,
+        "automatic_total": automatic_total,
+        "planned_target": 100,
+        "popular": popular,
+    }
+
+
+def _season_achievement_code(season: dict[str, Any]) -> str:
+    return f"season_{_achievement_campaign_slug(season.get('code'))}"
+
+
+def _season_achievement_info(season: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "title": str(season.get("title") or "Сезон VoxLyra"),
+        "description": str(season.get("description") or "Выполнить сезонную цель VoxLyra."),
+        "icon": "✦",
+        "icon_asset": "/media/achievements/seasonal_reader.png",
+        "group": "reader",
+        "category": "seasonal",
+        "rarity": str(season.get("rarity") or "epic"),
+        "goal": max(1, int(season.get("goal") or 1)),
+        "custom_points": max(0, int(season.get("custom_points") or 0)),
+        "special": True,
+        "season_start": str(season.get("start_date") or ""),
+        "season_end": str(season.get("end_date") or ""),
+    }
+
+
+def _achievement_points(info: dict[str, Any], program: dict[str, Any] | None = None) -> int:
+    custom = int(info.get("custom_points") or 0)
+    if custom > 0:
+        return custom
+    configured = (program or {}).get("points") if isinstance((program or {}).get("points"), dict) else {}
+    rarity = str(info.get("rarity") or "common")
+    return max(1, int(configured.get(rarity, _ACHIEVEMENT_POINTS_BY_RARITY.get(rarity, 10))))
+
+
+def _achievement_collector_summary(
+    total_points: int,
+    unlocked_count: int,
+    total_count: int,
+    levels: list[dict[str, Any]] | tuple[tuple[int, str], ...] | None = None,
+) -> dict[str, Any]:
     points = max(0, int(total_points))
+    configured_levels: list[tuple[int, str]] = []
+    for item in levels or _ACHIEVEMENT_COLLECTOR_LEVELS:
+        if isinstance(item, dict):
+            configured_levels.append((int(item.get("threshold") or 0), str(item.get("name") or "Уровень")))
+        else:
+            configured_levels.append((int(item[0]), str(item[1])))
+    configured_levels.sort(key=lambda item: item[0])
+    if not configured_levels or configured_levels[0][0] != 0:
+        configured_levels.insert(0, (0, "Новичок"))
     level_index = 0
-    for index, (threshold, _name) in enumerate(_ACHIEVEMENT_COLLECTOR_LEVELS):
+    for index, (threshold, _name) in enumerate(configured_levels):
         if points >= threshold:
             level_index = index
-    threshold, name = _ACHIEVEMENT_COLLECTOR_LEVELS[level_index]
-    if level_index + 1 < len(_ACHIEVEMENT_COLLECTOR_LEVELS):
-        next_threshold, next_name = _ACHIEVEMENT_COLLECTOR_LEVELS[level_index + 1]
+    threshold, name = configured_levels[level_index]
+    if level_index + 1 < len(configured_levels):
+        next_threshold, next_name = configured_levels[level_index + 1]
         span = max(1, next_threshold - threshold)
         level_progress = min(100, round((points - threshold) * 100 / span))
         points_to_next = max(0, next_threshold - points)
@@ -10789,7 +11367,10 @@ def _achievement_collector_summary(total_points: int, unlocked_count: int, total
 
 
 def _achievement_tier(info: dict[str, Any]) -> tuple[str, str]:
-    tier = _ACHIEVEMENT_TIER_BY_RARITY.get(str(info.get("rarity") or "common"), "bronze")
+    explicit_tier = str(info.get("tier") or "").strip().lower()
+    tier = explicit_tier if explicit_tier in _ACHIEVEMENT_TIER_LABELS else _ACHIEVEMENT_TIER_BY_RARITY.get(
+        str(info.get("rarity") or "common"), "bronze"
+    )
     return tier, _ACHIEVEMENT_TIER_LABELS[tier]
 
 
@@ -10801,8 +11382,6 @@ async def set_user_achievement_showcase(user_id: int, achievement_codes: list[st
         code = str(raw_code or "").strip()
         if not code or code in normalized:
             continue
-        if code not in _ACHIEVEMENT_CATALOG:
-            raise ValueError("Неизвестное достижение.")
         normalized.append(code)
     if len(normalized) > 3:
         raise ValueError("На витрине можно разместить не более трёх достижений.")
@@ -11045,7 +11624,25 @@ async def sync_user_achievements(user_id: int) -> dict[str, Any]:
     """Начисляет подтверждённые награды и возвращает полный каталог с прогрессом."""
     uid = int(user_id)
     now = utc_now()
+    program = await get_achievement_program_settings()
+    program_catalog: dict[str, dict[str, Any]] = dict(_ACHIEVEMENT_CATALOG)
+    for manual_item in await get_manual_achievement_definitions():
+        if manual_item.get("active", True):
+            program_catalog[str(manual_item["code"])] = dict(manual_item)
+    rare_settings = program.get("rare") if isinstance(program.get("rare"), dict) else {}
+    if _program_bool(rare_settings.get("founding_member_enabled"), True):
+        program_catalog["founding_member"] = dict(_RARE_ACHIEVEMENT_CATALOG["founding_member"])
+    if _program_bool(rare_settings.get("all_rounder_enabled"), True):
+        program_catalog["all_rounder"] = dict(_RARE_ACHIEVEMENT_CATALOG["all_rounder"])
+    season_settings = program.get("season") if isinstance(program.get("season"), dict) else {}
+    season_code = _season_achievement_code(season_settings) if _program_bool(season_settings.get("enabled"), False) else ""
+    if season_code:
+        program_catalog[season_code] = _season_achievement_info(season_settings)
+
     async with connect() as db:
+        cur = await db.execute("SELECT created_at FROM users WHERE id=?", (uid,))
+        user_row = await cur.fetchone()
+        user_created_at = str(user_row["created_at"] or "") if user_row else ""
         cur = await db.execute(
             "SELECT COUNT(*) AS completed FROM reading_progress WHERE user_id=? AND position_percent>=90", (uid,)
         )
@@ -11101,6 +11698,70 @@ async def sync_user_achievements(user_id: int) -> dict[str, Any]:
         )
         premium_count = int((await cur.fetchone())["cnt"] or 0)
 
+        # v1.14.0.18 — подтверждённые метрики для каталога из 100 наград.
+        cur = await db.execute(
+            "SELECT COUNT(DISTINCT book_id) AS cnt FROM reader_book_cycles "
+            "WHERE user_id=? AND status='finished'",
+            (uid,),
+        )
+        completed_books = int((await cur.fetchone())["cnt"] or 0)
+        cur = await db.execute(
+            """
+            SELECT COUNT(*) AS cnt
+            FROM reader_activity_daily
+            WHERE user_id=? AND (
+                text_chapters>0 OR text_progress_points>0 OR audio_seconds>0
+                OR graphic_pages>0 OR sessions>0
+            )
+            """,
+            (uid,),
+        )
+        active_days = int((await cur.fetchone())["cnt"] or 0)
+        cur = await db.execute(
+            """
+            SELECT COUNT(DISTINCT bov.option_code) AS cnt
+            FROM reading_progress rp
+            JOIN book_option_values bov
+              ON bov.book_id=rp.book_id AND bov.option_group='genres'
+            WHERE rp.user_id=? AND rp.position_percent>=90
+            """,
+            (uid,),
+        )
+        completed_genres = int((await cur.fetchone())["cnt"] or 0)
+        cur = await db.execute(
+            """
+            SELECT COUNT(*) AS cnt
+            FROM graphic_reading_progress grp
+            JOIN graphic_chapters gc ON gc.id=grp.graphic_chapter_id
+            WHERE grp.user_id=? AND gc.status='published' AND gc.pages_count>0
+              AND grp.page_number>=gc.pages_count
+            """,
+            (uid,),
+        )
+        completed_graphic_chapters = int((await cur.fetchone())["cnt"] or 0)
+        cur = await db.execute(
+            """
+            SELECT COUNT(*) AS cnt
+            FROM listening_progress lp
+            JOIN audio_chapters ac ON ac.id=lp.audio_chapter_id
+            WHERE lp.user_id=? AND ac.status='published' AND ac.duration_seconds>0
+              AND lp.position_seconds*100>=ac.duration_seconds*90
+            """,
+            (uid,),
+        )
+        completed_audio_chapters = int((await cur.fetchone())["cnt"] or 0)
+
+        season_completed = 0
+        if season_code:
+            start_date = datetime.fromisoformat(str(season_settings.get("start_date"))).date()
+            end_date = datetime.fromisoformat(str(season_settings.get("end_date"))).date() + timedelta(days=1)
+            cur = await db.execute(
+                "SELECT COUNT(*) AS cnt FROM reading_progress "
+                "WHERE user_id=? AND position_percent>=90 AND updated_at>=? AND updated_at<?",
+                (uid, start_date.isoformat(), end_date.isoformat()),
+            )
+            season_completed = int((await cur.fetchone())["cnt"] or 0)
+
         cur = await db.execute(
             """
             SELECT activity_date FROM reader_activity_daily
@@ -11130,6 +11791,8 @@ async def sync_user_achievements(user_id: int) -> dict[str, Any]:
         cur = await db.execute("SELECT id FROM author_profiles WHERE user_id=?", (uid,))
         author = await cur.fetchone()
         published_books = published_chapters = author_readers = month_rank = author_reactions = 0
+        author_completed_books = author_word_count = author_review_count = author_library_additions = 0
+        author_average_rating = 0.0
         if author:
             author_id = int(author["id"])
             cur = await db.execute(
@@ -11162,6 +11825,57 @@ async def sync_user_achievements(user_id: int) -> dict[str, Any]:
                 (author_id,),
             )
             author_reactions = int((await cur.fetchone())["cnt"] or 0)
+            cur = await db.execute(
+                "SELECT COUNT(*) AS cnt FROM books "
+                "WHERE author_id=? AND publication_status='published' AND writing_status='finished'",
+                (author_id,),
+            )
+            author_completed_books = int((await cur.fetchone())["cnt"] or 0)
+            cur = await db.execute(
+                """
+                WITH author_text AS (
+                    SELECT TRIM(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(
+                               c.text, char(10), ' '), char(13), ' '), char(9), ' '),
+                               '  ', ' '), '  ', ' '), '  ', ' ')) AS clean_text
+                    FROM chapters c
+                    JOIN books b ON b.id=c.book_id
+                    WHERE b.author_id=? AND b.publication_status='published'
+                      AND c.status='published'
+                )
+                SELECT COALESCE(SUM(
+                    CASE
+                        WHEN clean_text='' THEN 0
+                        ELSE LENGTH(clean_text)-LENGTH(REPLACE(clean_text,' ',''))+1
+                    END
+                ),0) AS words
+                FROM author_text
+                """,
+                (author_id,),
+            )
+            author_word_count = int((await cur.fetchone())["words"] or 0)
+            cur = await db.execute(
+                """
+                SELECT COUNT(*) AS cnt, COALESCE(AVG(r.rating),0) AS avg_rating
+                FROM reviews r
+                JOIN books b ON b.id=r.book_id
+                WHERE b.author_id=? AND b.publication_status='published'
+                  AND r.status='published'
+                """,
+                (author_id,),
+            )
+            author_quality = await cur.fetchone()
+            author_review_count = int(author_quality["cnt"] or 0)
+            author_average_rating = float(author_quality["avg_rating"] or 0.0)
+            cur = await db.execute(
+                """
+                SELECT COUNT(*) AS cnt
+                FROM bookmarks bm
+                JOIN books b ON b.id=bm.book_id
+                WHERE b.author_id=? AND b.publication_status='published'
+                """,
+                (author_id,),
+            )
+            author_library_additions = int((await cur.fetchone())["cnt"] or 0)
             month_start = datetime.now(timezone.utc).replace(
                 day=1, hour=0, minute=0, second=0, microsecond=0
             ).isoformat()
@@ -11180,6 +11894,8 @@ async def sync_user_achievements(user_id: int) -> dict[str, Any]:
             )
             row = await cur.fetchone()
             month_rank = int(row["rank"] or 0) if row else 0
+
+        author_quality_review_progress = author_review_count if author_average_rating >= 4.7 else 0
 
         candidates = {
             "first_chapter": (completed >= 1, completed),
@@ -11211,15 +11927,110 @@ async def sync_user_achievements(user_id: int) -> dict[str, Any]:
             "author_five_hundred_chapters": (published_chapters >= 500, published_chapters),
             "author_fifty_books": (published_books >= 50, published_books),
             "author_thousand_reactions": (author_reactions >= 1000, author_reactions),
+            "two_thousand_chapters": (completed >= 2500, completed),
+            "collector_hundred": (saved >= 100, saved),
+            "reviewer_fifty": (reviews >= 50, reviews),
+            "commentator_hundred": (comments_count >= 100, comments_count),
+            "audio_hundred_hours": (audio_minutes >= 6000, audio_minutes),
+            "comic_five_thousand_pages": (graphic_pages >= 5000, graphic_pages),
+            "author_hundred_books": (published_books >= 100, published_books),
+            "author_ten_thousand_reactions": (author_reactions >= 10000, author_reactions),
+            "reader_twenty_five_chapters": (completed >= 25, completed),
+            "reader_two_hundred_fifty_chapters": (completed >= 250, completed),
+            "reader_five_thousand_chapters": (completed >= 5000, completed),
+            "reading_streak_14": (longest_streak >= 14, longest_streak),
+            "reading_streak_100": (longest_streak >= 100, longest_streak),
+            "reading_streak_365": (longest_streak >= 365, longest_streak),
+            "collector_twenty_five": (saved >= 25, saved),
+            "collector_two_hundred_fifty": (saved >= 250, saved),
+            "reviewer_ten": (reviews >= 10, reviews),
+            "commentator_twenty_five": (comments_count >= 25, comments_count),
+            "audio_twenty_five_hours": (audio_minutes >= 1500, audio_minutes),
+            "audio_five_hundred_hours": (audio_minutes >= 30000, audio_minutes),
+            "comic_twenty_five_thousand_pages": (graphic_pages >= 25000, graphic_pages),
+            "quote_fifty": (quotes_count >= 50, quotes_count),
+            "author_fifty_chapters": (published_chapters >= 50, published_chapters),
+            "author_two_hundred_fifty_chapters": (published_chapters >= 250, published_chapters),
+            "author_thousand_chapters": (published_chapters >= 1000, published_chapters),
+            "author_five_books": (published_books >= 5, published_books),
+            "author_hundred_readers": (author_readers >= 100, author_readers),
+            "author_ten_thousand_readers": (author_readers >= 10000, author_readers),
+            "completed_book_1": (completed_books >= 1, completed_books),
+            "completed_books_5": (completed_books >= 5, completed_books),
+            "completed_books_25": (completed_books >= 25, completed_books),
+            "completed_books_100": (completed_books >= 100, completed_books),
+            "completed_books_250": (completed_books >= 250, completed_books),
+            "active_days_30": (active_days >= 30, active_days),
+            "active_days_100": (active_days >= 100, active_days),
+            "active_days_365": (active_days >= 365, active_days),
+            "active_days_1000": (active_days >= 1000, active_days),
+            "genres_5": (completed_genres >= 5, completed_genres),
+            "genres_10": (completed_genres >= 10, completed_genres),
+            "genres_20": (completed_genres >= 20, completed_genres),
+            "notes_10": (notes_count >= 10, notes_count),
+            "notes_50": (notes_count >= 50, notes_count),
+            "notes_200": (notes_count >= 200, notes_count),
+            "quotes_100": (quotes_count >= 100, quotes_count),
+            "quotes_250": (quotes_count >= 250, quotes_count),
+            "graphic_chapters_25": (completed_graphic_chapters >= 25, completed_graphic_chapters),
+            "graphic_chapters_250": (completed_graphic_chapters >= 250, completed_graphic_chapters),
+            "graphic_chapters_1000": (completed_graphic_chapters >= 1000, completed_graphic_chapters),
+            "audio_chapters_10": (completed_audio_chapters >= 10, completed_audio_chapters),
+            "audio_chapters_100": (completed_audio_chapters >= 100, completed_audio_chapters),
+            "audio_chapters_500": (completed_audio_chapters >= 500, completed_audio_chapters),
+            "reviews_200": (reviews >= 200, reviews),
+            "reviews_500": (reviews >= 500, reviews),
+            "comments_500": (comments_count >= 500, comments_count),
+            "comments_1000": (comments_count >= 1000, comments_count),
+            "author_completed_book_1": (author_completed_books >= 1, author_completed_books),
+            "author_completed_books_5": (author_completed_books >= 5, author_completed_books),
+            "author_completed_books_20": (author_completed_books >= 20, author_completed_books),
+            "author_completed_books_50": (author_completed_books >= 50, author_completed_books),
+            "author_words_100k": (author_word_count >= 100000, author_word_count),
+            "author_words_1m": (author_word_count >= 1000000, author_word_count),
+            "author_words_5m": (author_word_count >= 5000000, author_word_count),
+            "author_words_10m": (author_word_count >= 10000000, author_word_count),
+            "author_rating_50": (author_quality_review_progress >= 50, author_quality_review_progress),
+            "author_rating_250": (author_quality_review_progress >= 250, author_quality_review_progress),
+            "author_library_additions_1000": (author_library_additions >= 1000, author_library_additions),
+            "author_hundred_thousand_readers": (author_readers >= 100000, author_readers),
+            "author_hundred_thousand_reactions": (author_reactions >= 100000, author_reactions),
         }
+        all_rounder_progress = sum((
+            1 if completed >= 1 else 0,
+            1 if audio_minutes >= 60 else 0,
+            1 if graphic_pages >= 100 else 0,
+            1 if (reviews + comments_count) >= 1 else 0,
+        ))
+        if "all_rounder" in program_catalog:
+            candidates["all_rounder"] = (all_rounder_progress >= 4, all_rounder_progress)
+        if "founding_member" in program_catalog:
+            try:
+                created_date = datetime.fromisoformat(user_created_at.replace("Z", "+00:00")).date()
+                cutoff_date = datetime.fromisoformat(str(rare_settings.get("founding_cutoff_date"))).date()
+                founding_eligible = created_date <= cutoff_date
+            except (TypeError, ValueError):
+                founding_eligible = False
+            candidates["founding_member"] = (founding_eligible, 1 if founding_eligible else 0)
+        if season_code:
+            season_goal = max(1, int(program_catalog[season_code].get("goal") or 1))
+            candidates[season_code] = (season_completed >= season_goal, season_completed)
+
         awarded_codes: list[str] = []
         for code, (eligible, value) in candidates.items():
             if not eligible:
                 continue
+            metadata: dict[str, Any] = {}
+            if code == season_code and code in program_catalog:
+                metadata = {
+                    "achievement": program_catalog[code],
+                    "campaign_code": str(season_settings.get("code") or ""),
+                    "awarded_program_version": 2,
+                }
             cur = await db.execute(
                 "INSERT OR IGNORE INTO user_achievements(user_id, achievement_code, progress_value, metadata_json, awarded_at) "
-                "VALUES(?, ?, ?, '{}', ?)",
-                (uid, code, int(value), now),
+                "VALUES(?, ?, ?, ?, ?)",
+                (uid, code, int(value), json.dumps(metadata, ensure_ascii=False, separators=(",", ":")), now),
             )
             if cur.rowcount:
                 awarded_codes.append(code)
@@ -11240,17 +12051,22 @@ async def sync_user_achievements(user_id: int) -> dict[str, Any]:
 
     def public(row: Any) -> dict[str, Any]:
         code = str(row["achievement_code"])
-        info = _ACHIEVEMENT_CATALOG.get(
-            code,
-            {"title": code, "description": "", "icon": "✦", "group": "reader", "category": "reading", "rarity": "common", "goal": 1},
-        )
+        fallback = {"title": code, "description": "", "icon": "✦", "group": "reader", "category": "reading", "rarity": "common", "goal": 1}
+        info = dict(program_catalog.get(code) or _RARE_ACHIEVEMENT_CATALOG.get(code) or fallback)
+        try:
+            metadata = json.loads(str(row["metadata_json"] or "{}"))
+        except (TypeError, ValueError):
+            metadata = {}
+        frozen_info = metadata.get("achievement") if isinstance(metadata, dict) else None
+        if isinstance(frozen_info, dict):
+            info.update({key: value for key, value in frozen_info.items() if value is not None})
         goal = max(1, int(info.get("goal") or 1))
         progress = int(row["progress_value"] or 0)
         tier, tier_label = _achievement_tier(info)
         showcase_position = showcase_positions.get(code)
         return {
             "code": code, **info, "tier": tier, "tier_label": tier_label,
-            "points": _achievement_points(info),
+            "points": _achievement_points(info, program),
             "progress_value": progress, "goal": goal, "progress_percent": 100,
             "unlocked": True, "awarded_at": row["awarded_at"],
             "showcased": showcase_position is not None, "showcase_position": showcase_position,
@@ -11289,9 +12105,81 @@ async def sync_user_achievements(user_id: int) -> dict[str, Any]:
         "author_five_hundred_chapters": published_chapters,
         "author_fifty_books": published_books,
         "author_thousand_reactions": author_reactions,
+        "two_thousand_chapters": completed,
+        "collector_hundred": saved,
+        "reviewer_fifty": reviews,
+        "commentator_hundred": comments_count,
+        "audio_hundred_hours": audio_minutes,
+        "comic_five_thousand_pages": graphic_pages,
+        "author_hundred_books": published_books,
+        "author_ten_thousand_reactions": author_reactions,
+        "all_rounder": all_rounder_progress,
+        "founding_member": 1 if candidates.get("founding_member", (False, 0))[0] else 0,
+        "reader_twenty_five_chapters": completed,
+        "reader_two_hundred_fifty_chapters": completed,
+        "reader_five_thousand_chapters": completed,
+        "reading_streak_14": longest_streak,
+        "reading_streak_100": longest_streak,
+        "reading_streak_365": longest_streak,
+        "collector_twenty_five": saved,
+        "collector_two_hundred_fifty": saved,
+        "reviewer_ten": reviews,
+        "commentator_twenty_five": comments_count,
+        "audio_twenty_five_hours": audio_minutes,
+        "audio_five_hundred_hours": audio_minutes,
+        "comic_twenty_five_thousand_pages": graphic_pages,
+        "quote_fifty": quotes_count,
+        "author_fifty_chapters": published_chapters,
+        "author_two_hundred_fifty_chapters": published_chapters,
+        "author_thousand_chapters": published_chapters,
+        "author_five_books": published_books,
+        "author_hundred_readers": author_readers,
+        "author_ten_thousand_readers": author_readers,
+        "completed_book_1": completed_books,
+        "completed_books_5": completed_books,
+        "completed_books_25": completed_books,
+        "completed_books_100": completed_books,
+        "completed_books_250": completed_books,
+        "active_days_30": active_days,
+        "active_days_100": active_days,
+        "active_days_365": active_days,
+        "active_days_1000": active_days,
+        "genres_5": completed_genres,
+        "genres_10": completed_genres,
+        "genres_20": completed_genres,
+        "notes_10": notes_count,
+        "notes_50": notes_count,
+        "notes_200": notes_count,
+        "quotes_100": quotes_count,
+        "quotes_250": quotes_count,
+        "graphic_chapters_25": completed_graphic_chapters,
+        "graphic_chapters_250": completed_graphic_chapters,
+        "graphic_chapters_1000": completed_graphic_chapters,
+        "audio_chapters_10": completed_audio_chapters,
+        "audio_chapters_100": completed_audio_chapters,
+        "audio_chapters_500": completed_audio_chapters,
+        "reviews_200": reviews,
+        "reviews_500": reviews,
+        "comments_500": comments_count,
+        "comments_1000": comments_count,
+        "author_completed_book_1": author_completed_books,
+        "author_completed_books_5": author_completed_books,
+        "author_completed_books_20": author_completed_books,
+        "author_completed_books_50": author_completed_books,
+        "author_words_100k": author_word_count,
+        "author_words_1m": author_word_count,
+        "author_words_5m": author_word_count,
+        "author_words_10m": author_word_count,
+        "author_rating_50": author_quality_review_progress,
+        "author_rating_250": author_quality_review_progress,
+        "author_library_additions_1000": author_library_additions,
+        "author_hundred_thousand_readers": author_readers,
+        "author_hundred_thousand_reactions": author_reactions,
     }
+    if season_code:
+        live_progress[season_code] = season_completed
     catalog: list[dict[str, Any]] = []
-    for code, info in _ACHIEVEMENT_CATALOG.items():
+    for code, info in program_catalog.items():
         unlocked = unlocked_by_code.get(code)
         if unlocked:
             catalog.append(dict(unlocked))
@@ -11301,19 +12189,32 @@ async def sync_user_achievements(user_id: int) -> dict[str, Any]:
         tier, tier_label = _achievement_tier(info)
         catalog.append({
             "code": code, **info, "tier": tier, "tier_label": tier_label,
-            "points": _achievement_points(info),
+            "points": _achievement_points(info, program),
             "progress_value": progress, "goal": goal,
             "progress_percent": min(100, round(progress * 100 / goal)),
             "unlocked": False, "awarded_at": None,
             "showcased": False, "showcase_position": None,
         })
+    catalog_codes = {str(item.get("code") or "") for item in catalog}
+    catalog.extend(dict(item) for item in all_items if str(item.get("code") or "") not in catalog_codes)
     showcase = sorted(
         (item for item in all_items if item.get("showcased")),
         key=lambda item: int(item.get("showcase_position") or 99),
     )
     total_points = sum(int(item.get("points") or 0) for item in all_items)
-    summary = _achievement_collector_summary(total_points, len(all_items), len(_ACHIEVEMENT_CATALOG))
-    return {"new": new_items, "items": all_items, "catalog": catalog, "showcase": showcase, "summary": summary}
+    summary = _achievement_collector_summary(total_points, len(all_items), len(catalog), program.get("levels"))
+    return {
+        "new": new_items,
+        "items": all_items,
+        "catalog": catalog,
+        "showcase": showcase,
+        "summary": summary,
+        "program": {
+            "points": program.get("points"),
+            "levels": program.get("levels"),
+            "season": season_settings if season_code else {"enabled": False},
+        },
+    }
 
 
 async def list_smart_reader_reminder_candidates(limit: int = 100, now_utc: datetime | None = None) -> list[dict[str, Any]]:
@@ -12071,7 +12972,13 @@ async def _ensure_v1114_access_schema(db: aiosqlite.Connection) -> None:
     )
 
 
-async def list_grantable_books(query: str = "", limit: int = 50) -> list[aiosqlite.Row]:
+async def list_grantable_books(query: str = "", limit: int | None = None) -> list[aiosqlite.Row]:
+    """Return every non-deleted book available for a manual access grant.
+
+    v1.14.0.21 removes the old silent 60/100-book cap.  The protected owner
+    screen may load the full catalogue once and filter it locally, while the
+    optional query/limit arguments remain available for future API clients.
+    """
     clean = str(query or "").strip()
     params: list[Any] = []
     where = "b.publication_status!='deleted'"
@@ -12079,7 +12986,11 @@ async def list_grantable_books(query: str = "", limit: int = 50) -> list[aiosqli
         like = f"%{clean}%"
         where += " AND (b.title LIKE ? OR CAST(b.id AS TEXT)=? OR ap.pen_name LIKE ?)"
         params.extend((like, clean, like))
-    params.append(max(1, min(100, int(limit))))
+    limit_sql = ""
+    if limit is not None:
+        safe_limit = max(1, min(10000, int(limit)))
+        limit_sql = " LIMIT ?"
+        params.append(safe_limit)
     async with connect() as db:
         cur = await db.execute(
             f"""
@@ -12091,8 +13002,8 @@ async def list_grantable_books(query: str = "", limit: int = 50) -> list[aiosqli
             LEFT JOIN chapters c ON c.book_id=b.id
             WHERE {where}
             GROUP BY b.id
-            ORDER BY CASE WHEN b.publication_status='published' THEN 0 ELSE 1 END, b.title COLLATE NOCASE
-            LIMIT ?
+            ORDER BY CASE WHEN b.publication_status='published' THEN 0 ELSE 1 END,
+                     b.title COLLATE NOCASE, b.id DESC{limit_sql}
             """,
             tuple(params),
         )
@@ -18063,3 +18974,658 @@ async def _ensure_v11337_performance_schema(db: aiosqlite.Connection) -> None:
             ON listening_progress(user_id, updated_at DESC, audio_chapter_id);
         """
     )
+
+
+# v1.14.0.15 — честная ротация продвижения каталога и ручные особые награды
+async def _ensure_v114015_catalog_promotion_schema(db: aiosqlite.Connection) -> None:
+    now = utc_now()
+    await db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS catalog_promotions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            book_id INTEGER NOT NULL,
+            user_id INTEGER,
+            purchase_id INTEGER,
+            source TEXT NOT NULL DEFAULT 'paid',
+            amount_stars INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'invoice',
+            duration_hours INTEGER NOT NULL DEFAULT 24,
+            starts_at TEXT,
+            expires_at TEXT NOT NULL,
+            last_shown_at TEXT,
+            impressions INTEGER NOT NULL DEFAULT 0,
+            clicks INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE SET NULL,
+            FOREIGN KEY(purchase_id) REFERENCES purchases(id) ON DELETE SET NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_catalog_promotions_active
+            ON catalog_promotions(status, expires_at, last_shown_at, id);
+        CREATE INDEX IF NOT EXISTS idx_catalog_promotions_book
+            ON catalog_promotions(book_id, status, expires_at, id);
+        CREATE INDEX IF NOT EXISTS idx_catalog_promotions_user
+            ON catalog_promotions(user_id, status, created_at DESC);
+        """
+    )
+    for key, value in {
+        "catalog_promotion_price_stars": "30",
+        "catalog_promotion_duration_hours": "24",
+        "catalog_promotion_max_active_per_author": "3",
+        "catalog_promotion_slots_first_page": "2",
+    }.items():
+        await db.execute(
+            "INSERT INTO settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO NOTHING",
+            (key, value, now),
+        )
+    await db.execute(
+        "UPDATE catalog_promotions SET status='expired',updated_at=? WHERE status='active' AND expires_at<=?",
+        (now, now),
+    )
+    await db.execute(
+        "UPDATE catalog_promotions SET status='expired',updated_at=? WHERE status='invoice' AND expires_at<=?",
+        (now, now),
+    )
+
+
+def _manual_achievement_slug(value: Any) -> str:
+    clean = str(value or "").strip().lower()
+    if clean.startswith("manual_"):
+        clean = clean[7:]
+    normalized: list[str] = []
+    separator = False
+    for char in clean:
+        if char.isalnum():
+            normalized.append(char)
+            separator = False
+        elif not separator:
+            normalized.append("_")
+            separator = True
+    slug = "".join(normalized).strip("_")[:44]
+    return f"manual_{slug or 'special'}"
+
+
+async def get_manual_achievement_definitions() -> list[dict[str, Any]]:
+    raw = await get_setting(_MANUAL_ACHIEVEMENT_CATALOG_SETTING_KEY, "[]")
+    try:
+        source = json.loads(raw)
+    except (TypeError, ValueError):
+        source = []
+    if not isinstance(source, list):
+        source = []
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in source:
+        if not isinstance(item, dict):
+            continue
+        code = _manual_achievement_slug(item.get("code") or item.get("title"))
+        if code in seen:
+            continue
+        seen.add(code)
+        rarity = str(item.get("rarity") or "epic").strip().lower()
+        if rarity not in _ACHIEVEMENT_RARITIES:
+            rarity = "epic"
+        result.append({
+            "code": code,
+            "title": str(item.get("title") or "Особая награда").strip()[:80] or "Особая награда",
+            "description": str(item.get("description") or "Выдана владельцем VoxLyra.").strip()[:240],
+            "icon": "✦",
+            "icon_asset": "/media/achievements/owner_special.png",
+            "group": str(item.get("group") or "reader").strip().lower() if str(item.get("group") or "reader").strip().lower() in {"reader", "author"} else "reader",
+            "category": "manual",
+            "rarity": rarity,
+            "goal": 1,
+            "custom_points": max(0, min(10000, int(item.get("custom_points") or 0))),
+            "special": True,
+            "manual": True,
+            "active": bool(item.get("active", True)),
+            "created_at": str(item.get("created_at") or ""),
+        })
+    return result
+
+
+async def create_manual_achievement_definition(payload: dict[str, Any]) -> dict[str, Any]:
+    title = str((payload or {}).get("title") or "").strip()
+    description = str((payload or {}).get("description") or "").strip()
+    if len(title) < 3:
+        raise ValueError("Название особой награды должно содержать не менее трёх символов.")
+    if len(description) < 8:
+        raise ValueError("Добавьте понятное описание особой награды.")
+    rarity = str((payload or {}).get("rarity") or "epic").strip().lower()
+    if rarity not in _ACHIEVEMENT_RARITIES:
+        raise ValueError("Неизвестная редкость награды.")
+    try:
+        custom_points = max(0, min(10000, int((payload or {}).get("custom_points") or 0)))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Очки особой награды должны быть целым числом.") from exc
+    group = str((payload or {}).get("group") or "reader").strip().lower()
+    if group not in {"reader", "author"}:
+        group = "reader"
+    definitions = await get_manual_achievement_definitions()
+    code = _manual_achievement_slug((payload or {}).get("code") or title)
+    if code in _ACHIEVEMENT_CATALOG or code in _RARE_ACHIEVEMENT_CATALOG or any(item["code"] == code for item in definitions):
+        raise ValueError("Награда с таким кодом уже существует. Измените название или код.")
+    item = {
+        "code": code,
+        "title": title[:80],
+        "description": description[:240],
+        "rarity": rarity,
+        "custom_points": custom_points,
+        "group": group,
+        "active": True,
+        "created_at": utc_now(),
+    }
+    stored = [{key: value for key, value in definition.items() if key in {"code", "title", "description", "rarity", "custom_points", "group", "active", "created_at"}} for definition in definitions]
+    stored.append(item)
+    await set_setting(_MANUAL_ACHIEVEMENT_CATALOG_SETTING_KEY, json.dumps(stored, ensure_ascii=False, separators=(",", ":")))
+    return next(definition for definition in await get_manual_achievement_definitions() if definition["code"] == code)
+
+
+async def set_manual_achievement_active(code: str, active: bool) -> bool:
+    clean = _manual_achievement_slug(code)
+    definitions = await get_manual_achievement_definitions()
+    changed = False
+    stored: list[dict[str, Any]] = []
+    for item in definitions:
+        if item["code"] == clean:
+            item["active"] = bool(active)
+            changed = True
+        stored.append({key: value for key, value in item.items() if key in {"code", "title", "description", "rarity", "custom_points", "group", "active", "created_at"}})
+    if changed:
+        await set_setting(_MANUAL_ACHIEVEMENT_CATALOG_SETTING_KEY, json.dumps(stored, ensure_ascii=False, separators=(",", ":")))
+    return changed
+
+
+async def grant_manual_achievement(user_id: int, code: str, reason: str = "") -> dict[str, Any]:
+    clean = _manual_achievement_slug(code)
+    definition = next((item for item in await get_manual_achievement_definitions() if item["code"] == clean and item.get("active", True)), None)
+    if not definition:
+        raise ValueError("Особая награда не найдена или отключена.")
+    uid = int(user_id)
+    now = utc_now()
+    metadata = {
+        "achievement": definition,
+        "manual": True,
+        "reason": str(reason or "").strip()[:300],
+        "awarded_program_version": 3,
+    }
+    async with connect() as db:
+        cur = await db.execute("SELECT id FROM users WHERE id=? AND account_status!='deleted'", (uid,))
+        if not await cur.fetchone():
+            raise ValueError("Пользователь не найден.")
+        try:
+            cur = await db.execute(
+                "INSERT INTO user_achievements(user_id,achievement_code,progress_value,metadata_json,awarded_at) VALUES(?,?,?,?,?)",
+                (uid, clean, 1, json.dumps(metadata, ensure_ascii=False, separators=(",", ":")), now),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("Эта награда уже выдана пользователю.") from exc
+        await db.commit()
+        return {"id": int(cur.lastrowid), "user_id": uid, "code": clean, "awarded_at": now, "achievement": definition}
+
+
+async def revoke_manual_achievement(user_id: int, code: str) -> bool:
+    uid = int(user_id)
+    clean = _manual_achievement_slug(code)
+    async with connect() as db:
+        cur = await db.execute(
+            "SELECT metadata_json FROM user_achievements WHERE user_id=? AND achievement_code=?",
+            (uid, clean),
+        )
+        row = await cur.fetchone()
+        if not row:
+            return False
+        try:
+            metadata = json.loads(str(row["metadata_json"] or "{}"))
+        except (TypeError, ValueError):
+            metadata = {}
+        if not bool(metadata.get("manual")):
+            raise ValueError("Автоматические награды нельзя отзывать вручную.")
+        await db.execute("DELETE FROM achievement_showcase WHERE user_id=? AND achievement_code=?", (uid, clean))
+        cur = await db.execute("DELETE FROM user_achievements WHERE user_id=? AND achievement_code=?", (uid, clean))
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def get_manual_achievement_admin_summary(limit: int = 30) -> dict[str, Any]:
+    definitions = await get_manual_achievement_definitions()
+    async with connect() as db:
+        cur = await db.execute(
+            "SELECT achievement_code,COUNT(*) AS awarded FROM user_achievements WHERE achievement_code LIKE 'manual_%' GROUP BY achievement_code"
+        )
+        counts = {str(row["achievement_code"]): int(row["awarded"] or 0) for row in await cur.fetchall()}
+        cur = await db.execute(
+            """
+            SELECT l.*,u.telegram_id,u.username,u.full_name
+            FROM audit_logs l LEFT JOIN users u ON u.id=l.actor_user_id
+            WHERE l.action IN ('manual_achievement_granted','manual_achievement_revoked','manual_achievement_created')
+            ORDER BY l.id DESC LIMIT ?
+            """,
+            (max(1, min(100, int(limit))),),
+        )
+        events = [{key: row[key] for key in row.keys()} for row in await cur.fetchall()]
+    return {
+        "definitions": [{**item, "awarded": counts.get(str(item["code"]), 0)} for item in definitions],
+        "events": events,
+    }
+
+
+async def get_catalog_promotion_settings() -> dict[str, int]:
+    return {
+        "price_stars": max(1, min(10000, int(await get_setting("catalog_promotion_price_stars", "30") or 30))),
+        "duration_hours": max(1, min(720, int(await get_setting("catalog_promotion_duration_hours", "24") or 24))),
+        "max_active_per_author": max(1, min(20, int(await get_setting("catalog_promotion_max_active_per_author", "3") or 3))),
+        "slots_first_page": max(1, min(6, int(await get_setting("catalog_promotion_slots_first_page", "2") or 2))),
+    }
+
+
+async def set_catalog_promotion_settings(payload: dict[str, Any]) -> dict[str, int]:
+    current = await get_catalog_promotion_settings()
+    fields = {
+        "price_stars": ("catalog_promotion_price_stars", 1, 10000),
+        "duration_hours": ("catalog_promotion_duration_hours", 1, 720),
+        "max_active_per_author": ("catalog_promotion_max_active_per_author", 1, 20),
+        "slots_first_page": ("catalog_promotion_slots_first_page", 1, 6),
+    }
+    for public_key, (setting_key, minimum, maximum) in fields.items():
+        if public_key not in (payload or {}):
+            continue
+        try:
+            value = max(minimum, min(maximum, int((payload or {}).get(public_key))))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Настройки продвижения должны быть целыми числами.") from exc
+        await set_setting(setting_key, str(value))
+        current[public_key] = value
+    return await get_catalog_promotion_settings()
+
+
+async def _expire_catalog_promotions(db: aiosqlite.Connection) -> None:
+    now = utc_now()
+    await db.execute("UPDATE catalog_promotions SET status='expired',updated_at=? WHERE status IN ('active','invoice') AND expires_at<=?", (now, now))
+
+
+async def get_catalog_promotion_availability(book_id: int, user_id: int, *, owner: bool = False) -> dict[str, Any]:
+    bid, uid = int(book_id), int(user_id)
+    settings_value = await get_catalog_promotion_settings()
+    async with connect() as db:
+        await _expire_catalog_promotions(db)
+        cur = await db.execute(
+            """
+            SELECT b.id,b.title,b.publication_status,b.author_id,ap.user_id AS author_user_id
+            FROM books b LEFT JOIN author_profiles ap ON ap.id=b.author_id WHERE b.id=?
+            """,
+            (bid,),
+        )
+        book = await cur.fetchone()
+        if not book or str(book["publication_status"]) != "published":
+            return {"allowed": False, "reason": "not_published"}
+        if not owner and int(book["author_user_id"] or 0) != uid:
+            return {"allowed": False, "reason": "not_owner"}
+        cur = await db.execute(
+            "SELECT * FROM catalog_promotions WHERE book_id=? AND status IN ('active','invoice') AND expires_at>? ORDER BY id DESC LIMIT 1",
+            (bid, utc_now()),
+        )
+        active = await cur.fetchone()
+        if active:
+            return {"allowed": False, "reason": "already_active", "promotion": {key: active[key] for key in active.keys()}}
+        if not owner and book["author_id"] is not None:
+            cur = await db.execute(
+                """
+                SELECT COUNT(*) AS cnt FROM catalog_promotions cp
+                JOIN books b ON b.id=cp.book_id
+                WHERE b.author_id=? AND cp.status='active' AND cp.expires_at>?
+                """,
+                (int(book["author_id"]), utc_now()),
+            )
+            if int((await cur.fetchone())["cnt"] or 0) >= int(settings_value["max_active_per_author"]):
+                return {"allowed": False, "reason": "author_limit"}
+        await db.commit()
+    return {"allowed": True, "reason": "ok", "book_id": bid, "title": str(book["title"]), **settings_value}
+
+
+async def reserve_catalog_promotion(book_id: int, user_id: int, amount_stars: int) -> int:
+    availability = await get_catalog_promotion_availability(book_id, user_id, owner=False)
+    if not availability.get("allowed"):
+        reasons = {
+            "not_published": "Продвигать можно только опубликованную книгу.",
+            "not_owner": "Платно продвигать можно только собственные книги.",
+            "already_active": "Книга уже участвует в ротации каталога.",
+            "author_limit": "Достигнут лимит одновременно продвигаемых книг автора.",
+        }
+        raise ValueError(reasons.get(str(availability.get("reason")), "Продвижение сейчас недоступно."))
+    now_dt = datetime.now(timezone.utc)
+    invoice_expires = (now_dt + timedelta(minutes=30)).isoformat()
+    settings_value = await get_catalog_promotion_settings()
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            INSERT INTO catalog_promotions(book_id,user_id,source,amount_stars,status,duration_hours,expires_at,created_at,updated_at)
+            VALUES(?,?,'paid',?,'invoice',?,?,?,?)
+            """,
+            (int(book_id), int(user_id), int(amount_stars), int(settings_value["duration_hours"]), invoice_expires, now_dt.isoformat(), now_dt.isoformat()),
+        )
+        await db.commit()
+        return int(cur.lastrowid)
+
+
+async def create_owner_catalog_promotion(book_id: int, user_id: int, duration_hours: int | None = None) -> dict[str, Any]:
+    availability = await get_catalog_promotion_availability(book_id, user_id, owner=True)
+    if not availability.get("allowed"):
+        if availability.get("reason") == "already_active":
+            raise ValueError("Книга уже участвует в ротации каталога.")
+        raise ValueError("Продвигать можно только опубликованные книги.")
+    settings_value = await get_catalog_promotion_settings()
+    duration = int(duration_hours or settings_value["duration_hours"])
+    duration = max(1, min(720, duration))
+    now_dt = datetime.now(timezone.utc)
+    expires = (now_dt + timedelta(hours=duration)).isoformat()
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            INSERT INTO catalog_promotions(book_id,user_id,source,amount_stars,status,duration_hours,starts_at,expires_at,created_at,updated_at)
+            VALUES(?,?,'owner',0,'active',?,?,?,?,?)
+            """,
+            (int(book_id), int(user_id), duration, now_dt.isoformat(), expires, now_dt.isoformat(), now_dt.isoformat()),
+        )
+        await db.commit()
+        promotion_id = int(cur.lastrowid)
+    return dict(await get_catalog_promotion(promotion_id) or {})
+
+
+async def get_catalog_promotion(promotion_id: int) -> aiosqlite.Row | None:
+    async with connect() as db:
+        await _expire_catalog_promotions(db)
+        cur = await db.execute(
+            """
+            SELECT cp.*,b.title AS book_title,b.publication_status,b.author_id,ap.user_id AS author_user_id,
+                   COALESCE(ap.pen_name,b.source_author_name) AS pen_name
+            FROM catalog_promotions cp
+            JOIN books b ON b.id=cp.book_id
+            LEFT JOIN author_profiles ap ON ap.id=b.author_id
+            WHERE cp.id=?
+            """,
+            (int(promotion_id),),
+        )
+        row = await cur.fetchone()
+        await db.commit()
+        return row
+
+
+async def activate_catalog_promotion(promotion_id: int, purchase_id: int | None = None) -> bool:
+    now_dt = datetime.now(timezone.utc)
+    async with connect() as db:
+        cur = await db.execute("SELECT duration_hours,status,expires_at FROM catalog_promotions WHERE id=?", (int(promotion_id),))
+        row = await cur.fetchone()
+        if not row or str(row["status"]) not in {"invoice", "active"}:
+            return False
+        expires = (now_dt + timedelta(hours=max(1, int(row["duration_hours"] or 24)))).isoformat()
+        cur = await db.execute(
+            """
+            UPDATE catalog_promotions SET purchase_id=COALESCE(?,purchase_id),status='active',starts_at=COALESCE(starts_at,?),
+                   expires_at=?,updated_at=? WHERE id=? AND status IN ('invoice','active')
+            """,
+            (int(purchase_id) if purchase_id else None, now_dt.isoformat(), expires, now_dt.isoformat(), int(promotion_id)),
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def cancel_catalog_promotion(promotion_id: int) -> bool:
+    async with connect() as db:
+        cur = await db.execute(
+            "UPDATE catalog_promotions SET status='canceled',updated_at=? WHERE id=? AND status IN ('active','invoice')",
+            (utc_now(), int(promotion_id)),
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def list_catalog_promotions(*, limit: int = 50, active_only: bool = False) -> list[dict[str, Any]]:
+    async with connect() as db:
+        await _expire_catalog_promotions(db)
+        where = "WHERE cp.status='active' AND cp.expires_at>?" if active_only else ""
+        params: tuple[Any, ...] = (utc_now(), max(1, min(500, int(limit)))) if active_only else (max(1, min(500, int(limit))),)
+        cur = await db.execute(
+            f"""
+            SELECT cp.*,b.title AS book_title,b.cover_path,b.content_type,b.publication_status,
+                   COALESCE(ap.pen_name,b.source_author_name) AS pen_name,u.telegram_id,u.username,u.full_name
+            FROM catalog_promotions cp
+            JOIN books b ON b.id=cp.book_id
+            LEFT JOIN author_profiles ap ON ap.id=b.author_id
+            LEFT JOIN users u ON u.id=cp.user_id
+            {where}
+            ORDER BY CASE cp.status WHEN 'active' THEN 0 WHEN 'invoice' THEN 1 ELSE 2 END,
+                     cp.expires_at DESC,cp.id DESC LIMIT ?
+            """,
+            params,
+        )
+        rows = [{key: row[key] for key in row.keys()} for row in await cur.fetchall()]
+        await db.commit()
+        return rows
+
+
+async def search_catalog_promotion_books(query: str = "", *, user_id: int | None = None, owner: bool = False, limit: int = 40) -> list[dict[str, Any]]:
+    clean = str(query or "").strip().lower()
+    clauses = ["b.publication_status='published'"]
+    params: list[Any] = []
+    if not owner:
+        clauses.append("ap.user_id=?")
+        params.append(int(user_id or 0))
+    if clean:
+        if clean.isdigit():
+            clauses.append("(b.id=? OR lower(b.title) LIKE ? OR lower(COALESCE(ap.pen_name,b.source_author_name,'')) LIKE ?)")
+            params.extend([int(clean), f"%{clean}%", f"%{clean}%"])
+        else:
+            clauses.append("(lower(b.title) LIKE ? OR lower(COALESCE(ap.pen_name,b.source_author_name,'')) LIKE ?)")
+            params.extend([f"%{clean}%", f"%{clean}%"])
+    params.append(max(1, min(100, int(limit))))
+    async with connect() as db:
+        await _expire_catalog_promotions(db)
+        cur = await db.execute(
+            f"""
+            SELECT b.id,b.title,b.cover_path,b.content_type,b.publication_status,b.author_id,
+                   COALESCE(ap.pen_name,b.source_author_name) AS pen_name,
+                   EXISTS(SELECT 1 FROM catalog_promotions cp WHERE cp.book_id=b.id AND cp.status='active' AND cp.expires_at>?) AS promoted
+            FROM books b LEFT JOIN author_profiles ap ON ap.id=b.author_id
+            WHERE {' AND '.join(clauses)} ORDER BY b.updated_at DESC,b.id DESC LIMIT ?
+            """,
+            (utc_now(), *params),
+        )
+        rows = [{key: row[key] for key in row.keys()} for row in await cur.fetchall()]
+        await db.commit()
+        return rows
+
+
+async def get_active_catalog_promotion_for_book(book_id: int) -> dict[str, Any] | None:
+    async with connect() as db:
+        await _expire_catalog_promotions(db)
+        cur = await db.execute(
+            "SELECT * FROM catalog_promotions WHERE book_id=? AND status='active' AND expires_at>? ORDER BY last_shown_at IS NOT NULL,last_shown_at,id LIMIT 1",
+            (int(book_id), utc_now()),
+        )
+        row = await cur.fetchone()
+        await db.commit()
+        return {key: row[key] for key in row.keys()} if row else None
+
+
+async def record_catalog_promotion_click(book_id: int) -> None:
+    async with connect() as db:
+        await db.execute(
+            "UPDATE catalog_promotions SET clicks=clicks+1,updated_at=? WHERE book_id=? AND status='active' AND expires_at>?",
+            (utc_now(), int(book_id), utc_now()),
+        )
+        await db.commit()
+
+
+async def _catalog_rows_unrotated(limit: int = 300, include_drafts: bool = False) -> list[dict[str, Any]]:
+    status_filter = "b.publication_status != 'deleted'" if include_drafts else "b.publication_status = 'published'"
+    chapter_status = "c.status != 'deleted'" if include_drafts else "c.status = 'published'"
+    graphic_status = "gc.status != 'deleted'" if include_drafts else "gc.status = 'published'"
+    audio_status = "ac.status != 'deleted'" if include_drafts else "ac.status = 'published'"
+    async with connect() as db:
+        await _expire_catalog_promotions(db)
+        cur = await db.execute(
+            f"""
+            SELECT b.*, COALESCE(a.pen_name, b.source_author_name) AS pen_name,
+                   COALESCE((SELECT AVG(r.rating) FROM reviews r WHERE r.book_id=b.id AND r.status='published'), 0) AS rating,
+                   (SELECT COUNT(*) FROM reviews r WHERE r.book_id=b.id AND r.status='published') AS reviews_count,
+                   (SELECT COUNT(*) FROM chapters c WHERE c.book_id=b.id AND {chapter_status}) AS text_chapters_count,
+                   (SELECT COUNT(*) FROM graphic_chapters gc WHERE gc.book_id=b.id AND {graphic_status}) AS graphic_chapters_count,
+                   ((SELECT COUNT(*) FROM chapters c WHERE c.book_id=b.id AND {chapter_status}) +
+                    (SELECT COUNT(*) FROM graphic_chapters gc WHERE gc.book_id=b.id AND {graphic_status})) AS chapters_count,
+                   (SELECT COALESCE(SUM(gc.pages_count), 0) FROM graphic_chapters gc WHERE gc.book_id=b.id AND {graphic_status}) AS graphic_pages_count,
+                   (SELECT COUNT(*) FROM audio_chapters ac WHERE ac.book_id=b.id AND {audio_status}) AS audio_count,
+                   ((SELECT COUNT(*) FROM chapters c WHERE c.book_id=b.id AND {chapter_status} AND c.is_free=1) +
+                    (SELECT COUNT(*) FROM graphic_chapters gc WHERE gc.book_id=b.id AND {graphic_status} AND gc.is_free=1)) AS free_chapters_count,
+                   (SELECT c.id FROM chapters c WHERE c.book_id=b.id AND {chapter_status} ORDER BY c.number,c.id LIMIT 1) AS first_chapter_id,
+                   (SELECT gc.id FROM graphic_chapters gc WHERE gc.book_id=b.id AND {graphic_status} ORDER BY gc.number,gc.id LIMIT 1) AS first_graphic_chapter_id,
+                   (SELECT ac.id FROM audio_chapters ac WHERE ac.book_id=b.id AND {audio_status} ORDER BY ac.number,ac.id LIMIT 1) AS first_audio_id,
+                   (SELECT GROUP_CONCAT(v.option_label,'||') FROM book_option_values v WHERE v.book_id=b.id AND v.option_group='genres') AS genre_labels,
+                   (SELECT COUNT(*) FROM bookmarks bm WHERE bm.book_id=b.id) AS bookmark_count,
+                   (SELECT COUNT(DISTINCT rp.user_id) FROM reading_progress rp WHERE rp.book_id=b.id) AS reader_count,
+                   (SELECT COUNT(*) FROM purchases p WHERE p.status='paid' AND (
+                       p.book_id=b.id OR p.chapter_id IN (SELECT c3.id FROM chapters c3 WHERE c3.book_id=b.id) OR
+                       p.audio_chapter_id IN (SELECT ac3.id FROM audio_chapters ac3 WHERE ac3.book_id=b.id) OR
+                       p.graphic_chapter_id IN (SELECT gc3.id FROM graphic_chapters gc3 WHERE gc3.book_id=b.id)
+                   )) AS purchase_count,
+                   cp.id AS catalog_promotion_id,cp.source AS catalog_promotion_source,
+                   cp.expires_at AS catalog_promotion_expires_at,cp.last_shown_at AS catalog_promotion_last_shown,
+                   cp.impressions AS catalog_promotion_impressions
+            FROM books b
+            LEFT JOIN author_profiles a ON a.id=b.author_id
+            LEFT JOIN catalog_promotions cp ON cp.id=(
+                SELECT cp2.id FROM catalog_promotions cp2
+                WHERE cp2.book_id=b.id AND cp2.status='active' AND cp2.expires_at>?
+                ORDER BY cp2.last_shown_at IS NOT NULL,cp2.last_shown_at,cp2.id LIMIT 1
+            )
+            WHERE {status_filter}
+            ORDER BY b.updated_at DESC,b.id DESC LIMIT ?
+            """,
+            (utc_now(), max(1, min(1000, int(limit)))),
+        )
+        rows = [{key: row[key] for key in row.keys()} for row in await cur.fetchall()]
+        await db.commit()
+        return rows
+
+
+def _catalog_organic_score(row: dict[str, Any]) -> float:
+    rating = float(row.get("rating") or 0)
+    reviews = int(row.get("reviews_count") or 0)
+    purchases = int(row.get("purchase_count") or 0)
+    readers = int(row.get("reader_count") or 0)
+    bookmarks = int(row.get("bookmark_count") or 0)
+    try:
+        updated = datetime.fromisoformat(str(row.get("updated_at") or "").replace("Z", "+00:00"))
+        if updated.tzinfo is None:
+            updated = updated.replace(tzinfo=timezone.utc)
+        age_days = max(0.0, (datetime.now(timezone.utc) - updated).total_seconds() / 86400)
+    except Exception:
+        age_days = 365.0
+    freshness = max(0.0, 40.0 - min(age_days, 40.0))
+    return purchases * 24.0 + readers * 9.0 + bookmarks * 6.0 + reviews * 7.0 + rating * min(reviews, 30) * 1.4 + freshness
+
+
+_previous_list_catalog_books_v114015 = list_catalog_books
+
+
+async def list_catalog_books(limit: int = 50, include_drafts: bool = False) -> list[dict[str, Any]]:
+    """Catalog with a limited fair promotion rotation, never permanent pinning.
+
+    At most a small configured number of active promotions are inserted into the
+    first page. All remaining positions are filled by the ordinary organic
+    score, so paid or owner promotion cannot occupy the whole catalog.
+    """
+    requested = max(1, min(500, int(limit)))
+    if include_drafts:
+        return await _catalog_rows_unrotated(requested, include_drafts=True)
+    rows = await _catalog_rows_unrotated(max(requested * 3, 180), include_drafts=False)
+    organic = sorted(rows, key=lambda item: (_catalog_organic_score(item), int(item.get("id") or 0)), reverse=True)
+    promoted = [item for item in organic if int(item.get("catalog_promotion_id") or 0) > 0]
+    promoted.sort(key=lambda item: (
+        1 if item.get("catalog_promotion_last_shown") else 0,
+        str(item.get("catalog_promotion_last_shown") or ""),
+        int(item.get("catalog_promotion_impressions") or 0),
+        -_catalog_organic_score(item),
+    ))
+    settings_value = await get_catalog_promotion_settings()
+    max_promoted_without_blocking_organic = max(0, min(requested - 1, max(1, requested // 5)))
+    slot_count = min(int(settings_value["slots_first_page"]), len(promoted), max_promoted_without_blocking_organic)
+    selected = promoted[:slot_count]
+    selected_ids = {int(item["id"]) for item in selected}
+    base = [item for item in organic if int(item["id"]) not in selected_ids]
+    positions = [1, 5, 9, 13, 17, 21]
+    result = list(base[:requested])
+    for index, item in enumerate(selected):
+        item = dict(item)
+        item["catalog_promoted"] = True
+        position = min(positions[index] if index < len(positions) else len(result), len(result))
+        result.insert(position, item)
+    result = result[:requested]
+    shown_promotion_ids = [int(item.get("catalog_promotion_id") or 0) for item in result if int(item.get("catalog_promotion_id") or 0) > 0 and item.get("catalog_promoted")]
+    if shown_promotion_ids:
+        now = utc_now()
+        async with connect() as db:
+            placeholders = ",".join("?" for _ in shown_promotion_ids)
+            await db.execute(
+                f"UPDATE catalog_promotions SET impressions=impressions+1,last_shown_at=?,updated_at=? WHERE id IN ({placeholders})",
+                (now, now, *shown_promotion_ids),
+            )
+            await db.commit()
+    for item in result:
+        item.setdefault("catalog_promoted", False)
+    return result
+
+
+_previous_get_purchase_target_v114015 = get_purchase_target
+
+
+async def get_purchase_target(payload: str) -> dict[str, Any] | None:
+    value = str(payload or "")
+    canonical = value
+    if value.startswith("vox:intent:"):
+        intent = await get_payment_intent(value)
+        if not intent or str(intent["status"] or "") not in {"active", "paid"}:
+            return None
+        canonical = str(intent["canonical_payload"] or "")
+    parts = canonical.split(":")
+    if len(parts) == 3 and parts[0] == "vox" and parts[1] == "catalog_promo" and parts[2].isdigit():
+        promotion = await get_catalog_promotion(int(parts[2]))
+        if not promotion or str(promotion["status"]) not in {"invoice", "active"}:
+            return None
+        if str(promotion["publication_status"]) != "published":
+            return None
+        return {
+            "kind": "catalog_promo",
+            "target_id": int(promotion["id"]),
+            "promotion_id": int(promotion["id"]),
+            "book_id": int(promotion["book_id"]),
+            "title": f"Топ каталога: {promotion['book_title']}",
+            "description": f"Продвижение книги «{promotion['book_title']}» в честной ротации каталога на {int(promotion['duration_hours'] or 24)} ч.",
+            "book_title": str(promotion["book_title"]),
+            "amount_stars": int(promotion["amount_stars"] or 0),
+            "author_id": None,
+            "promo_code": None,
+            "discount_percent": 0,
+        }
+    return await _previous_get_purchase_target_v114015(value)
+
+
+_previous_create_paid_purchase_v114015 = create_paid_purchase
+
+
+async def create_paid_purchase(*, user_id: int, payload: str, amount_stars: int, telegram_payment_charge_id: str) -> int:
+    purchase_id = await _previous_create_paid_purchase_v114015(
+        user_id=int(user_id), payload=str(payload), amount_stars=int(amount_stars),
+        telegram_payment_charge_id=str(telegram_payment_charge_id),
+    )
+    target = await get_purchase_target(str(payload))
+    if target and str(target.get("kind") or "") == "catalog_promo":
+        await activate_catalog_promotion(int(target["promotion_id"]), int(purchase_id))
+        async with connect() as db:
+            await db.execute("UPDATE purchases SET purchase_kind='catalog_promotion' WHERE id=?", (int(purchase_id),))
+            await db.commit()
+    return int(purchase_id)
+
+
+# v1.14.0.16 — five reward levels and first expansion toward 100

@@ -270,9 +270,11 @@ def author_book_card_menu(book_id: int, publication_status: str) -> InlineKeyboa
         else:
             kb.button(text="📖 Открыть книгу", callback_data=f"open:book:{int(book_id)}")
         kb.button(text="📢 Опубликовать в канале", callback_data=f"channel:promote:{book_id}")
+        kb.button(text="🚀 Поднять в каталоге", callback_data=f"catalog:promote:{book_id}")
     kb.button(text="➕ Главы", callback_data=f"author:chapters:{book_id}")
     kb.button(text="🎧 Аудио", callback_data=f"author:audio:{book_id}")
     kb.button(text="✏️ Название", callback_data=f"book:edit_title:{book_id}")
+    kb.button(text="🖼 Добавить / заменить обложку", callback_data=f"book:edit_cover:{book_id}")
     kb.button(text="📝 Описание", callback_data=f"book:edit_description:{book_id}")
     kb.button(text="🔞 Возраст", callback_data=f"book:edit_age:{book_id}")
     kb.button(text="📌 Статус", callback_data=f"book:edit_status:{book_id}")
@@ -280,6 +282,14 @@ def author_book_card_menu(book_id: int, publication_status: str) -> InlineKeyboa
     kb.button(text="💰 Цена всей книги", callback_data=f"book:edit_price:{book_id}")
     kb.button(text="🗑 Удалить книгу", callback_data=f"book:delete_ask:{book_id}")
     kb.button(text="⬅️ К моим книгам", callback_data="author:books")
+    kb.button(text="🏠 Главное меню", callback_data="menu:main")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def book_cover_edit_menu(book_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ Назад к книге", callback_data=f"book:edit_cover_cancel:{int(book_id)}")
     kb.button(text="🏠 Главное меню", callback_data="menu:main")
     kb.adjust(1)
     return kb.as_markup()
@@ -907,6 +917,17 @@ def owner_channel_menu() -> InlineKeyboardMarkup:
 def channel_promotion_confirm_menu(book_id: int, price: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text=f"⭐ Оплатить {int(price)} Stars", callback_data=f"channel:promote_pay:{int(book_id)}")
+    kb.button(text="⬅️ К книге", callback_data=f"author:book:{int(book_id)}")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def catalog_promotion_confirm_menu(book_id: int, price: int, *, owner: bool = False) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    if owner:
+        kb.button(text="🚀 Запустить бесплатно", callback_data=f"catalog:promote_owner:{int(book_id)}")
+    else:
+        kb.button(text=f"⭐ Оплатить {int(price)} Stars", callback_data=f"catalog:promote_pay:{int(book_id)}")
     kb.button(text="⬅️ К книге", callback_data=f"author:book:{int(book_id)}")
     kb.adjust(1)
     return kb.as_markup()

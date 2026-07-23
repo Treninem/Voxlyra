@@ -14,8 +14,27 @@ from pathlib import Path
 
 from app.config import settings
 
-BACKUP_ROOT = Path("storage/backups")
+BACKUP_ROOT = Path(str(settings.BACKUP_STORAGE_ROOT or "data/backups"))
 MANIFEST_NAME = "voxlyra_backup_manifest.json"
+
+
+def _persistent_roots() -> dict[str, Path]:
+    return {
+        "library_storage": Path(str(settings.LIBRARY_STORAGE_ROOT or "data/library_storage")),
+        "covers": Path(str(settings.BOOK_COVER_STORAGE_ROOT or "data/covers")),
+        "achievement_artwork": Path(str(settings.ACHIEVEMENT_ARTWORK_STORAGE_ROOT or "data/achievement_artwork")),
+        "books": Path(str(settings.AUTHOR_BOOK_STORAGE_ROOT or "data/books")),
+        "audio": Path(str(settings.AUDIO_STORAGE_ROOT or "data/audio")),
+        "comics": Path(str(settings.COMIC_STORAGE_ROOT or "data/comics")),
+    }
+
+
+def _archive_prefix(path: Path, label: str) -> Path:
+    try:
+        return path.resolve().relative_to(Path.cwd().resolve())
+    except (OSError, ValueError):
+        return Path("persistent") / label
+
 
 
 @dataclass(slots=True)
@@ -53,24 +72,36 @@ def _create_backup_sync(include_storage: bool = True) -> BackupInfo:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     target = BACKUP_ROOT / f"voxlyra_backup_{stamp}.zip"
     temp = target.with_suffix(".tmp")
+    roots = _persistent_roots()
+    archived_roots: list[str] = []
     manifest = {
-        "format": 2,
+        "format": 3,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "project_version": str(settings.PROJECT_VERSION),
         "database": "data/voxlyra.sqlite3",
         "database_sha256": _sha256(db_path),
         "database_size": db_path.stat().st_size,
         "includes_storage": bool(include_storage),
+        "persistent_roots": archived_roots,
     }
     with zipfile.ZipFile(temp, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
         zf.write(db_path, "data/voxlyra.sqlite3")
         if include_storage:
-            storage = Path("storage")
-            if storage.exists():
-                for item in storage.rglob("*"):
-                    if not item.is_file() or BACKUP_ROOT in item.parents:
+            for label, storage_root in roots.items():
+                if not storage_root.exists():
+                    continue
+                prefix = _archive_prefix(storage_root, label)
+                archived_roots.append(prefix.as_posix())
+                for item in storage_root.rglob("*"):
+                    if not item.is_file():
                         continue
-                    zf.write(item, item.as_posix())
+                    try:
+                        if BACKUP_ROOT.resolve() in item.resolve().parents:
+                            continue
+                    except OSError:
+                        pass
+                    arcname = prefix / item.relative_to(storage_root)
+                    zf.write(item, arcname.as_posix())
         zf.writestr(MANIFEST_NAME, json.dumps(manifest, ensure_ascii=False, indent=2))
     os.replace(temp, target)
     return BackupInfo(target, manifest["created_at"], target.stat().st_size, _sha256(target))
@@ -118,7 +149,7 @@ def _restore_backup_sync(archive: Path) -> dict[str, int]:
                 manifest = json.loads(zf.read(MANIFEST_NAME).decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError) as exc:
                 raise ValueError("Манифест резервной копии повреждён") from exc
-            if int(manifest.get("format") or 0) not in {1, 2}:
+            if int(manifest.get("format") or 0) not in {1, 2, 3}:
                 raise ValueError("Формат резервной копии не поддерживается")
             zf.extractall(root)
         restored_db = root / "data/voxlyra.sqlite3"
@@ -138,12 +169,31 @@ def _restore_backup_sync(archive: Path) -> dict[str, int]:
             staged_db = current_db.with_suffix(current_db.suffix + ".restore.tmp")
             shutil.copy2(restored_db, staged_db)
             os.replace(staged_db, current_db)
-            restored_storage = root / "storage"
-            if restored_storage.exists():
-                destination = Path("storage")
-                for item in restored_storage.rglob("*"):
-                    if item.is_file() and "backups" not in item.parts:
-                        rel = item.relative_to(restored_storage)
+            manifest_format = int(manifest.get("format") or 1)
+            if manifest_format in {1, 2}:
+                restored_storage = root / "storage"
+                if restored_storage.exists():
+                    destination = Path("storage")
+                    for item in restored_storage.rglob("*"):
+                        if item.is_file() and "backups" not in item.parts:
+                            rel = item.relative_to(restored_storage)
+                            out = destination / rel
+                            out.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copy2(item, out)
+                            restored_files += 1
+            else:
+                for raw_prefix in manifest.get("persistent_roots") or []:
+                    prefix = Path(str(raw_prefix or ""))
+                    if not str(prefix) or prefix.is_absolute() or ".." in prefix.parts:
+                        raise ValueError("Манифест содержит небезопасный путь постоянного хранилища")
+                    restored_root = root / prefix
+                    if not restored_root.exists():
+                        continue
+                    destination = Path(prefix)
+                    for item in restored_root.rglob("*"):
+                        if not item.is_file():
+                            continue
+                        rel = item.relative_to(restored_root)
                         out = destination / rel
                         out.parent.mkdir(parents=True, exist_ok=True)
                         shutil.copy2(item, out)

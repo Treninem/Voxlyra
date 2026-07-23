@@ -47,6 +47,12 @@ from app.db import (
     get_channel_promotion_price,
     reserve_channel_promotion,
     finish_channel_promotion,
+    get_catalog_promotion_availability,
+    get_catalog_promotion_settings,
+    reserve_catalog_promotion,
+    create_owner_catalog_promotion,
+    get_catalog_promotion,
+    cancel_catalog_promotion,
     list_chapters_for_book,
     get_purchase_target,
     get_user_chapter_credit_summary,
@@ -92,6 +98,7 @@ from app.keyboards import (
     user_purchases_menu,
     my_library_menu,
     channel_promotion_confirm_menu,
+    catalog_promotion_confirm_menu,
     chapter_wallet_checkout_menu,
     bonuses_menu,
 )
@@ -257,6 +264,53 @@ async def _show_channel_promotion(message_or_call, book_id: int) -> None:
         await message_or_call.answer(text, reply_markup=channel_promotion_confirm_menu(book_id, price))
 
 
+def _catalog_promotion_unavailable_text(reason: str, promotion: dict | None = None) -> str:
+    if reason == "not_published":
+        return "Продвигать можно только опубликованную книгу."
+    if reason == "not_owner":
+        return "Платное продвижение доступно только автору этой книги. Владелец платформы может продвигать любую опубликованную книгу."
+    if reason == "author_limit":
+        return "У автора уже достигнут лимит одновременно продвигаемых книг. Дождитесь завершения одной ротации."
+    if reason == "already_active":
+        expires = _promotion_available_label((promotion or {}).get("expires_at"))
+        return f"Книга уже участвует в ротации каталога. Текущее продвижение завершится {expires}."
+    return "Продвижение этой книги сейчас недоступно."
+
+
+async def _show_catalog_promotion(message_or_call, book_id: int) -> None:
+    user = await upsert_user(
+        message_or_call.from_user.id,
+        message_or_call.from_user.username,
+        message_or_call.from_user.full_name,
+    )
+    is_owner = message_or_call.from_user.id in settings.owner_ids
+    availability = await get_catalog_promotion_availability(int(book_id), int(user["id"]), owner=is_owner)
+    if not availability.get("allowed"):
+        text = _catalog_promotion_unavailable_text(str(availability.get("reason") or ""), availability.get("promotion"))
+        if isinstance(message_or_call, CallbackQuery):
+            await message_or_call.answer(text, show_alert=True)
+        else:
+            await message_or_call.answer(text, reply_markup=back_to_main())
+        return
+    price = int(availability.get("price_stars") or (await get_catalog_promotion_settings())["price_stars"])
+    duration = int(availability.get("duration_hours") or 24)
+    text = (
+        f"<b>🚀 Поднять книгу в каталоге</b>\n\n"
+        f"Книга: <b>{availability.get('title') or 'Книга'}</b>\n"
+        f"Срок ротации: <b>{duration} ч.</b>\n"
+        f"Стоимость: <b>{'бесплатно для владельца' if is_owner else f'{price} Stars'}</b>\n\n"
+        "Книга не закрепляется навсегда и не вытесняет обычный рейтинг. "
+        "Продвижение занимает только ограниченные места первой страницы, чередуется с другими активными продвижениями, "
+        "а остальные позиции остаются за книгами с реальной читательской активностью."
+    )
+    markup = catalog_promotion_confirm_menu(int(book_id), price, owner=is_owner)
+    if isinstance(message_or_call, CallbackQuery):
+        await message_or_call.message.edit_text(text, reply_markup=markup)
+        await message_or_call.answer()
+    else:
+        await message_or_call.answer(text, reply_markup=markup)
+
+
 async def _send_invoice(message_or_call, kind: str, target_id: int, promo_code: str | None = None, amount_stars: int | None = None) -> None:
     tg = message_or_call.from_user
     user = await upsert_user(tg.id, tg.username, tg.full_name)
@@ -318,7 +372,7 @@ async def _send_invoice(message_or_call, kind: str, target_id: int, promo_code: 
         payload=intent["payload"],
         provider_token="",
         currency="XTR",
-        prices=[LabeledPrice(label=("Пополнение баланса" if kind == "wallet_topup" else "Публикация" if kind == "channel_promo" else "Пакет глав" if kind == "chapter_package" else "Доступ"), amount=target.amount_stars)],
+        prices=[LabeledPrice(label=("Пополнение баланса" if kind == "wallet_topup" else "Продвижение в каталоге" if kind == "catalog_promo" else "Публикация" if kind == "channel_promo" else "Пакет глав" if kind == "chapter_package" else "Доступ"), amount=target.amount_stars)],
         protect_content=True,
         reply_markup=payment_invoice_menu(intent["token"], target.amount_stars),
     )
@@ -442,6 +496,12 @@ async def start_deeplink(message: Message, state: FSMContext) -> None:
             await _show_channel_promotion(message, int(raw))
             return
         raise SkipHandler()
+    if payload.startswith("top_book_"):
+        raw = payload.replace("top_book_", "", 1)
+        if raw.isdigit() and int(raw) > 0:
+            await _show_catalog_promotion(message, int(raw))
+            return
+        raise SkipHandler()
     if payload.startswith("promo_chapter_"):
         raw = payload.replace("promo_chapter_", "", 1)
         if not raw.isdigit() or int(raw) <= 0:
@@ -471,6 +531,53 @@ async def start_deeplink(message: Message, state: FSMContext) -> None:
     # иначе ссылка внешне срабатывает, но пользователь не получает ни ответа,
     # ни кнопки открытия Mini App.
     raise SkipHandler()
+
+
+@router.callback_query(F.data.startswith("catalog:promote:"))
+async def catalog_promote_preview(call: CallbackQuery) -> None:
+    book_id = int(call.data.rsplit(":", 1)[-1])
+    await _show_catalog_promotion(call, book_id)
+
+
+@router.callback_query(F.data.startswith("catalog:promote_owner:"))
+async def catalog_promote_owner(call: CallbackQuery) -> None:
+    if call.from_user.id not in settings.owner_ids:
+        await call.answer("Это действие доступно только владельцу.", show_alert=True)
+        return
+    book_id = int(call.data.rsplit(":", 1)[-1])
+    user = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
+    try:
+        promotion = await create_owner_catalog_promotion(book_id, int(user["id"]))
+    except ValueError as exc:
+        await call.answer(str(exc), show_alert=True)
+        return
+    await add_audit(int(user["id"]), "owner_catalog_promotion_started_bot", "book", str(book_id), None, str(promotion.get("id") or ""))
+    await call.message.edit_text(
+        f"<b>Продвижение запущено.</b>\n\nКнига участвует в честной ротации каталога до {_promotion_available_label(promotion.get('expires_at'))}. "
+        "Она не закреплена навсегда и не блокирует попадание других книг.",
+        reply_markup=back_to_main(),
+    )
+    await call.answer("Книга добавлена в ротацию")
+
+
+@router.callback_query(F.data.startswith("catalog:promote_pay:"))
+async def catalog_promote_pay(call: CallbackQuery) -> None:
+    book_id = int(call.data.rsplit(":", 1)[-1])
+    user = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
+    if call.from_user.id in settings.owner_ids:
+        await catalog_promote_owner(call)
+        return
+    availability = await get_catalog_promotion_availability(book_id, int(user["id"]), owner=False)
+    if not availability.get("allowed"):
+        await call.answer(_catalog_promotion_unavailable_text(str(availability.get("reason") or ""), availability.get("promotion")), show_alert=True)
+        return
+    price = int(availability.get("price_stars") or (await get_catalog_promotion_settings())["price_stars"])
+    try:
+        promotion_id = await reserve_catalog_promotion(book_id, int(user["id"]), price)
+    except ValueError as exc:
+        await call.answer(str(exc), show_alert=True)
+        return
+    await _send_invoice(call, "catalog_promo", promotion_id)
 
 
 @router.callback_query(F.data.startswith("channel:promote:"))
@@ -560,7 +667,11 @@ async def payment_invoice_cancel(call: CallbackQuery) -> None:
     if not await cancel_payment_intent(token, int(user["id"])):
         await call.answer("Счёт уже отменён или устарел", show_alert=True)
         return
-    await add_audit(int(user["id"]), "payment_invoice_canceled", "payment_intent", token, None, str(intent["canonical_payload"]))
+    canonical_payload = str(intent["canonical_payload"] or "")
+    parts = canonical_payload.split(":")
+    if len(parts) == 3 and parts[0] == "vox" and parts[1] == "catalog_promo" and parts[2].isdigit():
+        await cancel_catalog_promotion(int(parts[2]))
+    await add_audit(int(user["id"]), "payment_invoice_canceled", "payment_intent", token, None, canonical_payload)
     try:
         await call.message.delete()
     except Exception:
@@ -789,6 +900,16 @@ async def successful_payment_handler(message: Message) -> None:
         if target["kind"] == "ad_budget":
             await message.answer(
                 "<b>Оплата прошла.</b>\n\nРекламный бюджет пополнен. Кампания продолжит показы, если не заблокирована.",
+                reply_markup=back_to_main(),
+            )
+        elif target["kind"] == "catalog_promo":
+            promotion = await get_catalog_promotion(int(target["promotion_id"]))
+            await add_audit(
+                int(user["id"]), "paid_catalog_promotion_started", "book", str(target["book_id"]), None, str(target["promotion_id"]),
+            )
+            await message.answer(
+                f"<b>Оплата прошла.</b>\n\nКнига «{target.get('book_title') or 'Книга'}» добавлена в честную ротацию верхней части каталога "
+                f"до {_promotion_available_label(promotion['expires_at'] if promotion else None)}. Она не закреплена навсегда и не вытесняет обычные книги.",
                 reply_markup=back_to_main(),
             )
         elif target["kind"] == "channel_promo":
