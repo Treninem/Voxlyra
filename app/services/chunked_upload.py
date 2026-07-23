@@ -341,13 +341,12 @@ def create_or_resume_library_import_upload(
         shutil.rmtree(folder, ignore_errors=True)
 
     if selected is not None:
-        folder, meta = selected
-        # A previously assembled file cannot be resumed as chunks.
-        assembled = folder / _safe_filename(str(meta.get("filename") or safe_name))
-        if assembled.exists():
-            shutil.rmtree(folder, ignore_errors=True)
-        else:
-            return meta, True
+        _, meta = selected
+        # The assembled file and assembly checkpoint are resumable. A Redeploy may
+        # happen after some parts were appended but before the ZIP was handed to
+        # the queue, so never discard this session merely because the final file
+        # already exists.
+        return meta, True
 
     meta = create_library_import_upload(
         user_id=user_id,
@@ -381,6 +380,15 @@ def claim_upload_finish(
     finally:
         os.close(descriptor)
     return True
+
+
+def release_upload_finish(upload_id: str) -> None:
+    """Release the finish lock without deleting resumable chunks/checkpoints."""
+    # v1.14.0.12.1 hotfix: ensure release lock export is present during rebuilds
+    try:
+        (_upload_dir(upload_id) / "finish.lock").unlink(missing_ok=True)
+    except ChunkedUploadError:
+        pass
 
 
 def load_upload(upload_id: str, *, user_id: int, book_id: int) -> dict[str, Any]:
@@ -457,9 +465,12 @@ def get_upload_status(upload_id: str, *, user_id: int, book_id: int) -> dict[str
     received = sorted({int(value) for value in meta.get("received", []) if int(value) >= 0})
     missing = [index for index in range(total_chunks) if index not in set(received)] if total_chunks else []
     total_size = max(0, int(meta.get("total_size") or 0))
-    received_bytes = 0
+    received_bytes = max(0, int(meta.get("assembled_bytes") or 0))
     folder = _upload_dir(upload_id)
+    assembled_count = max(0, int(meta.get("assembled_count") or 0))
     for index in received:
+        if index < assembled_count:
+            continue
         part = folder / f"{index:06d}.part"
         if part.is_file():
             received_bytes += int(part.stat().st_size)
@@ -476,6 +487,14 @@ def get_upload_status(upload_id: str, *, user_id: int, book_id: int) -> dict[str
     }
 
 def assemble_upload(upload_id: str, *, user_id: int, book_id: int, total_chunks: int) -> tuple[Path, dict[str, Any]]:
+    """Assemble a chunked file with a crash-resumable checkpoint.
+
+    Parts already appended to the final file are removed to keep disk usage near
+    one archive size. After each appended part, ``assembled_count`` and
+    ``assembled_bytes`` are atomically saved. If the process stops between the
+    append and checkpoint write, the next run truncates the uncommitted tail and
+    repeats only that part.
+    """
     meta = load_upload(upload_id, user_id=user_id, book_id=book_id)
     if int(meta.get("total_chunks") or total_chunks) != int(total_chunks):
         raise ChunkedUploadError("Количество частей файла не совпало. Повторите загрузку.")
@@ -486,38 +505,66 @@ def assemble_upload(upload_id: str, *, user_id: int, book_id: int, total_chunks:
 
     folder = _upload_dir(upload_id)
     final_path = folder / _safe_filename(str(meta["filename"]))
-    final_path.unlink(missing_ok=True)
+    assembled_count = max(0, min(total_chunks, int(meta.get("assembled_count") or 0)))
+    assembled_bytes = max(0, int(meta.get("assembled_bytes") or 0))
+
+    if assembled_count == 0:
+        final_path.unlink(missing_ok=True)
+        assembled_bytes = 0
+    elif not final_path.is_file():
+        raise ChunkedUploadError(
+            "Собранная часть архива потеряна после перезапуска. Начните загрузку заново."
+        )
+    else:
+        actual_size = int(final_path.stat().st_size)
+        if actual_size < assembled_bytes:
+            raise ChunkedUploadError(
+                "Собранная часть архива повреждена после перезапуска. Начните загрузку заново."
+            )
+        if actual_size != assembled_bytes:
+            # An append reached disk but its checkpoint did not. Roll back only
+            # the uncommitted tail and safely repeat the same chunk.
+            with final_path.open("r+b") as destination:
+                destination.truncate(assembled_bytes)
+                destination.flush()
+                os.fsync(destination.fileno())
+
     part_sizes: list[int] = []
-    for index in range(total_chunks):
+    for index in range(assembled_count, total_chunks):
         part_path = folder / f"{index:06d}.part"
         if not part_path.exists():
             raise ChunkedUploadError("Не найдена часть файла. Повторите загрузку.")
         part_sizes.append(int(part_path.stat().st_size))
 
-    # Части удаляются сразу после добавления в итоговый файл. Поэтому во время
-    # сборки на диске находится примерно один размер ZIP, а не две полные копии.
     _ensure_free_space(
         max(part_sizes or [0]) + 8 * 1024 * 1024,
         operation="сборки архива",
     )
-    total_written = 0
     try:
-        with final_path.open("wb") as destination:
-            for index in range(total_chunks):
+        with final_path.open("ab") as destination:
+            for index in range(assembled_count, total_chunks):
                 part_path = folder / f"{index:06d}.part"
                 part_size = int(part_path.stat().st_size)
                 with part_path.open("rb") as source:
                     shutil.copyfileobj(source, destination, length=1024 * 1024)
-                total_written += part_size
+                destination.flush()
+                os.fsync(destination.fileno())
+                assembled_bytes += part_size
+                assembled_count = index + 1
+                meta["assembled_count"] = assembled_count
+                meta["assembled_bytes"] = assembled_bytes
+                meta["updated_at"] = datetime.now(timezone.utc).isoformat()
+                _write_meta_file(folder, meta)
                 part_path.unlink(missing_ok=True)
     except OSError as exc:
-        final_path.unlink(missing_ok=True)
         raise _storage_write_error(exc) from exc
 
     expected_size = int(meta.get("total_size") or 0)
-    if expected_size and total_written != expected_size:
-        final_path.unlink(missing_ok=True)
+    if expected_size and assembled_bytes != expected_size:
         raise ChunkedUploadError("Файл загрузился не полностью. Повторите попытку.")
+    meta["assembly_complete"] = True
+    meta["updated_at"] = datetime.now(timezone.utc).isoformat()
+    _write_meta_file(folder, meta)
     return final_path, meta
 
 
