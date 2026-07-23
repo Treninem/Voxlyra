@@ -410,6 +410,7 @@ from app.services.web_import_store import (
 )
 from app.services.publication import finish_book_content_workflow, publish_book_and_channel
 from app.services.cover_storage import ensure_book_cover_file
+from app.services.profile_avatar import ensure_profile_avatar
 from app.services.moderation_alerts import notify_moderation_resolved
 from app.services.tts_providers import (
     TTSProviderError,
@@ -2592,6 +2593,26 @@ def create_app() -> FastAPI:
                 headers={"Cache-Control": "no-store, max-age=0"},
             )
         return _cover_file_response(path, private=False)
+
+    @app.get("/api/me/avatar")
+    async def api_me_avatar(x_telegram_init_data: str | None = Header(default=None)):
+        user = await _tma_user(x_telegram_init_data)
+        path = await ensure_profile_avatar(user.telegram_id)
+        if not path:
+            raise HTTPException(
+                status_code=404,
+                detail="Фото профиля не найдено.",
+                headers={"Cache-Control": "private, no-store, max-age=0"},
+            )
+        media_type = {
+            ".png": "image/png", ".webp": "image/webp",
+            ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+        }.get(path.suffix.lower(), "image/jpeg")
+        return FileResponse(
+            path,
+            media_type=media_type,
+            headers={"Cache-Control": "private, max-age=21600", "X-Content-Type-Options": "nosniff"},
+        )
 
     @app.get("/api/me")
     async def api_me(x_telegram_init_data: str | None = Header(default=None)):

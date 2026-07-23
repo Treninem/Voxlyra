@@ -10700,6 +10700,30 @@ _ACHIEVEMENT_CATALOG: dict[str, dict[str, Any]] = {
     "author_month": {
         "title": "Автор месяца", "description": "Стать первым по уникальным читателям месяца.", "icon": "🏆", "icon_asset": "/static/img/achievements/author_month.png", "group": "author", "category": "author", "rarity": "legendary", "goal": 1
     },
+    "five_hundred_chapters": {
+        "title": "500 глав", "description": "Прочитать пятьсот глав до конца.", "icon": "📚", "icon_asset": "/static/img/achievements/five_hundred_chapters.png", "group": "reader", "category": "reading", "rarity": "legendary", "goal": 500
+    },
+    "thousand_chapters": {
+        "title": "1000 глав", "description": "Прочитать тысячу глав до конца.", "icon": "✦", "icon_asset": "/static/img/achievements/thousand_chapters.png", "group": "reader", "category": "reading", "rarity": "legendary", "goal": 1000
+    },
+    "collector_fifty": {
+        "title": "Большая библиотека", "description": "Сохранить пятьдесят произведений в личной библиотеке.", "icon": "🏛", "icon_asset": "/static/img/achievements/collector_fifty.png", "group": "reader", "category": "reading", "rarity": "epic", "goal": 50
+    },
+    "audio_ten_hours": {
+        "title": "10 часов аудио", "description": "Прослушать суммарно десять часов аудиокниг.", "icon": "🎧", "icon_asset": "/static/img/achievements/audio_ten_hours.png", "group": "reader", "category": "audio", "rarity": "epic", "goal": 600
+    },
+    "comic_thousand_pages": {
+        "title": "1000 страниц комиксов", "description": "Просмотреть тысячу страниц графических произведений.", "icon": "💠", "icon_asset": "/static/img/achievements/comic_thousand_pages.png", "group": "reader", "category": "comic", "rarity": "legendary", "goal": 1000
+    },
+    "author_five_hundred_chapters": {
+        "title": "Автор 500 глав", "description": "Опубликовать пятьсот текстовых или графических глав.", "icon": "🪶", "icon_asset": "/static/img/achievements/author_five_hundred_chapters.png", "group": "author", "category": "author", "rarity": "legendary", "goal": 500
+    },
+    "author_fifty_books": {
+        "title": "Автор 50 книг", "description": "Опубликовать пятьдесят самостоятельных произведений.", "icon": "📚", "icon_asset": "/static/img/achievements/author_fifty_books.png", "group": "author", "category": "author", "rarity": "legendary", "goal": 50
+    },
+    "author_thousand_reactions": {
+        "title": "1000 реакций", "description": "Получить тысячу реакций читателей на опубликованные главы.", "icon": "💜", "icon_asset": "/static/img/achievements/author_thousand_reactions.png", "group": "author", "category": "author", "rarity": "legendary", "goal": 1000
+    },
 }
 
 
@@ -10715,6 +10739,53 @@ _ACHIEVEMENT_TIER_LABELS: dict[str, str] = {
     "gold": "Золото",
     "platinum": "Платина",
 }
+_ACHIEVEMENT_POINTS_BY_RARITY: dict[str, int] = {
+    "common": 10,
+    "rare": 25,
+    "epic": 60,
+    "legendary": 150,
+}
+_ACHIEVEMENT_COLLECTOR_LEVELS: tuple[tuple[int, str], ...] = (
+    (0, "Новичок"),
+    (100, "Искатель"),
+    (250, "Коллекционер"),
+    (500, "Хранитель"),
+    (1000, "Легенда VoxLyra"),
+)
+
+
+def _achievement_points(info: dict[str, Any]) -> int:
+    return _ACHIEVEMENT_POINTS_BY_RARITY.get(str(info.get("rarity") or "common"), 10)
+
+
+def _achievement_collector_summary(total_points: int, unlocked_count: int, total_count: int) -> dict[str, Any]:
+    points = max(0, int(total_points))
+    level_index = 0
+    for index, (threshold, _name) in enumerate(_ACHIEVEMENT_COLLECTOR_LEVELS):
+        if points >= threshold:
+            level_index = index
+    threshold, name = _ACHIEVEMENT_COLLECTOR_LEVELS[level_index]
+    if level_index + 1 < len(_ACHIEVEMENT_COLLECTOR_LEVELS):
+        next_threshold, next_name = _ACHIEVEMENT_COLLECTOR_LEVELS[level_index + 1]
+        span = max(1, next_threshold - threshold)
+        level_progress = min(100, round((points - threshold) * 100 / span))
+        points_to_next = max(0, next_threshold - points)
+    else:
+        next_threshold = threshold
+        next_name = name
+        level_progress = 100
+        points_to_next = 0
+    return {
+        "points": points,
+        "level": level_index + 1,
+        "level_name": name,
+        "level_progress_percent": level_progress,
+        "next_level_name": next_name,
+        "next_level_points": next_threshold,
+        "points_to_next": points_to_next,
+        "unlocked_count": max(0, int(unlocked_count)),
+        "total_count": max(0, int(total_count)),
+    }
 
 
 def _achievement_tier(info: dict[str, Any]) -> tuple[str, str]:
@@ -10970,7 +11041,7 @@ async def get_author_analytics(author_user_id: int, days: int = 30) -> dict[str,
         return {"days": period_days, "summary": summary, "books": books, "dropoff": dropoff, "daily": daily}
 
 
-async def sync_user_achievements(user_id: int) -> dict[str, list[dict[str, Any]]]:
+async def sync_user_achievements(user_id: int) -> dict[str, Any]:
     """Начисляет подтверждённые награды и возвращает полный каталог с прогрессом."""
     uid = int(user_id)
     now = utc_now()
@@ -11132,6 +11203,14 @@ async def sync_user_achievements(user_id: int) -> dict[str, list[dict[str, Any]]
             "author_hundred_reactions": (author_reactions >= 100, author_reactions),
             "thousand_readers": (author_readers >= 1000, author_readers),
             "author_month": (month_rank == 1 and author_readers >= 20, 1 if month_rank == 1 and author_readers >= 20 else 0),
+            "five_hundred_chapters": (completed >= 500, completed),
+            "thousand_chapters": (completed >= 1000, completed),
+            "collector_fifty": (saved >= 50, saved),
+            "audio_ten_hours": (audio_minutes >= 600, audio_minutes),
+            "comic_thousand_pages": (graphic_pages >= 1000, graphic_pages),
+            "author_five_hundred_chapters": (published_chapters >= 500, published_chapters),
+            "author_fifty_books": (published_books >= 50, published_books),
+            "author_thousand_reactions": (author_reactions >= 1000, author_reactions),
         }
         awarded_codes: list[str] = []
         for code, (eligible, value) in candidates.items():
@@ -11171,6 +11250,7 @@ async def sync_user_achievements(user_id: int) -> dict[str, list[dict[str, Any]]
         showcase_position = showcase_positions.get(code)
         return {
             "code": code, **info, "tier": tier, "tier_label": tier_label,
+            "points": _achievement_points(info),
             "progress_value": progress, "goal": goal, "progress_percent": 100,
             "unlocked": True, "awarded_at": row["awarded_at"],
             "showcased": showcase_position is not None, "showcase_position": showcase_position,
@@ -11201,6 +11281,14 @@ async def sync_user_achievements(user_id: int) -> dict[str, list[dict[str, Any]]
         "author_hundred_reactions": author_reactions,
         "thousand_readers": author_readers,
         "author_month": 1 if month_rank == 1 and author_readers >= 20 else 0,
+        "five_hundred_chapters": completed,
+        "thousand_chapters": completed,
+        "collector_fifty": saved,
+        "audio_ten_hours": audio_minutes,
+        "comic_thousand_pages": graphic_pages,
+        "author_five_hundred_chapters": published_chapters,
+        "author_fifty_books": published_books,
+        "author_thousand_reactions": author_reactions,
     }
     catalog: list[dict[str, Any]] = []
     for code, info in _ACHIEVEMENT_CATALOG.items():
@@ -11213,6 +11301,7 @@ async def sync_user_achievements(user_id: int) -> dict[str, list[dict[str, Any]]
         tier, tier_label = _achievement_tier(info)
         catalog.append({
             "code": code, **info, "tier": tier, "tier_label": tier_label,
+            "points": _achievement_points(info),
             "progress_value": progress, "goal": goal,
             "progress_percent": min(100, round(progress * 100 / goal)),
             "unlocked": False, "awarded_at": None,
@@ -11222,7 +11311,9 @@ async def sync_user_achievements(user_id: int) -> dict[str, list[dict[str, Any]]
         (item for item in all_items if item.get("showcased")),
         key=lambda item: int(item.get("showcase_position") or 99),
     )
-    return {"new": new_items, "items": all_items, "catalog": catalog, "showcase": showcase}
+    total_points = sum(int(item.get("points") or 0) for item in all_items)
+    summary = _achievement_collector_summary(total_points, len(all_items), len(_ACHIEVEMENT_CATALOG))
+    return {"new": new_items, "items": all_items, "catalog": catalog, "showcase": showcase, "summary": summary}
 
 
 async def list_smart_reader_reminder_candidates(limit: int = 100, now_utc: datetime | None = None) -> list[dict[str, Any]]:

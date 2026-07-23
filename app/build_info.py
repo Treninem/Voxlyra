@@ -5,12 +5,12 @@
 передаётся.
 """
 
-OWNER_BUILD_VERSION = "v1.14.0.12"
-OWNER_BUILD_NAME = "achievement tiers and profile showcase"
+OWNER_BUILD_VERSION = "v1.14.0.13"
+OWNER_BUILD_NAME = "achievement collector and media recovery"
 
 
 def owner_build_label() -> str:
     return f"{OWNER_BUILD_VERSION} · {OWNER_BUILD_NAME}"
 
 
-WORKING_BUILD_STAGE = "v1.14.0.12 · achievement tiers and profile showcase"
+WORKING_BUILD_STAGE = "v1.14.0.13 · rewards, imported covers and Telegram avatar"

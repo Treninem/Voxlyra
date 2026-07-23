@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     BOT_USERNAME: str = "VoxlyraBot"
     PROJECT_NAME: str = "Вокслира"
     PUBLIC_VERSION_VISIBLE: bool = False
-    PROJECT_VERSION: str = "v1.14.0.12"
+    PROJECT_VERSION: str = "v1.14.0.13"
     MAX_BOOK_UPLOAD_MB: int = 0
     MAX_BOOK_UNPACKED_MB: int = 2048
     # Прямая загрузка больших библиотечных ZIP идёт частями. Это аварийный
@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     # после пересоздания контейнера Bothost.
     LIBRARY_STORAGE_ROOT: str = "data/library_storage"
     BOOK_COVER_STORAGE_ROOT: str = "data/covers"
+    PROFILE_AVATAR_STORAGE_ROOT: str = "data/profile_avatars"
     AUTHOR_BOOK_STORAGE_ROOT: str = "data/books"
     AUDIO_STORAGE_ROOT: str = "data/audio"
     BACKUP_STORAGE_ROOT: str = "data/backups"
