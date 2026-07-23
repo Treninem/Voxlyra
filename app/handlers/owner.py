@@ -15,6 +15,8 @@ from app.db import (
     get_platform_finance_summary,
     get_reader_ad_settings,
     get_book,
+    get_book_moderation_entry,
+    count_chapters_for_book,
     get_complaint,
     list_complaints,
     search_books,
@@ -602,13 +604,30 @@ async def owner_book_card(call: CallbackQuery) -> None:
     if not book:
         await call.answer("Книга не найдена", show_alert=True)
         return
+    chapters_count = await count_chapters_for_book(book_id)
+    moderation = await get_book_moderation_entry(book_id)
+    status = str(book["publication_status"] or "draft")
+    review_note = ""
+    if status == "review":
+        active = bool(moderation and str(moderation["status"] or "") == "pending")
+        reasons = str(moderation["reasons"] or "").strip() if moderation else ""
+        if active:
+            review_note = "\n\n<b>Причина проверки:</b>\n" + (reasons or "Ожидается ручное решение модератора.")
+        else:
+            review_note = (
+                "\n\n⚠️ <b>Активного задания модерации нет.</b> "
+                "Книга могла застрять после изменения цены, доступа или метаданных. "
+                "Её можно опубликовать кнопкой ниже без повторного поста в канал."
+            )
     await call.message.edit_text(
         f"<b>📚 Книга</b>\n\n"
+        f"ID: <b>{book_id}</b>\n"
         f"Название: <b>{book['title']}</b>\n"
-        f"Автор: <b>{book['pen_name'] or '-'}</b>\n"
+        f"Автор: <b>{book['pen_name'] or book['source_author_name'] or '-'}</b>\n"
         f"Возраст: <b>{book['age_limit']}</b>\n"
-        f"Статус: <b>{book['publication_status']}</b>",
-        reply_markup=owner_book_card_menu(book_id, book["publication_status"]),
+        f"Глав: <b>{chapters_count}</b>\n"
+        f"Статус: <b>{status}</b>{review_note}",
+        reply_markup=owner_book_card_menu(book_id, status),
     )
     await call.answer()
 

@@ -894,6 +894,13 @@ def owner_books_search_results_menu(rows) -> InlineKeyboardMarkup:
 
 def owner_book_card_menu(book_id: int, status: str) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
+    if status == "review":
+        # Владелец должен иметь полный набор действий прямо из результата
+        # поиска. Раньше здесь оставалась только блокировка, поэтому книги,
+        # застрявшие в review после редактирования, невозможно было выпустить.
+        kb.button(text="🛡 Открыть проверку", callback_data=f"mod:book:{book_id}")
+        kb.button(text="✅ Опубликовать", callback_data=f"mod:book_publish:{book_id}")
+        kb.button(text="↩️ На доработку", callback_data=f"mod:book_reject:{book_id}")
     if status == "published":
         kb.button(text="📢 Опубликовать в канале повторно", callback_data=f"owner:channel_repost:{book_id}")
     if status == "blocked":

@@ -1448,9 +1448,10 @@ async def update_author_book_fields(book_id: int, author_user_id: int, values: d
     now = utc_now()
     fields = [f"{key}=?" for key in clean]
     values_list = list(clean.values())
-    sensitive = {"content_type", "reading_mode"}
-    if sensitive.intersection(clean):
-        fields.append("publication_status=CASE WHEN publication_status='published' THEN 'review' ELSE publication_status END")
+    # Метаданные, оформление, режим чтения и коммерческие настройки не
+    # являются изменением текста. Уже опубликованная книга остаётся в каталоге.
+    # Повторная проверка запускается только отдельным workflow после реального
+    # изменения содержимого главы или добавления нового контента.
     fields.append("updated_at=?")
     values_list.extend([now, int(book_id), int(author_user_id)])
     async with connect() as db:
@@ -5695,6 +5696,31 @@ async def was_channel_post_sent(book_id: int) -> bool:
             LIMIT 1
             """,
             (str(int(book_id)),),
+        )
+        return await cur.fetchone() is not None
+
+
+async def was_book_ever_published(book_id: int) -> bool:
+    """Whether the book has already been approved in an earlier lifecycle.
+
+    This is used when a previously published book was accidentally moved to
+    ``review`` by an old pricing/metadata update. Re-approving it must restore
+    the catalog entry without notifying followers or creating a duplicate
+    channel post.
+    """
+    async with connect() as db:
+        cur = await db.execute(
+            """
+            SELECT 1
+            FROM audit_logs
+            WHERE target_type='book' AND target_id=? AND action='book_published'
+            UNION ALL
+            SELECT 1
+            FROM book_moderation_snapshots
+            WHERE book_id=? AND snapshot_kind='approved'
+            LIMIT 1
+            """,
+            (str(int(book_id)), int(book_id)),
         )
         return await cur.fetchone() is not None
 
@@ -10002,7 +10028,7 @@ async def update_chapter_price_range(
         if updated:
             await _sync_book_pricing_type_conn(db, int(book_id))
             await db.execute(
-                "UPDATE books SET publication_status=CASE WHEN publication_status='published' THEN 'review' ELSE publication_status END, updated_at=? WHERE id=?",
+                "UPDATE books SET updated_at=? WHERE id=?",
                 (now, int(book_id)),
             )
         await db.commit()
@@ -10189,7 +10215,6 @@ async def update_book_price(
             """
             UPDATE books
             SET pricing_type=?, price_stars=?,
-                publication_status=CASE WHEN publication_status='published' THEN 'review' ELSE publication_status END,
                 updated_at=?
             WHERE id=?
             """,
@@ -10238,7 +10263,7 @@ async def restore_saved_chapter_prices(book_id: int, author_user_id: int) -> dic
         updated = int(cur.rowcount or 0)
         if updated:
             await db.execute(
-                "UPDATE books SET publication_status=CASE WHEN publication_status='published' THEN 'review' ELSE publication_status END, updated_at=? WHERE id=?",
+                "UPDATE books SET updated_at=? WHERE id=?",
                 (now, int(book_id)),
             )
         await db.commit()
@@ -10313,7 +10338,7 @@ async def update_chapter_access_range(
         updated = int(cur.rowcount or 0)
         if updated:
             await db.execute(
-                "UPDATE books SET publication_status=CASE WHEN publication_status='published' THEN 'review' ELSE publication_status END, updated_at=? WHERE id=?",
+                "UPDATE books SET updated_at=? WHERE id=?",
                 (now, int(book_id)),
             )
         await db.commit()

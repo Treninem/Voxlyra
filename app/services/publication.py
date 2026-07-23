@@ -19,6 +19,7 @@ from app.db import (
     set_book_publication_status,
     submit_book_for_review,
     was_channel_post_sent,
+    was_book_ever_published,
 )
 from app.services.channel import build_new_book_post
 from app.services.duplicate_books import duplicate_warning_text, find_book_duplicates
@@ -50,6 +51,7 @@ class PublicationResult:
             "failed": "Книга опубликована в каталоге, но пост в канал отправить не удалось.",
             "duplicate": "Публикация остановлена: найдена возможная копия книги.",
             "queued": "Карточка книги поставлена в очередь канала и выйдет по расписанию.",
+            "restored": "Книга возвращена в каталог без повторного поста в канал.",
         }.get(self.channel_status, "")
 
 
@@ -240,6 +242,7 @@ async def publish_book_and_channel(
     book = await get_book(book_id)
     if not book:
         return PublicationResult(False, "failed", "Книга не найдена")
+    published_before = await was_book_ever_published(book_id)
     if await count_chapters_for_book(book_id) < 1:
         return PublicationResult(False, "failed", "Нельзя публиковать книгу без глав")
 
@@ -265,6 +268,11 @@ async def publish_book_and_channel(
     await set_book_publication_status(book_id, "published")
     await publish_book_content(book_id)
     await add_audit(actor_user_id, "book_published", "book", str(book_id), None, "published")
+    if published_before and not force_channel:
+        # Это восстановление ранее опубликованной книги после проверки или
+        # старого ошибочного перехода в review. Не создаём повторный анонс, не
+        # уведомляем подписчиков как о новой книге и не дублируем очередь канала.
+        return PublicationResult(True, "restored", workflow_status="published")
     # Импортированные книги ставит в очередь Library Manager. Обычные авторские
     # книги идут в отдельную справедливую очередь, чтобы сотни публикаций не спамили канал.
     fresh = await get_book(book_id)

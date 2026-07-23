@@ -5,12 +5,12 @@
 передаётся.
 """
 
-OWNER_BUILD_VERSION = "v1.14.0.24"
-OWNER_BUILD_NAME = "exact-title catalog search and cache isolation"
+OWNER_BUILD_VERSION = "v1.14.0.25"
+OWNER_BUILD_NAME = "moderation recovery and safe edit status"
 
 
 def owner_build_label() -> str:
     return f"{OWNER_BUILD_VERSION} · {OWNER_BUILD_NAME}"
 
 
-WORKING_BUILD_STAGE = "v1.14.0.24 · direct exact-title lookup, import aliases and no stale catalog cache"
+WORKING_BUILD_STAGE = "v1.14.0.25 · owner moderation actions, safe edits stay published, stranded review recovery"
