@@ -3407,8 +3407,24 @@ function achievementCardMarkup(item, options = {}) {
     : '';
   return `<article class="achievement-card rarity-${rarity} tier-${tier}${unlocked ? ' is-unlocked' : ' is-locked'}${options.gallery ? ' gallery-card' : ''}">
     <div class="achievement-medal">${image}${unlocked ? '<span class="achievement-check">✓</span>' : '<span class="achievement-lock">◆</span>'}</div>
-    <div class="achievement-copy"><div class="achievement-title-row"><strong>${escapeHtml(item?.title || 'Достижение')}</strong><span class="achievement-tier">${achievementTierLabels[tier]}</span></div><p>${escapeHtml(item?.description || '')}</p><small class="achievement-rarity-note">${achievementRarityLabels[rarity]} награда</small>${progressMarkup}${showcaseAction}</div>
+    <div class="achievement-copy"><div class="achievement-title-row"><strong>${escapeHtml(item?.title || 'Достижение')}</strong><span class="achievement-tier">${achievementTierLabels[tier]}</span></div><p>${escapeHtml(item?.description || '')}</p><small class="achievement-rarity-note">${achievementRarityLabels[rarity]} награда · ${Number(item?.points || 0)} очков</small>${progressMarkup}${showcaseAction}</div>
   </article>`;
+}
+
+function renderAchievementCollectorSummary(payload) {
+  const summary = payload?.summary || {};
+  const level = document.getElementById('achievementCollectorLevel');
+  const count = document.getElementById('achievementCollectorCount');
+  const points = document.getElementById('achievementCollectorPoints');
+  const progress = document.getElementById('achievementCollectorProgress');
+  const next = document.getElementById('achievementCollectorNext');
+  if (level) level.textContent = `Уровень ${Number(summary.level || 1)} · ${summary.level_name || 'Новичок'}`;
+  if (count) count.textContent = `${Number(summary.unlocked_count || 0)} из ${Number(summary.total_count || 0)} наград`;
+  if (points) points.textContent = String(Number(summary.points || 0));
+  if (progress) progress.style.width = `${Math.max(0, Math.min(100, Number(summary.level_progress_percent || 0)))}%`;
+  if (next) next.textContent = Number(summary.points_to_next || 0) > 0
+    ? `До уровня «${summary.next_level_name || ''}»: ${Number(summary.points_to_next || 0)} очков`
+    : 'Максимальный уровень коллекционера открыт';
 }
 
 function achievementShowcaseMarkup(payload) {
@@ -3571,6 +3587,7 @@ function showAchievementUnlockSequence(items) {
 window.showAchievementUnlockSequence = showAchievementUnlockSequence;
 
 function renderLibraryAchievements(payload, options = {}) {
+  renderAchievementCollectorSummary(payload);
   const panel = document.getElementById('libraryAchievementPanel');
   const grid = document.getElementById('libraryAchievements');
   const showcase = document.getElementById('achievementShowcase');
@@ -3800,34 +3817,41 @@ async function initLibrary() {
     renderWalletSummary(data);
     const profileName = String(data.user?.full_name || data.user?.username || '').trim();
     const username = String(data.user?.username || '').replace(/^@+/, '').trim();
-    const telegramPhotoUrl = String(
-      data.user?.photo_url || window.Telegram?.WebApp?.initDataUnsafe?.user?.photo_url || ''
-    ).trim();
     const initial = (profileName || username || 'В').slice(0, 1).toUpperCase();
     const profileInitial = document.getElementById('libraryProfileInitial');
     const profileIcon = document.getElementById('libraryProfileIcon');
     const profileNameLabel = document.getElementById('libraryProfileName');
+    let profileAvatarObjectUrl = '';
     const showInitialFallback = () => {
-      if (profileIcon) profileIcon.hidden = true;
+      if (profileAvatarObjectUrl) {
+        URL.revokeObjectURL(profileAvatarObjectUrl);
+        profileAvatarObjectUrl = '';
+      }
+      if (profileIcon) {
+        profileIcon.hidden = true;
+        profileIcon.removeAttribute('src');
+        profileIcon.classList.remove('telegram-avatar');
+      }
       if (profileInitial) {
         profileInitial.textContent = initial;
         profileInitial.hidden = false;
       }
     };
+    showInitialFallback();
     if (profileIcon) {
-      profileIcon.hidden = false;
-      if (telegramPhotoUrl) {
-        profileIcon.src = telegramPhotoUrl;
-        profileIcon.classList.add('telegram-avatar');
-      } else {
-        profileIcon.classList.remove('telegram-avatar');
-      }
-      profileIcon.addEventListener('error', showInitialFallback, { once: true });
-      if (profileIcon.complete && profileIcon.naturalWidth === 0) showInitialFallback();
-    } else {
-      showInitialFallback();
+      profileIcon.addEventListener('error', showInitialFallback);
+      apiFetch('/api/me/avatar')
+        .then((response) => response.blob())
+        .then((blob) => {
+          if (!blob || blob.size <= 0) throw new Error('Пустое фото профиля');
+          profileAvatarObjectUrl = URL.createObjectURL(blob);
+          profileIcon.src = profileAvatarObjectUrl;
+          profileIcon.classList.add('telegram-avatar');
+          profileIcon.hidden = false;
+          if (profileInitial) profileInitial.hidden = true;
+        })
+        .catch(showInitialFallback);
     }
-    if (profileInitial && profileIcon && !profileIcon.hidden) profileInitial.hidden = true;
     if (profileNameLabel) {
       const label = username ? `@${username}` : profileName;
       profileNameLabel.textContent = label;
