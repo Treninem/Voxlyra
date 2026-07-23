@@ -293,11 +293,11 @@ function showAuthorError(message) {
 
 
 function achievementCard(item) {
-  const rarityLabels = { common: 'Обычная', rare: 'Редкая', epic: 'Эпическая', legendary: 'Легендарная' };
-  const tierByRarity = { common: 'bronze', rare: 'silver', epic: 'gold', legendary: 'platinum' };
-  const tierLabels = { bronze: 'Бронза', silver: 'Серебро', gold: 'Золото', platinum: 'Платина' };
-  const rarity = ['common', 'rare', 'epic', 'legendary'].includes(item?.rarity) ? item.rarity : 'common';
-  const tier = ['bronze', 'silver', 'gold', 'platinum'].includes(item?.tier) ? item.tier : tierByRarity[rarity];
+  const rarityLabels = { common: 'Бронзовая', rare: 'Серебряная', epic: 'Золотая', legendary: 'Платиновая', mythic: 'Легендарная' };
+  const tierByRarity = { common: 'bronze', rare: 'silver', epic: 'gold', legendary: 'platinum', mythic: 'legend' };
+  const tierLabels = { bronze: 'Бронза', silver: 'Серебро', gold: 'Золото', platinum: 'Платина', legend: 'Легенда' };
+  const rarity = ['common', 'rare', 'epic', 'legendary', 'mythic'].includes(item?.rarity) ? item.rarity : 'common';
+  const tier = ['bronze', 'silver', 'gold', 'platinum', 'legend'].includes(item?.tier) ? item.tier : tierByRarity[rarity];
   const image = item?.icon_asset
     ? `<span class="achievement-icon achievement-icon-image"><img src="${escapeHtml(item.icon_asset)}" alt="${escapeHtml(item.title || 'Достижение')}" loading="lazy"></span>`
     : `<span class="achievement-icon">${escapeHtml(item.icon || '✦')}</span>`;

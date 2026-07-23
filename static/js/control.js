@@ -104,6 +104,8 @@
       sections.push(sectionButton('tts', 'Озвучивание', 'Движки, голоса и очередь', 0));
       sections.push(sectionButton('payments', 'Stars и курсы', 'Оплата, расчёты автора и защита', 0));
       sections.push(sectionButton('premium', 'Premium', 'Цена, включение и статистика подписки', data.premium?.active_users || 0));
+      sections.push(sectionButton('achievements', 'Награды и уровни', 'Очки, особые награды и сезонные марафоны', 0));
+      sections.push(sectionButton('catalog_promotions', 'Топ каталога', 'Честная ротация: ты бесплатно, авторы за Stars', data.catalog_promotions_active || 0));
     }
     $('controlSections').innerHTML = sections.length ? sections.join('') : '<article class="empty-card"><h3>Нет доступных действий</h3><p>Права можно изменить в меню владельца.</p></article>';
 
@@ -378,6 +380,7 @@
     const queueControl = data.queue_control || { mode: 'running' };
     const queueWorker = data.queue_worker || { alive: false, status: 'not_started' };
     const queueMode = String(queueControl.mode || 'running');
+    const pendingHandoffs = Number(queueControl.pending_handoffs || 0);
     const workerStatus = String(queueWorker.status || 'not_started');
     const workerAlive = queueWorker.alive === true;
     const workerLabels = { not_started: 'Не запущен', starting: 'Запускается', idle: 'Готов', processing: 'Обрабатывает', error_retrying: 'Перезапускается', failed: 'Ошибка', stopped: 'Остановлен' };
@@ -410,12 +413,13 @@
       ${statCard('В очереди', queueCount)}
       ${statCard('Режим очереди', queueModeLabels[queueMode] || queueMode)}
       ${statCard('Обработчик', workerLabels[workerStatus] || workerStatus)}
+      ${statCard('Принятые ZIP', pendingHandoffs)}
       ${statCard('Автомодерация', learning.enabled ? 'Включена' : 'Выключена')}
       ${statCard('Решений для обучения', Number(learning.approved || 0) + Number(learning.rejected || 0))}
       ${statCard('Доверенных категорий', (learning.trusted_categories || []).length)}
     </div>
     <article class="control-item payment-settings-card">
-      <div class="control-item-main"><span>Управление очередью</span><h3>${esc(queueModeLabels[queueMode] || queueMode)} · ${esc(workerLabels[workerStatus] || workerStatus)}</h3><p>${esc(queueModeText)}</p>${queueWorker.last_error ? `<p class="danger-text">Последняя ошибка обработчика: ${esc(String(queueWorker.last_error).slice(0, 300))}</p>` : ''}<small>Пауза и обслуживание сохраняются после перезапуска сервера. Уже выполняющееся задание не обрывается.</small></div>
+      <div class="control-item-main"><span>Управление очередью</span><h3>${esc(queueModeLabels[queueMode] || queueMode)} · ${esc(workerLabels[workerStatus] || workerStatus)}</h3><p>${esc(queueModeText)}</p>${queueWorker.last_error ? `<p class="danger-text">Последняя ошибка обработчика: ${esc(String(queueWorker.last_error).slice(0, 300))}</p>` : ''}${pendingHandoffs ? `<p class="warning-text">${pendingHandoffs} полностью принятый ZIP ожидает автоматического восстановления передачи в очередь.</p>` : ''}<small>Пауза и обслуживание сохраняются после перезапуска сервера. Уже выполняющееся задание не обрывается.</small></div>
       <div class="control-actions">${queueModeActions}</div>
     </article>
     <article class="control-item payment-settings-card">
@@ -825,6 +829,374 @@
   }
 
 
+  function manualAchievementDefinitionCard(item) {
+    const active = item.active !== false;
+    return `<article class="manual-achievement-definition${active ? '' : ' inactive'}">
+      <div><span>${item.group === 'author' ? 'Авторская' : 'Читательская'}</span><h4>${esc(item.title || item.code)}</h4><p>${esc(item.description || '')}</p><small>${esc(item.code)} · ${esc(item.rarity || 'epic')} · ${Number(item.custom_points || 0) || 'по редкости'} очков · ${Number(item.awarded || 0)} выдач</small></div>
+      <button type="button" class="control-action ${active ? 'danger' : 'approve'}" data-manual-toggle="${esc(item.code)}" data-manual-active="${active ? '0' : '1'}">${active ? 'Отключить' : 'Включить'}</button>
+    </article>`;
+  }
+
+  function manualAchievementEventCard(item) {
+    let payload = {};
+    try { payload = JSON.parse(item.after_value || '{}'); } catch (_) {}
+    const labels = {
+      manual_achievement_granted: 'Выдана',
+      manual_achievement_revoked: 'Отозвана',
+      manual_achievement_created: 'Создана',
+    };
+    const actor = item.username ? `@${item.username}` : (item.full_name || `ID ${item.actor_user_id || 0}`);
+    return `<article class="manual-achievement-event"><div><b>${esc(labels[item.action] || item.action || 'Действие')}</b><span>${esc(payload.code || item.target_id || '')}</span></div><small>${esc(actor)} · ${esc(dateText(item.created_at))}</small></article>`;
+  }
+
+  async function loadAchievementSettings() {
+    openWorkspace('Награды и уровни', 'Управляйте ценностью наград, порогами коллекционера и сезонными событиями без обновления кода.', 'Владелец');
+    $('workspaceTabs').innerHTML = '';
+    const data = await apiFetch('/api/control/achievements');
+    const cfg = data.settings || {};
+    const points = cfg.points || {};
+    const levels = Array.isArray(cfg.levels) ? cfg.levels : [];
+    const rare = cfg.rare || {};
+    const season = cfg.season || {};
+    const summary = data.summary || {};
+    const levelFields = [0,1,2,3,4].map((index) => {
+      const item = levels[index] || { threshold: index ? index * 100 : 0, name: `Уровень ${index + 1}` };
+      return `<div class="achievement-admin-level"><label class="payment-secret-field"><span>Название уровня ${index + 1}</span><input type="text" maxlength="48" name="level_name_${index}" value="${esc(item.name || '')}"></label><label class="payment-secret-field"><span>Порог очков</span><input type="number" min="${index ? 1 : 0}" max="10000000" step="1" name="level_threshold_${index}" value="${Number(item.threshold || 0)}" ${index === 0 ? 'readonly' : ''}></label></div>`;
+    }).join('');
+    const popular = (summary.popular || []).map((item) => `<span class="achievement-admin-popular"><b>${esc(item.code || '')}</b><small>${Number(item.awarded || 0)} выдач</small></span>`).join('') || '<span class="muted">Награды ещё не выдавались.</span>';
+    const manual = data.manual || {};
+    const manualDefinitions = Array.isArray(manual.definitions) ? manual.definitions : [];
+    const activeManualDefinitions = manualDefinitions.filter((item) => item.active !== false);
+    const manualOptions = activeManualDefinitions.map((item) => `<option value="${esc(item.code)}">${esc(item.title)} · ${esc(item.rarity)}</option>`).join('');
+    const manualList = manualDefinitions.map(manualAchievementDefinitionCard).join('') || '<p class="muted">Особых наград пока нет.</p>';
+    const manualEvents = (manual.events || []).map(manualAchievementEventCard).join('') || '<p class="muted">Журнал выдач пока пуст.</p>';
+    $('workspaceList').innerHTML = `<form id="achievementSettingsForm" class="payment-settings-form achievement-admin-form">
+      <div class="control-stat-grid achievement-admin-summary">
+        ${statCard('Выдано наград', summary.awards_total || 0)}
+        ${statCard('Коллекционеров', summary.users_with_awards || 0, 'с наградами')}
+        ${statCard('Витрины', summary.showcase_users || 0, 'профилей')}
+        ${statCard('Автоматических', `${Number(summary.automatic_total || 0)} / ${Number(summary.planned_target || 100)}`, 'план наград')}
+        ${statCard('Активный сезон', season.enabled ? (season.title || 'Включён') : 'Выключен')}
+      </div>
+      <article class="control-item payment-settings-card"><div class="control-item-main"><span>Очки</span><h3>Ценность каждого уровня</h3><p>Изменение пересчитывает уровень всех пользователей по уже полученным наградам. Сами награды не удаляются.</p></div><div class="payment-settings-stack achievement-points-admin">
+        <label class="payment-secret-field"><span>Бронзовая</span><input type="number" min="1" max="10000" name="points_common" value="${Number(points.common || 10)}"></label>
+        <label class="payment-secret-field"><span>Серебряная</span><input type="number" min="1" max="10000" name="points_rare" value="${Number(points.rare || 25)}"></label>
+        <label class="payment-secret-field"><span>Золотая</span><input type="number" min="1" max="10000" name="points_epic" value="${Number(points.epic || 60)}"></label>
+        <label class="payment-secret-field"><span>Платиновая</span><input type="number" min="1" max="10000" name="points_legendary" value="${Number(points.legendary || 150)}"></label>
+        <label class="payment-secret-field"><span>Легенда</span><input type="number" min="1" max="10000" name="points_mythic" value="${Number(points.mythic || 300)}"></label>
+      </div></article>
+      <article class="control-item payment-settings-card"><div class="control-item-main"><span>Коллекционер</span><h3>Названия и пороги уровней</h3><p>Первый уровень всегда начинается с нуля. Каждый следующий порог должен быть больше предыдущего.</p></div><div class="payment-settings-stack achievement-level-admin">${levelFields}</div></article>
+      <article class="control-item payment-settings-card"><div class="control-item-main"><span>Редкие награды</span><h3>Особые знаки сообщества</h3><p>Отключение скрывает ещё не полученную награду, но не отнимает её у уже награждённых пользователей.</p></div><div class="payment-settings-stack">
+        ${paymentToggle('founding_member_enabled', '«Первые хранители»', rare.founding_member_enabled !== false, 'Автоматически выдаётся пользователям, зарегистрированным не позже контрольной даты.')}
+        <label class="payment-secret-field"><span>Контрольная дата раннего сообщества</span><input type="date" name="founding_cutoff_date" value="${esc(rare.founding_cutoff_date || '2026-07-23')}"><small>Дата учитывается включительно.</small></label>
+        ${paymentToggle('all_rounder_enabled', '«Голос всех миров»', rare.all_rounder_enabled !== false, 'Чтение, 60 минут аудио, 100 страниц комиксов и участие в обсуждении.')}
+      </div></article>
+      <article class="control-item payment-settings-card season-achievement-card"><div class="control-item-main"><span>Сезонная награда</span><h3>${esc(season.title || 'Сезон VoxLyra')}</h3><p>Код сезона нельзя повторять для другой кампании: новый код создаёт отдельную коллекционную награду.</p></div><div class="payment-settings-stack">
+        ${paymentToggle('season_enabled', 'Сезон активен', Boolean(season.enabled), 'Прогресс считается по завершённым главам в выбранном диапазоне дат.')}
+        <label class="payment-secret-field"><span>Код сезона</span><input type="text" maxlength="40" name="season_code" value="${esc(season.code || 'season')}"><small>Латиница, цифры и подчёркивание. После первых выдач лучше не менять.</small></label>
+        <label class="payment-secret-field"><span>Название награды</span><input type="text" maxlength="80" name="season_title" value="${esc(season.title || '')}"></label>
+        <label class="payment-secret-field"><span>Описание</span><input type="text" maxlength="240" name="season_description" value="${esc(season.description || '')}"></label>
+        <div class="achievement-admin-dates"><label class="payment-secret-field"><span>Начало</span><input type="date" name="season_start_date" value="${esc(season.start_date || '')}"></label><label class="payment-secret-field"><span>Окончание</span><input type="date" name="season_end_date" value="${esc(season.end_date || '')}"></label></div>
+        <div class="achievement-admin-dates"><label class="payment-secret-field"><span>Цель: завершённых глав</span><input type="number" min="1" max="1000000" name="season_goal" value="${Number(season.goal || 30)}"></label><label class="payment-secret-field"><span>Очки сезона</span><input type="number" min="0" max="10000" name="season_custom_points" value="${Number(season.custom_points || 0)}"><small>0 — использовать очки выбранного уровня.</small></label></div>
+        <label class="payment-secret-field"><span>Уровень награды</span><select name="season_rarity"><option value="common" ${season.rarity === 'common' ? 'selected' : ''}>Бронза</option><option value="rare" ${season.rarity === 'rare' ? 'selected' : ''}>Серебро</option><option value="epic" ${season.rarity === 'epic' ? 'selected' : ''}>Золото</option><option value="legendary" ${season.rarity === 'legendary' ? 'selected' : ''}>Платина</option><option value="mythic" ${season.rarity === 'mythic' ? 'selected' : ''}>Легенда</option></select></label>
+      </div></article>
+      <article class="control-item payment-settings-card"><div class="control-item-main"><span>Популярность</span><h3>Чаще всего полученные награды</h3><p>Служебные коды показываются владельцу для контроля начислений.</p></div><div class="achievement-admin-popular-list">${popular}</div></article>
+      <div class="control-actions payment-settings-actions"><button type="submit" class="approve">Сохранить систему наград</button></div>
+    </form>
+    <section class="manual-achievement-admin">
+      <article class="control-item payment-settings-card"><div class="control-item-main"><span>Особые награды</span><h3>Создать награду владельца</h3><p>Такие награды выдаются и отзываются только вручную. Они отображаются в профиле и участвуют в уровне коллекционера.</p></div>
+        <form id="manualAchievementCreateForm" class="manual-achievement-form">
+          <label class="payment-secret-field"><span>Название</span><input name="title" maxlength="80" required placeholder="Например, Легенда VoxLyra"></label>
+          <label class="payment-secret-field"><span>Описание</span><input name="description" maxlength="240" required placeholder="За особый вклад в сообщество"></label>
+          <label class="payment-secret-field"><span>Раздел</span><select name="group"><option value="reader" selected>Читательская</option><option value="author">Авторская</option></select></label>
+          <label class="payment-secret-field"><span>Уровень награды</span><select name="rarity"><option value="common">Бронза</option><option value="rare">Серебро</option><option value="epic" selected>Золото</option><option value="legendary">Платина</option><option value="mythic">Легенда</option></select></label>
+          <label class="payment-secret-field"><span>Собственные очки</span><input type="number" min="0" max="10000" name="custom_points" value="0"><small>0 — использовать очки выбранного уровня.</small></label>
+          <button type="submit" class="control-action approve">Создать особую награду</button>
+        </form>
+      </article>
+      <article class="control-item payment-settings-card"><div class="control-item-main"><span>Выдача</span><h3>Наградить пользователя</h3><p>Найдите пользователя по ID, username, имени или псевдониму автора.</p></div>
+        <div class="manual-achievement-award">
+          <div class="manual-achievement-search"><input id="manualAchievementUserQuery" type="search" placeholder="ID, @username или имя"><button id="manualAchievementUserSearch" type="button" class="control-action">Найти</button></div>
+          <div id="manualAchievementUserResults" class="manual-achievement-user-results"><p class="muted">Пользователь не выбран.</p></div>
+          <label class="payment-secret-field"><span>Особая награда</span><select id="manualAchievementCode">${manualOptions || '<option value="">Сначала создайте награду</option>'}</select></label>
+          <label class="payment-secret-field"><span>Причина или комментарий</span><input id="manualAchievementReason" maxlength="300" placeholder="Будет сохранено в журнале"></label>
+          <div class="control-actions"><button id="manualAchievementGrant" type="button" class="approve">Выдать</button><button id="manualAchievementRevoke" type="button" class="danger">Отозвать</button></div>
+        </div>
+      </article>
+      <article class="control-item payment-settings-card"><div class="control-item-main"><span>Каталог особых наград</span><h3>${manualDefinitions.length} наград</h3><p>Отключённую награду нельзя выдавать заново, но уже полученные экземпляры сохраняются.</p></div><div class="manual-achievement-definition-list">${manualList}</div></article>
+      <article class="control-item payment-settings-card"><div class="control-item-main"><span>Журнал</span><h3>Последние действия</h3><p>Выдача, отзыв и создание особых наград.</p></div><div class="manual-achievement-event-list">${manualEvents}</div></article>
+      <article class="control-item payment-settings-card achievement-artwork-entry"><div class="control-item-main"><span>Изображения</span><h3>Финальные PNG наград</h3><p>Загружайте свои изображения по одному или ZIP-архивом. Система проверит имя, PNG и точный размер 1024×1024 px. Сорок утверждённых изображений защищены от замены.</p></div><button id="openAchievementArtwork" type="button" class="control-action approve">Управление изображениями</button></article>
+    </section>`;
+    const form = $('achievementSettingsForm');
+    form?.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const configuredLevels = [0,1,2,3,4].map((index) => ({
+        name: String(form.elements[`level_name_${index}`].value || '').trim(),
+        threshold: index === 0 ? 0 : Number(form.elements[`level_threshold_${index}`].value || 0),
+      }));
+      for (let index = 1; index < configuredLevels.length; index += 1) {
+        if (configuredLevels[index].threshold <= configuredLevels[index - 1].threshold) {
+          notify('Пороги уровней должны строго возрастать'); return;
+        }
+      }
+      const payload = {
+        points: {
+          common: Number(form.elements.points_common.value || 10),
+          rare: Number(form.elements.points_rare.value || 25),
+          epic: Number(form.elements.points_epic.value || 60),
+          legendary: Number(form.elements.points_legendary.value || 150),
+          mythic: Number(form.elements.points_mythic.value || 300),
+        },
+        levels: configuredLevels,
+        rare: {
+          founding_member_enabled: Boolean(form.elements.founding_member_enabled.checked),
+          founding_cutoff_date: String(form.elements.founding_cutoff_date.value || ''),
+          all_rounder_enabled: Boolean(form.elements.all_rounder_enabled.checked),
+        },
+        season: {
+          enabled: Boolean(form.elements.season_enabled.checked),
+          code: String(form.elements.season_code.value || '').trim(),
+          title: String(form.elements.season_title.value || '').trim(),
+          description: String(form.elements.season_description.value || '').trim(),
+          start_date: String(form.elements.season_start_date.value || ''),
+          end_date: String(form.elements.season_end_date.value || ''),
+          goal: Number(form.elements.season_goal.value || 1),
+          rarity: String(form.elements.season_rarity.value || 'epic'),
+          custom_points: Number(form.elements.season_custom_points.value || 0),
+        },
+      };
+      await apiFetch('/api/control/achievements', { method: 'PATCH', body: JSON.stringify(payload) });
+      notify('Система наград сохранена');
+      await loadAchievementSettings();
+    });
+
+    $('manualAchievementCreateForm')?.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const createForm = event.currentTarget;
+      await apiFetch('/api/control/achievements/manual/definition', {
+        method: 'POST',
+        body: JSON.stringify({
+          title: String(createForm.elements.title.value || '').trim(),
+          description: String(createForm.elements.description.value || '').trim(),
+          group: String(createForm.elements.group.value || 'Особые').trim(),
+          rarity: String(createForm.elements.rarity.value || 'epic'),
+          custom_points: Number(createForm.elements.custom_points.value || 0),
+        }),
+      });
+      notify('Особая награда создана');
+      await loadAchievementSettings();
+    });
+
+    document.querySelectorAll('[data-manual-toggle]').forEach((button) => button.addEventListener('click', async () => {
+      await apiFetch(`/api/control/achievements/manual/definition/${encodeURIComponent(button.dataset.manualToggle)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ active: button.dataset.manualActive === '1' }),
+      });
+      notify(button.dataset.manualActive === '1' ? 'Награда включена' : 'Награда отключена');
+      await loadAchievementSettings();
+    }));
+
+    $('manualAchievementUserSearch')?.addEventListener('click', async () => {
+      const query = String($('manualAchievementUserQuery')?.value || '').trim();
+      if (!query) { notify('Введите ID, username или имя'); return; }
+      const result = await apiFetch(`/api/control/achievements/users?q=${encodeURIComponent(query)}`);
+      const items = result.items || [];
+      $('manualAchievementUserResults').innerHTML = items.length ? items.map((user) => `<button type="button" class="manual-achievement-user" data-manual-user="${Number(user.id)}"><b>${esc(user.full_name || user.pen_name || user.username || `ID ${user.telegram_id}`)}</b><span>${user.username ? `@${esc(user.username)}` : `Telegram ID ${Number(user.telegram_id)}`}${user.pen_name ? ` · ${esc(user.pen_name)}` : ''}</span></button>`).join('') : '<p class="muted">Пользователь не найден.</p>';
+      document.querySelectorAll('[data-manual-user]').forEach((button) => button.addEventListener('click', () => {
+        state.manualAchievementUser = Number(button.dataset.manualUser);
+        document.querySelectorAll('[data-manual-user]').forEach((item) => item.classList.toggle('selected', item === button));
+        notify(`Пользователь выбран: ID ${state.manualAchievementUser}`);
+      }));
+    });
+
+    const changeManualAward = async (mode) => {
+      const userId = Number(state.manualAchievementUser || 0);
+      const code = String($('manualAchievementCode')?.value || '');
+      if (!userId) { notify('Сначала выберите пользователя'); return; }
+      if (!code) { notify('Выберите особую награду'); return; }
+      await apiFetch(`/api/control/achievements/manual/${mode}`, {
+        method: 'POST',
+        body: JSON.stringify({ user_id: userId, code, reason: String($('manualAchievementReason')?.value || '').trim() }),
+      });
+      notify(mode === 'grant' ? 'Награда выдана' : 'Награда отозвана');
+      await loadAchievementSettings();
+    };
+    $('manualAchievementGrant')?.addEventListener('click', () => changeManualAward('grant').catch(handleError));
+    $('manualAchievementRevoke')?.addEventListener('click', () => changeManualAward('revoke').catch(handleError));
+    $('openAchievementArtwork')?.addEventListener('click', () => loadAchievementArtwork().catch(handleError));
+  }
+
+
+  function achievementArtworkStatusLabel(status) {
+    return ({ protected: 'Утверждено и защищено', awaiting: 'Нужен финальный PNG', custom: 'Финальный PNG установлен', missing: 'Файл отсутствует' })[status] || status || '—';
+  }
+
+  function achievementArtworkCard(item) {
+    const status = String(item.status || 'awaiting');
+    const canReplace = Boolean(item.replaceable);
+    const actions = canReplace
+      ? `<div class="achievement-artwork-actions"><input type="file" accept="image/png,.png" hidden data-art-file="${esc(item.code)}"><button type="button" class="control-action approve" data-art-select="${esc(item.code)}">${item.overridden ? 'Заменить PNG' : 'Загрузить PNG'}</button>${item.overridden ? `<button type="button" class="control-action danger" data-art-reset="${esc(item.code)}">Вернуть заглушку</button>` : ''}</div>`
+      : '<span class="achievement-artwork-locked">Защищено</span>';
+    const image = item.url
+      ? `<img src="${esc(item.url)}" alt="${esc(item.title || '')}" loading="lazy">`
+      : '<div class="achievement-artwork-missing">PNG</div>';
+    return `<article class="achievement-artwork-card status-${esc(status)}" data-art-status="${esc(status)}" data-art-search="${esc(`${item.title || ''} ${item.code || ''} ${item.filename || ''} ${item.tier || ''}`.toLowerCase())}">
+      <div class="achievement-artwork-preview">${image}<span>${esc(item.tier || '')}</span></div>
+      <div class="achievement-artwork-info"><div class="achievement-artwork-status">${esc(achievementArtworkStatusLabel(status))}</div><h4>${esc(item.title || item.code)}</h4><code>${esc(item.filename || '')}</code><p>${esc(item.condition || item.description || '')}</p>${item.composition ? `<small><b>Композиция:</b> ${esc(item.composition)}</small>` : ''}</div>
+      ${actions}
+    </article>`;
+  }
+
+  async function downloadAchievementManifest(format) {
+    const selected = format === 'json' ? 'json' : 'md';
+    const response = await fetch(`/api/control/achievement-artwork/manifest?format=${selected}`, {
+      headers: { 'X-Telegram-Init-Data': tgInitData() }, cache: 'no-store',
+    });
+    if (!response.ok) {
+      let message = 'Не удалось скачать манифест.';
+      try { message = (await response.json()).detail || message; } catch (_) {}
+      throw new Error(message);
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `VoxLyra_ACHIEVEMENTS_ART_MANIFEST_100.${selected}`;
+    document.body.appendChild(anchor); anchor.click(); anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  async function loadAchievementArtwork() {
+    openWorkspace('Изображения наград', 'Финальные файлы хранятся отдельно от кода и переживают Redeploy. Утверждённые изображения защищены.', 'Владелец');
+    $('workspaceTabs').innerHTML = '';
+    const data = await apiFetch('/api/control/achievement-artwork');
+    const summary = data.summary || {};
+    const items = Array.isArray(data.items) ? data.items : [];
+    const spec = data.spec || {};
+    $('workspaceList').innerHTML = `<section class="achievement-artwork-admin">
+      <div class="control-stat-grid achievement-artwork-summary">
+        ${statCard('Всего', summary.total || 0, 'автоматических наград')}
+        ${statCard('Защищено', summary.protected || 0, 'утверждённых PNG')}
+        ${statCard('Установлено', summary.custom || 0, 'твоих финальных PNG')}
+        ${statCard('Ожидают', summary.awaiting || 0, 'заглушек для замены')}
+        ${statCard('Готовность', `${Number(summary.ready || 0)} / ${Number(summary.total || 0)}`)}
+      </div>
+      <article class="control-item payment-settings-card"><div class="control-item-main"><span>Правила файла</span><h3>${Number(spec.width || 1024)}×${Number(spec.height || 1024)} px · PNG · sRGB</h3><p>Имя должно полностью совпадать с манифестом. Один файл — одна награда. Старый пользовательский PNG автоматически сохраняется в резерв.</p></div><div class="control-actions"><button id="achievementManifestMd" type="button">Манифест MD</button><button id="achievementManifestJson" type="button">Манифест JSON</button><button id="achievementArtworkBack" type="button">Назад к наградам</button></div></article>
+      <article class="control-item payment-settings-card"><div class="control-item-main"><span>Массовая загрузка</span><h3>Импорт ZIP</h3><p>В корне ZIP могут находиться готовые PNG с именами из манифеста. Защищённые и посторонние файлы будут пропущены и показаны в отчёте.</p></div><form id="achievementArtworkZipForm" class="achievement-artwork-zip"><input id="achievementArtworkZip" type="file" accept="application/zip,.zip" required><button type="submit" class="approve">Проверить и установить ZIP</button><div id="achievementArtworkImportResult"></div></form></article>
+      <div class="achievement-artwork-tools"><input id="achievementArtworkSearch" type="search" placeholder="Название, код или имя PNG"><select id="achievementArtworkFilter"><option value="replaceable">Требуют твоих изображений</option><option value="awaiting">Только заглушки</option><option value="custom">Установленные тобой</option><option value="protected">Утверждённые и защищённые</option><option value="all">Все 100 наград</option></select></div>
+      <div id="achievementArtworkList" class="achievement-artwork-list"></div>
+    </section>`;
+
+    const renderItems = () => {
+      const query = String($('achievementArtworkSearch')?.value || '').trim().toLowerCase();
+      const filter = String($('achievementArtworkFilter')?.value || 'replaceable');
+      const filtered = items.filter((item) => {
+        const status = String(item.status || '');
+        const filterOk = filter === 'all' || (filter === 'replaceable' ? Boolean(item.replaceable) : status === filter);
+        const haystack = `${item.title || ''} ${item.code || ''} ${item.filename || ''} ${item.tier || ''}`.toLowerCase();
+        return filterOk && (!query || haystack.includes(query));
+      });
+      $('achievementArtworkList').innerHTML = filtered.length ? filtered.map(achievementArtworkCard).join('') : '<article class="empty-card"><h3>Награды не найдены</h3><p>Измените фильтр или поисковую строку.</p></article>';
+      document.querySelectorAll('[data-art-select]').forEach((button) => button.addEventListener('click', () => {
+        document.querySelector(`[data-art-file="${button.dataset.artSelect}"]`)?.click();
+      }));
+      document.querySelectorAll('[data-art-file]').forEach((input) => input.addEventListener('change', async () => {
+        const file = input.files?.[0];
+        const code = String(input.dataset.artFile || '');
+        const item = items.find((entry) => String(entry.code) === code);
+        if (!file || !item) return;
+        if (file.name !== item.filename) { notify(`Имя должно быть строго ${item.filename}`); input.value = ''; return; }
+        const form = new FormData(); form.append('file', file, file.name);
+        await apiFetch(`/api/control/achievement-artwork/${encodeURIComponent(code)}`, { method: 'POST', body: form });
+        notify(`PNG установлен: ${item.title}`);
+        await loadAchievementArtwork();
+      }));
+      document.querySelectorAll('[data-art-reset]').forEach((button) => button.addEventListener('click', async () => {
+        if (!window.confirm('Вернуть временную заглушку? Текущий PNG сохранится в резервной копии.')) return;
+        await apiFetch(`/api/control/achievement-artwork/${encodeURIComponent(button.dataset.artReset)}`, { method: 'DELETE' });
+        notify('Возвращена временная заглушка');
+        await loadAchievementArtwork();
+      }));
+    };
+    $('achievementArtworkSearch')?.addEventListener('input', renderItems);
+    $('achievementArtworkFilter')?.addEventListener('change', renderItems);
+    $('achievementArtworkBack')?.addEventListener('click', () => loadAchievementSettings().catch(handleError));
+    $('achievementManifestMd')?.addEventListener('click', () => downloadAchievementManifest('md').catch(handleError));
+    $('achievementManifestJson')?.addEventListener('click', () => downloadAchievementManifest('json').catch(handleError));
+    $('achievementArtworkZipForm')?.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const file = $('achievementArtworkZip')?.files?.[0];
+      if (!file) { notify('Выберите ZIP-архив'); return; }
+      const form = new FormData(); form.append('file', file, file.name);
+      const result = await apiFetch('/api/control/achievement-artwork/import', { method: 'POST', body: form });
+      const report = result.result || {};
+      const errors = Array.isArray(report.errors) ? report.errors : [];
+      $('achievementArtworkImportResult').innerHTML = `<p><b>Установлено: ${Number(report.installed_count || 0)}</b> · ошибок/пропусков: ${Number(report.error_count || 0)}</p>${errors.length ? `<details><summary>Показать отчёт</summary>${errors.slice(0, 100).map((item) => `<div><code>${esc(item.filename || '')}</code> — ${esc(item.error || '')}</div>`).join('')}</details>` : ''}<button id="achievementArtworkRefreshAfterImport" type="button" class="control-action">Обновить список</button>`;
+      $('achievementArtworkRefreshAfterImport')?.addEventListener('click', () => loadAchievementArtwork().catch(handleError));
+      notify(`ZIP обработан: ${Number(report.installed_count || 0)} PNG`);
+    });
+    renderItems();
+  }
+
+
+  function catalogPromotionStatus(item) {
+    const labels = { active: 'В ротации', invoice: 'Ожидает оплаты', expired: 'Завершено', canceled: 'Остановлено' };
+    return labels[item.status] || item.status || '—';
+  }
+
+  async function loadCatalogPromotions(query = '') {
+    openWorkspace('Топ каталога', 'Продвигаемые книги получают ограниченные места в общей ротации и не вытесняют органический рейтинг.', 'Владелец');
+    $('workspaceTabs').innerHTML = '';
+    const clean = String(query || '').trim();
+    const data = await apiFetch(`/api/control/catalog-promotions?q=${encodeURIComponent(clean)}`);
+    const settings = data.settings || {};
+    const books = data.books || [];
+    const items = data.items || [];
+    const activeCount = items.filter((item) => item.status === 'active').length;
+    const bookRows = books.map((book) => `<article class="catalog-promotion-book${Number(book.promoted || 0) ? ' active' : ''}"><div><span>Книга №${Number(book.id)}</span><h4>${esc(book.title || '')}</h4><small>${esc(book.pen_name || 'Автор не указан')}${Number(book.promoted || 0) ? ' · уже в ротации' : ''}</small></div>${Number(book.promoted || 0) ? '<b>Активно</b>' : `<button type="button" class="control-action approve" data-owner-promote-book="${Number(book.id)}">В топ бесплатно</button>`}</article>`).join('') || '<p class="muted">Опубликованные книги не найдены.</p>';
+    const promotionRows = items.map((item) => `<article class="catalog-promotion-history ${esc(item.status || '')}"><div><span>${esc(catalogPromotionStatus(item))} · ${item.source === 'owner' ? 'владелец' : `${Number(item.amount_stars || 0)} Stars`}</span><h4>${esc(item.book_title || `Книга №${item.book_id}`)}</h4><small>${esc(item.pen_name || 'Автор не указан')} · до ${esc(dateText(item.expires_at))} UTC · показы ${Number(item.impressions || 0)} · переходы ${Number(item.clicks || 0)}</small></div>${item.status === 'active' || item.status === 'invoice' ? `<button type="button" class="control-action danger" data-cancel-promotion="${Number(item.id)}">Остановить</button>` : ''}</article>`).join('') || '<p class="muted">Продвижений пока не было.</p>';
+    $('workspaceList').innerHTML = `<section class="catalog-promotion-admin">
+      <div class="control-stat-grid">${statCard('Активно', activeCount, 'книг в ротации')}${statCard('Цена для авторов', settings.price_stars || 30, 'Stars')}${statCard('Срок', settings.duration_hours || 24, 'часов')}${statCard('Мест на первой странице', settings.slots_first_page || 2, 'остальные — органика')}</div>
+      <form id="catalogPromotionSettingsForm" class="control-item payment-settings-card catalog-promotion-settings"><div class="control-item-main"><span>Правила</span><h3>Общая честная ротация</h3><p>Ты можешь бесплатно выбрать любую опубликованную книгу. Авторы платят Stars и могут продвигать только свои книги.</p></div><div class="catalog-promotion-settings-grid">
+        <label class="payment-secret-field"><span>Цена, Stars</span><input type="number" min="1" max="10000" name="price_stars" value="${Number(settings.price_stars || 30)}"></label>
+        <label class="payment-secret-field"><span>Срок, часов</span><input type="number" min="1" max="720" name="duration_hours" value="${Number(settings.duration_hours || 24)}"></label>
+        <label class="payment-secret-field"><span>Лимит автора</span><input type="number" min="1" max="20" name="max_active_per_author" value="${Number(settings.max_active_per_author || 3)}"></label>
+        <label class="payment-secret-field"><span>Промо-мест на странице</span><input type="number" min="1" max="6" name="slots_first_page" value="${Number(settings.slots_first_page || 2)}"></label>
+      </div><div class="control-actions"><button type="submit" class="approve">Сохранить правила</button></div></form>
+      <article class="control-item payment-settings-card"><div class="control-item-main"><span>Любая опубликованная книга</span><h3>Бесплатное продвижение владельцем</h3><p>Книга получает не фиксированное первое место, а очередь показов среди других продвигаемых книг.</p></div><div class="catalog-promotion-search"><input id="catalogPromotionQuery" type="search" value="${esc(clean)}" placeholder="Название, автор или ID"><button id="catalogPromotionSearch" type="button" class="control-action">Найти</button><label class="payment-secret-field compact"><span>Срок, часов</span><input id="ownerPromotionDuration" type="number" min="1" max="720" value="${Number(settings.duration_hours || 24)}"></label></div><div class="catalog-promotion-book-list">${bookRows}</div></article>
+      <article class="control-item payment-settings-card"><div class="control-item-main"><span>История и статистика</span><h3>Все продвижения</h3><p>Показы распределяются по наименьшему числу показов и давности последнего выхода в каталог.</p></div><div class="catalog-promotion-history-list">${promotionRows}</div></article>
+    </section>`;
+
+    $('catalogPromotionSettingsForm')?.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const settingsForm = event.currentTarget;
+      await apiFetch('/api/control/catalog-promotions', { method: 'PATCH', body: JSON.stringify({
+        price_stars: Number(settingsForm.elements.price_stars.value || 30),
+        duration_hours: Number(settingsForm.elements.duration_hours.value || 24),
+        max_active_per_author: Number(settingsForm.elements.max_active_per_author.value || 3),
+        slots_first_page: Number(settingsForm.elements.slots_first_page.value || 2),
+      }) });
+      notify('Правила продвижения сохранены');
+      await loadCatalogPromotions(clean);
+      await refreshDashboard();
+    });
+    $('catalogPromotionSearch')?.addEventListener('click', () => loadCatalogPromotions($('catalogPromotionQuery')?.value || '').catch(handleError));
+    $('catalogPromotionQuery')?.addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); loadCatalogPromotions(event.currentTarget.value).catch(handleError); } });
+    document.querySelectorAll('[data-owner-promote-book]').forEach((button) => button.addEventListener('click', async () => {
+      await apiFetch('/api/control/catalog-promotions', { method: 'POST', body: JSON.stringify({ book_id: Number(button.dataset.ownerPromoteBook), duration_hours: Number($('ownerPromotionDuration')?.value || settings.duration_hours || 24) }) });
+      notify('Книга добавлена в честную ротацию каталога');
+      await loadCatalogPromotions(clean);
+      await refreshDashboard();
+    }));
+    document.querySelectorAll('[data-cancel-promotion]').forEach((button) => button.addEventListener('click', async () => {
+      await apiFetch(`/api/control/catalog-promotions/${Number(button.dataset.cancelPromotion)}/cancel`, { method: 'POST' });
+      notify('Продвижение остановлено');
+      await loadCatalogPromotions(clean);
+      await refreshDashboard();
+    }));
+  }
+
+
   function accessUserTitle(user) {
     if (!user) return 'Пользователь не выбран';
     const name = user.full_name || user.pen_name || (user.username ? `@${user.username}` : `ID ${user.telegram_id}`);
@@ -900,12 +1272,31 @@
     renderAccessUserResults(data.items || []);
   }
 
-  async function loadAccessBooks(query = '') {
-    const data = await apiFetch(`/api/control/access/books?q=${encodeURIComponent(query)}`);
-    state.accessBooks = data.items || [];
+  function accessBookSearchText(book) {
+    return `${book.id || ''} ${book.title || ''} ${book.pen_name || ''}`.toLocaleLowerCase('ru-RU');
+  }
+
+  function renderAccessBookOptions(query = '') {
     const select = $('accessBookSelect');
     if (!select) return;
-    select.innerHTML = '<option value="">Выберите книгу</option>' + state.accessBooks.map((book) => `<option value="${Number(book.id)}">${esc(book.title)} · ${Number(book.chapters_count || 0)} глав${book.pen_name ? ` · ${esc(book.pen_name)}` : ''}</option>`).join('');
+    const needle = String(query || '').trim().toLocaleLowerCase('ru-RU');
+    const current = String(select.value || '');
+    const items = needle
+      ? state.accessBooks.filter((book) => accessBookSearchText(book).includes(needle))
+      : state.accessBooks;
+    select.innerHTML = '<option value="">Выберите книгу</option>' + items.map((book) => `<option value="${Number(book.id)}">#${Number(book.id)} · ${esc(book.title)} · ${Number(book.chapters_count || 0)} глав${book.pen_name ? ` · ${esc(book.pen_name)}` : ''}</option>`).join('');
+    if (current && items.some((book) => String(book.id) === current)) select.value = current;
+    if (needle && items.length === 1) select.value = String(items[0].id);
+    const count = $('accessBookCount');
+    if (count) count.textContent = needle
+      ? `Найдено: ${items.length} из ${state.accessBooks.length}`
+      : `Доступны все книги: ${state.accessBooks.length}`;
+  }
+
+  async function loadAccessBooks() {
+    const data = await apiFetch('/api/control/access/books');
+    state.accessBooks = data.items || [];
+    renderAccessBookOptions($('accessBookQuery')?.value || '');
   }
 
   async function previewChapterGrant() {
@@ -968,6 +1359,8 @@
       <section class="access-grant-grid" data-access-needs-user hidden>
         <form id="accessChapterForm" class="access-step-card access-grant-card">
           <span class="access-step-number">2</span><div><span class="eyebrow">Платные главы</span><h3>Открыть главы вручную</h3><p>Поддерживаются отдельные номера и диапазоны: <b>33</b>, <b>56-67</b>, <b>98 34,36,38</b>, <b>1-100</b>.</p></div>
+          <label>Поиск книги<input id="accessBookQuery" type="search" placeholder="Название, автор или ID книги" autocomplete="off"></label>
+          <small id="accessBookCount" class="access-book-count">Загружаем полный список книг…</small>
           <label>Книга<select id="accessBookSelect" name="book_id" required><option value="">Загружаем книги…</option></select></label>
           <label>Главы<input id="accessChapterSpec" name="chapter_spec" required placeholder="33, 56-67, 98 34 36 38"></label>
           <div class="form-grid two"><label>Срок<select name="duration_days"><option value="0">Без ограничения</option><option value="1">1 день</option><option value="7">7 дней</option><option value="30">30 дней</option><option value="90">90 дней</option><option value="365">1 год</option></select></label><label>Причина<input name="note" maxlength="500" placeholder="Например: восстановление после сбоя"></label></div>
@@ -985,6 +1378,8 @@
     </section>`;
     $('accessUserSearch')?.addEventListener('click', () => searchAccessUsers().catch(handleError));
     $('accessUserQuery')?.addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); searchAccessUsers().catch(handleError); } });
+    $('accessBookQuery')?.addEventListener('input', (event) => renderAccessBookOptions(event.currentTarget.value));
+    $('accessBookQuery')?.addEventListener('search', (event) => renderAccessBookOptions(event.currentTarget.value));
     $('accessPreviewChapters')?.addEventListener('click', () => previewChapterGrant().catch(handleError));
     $('accessChapterForm')?.addEventListener('submit', (event) => grantChapters(event).catch(handleError));
     $('accessPremiumForm')?.addEventListener('submit', (event) => grantPremium(event).catch(handleError));
@@ -1112,7 +1507,7 @@
     const section = event.target.closest('[data-section]');
     if (section) {
       state.active = section.dataset.section;
-      const loaders = { books: loadBooks, graphic_pages: loadGraphicPages, comments: loadComments, complaints: loadComplaints, refunds: loadRefunds, payouts: loadPayouts, rub_profiles: loadRubProfiles, rub_payouts: loadRubPayouts, tts: loadTtsDiagnostics, payments: loadPaymentSettings, premium: loadPremiumSettings, access: loadAccessManagement, library_import: loadLibraryImport };
+      const loaders = { books: loadBooks, graphic_pages: loadGraphicPages, comments: loadComments, complaints: loadComplaints, refunds: loadRefunds, payouts: loadPayouts, rub_profiles: loadRubProfiles, rub_payouts: loadRubPayouts, tts: loadTtsDiagnostics, payments: loadPaymentSettings, premium: loadPremiumSettings, achievements: loadAchievementSettings, catalog_promotions: loadCatalogPromotions, access: loadAccessManagement, library_import: loadLibraryImport };
       loaders[state.active]?.().catch(handleError);
       return;
     }
@@ -1147,6 +1542,14 @@
     if (requested === 'premium' && data.role === 'owner') {
       state.active = 'premium';
       loadPremiumSettings().catch(handleError);
+    }
+    if (requested === 'achievements' && data.role === 'owner') {
+      state.active = 'achievements';
+      loadAchievementSettings().catch(handleError);
+    }
+    if (requested === 'catalog_promotions' && data.role === 'owner') {
+      state.active = 'catalog_promotions';
+      loadCatalogPromotions().catch(handleError);
     }
     if (requested === 'access' && can('grant_access')) {
       state.active = 'access';

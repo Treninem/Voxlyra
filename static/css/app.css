@@ -12,3 +12,69 @@
 .achievement-level-progress i{display:block;width:0;height:100%;border-radius:inherit;background:linear-gradient(90deg,#9b6cff,#e8c86d);transition:width .45s ease}
 .achievement-collector-summary>small{grid-column:1/-1;margin-top:-4px}
 @media(max-width:520px){.achievement-collector-summary{grid-template-columns:1fr}.achievement-points{justify-self:start}.achievement-level-progress,.achievement-collector-summary>small{grid-column:1}}
+
+/* v1.14.0.14 — configurable rewards, seasonal badges and profile level */
+.collector-profile-badge{display:inline-flex;align-items:center;min-height:27px;padding:4px 10px;border-radius:999px;border:1px solid rgba(149,230,255,.36);background:linear-gradient(135deg,rgba(113,77,211,.32),rgba(32,146,183,.18));color:#c9f7ff;font-size:.7rem;font-weight:900;letter-spacing:.02em;box-shadow:0 0 20px rgba(105,211,255,.14)}
+.profile-medallion[data-collector-level="2"]{box-shadow:0 0 0 2px rgba(220,232,247,.2),0 0 26px rgba(196,218,244,.2)}
+.profile-medallion[data-collector-level="3"]{box-shadow:0 0 0 2px rgba(255,211,95,.26),0 0 32px rgba(255,195,57,.26)}
+.profile-medallion[data-collector-level="4"]{box-shadow:0 0 0 2px rgba(156,245,255,.28),0 0 38px rgba(108,224,255,.3)}
+.profile-medallion[data-collector-level="5"]{box-shadow:0 0 0 2px rgba(255,223,129,.36),0 0 44px rgba(145,96,255,.34),0 0 70px rgba(255,195,57,.18)}
+.achievement-card.special-achievement{isolation:isolate}.achievement-card.special-achievement::before{background:radial-gradient(circle at 18% 8%,rgba(255,227,137,.22),transparent 34%),radial-gradient(circle at 88% 14%,rgba(121,225,255,.2),transparent 34%)}
+.achievement-card.special-achievement .achievement-tier::after{content:" · особая"}.achievement-card.seasonal-achievement{background:radial-gradient(circle at 85% 0,rgba(255,147,59,.14),transparent 40%),linear-gradient(145deg,rgba(38,24,84,.98),rgba(13,17,48,.96))}
+.achievement-card.seasonal-achievement .achievement-medal::after{content:"";position:absolute;inset:-4px;border-radius:24px;background:conic-gradient(from 0deg,transparent,rgba(255,218,112,.45),transparent 32%,rgba(151,103,255,.5),transparent 68%);filter:blur(7px);z-index:-1;animation:seasonal-achievement-glow 5s linear infinite}
+.achievement-admin-summary{width:100%}.achievement-points-admin{grid-template-columns:repeat(2,minmax(0,1fr));width:min(100%,620px)}.achievement-level-admin{width:min(100%,680px)}
+.achievement-admin-level,.achievement-admin-dates{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(120px,.7fr);gap:12px;padding:12px;border-radius:15px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.035)}
+.achievement-admin-popular-list{display:flex;flex-wrap:wrap;gap:8px;max-width:620px}.achievement-admin-popular{display:grid;gap:2px;padding:8px 11px;border-radius:13px;border:1px solid rgba(228,196,112,.18);background:rgba(228,196,112,.06)}.achievement-admin-popular b{font-size:.72rem}.achievement-admin-popular small{opacity:.65;font-size:.65rem}
+.season-achievement-card{border-color:rgba(232,190,91,.3)}
+@keyframes seasonal-achievement-glow{to{transform:rotate(360deg)}}
+@media(max-width:620px){.achievement-points-admin,.achievement-admin-level,.achievement-admin-dates{grid-template-columns:1fr}.collector-profile-badge{font-size:.64rem;padding-inline:8px}}
+@media(prefers-reduced-motion:reduce){.achievement-card.seasonal-achievement .achievement-medal::after{animation:none}}
+
+
+/* v1.14.0.15 — manual premium rewards and fair catalog promotion rotation */
+.catalog-promotion-badge{display:inline-flex;align-items:center;gap:5px;padding:4px 9px;border-radius:999px;border:1px solid rgba(255,216,112,.44);background:linear-gradient(135deg,rgba(255,204,70,.18),rgba(128,81,226,.24));color:#ffe39a;font-size:.66rem;font-weight:900;letter-spacing:.035em;box-shadow:0 0 18px rgba(255,197,61,.12)}
+.catalog-promotion-large{margin:0 0 12px;padding:7px 12px;font-size:.72rem}.catalog-promotion-action[hidden]{display:none!important}
+.manual-achievement-admin,.catalog-promotion-admin{display:grid;gap:16px}.manual-achievement-form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;width:min(100%,760px)}.manual-achievement-form>button{align-self:end;min-height:46px}
+.manual-achievement-award{display:grid;gap:12px;width:min(100%,760px)}.manual-achievement-search,.catalog-promotion-search{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:end}.manual-achievement-search input,.catalog-promotion-search>input{min-height:46px;padding:10px 13px;border-radius:14px;border:1px solid rgba(255,255,255,.12);background:rgba(8,11,29,.78);color:var(--text)}
+.manual-achievement-user-results,.manual-achievement-definition-list,.manual-achievement-event-list,.catalog-promotion-book-list,.catalog-promotion-history-list{display:grid;gap:9px;width:min(100%,820px)}
+.manual-achievement-user{display:grid;gap:3px;text-align:left;padding:11px 13px;border-radius:14px;border:1px solid rgba(255,255,255,.1);background:rgba(255,255,255,.035);color:var(--text)}.manual-achievement-user span{font-size:.72rem;color:var(--muted)}.manual-achievement-user.selected{border-color:rgba(232,196,112,.55);background:rgba(232,196,112,.1);box-shadow:0 0 0 2px rgba(232,196,112,.08)}
+.manual-achievement-definition,.manual-achievement-event,.catalog-promotion-book,.catalog-promotion-history{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:13px 15px;border-radius:16px;border:1px solid rgba(255,255,255,.09);background:rgba(255,255,255,.035)}
+.manual-achievement-definition>div,.catalog-promotion-book>div,.catalog-promotion-history>div{display:grid;gap:3px;min-width:0}.manual-achievement-definition span,.manual-achievement-event span,.catalog-promotion-book span,.catalog-promotion-history span{font-size:.65rem;font-weight:800;letter-spacing:.07em;text-transform:uppercase;color:#d9c27e}.manual-achievement-definition h4,.catalog-promotion-book h4,.catalog-promotion-history h4{margin:0}.manual-achievement-definition p{margin:0;color:var(--muted);font-size:.78rem}.manual-achievement-definition small,.manual-achievement-event small,.catalog-promotion-book small,.catalog-promotion-history small{color:var(--muted)}.manual-achievement-definition.inactive{opacity:.58}.manual-achievement-event>div{display:flex;gap:8px;align-items:center}
+.catalog-promotion-settings-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;width:min(100%,680px)}.catalog-promotion-search{grid-template-columns:minmax(0,1fr) auto minmax(120px,170px);width:min(100%,820px);margin-bottom:12px}.payment-secret-field.compact{margin:0}.catalog-promotion-book.active,.catalog-promotion-history.active{border-color:rgba(100,224,191,.35);background:rgba(63,185,151,.07)}.catalog-promotion-history.invoice{border-color:rgba(238,196,92,.3)}.catalog-promotion-history.expired,.catalog-promotion-history.canceled{opacity:.62}
+@media(max-width:680px){.manual-achievement-form,.catalog-promotion-settings-grid{grid-template-columns:1fr}.catalog-promotion-search{grid-template-columns:1fr}.manual-achievement-definition,.manual-achievement-event,.catalog-promotion-book,.catalog-promotion-history{align-items:flex-start;flex-direction:column}.manual-achievement-definition>button,.catalog-promotion-book>button,.catalog-promotion-history>button{width:100%}}
+
+
+/* v1.14.0.16 — five reward levels and first expansion toward 100 */
+.achievement-card.rarity-mythic{--rarity:#ffef9e;--rarity-glow:rgba(255,94,221,.48)}
+.achievement-card.tier-legend{--tier:#fff0a6;--tier-soft:rgba(255,92,222,.38);background:radial-gradient(circle at 82% 0,rgba(255,230,116,.2),transparent 34%),radial-gradient(circle at 12% 95%,rgba(183,72,255,.24),transparent 38%),linear-gradient(145deg,rgba(48,19,82,.99),rgba(10,13,42,.98));border-color:rgba(255,230,135,.52);box-shadow:inset 0 1px 0 rgba(255,255,255,.13),0 0 30px rgba(185,76,255,.17)}
+.achievement-card.tier-legend .achievement-tier{color:#fff2a8;text-shadow:0 0 12px rgba(255,207,79,.55)}
+.achievement-card.tier-legend .achievement-medal{filter:drop-shadow(0 0 16px rgba(255,222,107,.28)) drop-shadow(0 0 26px rgba(178,70,255,.2))}
+.achievement-showcase-slot.tier-legend{--tier:#fff0a6;background:radial-gradient(circle at 50% 0,rgba(255,224,104,.16),transparent 42%),rgba(92,35,132,.2);box-shadow:0 0 26px rgba(187,72,255,.22)}
+.achievement-unlock-modal.rarity-mythic .achievement-unlock-card,.achievement-unlock-modal.tier-legend .achievement-unlock-card{--unlock-color:#fff0a6;--unlock-glow:rgba(208,72,255,.56);background:radial-gradient(circle at 50% 6%,rgba(255,225,111,.2),transparent 34%),radial-gradient(circle at 18% 90%,rgba(192,61,255,.24),transparent 42%),linear-gradient(160deg,rgba(54,21,91,.997),rgba(7,8,28,.998))}
+.achievement-unlock-modal.tier-legend .achievement-unlock-rays{opacity:.72;background:repeating-conic-gradient(from 0deg,rgba(255,234,147,.28) 0 4deg,transparent 4deg 13deg,rgba(197,83,255,.2) 13deg 17deg,transparent 17deg 29deg)}
+.achievement-points-admin{grid-template-columns:repeat(5,minmax(110px,1fr));width:min(100%,980px)}
+@media(max-width:920px){.achievement-points-admin{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:520px){.achievement-points-admin{grid-template-columns:1fr}}
+
+/* v1.14.0.17 — quality-first achievement artwork rebuild; no quantity increase */
+
+/* v1.14.0.18 — 100 reward logic; approved art preserved, rejected/new art uses replaceable placeholders */
+
+/* v1.14.0.19 — persistent achievement artwork manager */
+.achievement-artwork-entry{align-items:center}.achievement-artwork-admin{display:grid;gap:16px}.achievement-artwork-summary{width:100%}
+.achievement-artwork-tools{display:grid;grid-template-columns:minmax(0,1fr) minmax(210px,.42fr);gap:10px;position:sticky;top:8px;z-index:4;padding:10px;border-radius:16px;background:rgba(7,8,24,.92);backdrop-filter:blur(14px);border:1px solid rgba(255,255,255,.08)}
+.achievement-artwork-tools input,.achievement-artwork-tools select,.achievement-artwork-zip input{min-height:46px;padding:10px 13px;border-radius:14px;border:1px solid rgba(255,255,255,.12);background:rgba(8,11,29,.82);color:var(--text)}
+.achievement-artwork-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.achievement-artwork-card{display:grid;grid-template-columns:124px minmax(0,1fr);gap:14px;align-items:start;padding:13px;border-radius:18px;border:1px solid rgba(255,255,255,.09);background:linear-gradient(145deg,rgba(255,255,255,.045),rgba(255,255,255,.018))}.achievement-artwork-card.status-custom{border-color:rgba(88,220,166,.34);box-shadow:inset 0 0 24px rgba(88,220,166,.035)}.achievement-artwork-card.status-awaiting{border-color:rgba(236,193,94,.25)}.achievement-artwork-card.status-missing{border-color:rgba(247,102,120,.4)}.achievement-artwork-card.status-protected{opacity:.84}
+.achievement-artwork-preview{position:relative;width:124px;aspect-ratio:1;border-radius:16px;overflow:hidden;background:#0a0b20;border:1px solid rgba(255,255,255,.1)}.achievement-artwork-preview img{width:100%;height:100%;object-fit:cover;display:block}.achievement-artwork-preview>span{position:absolute;left:6px;right:6px;bottom:6px;padding:4px 6px;border-radius:9px;background:rgba(5,6,20,.82);backdrop-filter:blur(5px);font-size:.62rem;font-weight:900;text-align:center;text-transform:uppercase;letter-spacing:.06em}.achievement-artwork-missing{display:grid;place-items:center;height:100%;font-weight:900;opacity:.45}
+.achievement-artwork-info{display:grid;gap:6px;min-width:0}.achievement-artwork-info h4{margin:0;font-size:1rem}.achievement-artwork-info code{display:block;overflow:hidden;text-overflow:ellipsis;color:#e8cf87;font-size:.68rem}.achievement-artwork-info p,.achievement-artwork-info small{margin:0;color:var(--muted);font-size:.74rem;line-height:1.45}.achievement-artwork-info small b{color:var(--text)}.achievement-artwork-status{width:max-content;max-width:100%;padding:4px 7px;border-radius:999px;background:rgba(255,255,255,.07);font-size:.62rem;font-weight:900;letter-spacing:.04em;text-transform:uppercase}.status-custom .achievement-artwork-status{color:#8af0c5;background:rgba(88,220,166,.09)}.status-awaiting .achievement-artwork-status{color:#f0cf7c;background:rgba(236,193,94,.09)}.status-missing .achievement-artwork-status{color:#ff8fa0;background:rgba(247,102,120,.1)}
+.achievement-artwork-actions{grid-column:1/-1;display:flex;gap:8px;flex-wrap:wrap}.achievement-artwork-actions button{flex:1;min-width:130px}.achievement-artwork-locked{grid-column:1/-1;display:block;padding:8px 10px;text-align:center;border-radius:12px;background:rgba(255,255,255,.045);color:var(--muted);font-size:.68rem;font-weight:800}.achievement-artwork-zip{display:grid;gap:10px;width:min(100%,660px)}.achievement-artwork-zip details{max-height:240px;overflow:auto;padding:10px;border-radius:12px;background:rgba(0,0,0,.2)}.achievement-artwork-zip details div{padding:4px 0;font-size:.7rem}.achievement-artwork-zip details code{color:#e8cf87}
+@media(max-width:820px){.achievement-artwork-list{grid-template-columns:1fr}}
+@media(max-width:560px){.achievement-artwork-tools{grid-template-columns:1fr;position:static}.achievement-artwork-card{grid-template-columns:94px minmax(0,1fr)}.achievement-artwork-preview{width:94px}.achievement-artwork-entry{align-items:flex-start;flex-direction:column}.achievement-artwork-entry>button{width:100%}}
+
+/* v1.14.0.21: full catalogue search in manual chapter access */
+.access-book-count {
+  display: block;
+  margin: -4px 0 4px;
+  color: var(--muted, #a9a4bd);
+  font-size: 0.84rem;
+}
