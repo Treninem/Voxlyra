@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     BOT_USERNAME: str = "VoxlyraBot"
     PROJECT_NAME: str = "Вокслира"
     PUBLIC_VERSION_VISIBLE: bool = False
-    PROJECT_VERSION: str = "v1.14.0.5"
+    PROJECT_VERSION: str = "v1.14.0.12"
     MAX_BOOK_UPLOAD_MB: int = 0
     MAX_BOOK_UNPACKED_MB: int = 2048
     # Прямая загрузка больших библиотечных ZIP идёт частями. Это аварийный
@@ -28,11 +28,25 @@ class Settings(BaseSettings):
     LIBRARY_IMPORT_LARGE_UPLOAD_MAX_MB: int = 2048
     LIBRARY_IMPORT_MAX_ACTIVE_UPLOADS: int = 4
     LIBRARY_IMPORT_MIN_FREE_DISK_MB: int = 256
+    # Keep a small cgroup memory reserve so a large book cannot kill the whole
+    # 256 MB Bothost container while the import worker is parsing it.
+    LIBRARY_IMPORT_MEMORY_RESERVE_MB: int = 12
     # Большие ZIP и незавершённые части должны лежать рядом с постоянной
     # базой, а не в эфемерной папке storage. На Bothost каталог data уже
     # используется для SQLite и переживает Redeploy.
     LIBRARY_IMPORT_QUEUE_ROOT: str = "data/library_import_queue"
     CHUNK_UPLOAD_ROOT: str = "data/chunked_uploads"
+    # Исходники книг, обложки, кандидаты дублей и резервы замен — это
+    # постоянные данные. Они хранятся рядом с SQLite и не должны исчезать
+    # после пересоздания контейнера Bothost.
+    LIBRARY_STORAGE_ROOT: str = "data/library_storage"
+    BOOK_COVER_STORAGE_ROOT: str = "data/covers"
+    AUTHOR_BOOK_STORAGE_ROOT: str = "data/books"
+    AUDIO_STORAGE_ROOT: str = "data/audio"
+    BACKUP_STORAGE_ROOT: str = "data/backups"
+    # Распаковка каждой книги является временной операцией и остаётся в
+    # эфемерном каталоге, чтобы не засорять постоянный диск после аварии.
+    LIBRARY_IMPORT_WORK_ROOT: str = "storage/library_import_work"
     CHUNK_UPLOAD_MAX_CONCURRENCY: int = 4
     DB_BUSY_TIMEOUT_MS: int = 15000
     DB_CACHE_MB: int = 8
@@ -48,7 +62,7 @@ class Settings(BaseSettings):
     COMIC_WEBP_QUALITY: int = 84
     COMIC_WEBTOON_SLICE_HEIGHT: int = 3600
     COMIC_SIGNING_SECRET: str = ""
-    COMIC_STORAGE_ROOT: str = "storage/comics"
+    COMIC_STORAGE_ROOT: str = "data/comics"
     COMIC_VARIANT_WIDTHS: str = "720,1280,1920"
     COMIC_DEVICE_CACHE_MAX_MB: int = 512
     COMIC_DEVICE_CACHE_MAX_ITEMS: int = 1200

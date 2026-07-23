@@ -293,7 +293,15 @@ function showAuthorError(message) {
 
 
 function achievementCard(item) {
-  return `<article class="achievement-card"><span class="achievement-icon">${escapeHtml(item.icon || '✦')}</span><div><strong>${escapeHtml(item.title || 'Достижение')}</strong><p>${escapeHtml(item.description || '')}</p></div></article>`;
+  const rarityLabels = { common: 'Обычная', rare: 'Редкая', epic: 'Эпическая', legendary: 'Легендарная' };
+  const tierByRarity = { common: 'bronze', rare: 'silver', epic: 'gold', legendary: 'platinum' };
+  const tierLabels = { bronze: 'Бронза', silver: 'Серебро', gold: 'Золото', platinum: 'Платина' };
+  const rarity = ['common', 'rare', 'epic', 'legendary'].includes(item?.rarity) ? item.rarity : 'common';
+  const tier = ['bronze', 'silver', 'gold', 'platinum'].includes(item?.tier) ? item.tier : tierByRarity[rarity];
+  const image = item?.icon_asset
+    ? `<span class="achievement-icon achievement-icon-image"><img src="${escapeHtml(item.icon_asset)}" alt="${escapeHtml(item.title || 'Достижение')}" loading="lazy"></span>`
+    : `<span class="achievement-icon">${escapeHtml(item.icon || '✦')}</span>`;
+  return `<article class="achievement-card rarity-${rarity} tier-${tier} is-unlocked"><div class="achievement-medal">${image}<span class="achievement-check">✓</span></div><div class="achievement-copy"><div class="achievement-title-row"><strong>${escapeHtml(item.title || 'Достижение')}</strong><span class="achievement-tier">${tierLabels[tier]}</span></div><p>${escapeHtml(item.description || '')}</p><small class="achievement-rarity-note">${rarityLabels[rarity]} награда</small></div></article>`;
 }
 
 function renderAuthorAchievements(payload) {
@@ -303,7 +311,7 @@ function renderAuthorAchievements(payload) {
   const items = (payload?.items || []).filter((item) => item.group === 'author');
   panel.hidden = !items.length;
   grid.innerHTML = items.map(achievementCard).join('');
-  (payload?.new || []).filter((item) => item.group === 'author').forEach((item) => notify(`Новое достижение: ${item.title}`));
+  window.showAchievementUnlockSequence?.((payload?.new || []).filter((item) => item.group === 'author'));
 }
 
 function renderAuthorAnalytics(analytics) {

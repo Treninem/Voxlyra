@@ -143,6 +143,8 @@ async def build_full_privacy_export(user_id: int) -> dict[str, Any]:
             "WHERE user_id=? ORDER BY created_at", (int(user_id),))
         achievements = await _fetch_all(db,
             "SELECT achievement_code, progress_value, awarded_at FROM user_achievements WHERE user_id=? ORDER BY awarded_at", (int(user_id),))
+        achievement_showcase = await _fetch_all(db,
+            "SELECT position, achievement_code, updated_at FROM achievement_showcase WHERE user_id=? ORDER BY position", (int(user_id),))
         purchases = await _fetch_all(db,
             "SELECT p.id, p.purchase_kind, p.amount_stars, p.original_amount_stars, p.wallet_stars_used, "
             "p.bonus_points_used, p.funding_method, p.status, p.telegram_payment_charge_id, p.created_at, "
@@ -176,7 +178,7 @@ async def build_full_privacy_export(user_id: int) -> dict[str, Any]:
         "private_materials": {"annotations": annotations, "journal": journal, "cycles": cycles},
         "public_activity": {"reviews": reviews, "comments": comments},
         "support": {"complaints": complaints},
-        "achievements": achievements,
+        "achievements": {"earned": achievements, "showcase": achievement_showcase},
         "payments": {"purchases": purchases, "premium": premium},
         "excluded": [
             "BOT_TOKEN и ключи шифрования", "полные платёжные charge ID", "внутренние файловые пути",
@@ -272,7 +274,7 @@ async def confirm_account_deletion(user_id: int, request_id: int, token: str) ->
             "progress_sync_state", "reading_history", "reader_annotations", "reader_book_cycles",
             "reader_book_journal", "reader_year_list_items", "reader_activity_daily",
             "reader_activity_targets", "reader_goal_settings", "reader_notification_settings",
-            "smart_notification_state", "recommendation_events", "user_achievements",
+            "smart_notification_state", "recommendation_events", "achievement_showcase", "user_achievements",
             "chapter_reactions", "comment_likes", "graphic_page_bookmarks", "graphic_reading_events",
             "notification_deliveries", "premium_content_events", "reader_ad_events",
             "reader_journal_import_previews", "reader_journal_import_runs",

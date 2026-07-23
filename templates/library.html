@@ -34,7 +34,11 @@
 <a class="author-studio-entry control-center-entry" id="controlCenterEntry" href="/control" hidden><img src="/static/img/miniapp/icons/control.webp?v={{ asset_version }}" alt="" aria-hidden="true"><div><b>Центр управления</b><small id="controlCenterHint">Модерация и рабочие очереди</small></div><i>›</i></a>
 <a class="author-studio-entry control-center-entry" id="ownerBooksEntry" href="/control?section=books" hidden><img src="/static/img/miniapp/icons/library.webp?v={{ asset_version }}" alt="" aria-hidden="true"><div><b>Управление книгами</b><small>Поиск, проверка и публикация в канал</small></div><i>›</i></a>
 <section class="achievement-panel library-achievements" id="libraryAchievementPanel" hidden>
-  <div class="section-title split-title slim"><div><span class="eyebrow">Личный прогресс</span><h2>Мои достижения</h2><p>Награды за чтение, коллекцию, отзывы и авторскую работу.</p></div><button class="secondary compact-button" id="toggleAllAchievements" type="button">Показать все</button></div>
+  <div class="section-title split-title slim"><div><span class="eyebrow">Личный прогресс</span><h2>Мои достижения</h2><p>Бронзовые, серебряные, золотые и платиновые награды за ваш путь в VoxLyra.</p></div><button class="secondary compact-button" id="toggleAllAchievements" type="button">Все награды</button></div>
+  <div class="achievement-showcase-block">
+    <div class="achievement-showcase-heading"><div><span class="eyebrow">Витрина профиля</span><b>Три любимые награды</b></div><button class="secondary compact-button" id="editAchievementShowcase" type="button">Настроить</button></div>
+    <div class="achievement-showcase-grid" id="achievementShowcase"></div>
+  </div>
   <div class="achievement-grid" id="libraryAchievements"></div>
 </section>
 <section class="library-panel" id="libraryPage">

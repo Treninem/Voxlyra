@@ -3369,23 +3369,224 @@ function renderLibraryTab(tab, data) {
   content.innerHTML = packageBlock + (purchases.length ? `<div class="purchase-list">${purchases.map(purchaseCard).join('')}</div>` : emptyStateMarkup('no-books', 'Покупок пока нет', 'После покупки книги, главы, пакета или аудио доступ появится здесь.'));
 }
 
-function renderLibraryAchievements(payload, expanded = false) {
+const achievementRarityLabels = {
+  common: 'Обычная',
+  rare: 'Редкая',
+  epic: 'Эпическая',
+  legendary: 'Легендарная',
+};
+const achievementTierLabels = {
+  bronze: 'Бронза',
+  silver: 'Серебро',
+  gold: 'Золото',
+  platinum: 'Платина',
+};
+const achievementTierByRarity = {
+  common: 'bronze',
+  rare: 'silver',
+  epic: 'gold',
+  legendary: 'platinum',
+};
+
+function achievementTier(item, rarity = 'common') {
+  const tier = String(item?.tier || achievementTierByRarity[rarity] || 'bronze');
+  return ['bronze', 'silver', 'gold', 'platinum'].includes(tier) ? tier : 'bronze';
+}
+
+function achievementCardMarkup(item, options = {}) {
+  const unlocked = item?.unlocked !== false;
+  const rarity = ['common', 'rare', 'epic', 'legendary'].includes(item?.rarity) ? item.rarity : 'common';
+  const tier = achievementTier(item, rarity);
+  const image = item?.icon_asset
+    ? `<span class="achievement-icon achievement-icon-image"><img src="${escapeHtml(item.icon_asset)}" alt="${escapeHtml(item.title || 'Достижение')}" loading="lazy"></span>`
+    : `<span class="achievement-icon">${escapeHtml(item?.icon || '✦')}</span>`;
+  const progress = Math.max(0, Math.min(100, Number(item?.progress_percent || 0)));
+  const progressMarkup = unlocked ? '' : `<div class="achievement-progress"><i style="--achievement-progress:${progress}%"></i></div><small>${Number(item?.progress_value || 0)} из ${Number(item?.goal || 1)}</small>`;
+  const showcaseAction = options.manageShowcase && unlocked
+    ? `<button type="button" class="achievement-showcase-action${item?.showcased ? ' active' : ''}" data-achievement-showcase="${escapeHtml(item.code || '')}">${item?.showcased ? 'Убрать с витрины' : 'На витрину'}</button>`
+    : '';
+  return `<article class="achievement-card rarity-${rarity} tier-${tier}${unlocked ? ' is-unlocked' : ' is-locked'}${options.gallery ? ' gallery-card' : ''}">
+    <div class="achievement-medal">${image}${unlocked ? '<span class="achievement-check">✓</span>' : '<span class="achievement-lock">◆</span>'}</div>
+    <div class="achievement-copy"><div class="achievement-title-row"><strong>${escapeHtml(item?.title || 'Достижение')}</strong><span class="achievement-tier">${achievementTierLabels[tier]}</span></div><p>${escapeHtml(item?.description || '')}</p><small class="achievement-rarity-note">${achievementRarityLabels[rarity]} награда</small>${progressMarkup}${showcaseAction}</div>
+  </article>`;
+}
+
+function achievementShowcaseMarkup(payload) {
+  const showcase = Array.isArray(payload?.showcase) ? payload.showcase.slice(0, 3) : [];
+  const slots = [];
+  for (let position = 1; position <= 3; position += 1) {
+    const item = showcase.find((entry) => Number(entry.showcase_position || 0) === position) || showcase[position - 1];
+    if (!item) {
+      slots.push(`<button type="button" class="achievement-showcase-slot empty" data-open-achievement-showcase><span>+</span><small>Выбрать награду</small></button>`);
+      continue;
+    }
+    const rarity = ['common', 'rare', 'epic', 'legendary'].includes(item?.rarity) ? item.rarity : 'common';
+    const tier = achievementTier(item, rarity);
+    const image = item?.icon_asset ? `<img src="${escapeHtml(item.icon_asset)}" alt="${escapeHtml(item.title || 'Достижение')}" loading="lazy">` : `<span>${escapeHtml(item?.icon || '✦')}</span>`;
+    slots.push(`<article class="achievement-showcase-slot tier-${tier}"><div class="achievement-showcase-image">${image}</div><strong>${escapeHtml(item.title || 'Достижение')}</strong><small>${achievementTierLabels[tier]}</small></article>`);
+  }
+  return slots.join('');
+}
+
+function ensureAchievementGallery() {
+  let modal = document.getElementById('achievementGalleryModal');
+  if (modal) return modal;
+  modal = document.createElement('section');
+  modal.id = 'achievementGalleryModal';
+  modal.className = 'achievement-gallery-modal';
+  modal.hidden = true;
+  modal.innerHTML = `<div class="achievement-gallery-backdrop" data-close-achievements></div><div class="achievement-gallery-sheet" role="dialog" aria-modal="true" aria-labelledby="achievementGalleryTitle">
+    <header><div><span class="eyebrow">Коллекция наград</span><h2 id="achievementGalleryTitle">Все достижения</h2><p id="achievementGallerySummary"></p></div><button type="button" class="achievement-gallery-close" data-close-achievements aria-label="Закрыть">×</button></header>
+    <div class="achievement-gallery-filters"><button type="button" class="active" data-achievement-filter="all">Все</button><button type="button" data-achievement-filter="unlocked">Получены</button><button type="button" data-achievement-filter="locked">Не открыты</button><button type="button" data-achievement-filter="bronze">Бронза</button><button type="button" data-achievement-filter="silver">Серебро</button><button type="button" data-achievement-filter="gold">Золото</button><button type="button" data-achievement-filter="platinum">Платина</button><button type="button" data-achievement-filter="reading">Чтение</button><button type="button" data-achievement-filter="audio">Аудио</button><button type="button" data-achievement-filter="comic">Комиксы</button><button type="button" data-achievement-filter="community">Общение</button><button type="button" data-achievement-filter="premium">Premium</button><button type="button" data-achievement-filter="author">Авторские</button></div>
+    <div class="achievement-gallery-grid" id="achievementGalleryGrid"></div>
+  </div>`;
+  document.body.appendChild(modal);
+  return modal;
+}
+
+function renderAchievementGallery(payload, filter = 'all') {
+  const modal = ensureAchievementGallery();
+  modal._achievementFilter = filter;
+  const catalog = payload?.catalog || payload?.items || [];
+  const unlockedCount = catalog.filter((item) => item.unlocked !== false).length;
+  const showcaseCount = (payload?.showcase || []).length;
+  const summary = modal.querySelector('#achievementGallerySummary');
+  if (summary) summary.textContent = `Открыто ${unlockedCount} из ${catalog.length} · на витрине ${showcaseCount} из 3`;
+  const filtered = catalog.filter((item) => {
+    if (filter === 'unlocked') return item.unlocked !== false;
+    if (filter === 'locked') return item.unlocked === false;
+    if (filter === 'author') return item.group === 'author' || item.category === 'author';
+    if (['bronze', 'silver', 'gold', 'platinum'].includes(filter)) return achievementTier(item, item?.rarity) === filter;
+    if (['reading', 'audio', 'comic', 'community', 'premium'].includes(filter)) return item.category === filter;
+    return true;
+  });
+  const grid = modal.querySelector('#achievementGalleryGrid');
+  if (grid) grid.innerHTML = filtered.map((item) => achievementCardMarkup(item, { gallery: true, manageShowcase: true })).join('');
+  modal.querySelectorAll('[data-achievement-filter]').forEach((button) => button.classList.toggle('active', button.dataset.achievementFilter === filter));
+}
+
+function openAchievementGallery(payload) {
+  const modal = ensureAchievementGallery();
+  modal._achievementPayload = payload || {};
+  renderAchievementGallery(modal._achievementPayload, 'all');
+  modal.hidden = false;
+  requestAnimationFrame(() => modal.classList.add('open'));
+  document.body.classList.add('modal-open');
+}
+
+function closeAchievementGallery() {
+  const modal = document.getElementById('achievementGalleryModal');
+  if (!modal) return;
+  modal.classList.remove('open');
+  document.body.classList.remove('modal-open');
+  setTimeout(() => { modal.hidden = true; }, 220);
+}
+
+async function toggleAchievementShowcase(code) {
+  const modal = document.getElementById('achievementGalleryModal');
+  const payload = modal?._achievementPayload || document.getElementById('libraryPage')?._libraryData?.achievements || {};
+  const current = (payload?.showcase || []).map((item) => String(item.code || '')).filter(Boolean);
+  const normalizedCode = String(code || '');
+  const existingIndex = current.indexOf(normalizedCode);
+  let next;
+  if (existingIndex >= 0) next = current.filter((item) => item !== normalizedCode);
+  else {
+    if (current.length >= 3) throw new Error('Сначала уберите одну награду с витрины.');
+    next = [...current, normalizedCode];
+  }
+  const result = await apiFetch('/api/me/achievements/showcase', { method: 'POST', body: JSON.stringify({ codes: next }) });
+  const achievements = result.achievements || {};
+  if (modal) {
+    modal._achievementPayload = achievements;
+    renderAchievementGallery(achievements, modal._achievementFilter || 'all');
+  }
+  const page = document.getElementById('libraryPage');
+  if (page?._libraryData) page._libraryData.achievements = achievements;
+  renderLibraryAchievements(achievements, { skipUnlocks: true });
+  meDataPromise = null;
+  return achievements;
+}
+
+let achievementUnlockQueue = [];
+let achievementUnlockRunning = false;
+
+function ensureAchievementUnlockModal() {
+  let modal = document.getElementById('achievementUnlockModal');
+  if (modal) return modal;
+  modal = document.createElement('section');
+  modal.id = 'achievementUnlockModal';
+  modal.className = 'achievement-unlock-modal';
+  modal.hidden = true;
+  modal.innerHTML = `<div class="achievement-unlock-backdrop"></div><div class="achievement-unlock-card" role="dialog" aria-modal="true">
+    <span class="achievement-unlock-rays" aria-hidden="true"></span><span class="eyebrow">Новое достижение</span><div class="achievement-unlock-image" id="achievementUnlockImage"></div><span class="achievement-unlock-rarity" id="achievementUnlockRarity"></span><h2 id="achievementUnlockTitle"></h2><p id="achievementUnlockDescription"></p><button type="button" id="achievementUnlockContinue">Забрать награду</button>
+  </div>`;
+  document.body.appendChild(modal);
+  modal.querySelector('#achievementUnlockContinue')?.addEventListener('click', () => finishAchievementUnlock());
+  modal.querySelector('.achievement-unlock-backdrop')?.addEventListener('click', () => finishAchievementUnlock());
+  return modal;
+}
+
+function showNextAchievementUnlock() {
+  if (!achievementUnlockQueue.length) {
+    achievementUnlockRunning = false;
+    document.body.classList.remove('modal-open');
+    return;
+  }
+  achievementUnlockRunning = true;
+  const item = achievementUnlockQueue.shift();
+  const modal = ensureAchievementUnlockModal();
+  const rarity = ['common', 'rare', 'epic', 'legendary'].includes(item?.rarity) ? item.rarity : 'common';
+  const tier = achievementTier(item, rarity);
+  modal.className = `achievement-unlock-modal rarity-${rarity} tier-${tier}`;
+  const image = modal.querySelector('#achievementUnlockImage');
+  if (image) image.innerHTML = item?.icon_asset ? `<img src="${escapeHtml(item.icon_asset)}" alt="">` : `<span>${escapeHtml(item?.icon || '✦')}</span>`;
+  const rarityLabel = modal.querySelector('#achievementUnlockRarity');
+  if (rarityLabel) rarityLabel.textContent = `${achievementTierLabels[tier]} · ${achievementRarityLabels[rarity]}`;
+  const title = modal.querySelector('#achievementUnlockTitle');
+  if (title) title.textContent = item?.title || 'Достижение';
+  const description = modal.querySelector('#achievementUnlockDescription');
+  if (description) description.textContent = item?.description || '';
+  modal.hidden = false;
+  document.body.classList.add('modal-open');
+  requestAnimationFrame(() => modal.classList.add('open'));
+  try { window.Telegram?.WebApp?.HapticFeedback?.notificationOccurred?.('success'); } catch (_) {}
+}
+
+function finishAchievementUnlock() {
+  const modal = document.getElementById('achievementUnlockModal');
+  if (!modal || modal.hidden) return;
+  modal.classList.remove('open');
+  setTimeout(() => {
+    modal.hidden = true;
+    showNextAchievementUnlock();
+  }, 240);
+}
+
+function showAchievementUnlockSequence(items) {
+  const incoming = Array.isArray(items) ? items.filter(Boolean) : [];
+  if (!incoming.length) return;
+  achievementUnlockQueue.push(...incoming);
+  if (!achievementUnlockRunning) showNextAchievementUnlock();
+}
+window.showAchievementUnlockSequence = showAchievementUnlockSequence;
+
+function renderLibraryAchievements(payload, options = {}) {
   const panel = document.getElementById('libraryAchievementPanel');
   const grid = document.getElementById('libraryAchievements');
+  const showcase = document.getElementById('achievementShowcase');
   const toggle = document.getElementById('toggleAllAchievements');
   if (!panel || !grid) return;
   const items = payload?.items || [];
-  panel.hidden = !items.length;
-  const visible = expanded ? items : items.slice(0, 4);
-  grid.innerHTML = visible.map((item) => `<article class="achievement-card"><span class="achievement-icon">${escapeHtml(item.icon || '✦')}</span><div><strong>${escapeHtml(item.title || 'Достижение')}</strong><p>${escapeHtml(item.description || '')}</p></div></article>`).join('');
+  panel.hidden = !items.length && !(payload?.catalog || []).length;
+  if (showcase) showcase.innerHTML = achievementShowcaseMarkup(payload);
+  const recent = items.filter((item) => !item.showcased).slice(0, 4);
+  grid.innerHTML = recent.map((item) => achievementCardMarkup(item)).join('');
   if (toggle) {
-    toggle.hidden = items.length <= 4;
-    toggle.textContent = expanded ? 'Свернуть' : 'Показать все';
-    toggle.dataset.expanded = expanded ? '1' : '0';
+    toggle.hidden = !(payload?.catalog || []).length;
+    toggle.textContent = 'Все награды';
   }
-  (payload?.new || []).forEach((item) => notify(`Новое достижение: ${item.title}`));
+  if (!options.skipUnlocks) showAchievementUnlockSequence(payload?.new || []);
 }
-
 
 function premiumDateLabel(value) {
   if (!value) return '';
@@ -4175,10 +4376,28 @@ function bindEvents() {
       }
       return;
     }
-    if (target.id === 'toggleAllAchievements') {
+    if (target.id === 'toggleAllAchievements' || target.id === 'editAchievementShowcase' || target.matches('[data-open-achievement-showcase]')) {
+      event.preventDefault();
       const page = document.getElementById('libraryPage');
-      const expanded = target.dataset.expanded !== '1';
-      if (page?._libraryData) renderLibraryAchievements(page._libraryData.achievements, expanded);
+      if (page?._libraryData) openAchievementGallery(page._libraryData.achievements);
+      return;
+    }
+    if (target.matches('[data-achievement-showcase]')) {
+      event.preventDefault();
+      target.disabled = true;
+      try {
+        const result = await toggleAchievementShowcase(target.dataset.achievementShowcase || '');
+        const count = (result?.showcase || []).length;
+        notify(`Витрина обновлена: ${count} из 3`);
+      } catch (error) { notify(error.message || 'Не удалось обновить витрину'); }
+      finally { target.disabled = false; }
+      return;
+    }
+    if (target.matches('[data-close-achievements]')) { event.preventDefault(); closeAchievementGallery(); return; }
+    if (target.matches('[data-achievement-filter]')) {
+      event.preventDefault();
+      const modal = document.getElementById('achievementGalleryModal');
+      if (modal?._achievementPayload) renderAchievementGallery(modal._achievementPayload, target.dataset.achievementFilter || 'all');
       return;
     }
     if (target.matches('[data-library-tab]')) { event.preventDefault(); document.querySelectorAll('[data-library-tab]').forEach((btn) => btn.classList.remove('active')); target.classList.add('active'); const page = document.getElementById('libraryPage'); if (page?._libraryData) renderLibraryTab(target.dataset.libraryTab, page._libraryData); return; }

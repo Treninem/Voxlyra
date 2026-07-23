@@ -1018,8 +1018,20 @@ async def _ensure_v1110_analytics_schema(db: aiosqlite.Connection) -> None:
             FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS achievement_showcase (
+            user_id INTEGER NOT NULL,
+            position INTEGER NOT NULL CHECK(position BETWEEN 1 AND 3),
+            achievement_code TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(user_id, position),
+            UNIQUE(user_id, achievement_code),
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+
         CREATE INDEX IF NOT EXISTS idx_user_achievements_user_awarded
             ON user_achievements(user_id, awarded_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_achievement_showcase_user_position
+            ON achievement_showcase(user_id, position);
         CREATE INDEX IF NOT EXISTS idx_smart_notifications_last_sent
             ON smart_notification_state(notification_code, last_sent_at);
         """
@@ -10624,17 +10636,125 @@ async def get_purchase_target(payload: str) -> dict[str, Any] | None:
     return target
 
 
-_ACHIEVEMENT_CATALOG: dict[str, dict[str, str]] = {
-    "first_chapter": {"title": "Первая глава", "description": "Прочитать первую главу до конца.", "icon": "📖", "group": "reader"},
-    "hundred_chapters": {"title": "100 глав", "description": "Прочитать сто глав до конца.", "icon": "💯", "group": "reader"},
-    "night_reader": {"title": "Ночной читатель", "description": "Читать поздним вечером или ночью.", "icon": "🌙", "group": "reader"},
-    "collector": {"title": "Коллекционер", "description": "Сохранить десять произведений в библиотеке.", "icon": "📚", "group": "reader"},
-    "first_review": {"title": "Первый отзыв", "description": "Оставить первый опубликованный отзыв.", "icon": "⭐", "group": "reader"},
-    "first_book": {"title": "Первая книга", "description": "Опубликовать первое произведение.", "icon": "✍️", "group": "author"},
-    "author_hundred_chapters": {"title": "Автор 100 глав", "description": "Опубликовать сто текстовых или графических глав.", "icon": "🏛", "group": "author"},
-    "thousand_readers": {"title": "1000 читателей", "description": "Собрать тысячу уникальных читателей.", "icon": "👥", "group": "author"},
-    "author_month": {"title": "Автор месяца", "description": "Стать первым по уникальным читателям месяца.", "icon": "🏆", "group": "author"},
+_ACHIEVEMENT_CATALOG: dict[str, dict[str, Any]] = {
+    "first_chapter": {
+        "title": "Первая глава", "description": "Прочитать первую главу до конца.", "icon": "📖", "icon_asset": "/static/img/achievements/first_chapter.png", "group": "reader", "category": "reading", "rarity": "common", "goal": 1
+    },
+    "hundred_chapters": {
+        "title": "100 глав", "description": "Прочитать сто глав до конца.", "icon": "💯", "icon_asset": "/static/img/achievements/hundred_chapters.png", "group": "reader", "category": "reading", "rarity": "epic", "goal": 100
+    },
+    "night_reader": {
+        "title": "Ночной читатель", "description": "Читать поздним вечером или ночью.", "icon": "🌙", "icon_asset": "/static/img/achievements/night_reader.png", "group": "reader", "category": "reading", "rarity": "rare", "goal": 1
+    },
+    "collector": {
+        "title": "Коллекционер", "description": "Сохранить десять произведений в библиотеке.", "icon": "📚", "icon_asset": "/static/img/achievements/collector.png", "group": "reader", "category": "reading", "rarity": "rare", "goal": 10
+    },
+    "first_review": {
+        "title": "Первый отзыв", "description": "Оставить первый опубликованный отзыв.", "icon": "⭐", "icon_asset": "/static/img/achievements/first_review.png", "group": "reader", "category": "community", "rarity": "common", "goal": 1
+    },
+    "first_comment": {
+        "title": "Первый комментарий", "description": "Опубликовать первый комментарий к главе.", "icon": "💬", "icon_asset": "/static/img/achievements/first_comment.png", "group": "reader", "category": "community", "rarity": "common", "goal": 1
+    },
+    "reading_streak_7": {
+        "title": "Серия 7 дней", "description": "Читать, слушать или смотреть комиксы семь дней подряд.", "icon": "🔥", "icon_asset": "/static/img/achievements/reading_streak_7.png", "group": "reader", "category": "reading", "rarity": "rare", "goal": 7
+    },
+    "reading_streak_30": {
+        "title": "Верный читатель", "description": "Сохранять активную серию тридцать дней подряд.", "icon": "✦", "icon_asset": "/static/img/achievements/reading_streak_30.png", "group": "reader", "category": "reading", "rarity": "legendary", "goal": 30
+    },
+    "audio_hour": {
+        "title": "Час аудио", "description": "Прослушать суммарно шестьдесят минут аудиокниг.", "icon": "🎧", "icon_asset": "/static/img/achievements/audio_hour.png", "group": "reader", "category": "audio", "rarity": "rare", "goal": 60
+    },
+    "comic_explorer": {
+        "title": "Исследователь комиксов", "description": "Открыть первую графическую главу.", "icon": "🖼", "icon_asset": "/static/img/achievements/comic_explorer.png", "group": "reader", "category": "comic", "rarity": "common", "goal": 1
+    },
+    "comic_hundred_pages": {
+        "title": "100 страниц комиксов", "description": "Просмотреть сто страниц комиксов, манги или манхвы.", "icon": "💠", "icon_asset": "/static/img/achievements/comic_hundred_pages.png", "group": "reader", "category": "comic", "rarity": "epic", "goal": 100
+    },
+    "first_note": {
+        "title": "Первая заметка", "description": "Сохранить первую личную заметку во время чтения.", "icon": "🖋", "icon_asset": "/static/img/achievements/first_note.png", "group": "reader", "category": "reading", "rarity": "common", "goal": 1
+    },
+    "quote_collector": {
+        "title": "Хранитель цитат", "description": "Сохранить десять цитат из произведений.", "icon": "📜", "icon_asset": "/static/img/achievements/quote_collector.png", "group": "reader", "category": "reading", "rarity": "rare", "goal": 10
+    },
+    "premium_member": {
+        "title": "VoxLyra Premium", "description": "Впервые оформить Premium и получить премиальный знак.", "icon": "👑", "icon_asset": "/static/img/achievements/premium_member.png", "group": "reader", "category": "premium", "rarity": "legendary", "goal": 1
+    },
+    "first_book": {
+        "title": "Первая книга", "description": "Опубликовать первое произведение.", "icon": "✍️", "icon_asset": "/static/img/achievements/first_book.png", "group": "author", "category": "author", "rarity": "rare", "goal": 1
+    },
+    "author_ten_chapters": {
+        "title": "Автор 10 глав", "description": "Опубликовать десять текстовых или графических глав.", "icon": "🪶", "icon_asset": "/static/img/achievements/author_ten_chapters.png", "group": "author", "category": "author", "rarity": "rare", "goal": 10
+    },
+    "author_hundred_chapters": {
+        "title": "Автор 100 глав", "description": "Опубликовать сто текстовых или графических глав.", "icon": "🏛", "icon_asset": "/static/img/achievements/author_hundred_chapters.png", "group": "author", "category": "author", "rarity": "epic", "goal": 100
+    },
+    "author_ten_books": {
+        "title": "Автор 10 книг", "description": "Опубликовать десять самостоятельных произведений.", "icon": "📚", "icon_asset": "/static/img/achievements/author_ten_books.png", "group": "author", "category": "author", "rarity": "epic", "goal": 10
+    },
+    "author_hundred_reactions": {
+        "title": "100 реакций читателей", "description": "Получить сто реакций на опубликованные главы.", "icon": "💜", "icon_asset": "/static/img/achievements/author_hundred_reactions.png", "group": "author", "category": "author", "rarity": "epic", "goal": 100
+    },
+    "thousand_readers": {
+        "title": "1000 читателей", "description": "Собрать тысячу уникальных читателей.", "icon": "👥", "icon_asset": "/static/img/achievements/thousand_readers.png", "group": "author", "category": "author", "rarity": "legendary", "goal": 1000
+    },
+    "author_month": {
+        "title": "Автор месяца", "description": "Стать первым по уникальным читателям месяца.", "icon": "🏆", "icon_asset": "/static/img/achievements/author_month.png", "group": "author", "category": "author", "rarity": "legendary", "goal": 1
+    },
 }
+
+
+_ACHIEVEMENT_TIER_BY_RARITY: dict[str, str] = {
+    "common": "bronze",
+    "rare": "silver",
+    "epic": "gold",
+    "legendary": "platinum",
+}
+_ACHIEVEMENT_TIER_LABELS: dict[str, str] = {
+    "bronze": "Бронза",
+    "silver": "Серебро",
+    "gold": "Золото",
+    "platinum": "Платина",
+}
+
+
+def _achievement_tier(info: dict[str, Any]) -> tuple[str, str]:
+    tier = _ACHIEVEMENT_TIER_BY_RARITY.get(str(info.get("rarity") or "common"), "bronze")
+    return tier, _ACHIEVEMENT_TIER_LABELS[tier]
+
+
+async def set_user_achievement_showcase(user_id: int, achievement_codes: list[str]) -> list[str]:
+    """Сохраняет до трёх уже полученных наград в витрине профиля."""
+    uid = int(user_id)
+    normalized: list[str] = []
+    for raw_code in achievement_codes or []:
+        code = str(raw_code or "").strip()
+        if not code or code in normalized:
+            continue
+        if code not in _ACHIEVEMENT_CATALOG:
+            raise ValueError("Неизвестное достижение.")
+        normalized.append(code)
+    if len(normalized) > 3:
+        raise ValueError("На витрине можно разместить не более трёх достижений.")
+
+    async with connect() as db:
+        if normalized:
+            placeholders = ",".join("?" for _ in normalized)
+            cur = await db.execute(
+                f"SELECT achievement_code FROM user_achievements WHERE user_id=? AND achievement_code IN ({placeholders})",
+                (uid, *normalized),
+            )
+            owned = {str(row["achievement_code"]) for row in await cur.fetchall()}
+            if any(code not in owned for code in normalized):
+                raise ValueError("На витрину можно добавить только уже полученные достижения.")
+        await db.execute("DELETE FROM achievement_showcase WHERE user_id=?", (uid,))
+        now = utc_now()
+        for position, code in enumerate(normalized, start=1):
+            await db.execute(
+                "INSERT INTO achievement_showcase(user_id, position, achievement_code, updated_at) VALUES(?, ?, ?, ?)",
+                (uid, position, code, now),
+            )
+        await db.commit()
+    return normalized
 
 
 async def get_author_analytics(author_user_id: int, days: int = 30) -> dict[str, Any]:
@@ -10851,7 +10971,7 @@ async def get_author_analytics(author_user_id: int, days: int = 30) -> dict[str,
 
 
 async def sync_user_achievements(user_id: int) -> dict[str, list[dict[str, Any]]]:
-    """Начисляет только подтверждённые достижениями действия; уже выданные не отзываются."""
+    """Начисляет подтверждённые награды и возвращает полный каталог с прогрессом."""
     uid = int(user_id)
     now = utc_now()
     async with connect() as db:
@@ -10861,37 +10981,125 @@ async def sync_user_achievements(user_id: int) -> dict[str, list[dict[str, Any]]
         completed = int((await cur.fetchone())["completed"] or 0)
         cur = await db.execute("SELECT COUNT(*) AS saved FROM bookmarks WHERE user_id=?", (uid,))
         saved = int((await cur.fetchone())["saved"] or 0)
-        cur = await db.execute("SELECT COUNT(*) AS reviews FROM reviews WHERE user_id=? AND status='published'", (uid,))
+        cur = await db.execute(
+            "SELECT COUNT(*) AS reviews FROM reviews WHERE user_id=? AND status='published'", (uid,)
+        )
         reviews = int((await cur.fetchone())["reviews"] or 0)
         cur = await db.execute(
-            "SELECT COUNT(*) AS night FROM reading_progress WHERE user_id=? AND (CAST(substr(updated_at,12,2) AS INTEGER)>=22 OR CAST(substr(updated_at,12,2) AS INTEGER)<5)",
+            "SELECT COUNT(*) AS comments FROM comments WHERE user_id=? AND status='published'", (uid,)
+        )
+        comments_count = int((await cur.fetchone())["comments"] or 0)
+        cur = await db.execute(
+            "SELECT COUNT(*) AS night FROM reading_progress WHERE user_id=? AND "
+            "(CAST(substr(updated_at,12,2) AS INTEGER)>=22 OR CAST(substr(updated_at,12,2) AS INTEGER)<5)",
             (uid,),
         )
         night = int((await cur.fetchone())["night"] or 0)
+        cur = await db.execute(
+            """
+            SELECT
+                COALESCE(SUM(audio_seconds),0) AS audio_seconds,
+                COALESCE(SUM(graphic_pages),0) AS graphic_pages
+            FROM reader_activity_daily WHERE user_id=?
+            """,
+            (uid,),
+        )
+        activity_totals = await cur.fetchone()
+        audio_minutes = int(activity_totals["audio_seconds"] or 0) // 60
+        graphic_pages = int(activity_totals["graphic_pages"] or 0)
+        cur = await db.execute(
+            "SELECT COUNT(DISTINCT graphic_chapter_id) AS cnt FROM graphic_reading_progress WHERE user_id=?",
+            (uid,),
+        )
+        graphic_chapters_opened = int((await cur.fetchone())["cnt"] or 0)
+        cur = await db.execute(
+            """
+            SELECT
+                SUM(CASE WHEN annotation_type='note' THEN 1 ELSE 0 END) AS notes,
+                SUM(CASE WHEN annotation_type='quote' THEN 1 ELSE 0 END) AS quotes
+            FROM reader_annotations WHERE user_id=?
+            """,
+            (uid,),
+        )
+        annotations = await cur.fetchone()
+        notes_count = int(annotations["notes"] or 0)
+        quotes_count = int(annotations["quotes"] or 0)
+        cur = await db.execute(
+            "SELECT COUNT(*) AS cnt FROM premium_subscriptions WHERE user_id=? AND status!='refunded'",
+            (uid,),
+        )
+        premium_count = int((await cur.fetchone())["cnt"] or 0)
+
+        cur = await db.execute(
+            """
+            SELECT activity_date FROM reader_activity_daily
+            WHERE user_id=? AND (
+                text_chapters>0 OR text_progress_points>0 OR audio_seconds>0 OR graphic_pages>0 OR sessions>0
+            ) ORDER BY activity_date
+            """,
+            (uid,),
+        )
+        streak_dates = []
+        for row in await cur.fetchall():
+            try:
+                streak_dates.append(datetime.fromisoformat(str(row["activity_date"])).date())
+            except (TypeError, ValueError):
+                continue
+        longest_streak = 0
+        current_streak = 0
+        previous_day = None
+        for activity_day in sorted(set(streak_dates)):
+            if previous_day is not None and activity_day == previous_day + timedelta(days=1):
+                current_streak += 1
+            else:
+                current_streak = 1
+            longest_streak = max(longest_streak, current_streak)
+            previous_day = activity_day
+
         cur = await db.execute("SELECT id FROM author_profiles WHERE user_id=?", (uid,))
         author = await cur.fetchone()
-        published_books = published_chapters = author_readers = month_rank = 0
+        published_books = published_chapters = author_readers = month_rank = author_reactions = 0
         if author:
             author_id = int(author["id"])
-            cur = await db.execute("SELECT COUNT(*) AS cnt FROM books WHERE author_id=? AND publication_status='published'", (author_id,))
+            cur = await db.execute(
+                "SELECT COUNT(*) AS cnt FROM books WHERE author_id=? AND publication_status='published'",
+                (author_id,),
+            )
             published_books = int((await cur.fetchone())["cnt"] or 0)
             cur = await db.execute(
-                "SELECT (SELECT COUNT(*) FROM chapters c JOIN books b ON b.id=c.book_id WHERE b.author_id=? AND b.publication_status='published' AND c.status='published') + "
-                "(SELECT COUNT(*) FROM graphic_chapters gc JOIN books b ON b.id=gc.book_id WHERE b.author_id=? AND b.publication_status='published' AND gc.status='published') AS cnt",
+                "SELECT (SELECT COUNT(*) FROM chapters c JOIN books b ON b.id=c.book_id "
+                "WHERE b.author_id=? AND b.publication_status='published' AND c.status='published') + "
+                "(SELECT COUNT(*) FROM graphic_chapters gc JOIN books b ON b.id=gc.book_id "
+                "WHERE b.author_id=? AND b.publication_status='published' AND gc.status='published') AS cnt",
                 (author_id, author_id),
             )
             published_chapters = int((await cur.fetchone())["cnt"] or 0)
             cur = await db.execute(
-                "SELECT COUNT(DISTINCT rp.user_id) AS cnt FROM reading_progress rp JOIN books b ON b.id=rp.book_id WHERE b.author_id=?",
+                "SELECT COUNT(DISTINCT rp.user_id) AS cnt FROM reading_progress rp "
+                "JOIN books b ON b.id=rp.book_id WHERE b.author_id=?",
                 (author_id,),
             )
             author_readers = int((await cur.fetchone())["cnt"] or 0)
-            month_start = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
+            cur = await db.execute(
+                """
+                SELECT COUNT(*) AS cnt
+                FROM chapter_reactions cr
+                JOIN chapters c ON c.id=cr.chapter_id
+                JOIN books b ON b.id=c.book_id
+                WHERE b.author_id=? AND b.publication_status='published'
+                """,
+                (author_id,),
+            )
+            author_reactions = int((await cur.fetchone())["cnt"] or 0)
+            month_start = datetime.now(timezone.utc).replace(
+                day=1, hour=0, minute=0, second=0, microsecond=0
+            ).isoformat()
             cur = await db.execute(
                 """
                 WITH author_month AS (
                     SELECT b.author_id, COUNT(DISTINCT rp.user_id) AS readers
-                    FROM books b LEFT JOIN reading_progress rp ON rp.book_id=b.id AND rp.updated_at>=?
+                    FROM books b LEFT JOIN reading_progress rp
+                      ON rp.book_id=b.id AND rp.updated_at>=?
                     WHERE b.publication_status='published' GROUP BY b.author_id
                 )
                 SELECT 1 + COUNT(*) AS rank FROM author_month mine, author_month other
@@ -10908,36 +11116,113 @@ async def sync_user_achievements(user_id: int) -> dict[str, list[dict[str, Any]]
             "night_reader": (night >= 1, night),
             "collector": (saved >= 10, saved),
             "first_review": (reviews >= 1, reviews),
+            "first_comment": (comments_count >= 1, comments_count),
+            "reading_streak_7": (longest_streak >= 7, longest_streak),
+            "reading_streak_30": (longest_streak >= 30, longest_streak),
+            "audio_hour": (audio_minutes >= 60, audio_minutes),
+            "comic_explorer": (graphic_chapters_opened >= 1, graphic_chapters_opened),
+            "comic_hundred_pages": (graphic_pages >= 100, graphic_pages),
+            "first_note": (notes_count >= 1, notes_count),
+            "quote_collector": (quotes_count >= 10, quotes_count),
+            "premium_member": (premium_count >= 1, premium_count),
             "first_book": (published_books >= 1, published_books),
+            "author_ten_chapters": (published_chapters >= 10, published_chapters),
             "author_hundred_chapters": (published_chapters >= 100, published_chapters),
+            "author_ten_books": (published_books >= 10, published_books),
+            "author_hundred_reactions": (author_reactions >= 100, author_reactions),
             "thousand_readers": (author_readers >= 1000, author_readers),
-            "author_month": (month_rank == 1 and author_readers >= 20, author_readers),
+            "author_month": (month_rank == 1 and author_readers >= 20, 1 if month_rank == 1 and author_readers >= 20 else 0),
         }
         awarded_codes: list[str] = []
         for code, (eligible, value) in candidates.items():
             if not eligible:
                 continue
             cur = await db.execute(
-                "INSERT OR IGNORE INTO user_achievements(user_id, achievement_code, progress_value, metadata_json, awarded_at) VALUES(?, ?, ?, '{}', ?)",
+                "INSERT OR IGNORE INTO user_achievements(user_id, achievement_code, progress_value, metadata_json, awarded_at) "
+                "VALUES(?, ?, ?, '{}', ?)",
                 (uid, code, int(value), now),
             )
             if cur.rowcount:
                 awarded_codes.append(code)
         await db.commit()
         cur = await db.execute(
-            "SELECT achievement_code, progress_value, metadata_json, awarded_at FROM user_achievements WHERE user_id=? ORDER BY awarded_at DESC, id DESC",
+            "SELECT achievement_code, progress_value, metadata_json, awarded_at "
+            "FROM user_achievements WHERE user_id=? ORDER BY awarded_at DESC, id DESC",
             (uid,),
         )
         rows = await cur.fetchall()
+        cur = await db.execute(
+            "SELECT position, achievement_code FROM achievement_showcase WHERE user_id=? ORDER BY position",
+            (uid,),
+        )
+        showcase_rows = await cur.fetchall()
+
+    showcase_positions = {str(row["achievement_code"]): int(row["position"]) for row in showcase_rows}
 
     def public(row: Any) -> dict[str, Any]:
         code = str(row["achievement_code"])
-        info = _ACHIEVEMENT_CATALOG.get(code, {"title": code, "description": "", "icon": "✦", "group": "reader"})
-        return {"code": code, **info, "progress_value": int(row["progress_value"] or 0), "awarded_at": row["awarded_at"]}
+        info = _ACHIEVEMENT_CATALOG.get(
+            code,
+            {"title": code, "description": "", "icon": "✦", "group": "reader", "category": "reading", "rarity": "common", "goal": 1},
+        )
+        goal = max(1, int(info.get("goal") or 1))
+        progress = int(row["progress_value"] or 0)
+        tier, tier_label = _achievement_tier(info)
+        showcase_position = showcase_positions.get(code)
+        return {
+            "code": code, **info, "tier": tier, "tier_label": tier_label,
+            "progress_value": progress, "goal": goal, "progress_percent": 100,
+            "unlocked": True, "awarded_at": row["awarded_at"],
+            "showcased": showcase_position is not None, "showcase_position": showcase_position,
+        }
 
     all_items = [public(row) for row in rows]
+    unlocked_by_code = {item["code"]: item for item in all_items}
     new_items = [item for item in all_items if item["code"] in awarded_codes]
-    return {"new": new_items, "items": all_items}
+    live_progress = {
+        "first_chapter": completed,
+        "hundred_chapters": completed,
+        "night_reader": night,
+        "collector": saved,
+        "first_review": reviews,
+        "first_comment": comments_count,
+        "reading_streak_7": longest_streak,
+        "reading_streak_30": longest_streak,
+        "audio_hour": audio_minutes,
+        "comic_explorer": graphic_chapters_opened,
+        "comic_hundred_pages": graphic_pages,
+        "first_note": notes_count,
+        "quote_collector": quotes_count,
+        "premium_member": premium_count,
+        "first_book": published_books,
+        "author_ten_chapters": published_chapters,
+        "author_hundred_chapters": published_chapters,
+        "author_ten_books": published_books,
+        "author_hundred_reactions": author_reactions,
+        "thousand_readers": author_readers,
+        "author_month": 1 if month_rank == 1 and author_readers >= 20 else 0,
+    }
+    catalog: list[dict[str, Any]] = []
+    for code, info in _ACHIEVEMENT_CATALOG.items():
+        unlocked = unlocked_by_code.get(code)
+        if unlocked:
+            catalog.append(dict(unlocked))
+            continue
+        goal = max(1, int(info.get("goal") or 1))
+        progress = max(0, int(live_progress.get(code, 0)))
+        tier, tier_label = _achievement_tier(info)
+        catalog.append({
+            "code": code, **info, "tier": tier, "tier_label": tier_label,
+            "progress_value": progress, "goal": goal,
+            "progress_percent": min(100, round(progress * 100 / goal)),
+            "unlocked": False, "awarded_at": None,
+            "showcased": False, "showcase_position": None,
+        })
+    showcase = sorted(
+        (item for item in all_items if item.get("showcased")),
+        key=lambda item: int(item.get("showcase_position") or 99),
+    )
+    return {"new": new_items, "items": all_items, "catalog": catalog, "showcase": showcase}
 
 
 async def list_smart_reader_reminder_candidates(limit: int = 100, now_utc: datetime | None = None) -> list[dict[str, Any]]:

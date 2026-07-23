@@ -107,6 +107,7 @@ from app.db import (
     get_premium_owner_summary,
     get_personal_reading_insights,
     sync_user_achievements,
+    set_user_achievement_showcase,
     get_user_by_id,
     search_users,
     search_books,
@@ -335,6 +336,7 @@ from app.services.chunked_upload import (
     create_upload,
     get_upload_status,
     load_upload,
+    release_upload_finish,
     save_chunk,
 )
 from app.services.library_import_queue import (
@@ -344,9 +346,13 @@ from app.services.library_import_queue import (
     enqueue_import_job,
     get_import_queue_control_state,
     get_import_queue_worker_state,
+    get_import_upload_handoff,
     get_import_upload_receipt,
+    import_upload_target_path,
     list_import_jobs,
+    mark_import_upload_handoff_prepared,
     persist_import_archive,
+    prepare_import_upload_handoff,
     retry_import_job,
     set_import_queue_mode,
     wake_import_worker,
@@ -1753,6 +1759,7 @@ def create_app() -> FastAPI:
         except ChunkedUploadError as exc:
             raise HTTPException(status_code=507 if "мест" in str(exc).lower() else 400, detail=str(exc)) from exc
         except OSError as exc:
+            await asyncio.to_thread(release_upload_finish, upload_id)
             if exc.errno == errno.ENOSPC or "no space left" in str(exc).lower():
                 raise HTTPException(
                     status_code=507,
@@ -1823,15 +1830,63 @@ def create_app() -> FastAPI:
         token = str(payload.get("token") or "")
         init_data = str(payload.get("init_data") or x_telegram_init_data or "")
         user, token_data = await library_import_upload_session(init_data, token)
-        receipt = await get_import_upload_receipt(upload_id, actor_user_id=user.app_user_id)
-        if receipt is not None:
+
+        async def accepted(job_id: int, position: int, *, idempotent: bool = False):
             await asyncio.to_thread(cleanup_upload, upload_id)
+            asyncio.create_task(
+                _notify_large_library_upload_accepted(
+                    chat_id=int(token_data.chat_id),
+                    progress_message_id=int(token_data.progress_message_id),
+                    job_id=int(job_id),
+                    position=int(position),
+                )
+            )
             return {
                 "ok": True,
-                "job_id": int(receipt["job_id"]),
-                "position": int(receipt["position"]),
-                "idempotent": True,
+                "job_id": int(job_id),
+                "position": int(position),
+                "idempotent": bool(idempotent),
             }
+
+        receipt = await get_import_upload_receipt(upload_id, actor_user_id=user.app_user_id)
+        if receipt is not None:
+            return await accepted(
+                int(receipt["job_id"]), int(receipt["position"]), idempotent=True
+            )
+
+        # A previous request may have persisted the complete ZIP but stopped before
+        # the queue transaction. Reuse that durable handoff instead of requiring a
+        # second 250+ MB upload.
+        handoff = await get_import_upload_handoff(upload_id, actor_user_id=user.app_user_id)
+        if handoff and bool(handoff.get("archive_available")):
+            queue_path = Path(str(handoff["archive_path"]))
+            try:
+                archive_hash = str(handoff.get("archive_hash") or "").strip()
+                if not archive_hash:
+                    archive_hash = await calculate_archive_hash(queue_path)
+                    await mark_import_upload_handoff_prepared(
+                        upload_id, archive_path=queue_path, archive_hash=archive_hash
+                    )
+                job_id, position = await enqueue_import_job(
+                    archive_path=queue_path,
+                    archive_name=str(handoff.get("archive_name") or "library.zip"),
+                    archive_hash=archive_hash,
+                    actor_user_id=user.app_user_id,
+                    chat_id=int(handoff.get("chat_id") or token_data.chat_id),
+                    progress_message_id=int(
+                        handoff.get("progress_message_id") or token_data.progress_message_id
+                    ),
+                    idempotency_key=upload_id,
+                )
+                return await accepted(job_id, position, idempotent=True)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            except OSError as exc:
+                raise HTTPException(
+                    status_code=507 if exc.errno == errno.ENOSPC else 500,
+                    detail="Не удалось восстановить уже принятый архив. Повторите завершение через минуту.",
+                ) from exc
+
         try:
             claimed = await asyncio.to_thread(
                 claim_upload_finish,
@@ -1849,12 +1904,25 @@ def create_app() -> FastAPI:
 
         total_chunks = int(payload.get("total_chunks") or 0)
         queue_path: Path | None = None
+        handoff_created = False
         try:
             meta = await asyncio.to_thread(
                 partial(load_upload, upload_id, user_id=user.app_user_id, book_id=0)
             )
             if str(meta.get("kind") or "") != "library_import":
                 raise ChunkedUploadError("Загрузка не относится к импорту библиотеки.")
+
+            expected_queue_path = import_upload_target_path(upload_id)
+            await prepare_import_upload_handoff(
+                upload_id=upload_id,
+                actor_user_id=user.app_user_id,
+                archive_name=str(meta.get("filename") or "library.zip"),
+                archive_path=expected_queue_path,
+                chat_id=int(token_data.chat_id),
+                progress_message_id=int(token_data.progress_message_id),
+            )
+            handoff_created = True
+
             assembled_path, meta = await asyncio.to_thread(
                 partial(
                     assemble_upload,
@@ -1864,8 +1932,11 @@ def create_app() -> FastAPI:
                     total_chunks=total_chunks,
                 )
             )
-            queue_path = await persist_import_archive(assembled_path)
+            queue_path = await persist_import_archive(assembled_path, stable_name=upload_id)
             archive_hash = await calculate_archive_hash(queue_path)
+            await mark_import_upload_handoff_prepared(
+                upload_id, archive_path=queue_path, archive_hash=archive_hash
+            )
             job_id, position = await enqueue_import_job(
                 archive_path=queue_path,
                 archive_name=str(meta.get("filename") or "library.zip"),
@@ -1876,44 +1947,38 @@ def create_app() -> FastAPI:
                 idempotency_key=upload_id,
             )
         except (ChunkedUploadError, ValueError) as exc:
-            if queue_path is not None and queue_path.exists():
-                await asyncio.to_thread(queue_path.unlink)
+            await asyncio.to_thread(release_upload_finish, upload_id)
+            # Keep resumable chunks/checkpoints and any durable handoff. Validation
+            # errors no longer destroy a fully received large upload.
             raise HTTPException(
                 status_code=507 if "мест" in str(exc).lower() else 400,
                 detail=str(exc),
             ) from exc
         except OSError as exc:
-            if queue_path is not None and queue_path.exists():
-                await asyncio.to_thread(queue_path.unlink)
             if exc.errno == errno.ENOSPC or "no space left" in str(exc).lower():
+                if not handoff_created:
+                    await asyncio.to_thread(cleanup_upload, upload_id)
                 raise HTTPException(
                     status_code=507,
                     detail=(
                         "На сервере недостаточно свободного места. "
-                        "Незавершённая загрузка очищена. Освободите место или увеличьте диск."
+                        "Освободите место; уже принятые данные будут продолжены, если они успели сохраниться."
                     ),
                 ) from exc
             raise HTTPException(
-                status_code=500, detail="Не удалось сохранить архив на сервере."
+                status_code=500,
+                detail="Не удалось сохранить архив на сервере. Повторите завершение через минуту.",
             ) from exc
         except Exception as exc:
-            if queue_path is not None and queue_path.exists():
-                await asyncio.to_thread(queue_path.unlink)
+            await asyncio.to_thread(release_upload_finish, upload_id)
+            # The durable handoff intentionally remains for startup recovery.
+            logger.exception("Could not finish durable library upload %s", upload_id)
             raise HTTPException(
-                status_code=500, detail="Не удалось поставить архив в очередь. Повторите загрузку."
+                status_code=500,
+                detail="Архив принят, но очередь временно недоступна. После Redeploy он восстановится автоматически.",
             ) from exc
-        finally:
-            await asyncio.to_thread(cleanup_upload, upload_id)
 
-        asyncio.create_task(
-            _notify_large_library_upload_accepted(
-                chat_id=int(token_data.chat_id),
-                progress_message_id=int(token_data.progress_message_id),
-                job_id=int(job_id),
-                position=int(position),
-            )
-        )
-        return {"ok": True, "job_id": job_id, "position": position}
+        return await accepted(job_id, position)
 
     async def premium_invoice_link(plan: dict[str, Any]) -> str:
         if not settings.BOT_TOKEN.strip():
@@ -2605,6 +2670,25 @@ def create_app() -> FastAPI:
                 "permissions": sorted(permissions),
             },
         }
+
+    @app.post("/api/me/achievements/showcase")
+    async def api_achievement_showcase(
+        request: Request,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        try:
+            payload = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Некорректный запрос.") from exc
+        codes = payload.get("codes") if isinstance(payload, dict) else None
+        if not isinstance(codes, list):
+            raise HTTPException(status_code=400, detail="Передайте список достижений.")
+        try:
+            await set_user_achievement_showcase(user.app_user_id, [str(code) for code in codes])
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"ok": True, "achievements": await sync_user_achievements(user.app_user_id)}
 
     @app.get("/api/library/organizer")
     async def api_library_organizer(x_telegram_init_data: str | None = Header(default=None)):

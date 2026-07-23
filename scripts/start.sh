@@ -9,7 +9,14 @@ export MALLOC_ARENA_MAX="${MALLOC_ARENA_MAX:-2}"
 export MALLOC_TRIM_THRESHOLD_="${MALLOC_TRIM_THRESHOLD_:-131072}"
 export VOSK_MODEL_PATH=/app/storage/tts/models/vosk
 export TTS_VOSK_MODEL_DIR=/app/storage/tts/models/vosk
-mkdir -p data data/chunked_uploads data/library_import_queue/uploads storage/covers storage/books storage/audio storage/tts storage/tts/models/vosk storage/comics storage/temp storage/legal
+mkdir -p data data/chunked_uploads data/library_import_queue/uploads data/library_storage \
+  data/covers data/books data/audio data/comics data/backups \
+  storage/library_import_work storage/tts storage/tts/models/vosk storage/temp storage/legal
+
+# Remove stale bytecode from older update archives before Python starts. Runtime
+# packages never rely on .pyc files and fresh bytecode is recreated as needed.
+find app scripts -type d -name '__pycache__' -prune -exec rm -rf {} + 2>/dev/null || true
+find app scripts -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete 2>/dev/null || true
 
 # Remove only stale/broken import artifacts. Fresh chunk sessions are preserved
 # so a 250+ MB upload can continue after Redeploy instead of starting from zero.
