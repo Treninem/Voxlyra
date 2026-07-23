@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import errno
+import gc
 import hashlib
 import gzip
+import logging
 import json
 import os
 import re
 import shutil
 import tempfile
 import time
+import uuid
 import zipfile
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
@@ -21,11 +25,20 @@ from app.config import settings
 from app.db import connect, utc_now
 from app.services.book_parser import BookParseError, parse_book_file
 
+logger = logging.getLogger(__name__)
+
 ALLOWED_LICENSES = {"public_domain", "creative_commons", "author_permission", "platform_original"}
 BOOK_EXTENSIONS = {".epub", ".fb2", ".txt", ".docx", ".pdf"}
 COVER_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
-DEFAULT_STORAGE_ROOT = Path("storage/library")
-IMPORT_WORK_ROOT = DEFAULT_STORAGE_ROOT / "import_work"
+LEGACY_STORAGE_ROOT = Path("storage/library")
+DEFAULT_STORAGE_ROOT = Path(
+    str(getattr(settings, "LIBRARY_STORAGE_ROOT", "data/library_storage") or "data/library_storage")
+)
+IMPORT_WORK_ROOT = Path(
+    str(getattr(settings, "LIBRARY_IMPORT_WORK_ROOT", "storage/library_import_work") or "storage/library_import_work")
+)
+_STORAGE_MIGRATION_LOCK = asyncio.Lock()
+_STORAGE_MIGRATION_READY: set[str] = set()
 MIN_IMPORT_FREE_BYTES = 32 * 1024 * 1024
 STALE_IMPORT_WORK_SECONDS = 2 * 60 * 60
 
@@ -34,6 +47,40 @@ MAX_FILES_PER_BOOK_FOLDER = 12
 MAX_COMPRESSION_RATIO = 250
 RIGHTS_HOLDER_TYPES = {"public_domain", "person", "publisher", "platform", "other"}
 REVENUE_MODES = {"none", "platform", "author_account"}
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+CANONICAL_COVER_ROOT = Path(str(getattr(settings, "BOOK_COVER_STORAGE_ROOT", "data/covers") or "data/covers"))
+if not CANONICAL_COVER_ROOT.is_absolute():
+    CANONICAL_COVER_ROOT = PROJECT_ROOT / CANONICAL_COVER_ROOT
+
+
+def _portable_project_path(path: Path) -> str:
+    try:
+        return path.resolve().relative_to(PROJECT_ROOT.resolve()).as_posix()
+    except (OSError, ValueError):
+        return path.resolve().as_posix()
+
+
+def _mirror_import_cover(book_id: int, source: Path) -> str | None:
+    """Copy an imported cover into a stable per-book location independent of import batches."""
+    if not source.is_file() or source.suffix.lower() not in COVER_EXTENSIONS:
+        return None
+    CANONICAL_COVER_ROOT.mkdir(parents=True, exist_ok=True)
+    suffix = source.suffix.lower()
+    destination = CANONICAL_COVER_ROOT / f"{int(book_id)}{suffix}"
+    temporary = CANONICAL_COVER_ROOT / f".{int(book_id)}{suffix}.part"
+    temporary.unlink(missing_ok=True)
+    try:
+        shutil.copy2(source, temporary)
+        if not temporary.is_file() or temporary.stat().st_size <= 0:
+            return None
+        temporary.replace(destination)
+        for other_suffix in COVER_EXTENSIONS:
+            other = CANONICAL_COVER_ROOT / f"{int(book_id)}{other_suffix}"
+            if other != destination:
+                other.unlink(missing_ok=True)
+        return _portable_project_path(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 async def _run_blocking(func, /, *args, **kwargs):
@@ -92,6 +139,95 @@ class LibraryImportStorageError(RuntimeError):
     pass
 
 
+class LibraryImportMemoryError(RuntimeError):
+    pass
+
+
+def _read_memory_counter(path: Path) -> int:
+    try:
+        raw = path.read_text(encoding="utf-8").strip()
+        if not raw or raw == "max":
+            return 0
+        return max(0, int(raw))
+    except (OSError, TypeError, ValueError):
+        return 0
+
+
+def _cgroup_memory_snapshot() -> tuple[int, int]:
+    current = _read_memory_counter(Path("/sys/fs/cgroup/memory.current"))
+    limit = _read_memory_counter(Path("/sys/fs/cgroup/memory.max"))
+    if current <= 0:
+        current = _read_memory_counter(Path("/sys/fs/cgroup/memory/memory.usage_in_bytes"))
+    if limit <= 0:
+        limit = _read_memory_counter(Path("/sys/fs/cgroup/memory/memory.limit_in_bytes"))
+    # Some hosts expose an effectively unlimited v1 value.
+    if limit >= (1 << 60):
+        limit = 0
+    return current, limit
+
+
+def _release_import_memory() -> None:
+    gc.collect()
+    try:
+        libc = ctypes.CDLL("libc.so.6")
+        trim = getattr(libc, "malloc_trim", None)
+        if trim is not None:
+            trim(0)
+    except (OSError, AttributeError):
+        pass
+
+
+def _ensure_import_memory_headroom(*, operation: str, expected_extra_bytes: int = 0) -> None:
+    current, limit = _cgroup_memory_snapshot()
+    if current <= 0 or limit <= 0:
+        return
+    reserve_mb = max(8, int(getattr(settings, "LIBRARY_IMPORT_MEMORY_RESERVE_MB", 12) or 12))
+    reserve = reserve_mb * 1024 * 1024
+    expected = max(0, int(expected_extra_bytes))
+    required = reserve + expected
+    available = max(0, limit - current)
+    if available >= required:
+        return
+    _release_import_memory()
+    current, limit = _cgroup_memory_snapshot()
+    available = max(0, limit - current) if limit > 0 else required
+    if available < required:
+        raise LibraryImportMemoryError(
+            f"Недостаточно оперативной памяти для {operation}: свободно около {_format_mb(available)}, "
+            f"для безопасного разбора требуется около {_format_mb(required)}. "
+            "Архив и задание сохранены. Закройте тяжёлые операции, отключите одновременное TTS/OCR "
+            "или увеличьте память Bothost, затем повторите задание без новой загрузки."
+        )
+
+
+def _estimate_book_parse_memory(path: Path) -> int:
+    """Conservative parser-memory estimate used before loading a whole book."""
+    try:
+        file_size = max(0, int(path.stat().st_size))
+    except OSError:
+        return 0
+    suffix = path.suffix.lower()
+    if suffix in {".epub", ".zip", ".docx"}:
+        try:
+            with zipfile.ZipFile(path) as archive:
+                if suffix == ".epub":
+                    unpacked = sum(
+                        max(0, int(info.file_size or 0))
+                        for info in archive.infolist()
+                        if not info.is_dir() and Path(info.filename).suffix.lower() in {".xhtml", ".html", ".htm", ".xml", ".opf", ".ncx"}
+                    )
+                    return max(file_size * 2, unpacked * 3)
+                unpacked = sum(max(0, int(info.file_size or 0)) for info in archive.infolist() if not info.is_dir())
+                return max(file_size * 2, unpacked * 3)
+        except (OSError, zipfile.BadZipFile):
+            return file_size * 3
+    if suffix in {".fb2", ".txt", ".md"}:
+        return file_size * 4
+    if suffix == ".pdf":
+        return file_size * 3
+    return file_size * 3
+
+
 def _format_mb(value: int) -> str:
     return f"{max(0, int(value)) / 1024 / 1024:.1f} МБ"
 
@@ -110,6 +246,227 @@ def _is_no_space_error(exc: BaseException) -> bool:
 def _ensure_library_storage_root() -> None:
     DEFAULT_STORAGE_ROOT.mkdir(parents=True, exist_ok=True)
     IMPORT_WORK_ROOT.mkdir(parents=True, exist_ok=True)
+
+
+def _portable_library_path(path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(Path.cwd().resolve()))
+    except (OSError, ValueError):
+        try:
+            return str(path.resolve())
+        except OSError:
+            return str(path)
+
+
+def _is_inside_root(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _move_tree_without_overwrite(
+    source: Path,
+    destination: Path,
+) -> tuple[int, int, dict[str, Path]]:
+    """Merge legacy files without replacing newer data.
+
+    Conflicting legacy files are preserved under a deterministic suffix and the
+    returned map allows SQLite paths to follow the exact migrated file.
+    """
+    if not source.is_dir():
+        return 0, 0, {}
+    moved_files = 0
+    conflict_files = 0
+    path_map: dict[str, Path] = {}
+    for current_root, dir_names, file_names in os.walk(source, topdown=False):
+        current = Path(current_root)
+        relative_dir = current.relative_to(source)
+        target_dir = destination / relative_dir
+        target_dir.mkdir(parents=True, exist_ok=True)
+        for name in file_names:
+            old_path = current / name
+            relative_file = relative_dir / name
+            new_path = target_dir / name
+            try:
+                old_hash = ""
+                if new_path.exists():
+                    same_file = (
+                        old_path.stat().st_size == new_path.stat().st_size
+                        and _sha256(old_path) == _sha256(new_path)
+                    )
+                    if same_file:
+                        old_path.unlink(missing_ok=True)
+                        path_map[str(relative_file)] = new_path
+                        continue
+                    old_hash = _sha256(old_path)
+                    conflict_files += 1
+                    suffix = new_path.suffix
+                    stem = new_path.name[:-len(suffix)] if suffix else new_path.name
+                    new_path = new_path.with_name(f"{stem}.legacy_{old_hash[:10]}{suffix}")
+                    if new_path.exists():
+                        if (
+                            old_path.stat().st_size == new_path.stat().st_size
+                            and old_hash == _sha256(new_path)
+                        ):
+                            old_path.unlink(missing_ok=True)
+                            path_map[str(relative_file)] = new_path
+                            continue
+                        new_path = new_path.with_name(f"{new_path.stem}_{uuid.uuid4().hex[:8]}{new_path.suffix}")
+                try:
+                    os.replace(old_path, new_path)
+                except OSError:
+                    shutil.copy2(old_path, new_path)
+                    old_path.unlink(missing_ok=True)
+                path_map[str(relative_file)] = new_path
+                moved_files += 1
+            except OSError:
+                conflict_files += 1
+        for name in dir_names:
+            try:
+                (current / name).rmdir()
+            except OSError:
+                pass
+    try:
+        source.rmdir()
+    except OSError:
+        pass
+    return moved_files, conflict_files, path_map
+
+
+def _legacy_relative_path(raw_value: Any) -> Path | None:
+    raw = Path(str(raw_value or ""))
+    if not str(raw):
+        return None
+    try:
+        return raw.resolve().relative_to(LEGACY_STORAGE_ROOT.resolve())
+    except (OSError, ValueError):
+        # Old rows can contain an absolute path from a previous container.
+        normalized = str(raw).replace('\\', '/')
+        marker = '/storage/library/'
+        if marker not in normalized:
+            if normalized.startswith('storage/library/'):
+                return Path(normalized[len('storage/library/'):])
+            return None
+        return Path(normalized.split(marker, 1)[1])
+
+
+def _legacy_to_persistent_path(
+    raw_value: Any,
+    migrated_paths: dict[str, Path] | None = None,
+) -> Path | None:
+    relative = _legacy_relative_path(raw_value)
+    if relative is None:
+        return None
+    if migrated_paths:
+        exact = migrated_paths.get(str(relative))
+        if exact is not None and exact.exists():
+            return exact
+    candidate = DEFAULT_STORAGE_ROOT / relative
+    return candidate if candidate.exists() else None
+
+
+async def ensure_persistent_library_storage() -> dict[str, int]:
+    """Move imported books/covers/backups out of ephemeral storage and repair DB paths."""
+    database_key = os.path.abspath(os.path.expanduser(str(settings.DATABASE_PATH)))
+    if database_key in _STORAGE_MIGRATION_READY:
+        return {"moved_files": 0, "skipped_files": 0, "updated_rows": 0}
+    async with _STORAGE_MIGRATION_LOCK:
+        if database_key in _STORAGE_MIGRATION_READY:
+            return {"moved_files": 0, "skipped_files": 0, "updated_rows": 0}
+        await asyncio.to_thread(_ensure_library_storage_root)
+        moved_files = 0
+        skipped_files = 0
+        migrated_paths: dict[str, Path] = {}
+        try:
+            same_root = LEGACY_STORAGE_ROOT.resolve() == DEFAULT_STORAGE_ROOT.resolve()
+        except OSError:
+            same_root = False
+        if not same_root:
+            for name in ("books", "duplicates", "replacement_backups"):
+                moved, skipped, current_paths = await asyncio.to_thread(
+                    _move_tree_without_overwrite,
+                    LEGACY_STORAGE_ROOT / name,
+                    DEFAULT_STORAGE_ROOT / name,
+                )
+                moved_files += moved
+                skipped_files += skipped
+                migrated_paths.update({str(Path(name) / key): value for key, value in current_paths.items()})
+
+        updated_rows = 0
+        async with connect() as db:
+            # Books are the load-bearing paths used by the reader and cover recovery.
+            cur = await db.execute(
+                "SELECT id, source_file_name, cover_path FROM books "
+                "WHERE COALESCE(source_file_name, '')!='' OR COALESCE(cover_path, '')!=''"
+            )
+            for row in await cur.fetchall():
+                source_path = _legacy_to_persistent_path(row["source_file_name"], migrated_paths)
+                cover_path = _legacy_to_persistent_path(row["cover_path"], migrated_paths)
+                values: list[Any] = []
+                sets: list[str] = []
+                if source_path is not None:
+                    sets.append("source_file_name=?")
+                    values.append(_portable_library_path(source_path))
+                if cover_path is not None:
+                    sets.append("cover_path=?")
+                    values.append(_portable_library_path(cover_path))
+                if sets:
+                    values.append(int(row["id"]))
+                    await db.execute(f"UPDATE books SET {', '.join(sets)} WHERE id=?", values)
+                    updated_rows += 1
+
+            cur = await db.execute(
+                "SELECT id, candidate_dir FROM library_import_duplicates "
+                "WHERE COALESCE(candidate_dir, '')!=''"
+            )
+            for row in await cur.fetchall():
+                candidate = _legacy_to_persistent_path(row["candidate_dir"], migrated_paths)
+                if candidate is not None:
+                    await db.execute(
+                        "UPDATE library_import_duplicates SET candidate_dir=? WHERE id=?",
+                        (_portable_library_path(candidate), int(row["id"])),
+                    )
+                    updated_rows += 1
+
+            cur = await db.execute(
+                "SELECT batch_id, book_id, backup_path, new_storage_path "
+                "FROM library_import_replacement_backups"
+            )
+            for row in await cur.fetchall():
+                backup = _legacy_to_persistent_path(row["backup_path"], migrated_paths)
+                new_storage = _legacy_to_persistent_path(row["new_storage_path"], migrated_paths)
+                sets: list[str] = []
+                values: list[Any] = []
+                if backup is not None:
+                    sets.append("backup_path=?")
+                    values.append(_portable_library_path(backup))
+                if new_storage is not None:
+                    sets.append("new_storage_path=?")
+                    values.append(_portable_library_path(new_storage))
+                if sets:
+                    values.extend((int(row["batch_id"]), int(row["book_id"])))
+                    await db.execute(
+                        f"UPDATE library_import_replacement_backups SET {', '.join(sets)} "
+                        "WHERE batch_id=? AND book_id=?",
+                        values,
+                    )
+                    updated_rows += 1
+            if updated_rows:
+                await db.commit()
+
+        _STORAGE_MIGRATION_READY.add(database_key)
+        if moved_files or skipped_files or updated_rows:
+            logger.info(
+                "Persistent library storage migration: moved_files=%s skipped_files=%s updated_rows=%s root=%s",
+                moved_files, skipped_files, updated_rows, DEFAULT_STORAGE_ROOT,
+            )
+        return {
+            "moved_files": moved_files,
+            "skipped_files": skipped_files,
+            "updated_rows": updated_rows,
+        }
 
 
 def cleanup_stale_import_work(*, max_age_seconds: int = STALE_IMPORT_WORK_SECONDS) -> int:
@@ -139,10 +496,15 @@ def cleanup_stale_import_work(*, max_age_seconds: int = STALE_IMPORT_WORK_SECOND
 
 def _ensure_library_free_space(required_bytes: int, *, operation: str) -> None:
     _ensure_library_storage_root()
-    try:
-        free = int(shutil.disk_usage(DEFAULT_STORAGE_ROOT).free)
-    except OSError:
+    free_values: list[int] = []
+    for root in (DEFAULT_STORAGE_ROOT, IMPORT_WORK_ROOT):
+        try:
+            free_values.append(int(shutil.disk_usage(root).free))
+        except OSError:
+            continue
+    if not free_values:
         return
+    free = min(free_values)
     required = max(0, int(required_bytes))
     if free < required:
         raise LibraryImportStorageError(
@@ -609,6 +971,7 @@ async def ensure_library_schema() -> None:
         await db.execute("CREATE INDEX IF NOT EXISTS idx_books_import_batch ON books(import_batch_id)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_books_import_hash ON books(import_file_hash)")
         await db.commit()
+    await ensure_persistent_library_storage()
 
 
 def _normalize_person_name(value: str) -> str:
@@ -884,6 +1247,18 @@ async def import_library_zip(
         folders = folders[:max_books]
 
     for processed_index, folder_info in enumerate(folders, 1):
+        # Drop references retained by the previous iteration before parsing the
+        # next book. This is critical on the 256 MB Bothost plan.
+        chapters = None
+        metadata = None
+        embedded = None
+        files = None
+        book_files = None
+        cover_files = None
+        await _run_blocking(_release_import_memory)
+        _ensure_import_memory_headroom(
+            operation=f"обработки книги {processed_index} из {len(folders)}"
+        )
         folder_name = str(folder_info["name"])
         current_folder = folder_name
         current_title = ""
@@ -962,6 +1337,11 @@ async def import_library_zip(
 
                 book_path = sorted(book_files, key=lambda p: (p.suffix.lower() != ".epub", p.name.lower()))[0]
                 cover_path = sorted(cover_files, key=lambda p: p.name.lower())[0]
+                estimated_parse_memory = await _run_blocking(_estimate_book_parse_memory, book_path)
+                _ensure_import_memory_headroom(
+                    operation=f"разбора книги «{item.title[:80]}»",
+                    expected_extra_bytes=estimated_parse_memory,
+                )
                 file_hash = await _run_blocking(_sha256, book_path)
                 normalized_title = " ".join(title.casefold().replace("ё", "е").split())
                 normalized_author = " ".join(author.casefold().replace("ё", "е").split())
@@ -1195,6 +1575,12 @@ async def import_library_zip(
                         ),
                     )
                     book_id = int(cur.lastrowid)
+                    canonical_cover = await _run_blocking(_mirror_import_cover, book_id, stored_cover)
+                    if canonical_cover:
+                        await db.execute(
+                            "UPDATE books SET cover_path=?, updated_at=? WHERE id=?",
+                            (canonical_cover, now, book_id),
+                        )
                     await db.execute(
                         """INSERT INTO book_rights(
                                book_id, creator_id, rights_holder_id, license_type, revenue_mode,
@@ -1249,6 +1635,13 @@ async def import_library_zip(
                     ) from exc
                 raise
 
+    chapters = None
+    metadata = None
+    embedded = None
+    files = None
+    book_files = None
+    cover_files = None
+    await _run_blocking(_release_import_memory)
     await _finish_batch(batch_id, result, total_found)
     current_folder = ""
     current_title = ""
@@ -2104,6 +2497,8 @@ async def _replace_book_from_candidate(
         (final_dir / "description.txt").write_text(description, encoding="utf-8")
 
     await _run_blocking(store_replacement_files)
+    canonical_cover = await _run_blocking(_mirror_import_cover, int(existing_book_id), stored_cover)
+    effective_cover_path = canonical_cover or _portable_project_path(stored_cover)
 
     pricing = str(metadata.get("free_or_paid") or "free").strip().lower()
     price_stars = max(0, int(metadata.get("price_stars") or 0))
@@ -2162,7 +2557,7 @@ async def _replace_book_from_candidate(
                 title,
                 description,
                 str(metadata.get("age_rating") or "12+"),
-                str(stored_cover),
+                effective_cover_path,
                 normalized_title,
                 file_hash,
                 str(stored_book),
