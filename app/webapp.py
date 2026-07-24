@@ -321,6 +321,7 @@ from app.services.publication import post_book_to_channel
 from app.permissions import PERMISSION_BY_CODE
 from app.keyboards import author_book_card_menu
 from app.services.diagnostics import diagnostics_summary
+from app.services.owner_diagnostics import diagnostics_brief, last_owner_diagnostics, run_owner_diagnostics
 from app.services.runtime_performance import runtime_performance_report, runtime_readiness
 from app.services.book_assistant import (
     answer_question as answer_book_question,
@@ -1105,6 +1106,28 @@ def create_app() -> FastAPI:
 
         application.state.startup_stage = "ready"
         application.state.startup_ready = True
+        application.state.owner_diagnostics_report = None
+
+        async def startup_owner_diagnostics() -> None:
+            try:
+                report = await run_owner_diagnostics(trigger="startup")
+                application.state.owner_diagnostics_report = report
+                counts = report.get("counts") or {}
+                logger.info(
+                    "Owner diagnostics complete: errors=%s warnings=%s",
+                    int(counts.get("error") or 0),
+                    int(counts.get("warning") or 0),
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Owner diagnostics failed")
+
+        diagnostics_task = asyncio.create_task(
+            startup_owner_diagnostics(),
+            name="voxlyra-owner-diagnostics",
+        )
+        application.state.owner_diagnostics_task = diagnostics_task
         logger.info("Application bootstrap complete")
 
     @asynccontextmanager
@@ -1129,6 +1152,10 @@ def create_app() -> FastAPI:
             if not bootstrap_task.done():
                 bootstrap_task.cancel()
             await asyncio.gather(bootstrap_task, return_exceptions=True)
+            diagnostics_task = getattr(application.state, "owner_diagnostics_task", None)
+            if diagnostics_task is not None and not diagnostics_task.done():
+                diagnostics_task.cancel()
+                await asyncio.gather(diagnostics_task, return_exceptions=True)
             await application.state.tts_sessions.close()
 
     app = FastAPI(title="Вокслира", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
@@ -1138,6 +1165,8 @@ def create_app() -> FastAPI:
     app.state.database_ready = False
     app.state.tts_ready = False
     app.state.startup_elapsed_seconds = 0
+    app.state.owner_diagnostics_report = None
+    app.state.owner_diagnostics_task = None
     # CORS нужен только для явно перечисленных внешних origin. Обычный Mini App
     # работает same-origin и не требует wildcard-доступа ко всем приватным API.
     app.add_middleware(
@@ -7293,6 +7322,20 @@ def create_app() -> FastAPI:
             "book_id": book_id,
         }
 
+    @app.get("/api/control/system-diagnostics")
+    async def api_control_system_diagnostics(
+        fresh: bool = True,
+        x_telegram_init_data: str | None = Header(default=None),
+    ):
+        _, is_owner, _ = await control_session(x_telegram_init_data)
+        if not is_owner:
+            raise HTTPException(status_code=403, detail="Диагностика доступна только владельцу.")
+        report = getattr(app.state, "owner_diagnostics_report", None) or last_owner_diagnostics()
+        if fresh or not report:
+            report = await run_owner_diagnostics(trigger="manual")
+            app.state.owner_diagnostics_report = report
+        return {"ok": True, "report": report}
+
     @app.get("/api/control/dashboard")
     async def api_control_dashboard(x_telegram_init_data: str | None = Header(default=None)):
         user, is_owner, permissions = await control_session(x_telegram_init_data)
@@ -7329,6 +7372,8 @@ def create_app() -> FastAPI:
             result["premium"] = await get_premium_owner_summary()
             result["catalog_promotions_active"] = len(await list_catalog_promotions(limit=100, active_only=True))
             result["monetization_integrity"] = await get_monetization_integrity_report()
+            report = getattr(app.state, "owner_diagnostics_report", None) or last_owner_diagnostics()
+            result["system_diagnostics"] = diagnostics_brief(report)
         if is_owner or permissions.intersection({"view_finance", "refunds", "payouts"}):
             result["finance"] = await get_platform_finance_summary()
             rub = await get_rub_control_summary()

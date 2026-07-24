@@ -106,6 +106,9 @@
       sections.push(sectionButton('premium', 'Premium', 'Цена, включение и статистика подписки', data.premium?.active_users || 0));
       sections.push(sectionButton('achievements', 'Награды и уровни', 'Очки, особые награды и сезонные марафоны', 0));
       sections.push(sectionButton('catalog_promotions', 'Топ каталога', 'Честная ротация: ты бесплатно, авторы за Stars', data.catalog_promotions_active || 0));
+      const diagnostics = data.system_diagnostics || {};
+      const diagnosticsProblems = Number(diagnostics.errors || 0) + Number(diagnostics.warnings || 0);
+      sections.push(sectionButton('system_diagnostics', 'Диагностика системы', 'Автопроверка базы, книг, обложек и очередей после Redeploy', diagnosticsProblems));
     }
     $('controlSections').innerHTML = sections.length ? sections.join('') : '<article class="empty-card"><h3>Нет доступных действий</h3><p>Права можно изменить в меню владельца.</p></article>';
 
@@ -693,6 +696,64 @@
     }).join('') : '<article class="empty-card"><h3>Активных сессий нет</h3><p>События появятся после запуска озвучивания читателем.</p></article>';
     const eventCards = recentEvents.slice(0, 12).map((item) => `<article class="control-item"><div class="control-item-main"><span>${esc(item.event || '')}</span><h3>Глава ${Number(item.chapter_id || 0)} · фрагмент ${Number(item.segment_index ?? 0) + 1}</h3><p>${new Date(Number(item.at_ms || 0)).toLocaleString('ru-RU')}</p><small>${esc(JSON.stringify(item.details || {}))}</small></div></article>`).join('') || '<article class="empty-card"><p>Событий плеера пока нет.</p></article>';
     $('workspaceList').innerHTML = `<article class="control-item payment-settings-card"><div class="control-item-main"><span>Локальный Vosk</span><h3>Женский: ${esc(selected.female ?? '—')} · Мужской: ${esc(selected.male ?? '—')}</h3><p>Источник выбора: ${esc(profile.source || 'по умолчанию')} · проверка: ${esc(benchmark.status || 'ожидается')}</p><small>${esc(benchmark.error || 'URL и API-ключ не требуются.')}</small></div><div class="control-actions">${actionButton('Проверить все голоса заново', 'ttsbenchmark:run:1', 'approve')}</div></article><article class="control-item payment-settings-card"><div class="control-item-main"><span>Очередь</span><h3>${Number(queue.running || 0)} выполняется · ${Number(queue.queued || 0)} ожидает</h3><p>Готово: ${Number(queue.completed || 0)} · ошибок: ${Number(queue.failed || 0)} · повторно использовано: ${Number(queue.deduplicated || 0)}</p><small>Рабочих процессов: ${Number(queue.workers || 0)} · контракт плеера: ${esc(data.player_contract_version || '—')}</small></div></article>${(data.providers || []).map(providerBadge).join('')}<div class="section-title"><div><span class="eyebrow">Живые сессии</span><h2>Переходы и восстановления</h2><p>Здесь видно, остановился ли плеер, был ли переход между главами и сработало ли автоматическое восстановление.</p></div></div>${activeCards}<div class="section-title"><div><span class="eyebrow">Последние события</span><h2>Журнал плеера</h2></div></div>${eventCards}<div class="section-title"><div><span class="eyebrow">Образцы</span><h2>Пять русских голосов</h2><p>Автовыбор оценивает стабильность. Окончательный тембр можно выбрать после прослушивания.</p></div></div>${sampleCards}`;
+  }
+
+  async function loadSystemDiagnostics(fresh = true) {
+    openWorkspace('Диагностика системы', 'Безопасная проверка после Redeploy. Ничего не публикует, не удаляет и не меняет.', 'Владелец');
+    $('workspaceTabs').innerHTML = '<button type="button" id="diagnosticsRefresh">Проверить заново</button><button type="button" id="diagnosticsDownload" class="secondary">Скачать JSON</button>';
+    $('workspaceList').innerHTML = '<article class="empty-card"><h3>Проверяем систему…</h3><p>Читаем SQLite, статусы книг, очереди модерации, обложки, реакции и уведомления.</p></article>';
+    const data = await apiFetch(`/api/control/system-diagnostics?fresh=${fresh ? 'true' : 'false'}`);
+    const report = data.report || {};
+    state.systemDiagnosticsReport = report;
+    const counts = report.counts || {};
+    const statusLabels = { ok: 'Исправно', warning: 'Нужно проверить', error: 'Ошибка' };
+    const statusIcons = { ok: '✓', warning: '!', error: '×' };
+    const categoryOrder = [];
+    const categoryMap = new Map();
+    (report.items || []).forEach((item) => {
+      const category = String(item.category || 'Прочее');
+      if (!categoryMap.has(category)) { categoryMap.set(category, []); categoryOrder.push(category); }
+      categoryMap.get(category).push(item);
+    });
+    const affectedHtml = (items) => {
+      if (!Array.isArray(items) || !items.length) return '';
+      return `<div class="library-evidence"><strong>Затронутые записи:</strong>${items.slice(0, 12).map((entry) => {
+        const bookId = Number(entry.book_id || 0);
+        const chapterId = Number(entry.chapter_id || 0);
+        const title = entry.title || (bookId ? `Книга #${bookId}` : chapterId ? `Глава #${chapterId}` : JSON.stringify(entry));
+        const details = Object.entries(entry).filter(([key]) => !['title'].includes(key)).map(([key, value]) => `${key}: ${value ?? '—'}`).join(' · ');
+        const link = bookId ? `<button type="button" class="button-link secondary compact-button" data-action="book:details:${bookId}">Открыть книгу</button>` : '';
+        return `<div><span>${esc(title)}</span>${details ? `<code>${esc(details)}</code>` : ''}${link}</div>`;
+      }).join('')}</div>`;
+    };
+    const groups = categoryOrder.map((category) => {
+      const cards = categoryMap.get(category).map((item) => {
+        const status = String(item.status || 'warning');
+        const count = Number(item.affected_count || 0);
+        return `<article class="control-item ${status === 'error' ? 'danger-card' : ''}">
+          <div class="control-item-main"><span>${esc(statusIcons[status] || '!')} ${esc(statusLabels[status] || status)}${count ? ` · ${count}` : ''}</span><h3>${esc(item.label || item.code)}</h3><p>${esc(item.detail || '')}</p>${item.hint ? `<small>${esc(item.hint)}</small>` : ''}${affectedHtml(item.affected)}</div>
+        </article>`;
+      }).join('');
+      return `<div class="section-title"><div><span class="eyebrow">Проверка</span><h2>${esc(category)}</h2></div></div>${cards}`;
+    }).join('');
+    const overall = String(report.status || 'warning');
+    $('workspaceList').innerHTML = `<div class="control-stat-grid">
+      ${statCard('Исправно', Number(counts.ok || 0))}
+      ${statCard('Предупреждения', Number(counts.warning || 0))}
+      ${statCard('Ошибки', Number(counts.error || 0))}
+      ${statCard('Всего проверок', Number(report.total || 0))}
+    </div><article class="control-item ${overall === 'error' ? 'danger-card' : ''}"><div class="control-item-main"><span>${esc(report.trigger === 'startup' ? 'Автопроверка после запуска' : 'Ручная проверка')}</span><h3>${esc(statusLabels[overall] || overall)}</h3><p>${esc(report.build || '')}</p><small>Завершено: ${esc(dateText(report.completed_at) || 'сейчас')}. Диагностика работает только на чтение и не меняет данные.</small></div></article>${groups}`;
+    $('diagnosticsRefresh')?.addEventListener('click', () => loadSystemDiagnostics(true).catch(handleError));
+    $('diagnosticsDownload')?.addEventListener('click', () => {
+      const blob = new Blob([JSON.stringify(state.systemDiagnosticsReport || {}, null, 2)], { type: 'application/json;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = `voxlyra_diagnostics_${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(anchor);
+      anchor.click(); anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    });
   }
 
   async function loadPaymentSettings() {
@@ -1564,7 +1625,7 @@
     const section = event.target.closest('[data-section]');
     if (section) {
       state.active = section.dataset.section;
-      const loaders = { books: loadBooks, graphic_pages: loadGraphicPages, comments: loadComments, complaints: loadComplaints, refunds: loadRefunds, payouts: loadPayouts, rub_profiles: loadRubProfiles, rub_payouts: loadRubPayouts, tts: loadTtsDiagnostics, payments: loadPaymentSettings, premium: loadPremiumSettings, achievements: loadAchievementSettings, catalog_promotions: loadCatalogPromotions, access: loadAccessManagement, library_import: loadLibraryImport };
+      const loaders = { books: loadBooks, graphic_pages: loadGraphicPages, comments: loadComments, complaints: loadComplaints, refunds: loadRefunds, payouts: loadPayouts, rub_profiles: loadRubProfiles, rub_payouts: loadRubPayouts, tts: loadTtsDiagnostics, payments: loadPaymentSettings, premium: loadPremiumSettings, achievements: loadAchievementSettings, catalog_promotions: loadCatalogPromotions, system_diagnostics: loadSystemDiagnostics, access: loadAccessManagement, library_import: loadLibraryImport };
       loaders[state.active]?.().catch(handleError);
       return;
     }
@@ -1607,6 +1668,10 @@
     if (requested === 'catalog_promotions' && data.role === 'owner') {
       state.active = 'catalog_promotions';
       loadCatalogPromotions().catch(handleError);
+    }
+    if (requested === 'system_diagnostics' && data.role === 'owner') {
+      state.active = 'system_diagnostics';
+      loadSystemDiagnostics(false).catch(handleError);
     }
     if (requested === 'access' && can('grant_access')) {
       state.active = 'access';
