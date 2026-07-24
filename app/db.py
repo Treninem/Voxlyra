@@ -1580,8 +1580,25 @@ async def list_books_for_moderation() -> list[aiosqlite.Row]:
                    (SELECT COALESCE(SUM(gc.pages_count), 0) FROM graphic_chapters gc WHERE gc.book_id=b.id AND gc.status!='deleted') AS graphic_pages_count
             FROM books b
             LEFT JOIN author_profiles a ON a.id = b.author_id
-            WHERE b.publication_status = 'review'
-            ORDER BY b.id ASC
+            WHERE b.publication_status='review'
+               OR EXISTS (
+                    SELECT 1 FROM book_moderation_queue q
+                    WHERE q.book_id=b.id AND q.status='pending'
+               )
+               OR (
+                    b.publication_status='published'
+                    AND (
+                        EXISTS (
+                            SELECT 1 FROM chapters pc
+                            WHERE pc.book_id=b.id AND pc.status IN ('draft','review')
+                        )
+                        OR EXISTS (
+                            SELECT 1 FROM graphic_chapters pgc
+                            WHERE pgc.book_id=b.id AND pgc.status IN ('draft','review')
+                        )
+                    )
+               )
+            ORDER BY CASE WHEN b.publication_status='review' THEN 0 ELSE 1 END, b.id ASC
             """
         )
         return await cur.fetchall()
@@ -1725,7 +1742,13 @@ async def get_platform_stats() -> dict[str, int]:
             "users": "SELECT COUNT(*) FROM users",
             "authors": "SELECT COUNT(*) FROM author_profiles",
             "books": "SELECT COUNT(*) FROM books",
-            "books_review": "SELECT COUNT(*) FROM books WHERE publication_status='review'",
+            "books_review": """SELECT COUNT(DISTINCT b.id) FROM books b
+                LEFT JOIN book_moderation_queue q ON q.book_id=b.id AND q.status='pending'
+                WHERE b.publication_status='review' OR q.book_id IS NOT NULL
+                   OR (b.publication_status='published' AND (
+                        EXISTS (SELECT 1 FROM chapters c WHERE c.book_id=b.id AND c.status IN ('draft','review'))
+                        OR EXISTS (SELECT 1 FROM graphic_chapters gc WHERE gc.book_id=b.id AND gc.status IN ('draft','review'))
+                   ))""",
             "books_published": "SELECT COUNT(*) FROM books WHERE publication_status='published'",
             "chapters": "SELECT COUNT(*) FROM chapters",
             "graphic_chapters": "SELECT COUNT(*) FROM graphic_chapters",
@@ -2654,7 +2677,7 @@ async def add_manual_chapter(book_id: int, title: str, text: str, is_free: bool 
     now = utc_now()
     async with connect() as db:
         cur = await db.execute(
-            "SELECT COALESCE(MAX(number), 0) + 1 AS next_number FROM chapters WHERE book_id=? AND status != 'deleted'",
+            "SELECT COALESCE(MAX(number), 0) + 1 AS next_number FROM chapters WHERE book_id=?",
             (book_id,),
         )
         row = await cur.fetchone()
@@ -2687,7 +2710,10 @@ async def upsert_imported_chapters(
     async with connect() as db:
         cur = await db.execute("SELECT publication_status FROM books WHERE id=?", (book_id,))
         book = await cur.fetchone()
-        target_status = "published" if book and book["publication_status"] == "published" else "draft"
+        # New graphic content must pass the same moderation workflow as a new
+        # text chapter.  The parent book may remain published, but the new
+        # graphic chapter stays hidden in ``draft`` until approval.
+        target_status = "draft"
         for chapter in chapters:
             if isinstance(chapter, dict):
                 number = int(chapter["number"])
@@ -2860,7 +2886,7 @@ async def add_audio_chapter(
     now = utc_now()
     async with connect() as db:
         cur = await db.execute(
-            "SELECT COALESCE(MAX(number), 0) + 1 AS next_number FROM audio_chapters WHERE book_id=? AND status != 'deleted'",
+            "SELECT COALESCE(MAX(number), 0) + 1 AS next_number FROM audio_chapters WHERE book_id=?",
             (book_id,),
         )
         row = await cur.fetchone()
@@ -3143,38 +3169,111 @@ async def _ensure_v179_schema(db: aiosqlite.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_notification_deliveries_event ON notification_deliveries(event_key);
         """
     )
-    # Ранние версии публиковали книгу, но могли оставить её главы черновиками.
+    # Do not auto-publish draft content merely because the parent book is
+    # published.  Draft/review now explicitly means "awaiting content check".
+    # The former unconditional repair ran on every restart and could bypass
+    # moderation after an author added a new chapter.
     await db.execute(
-        "UPDATE chapters SET status='published' WHERE status='draft' AND book_id IN "
-        "(SELECT id FROM books WHERE publication_status='published')"
-    )
-    await db.execute(
-        "UPDATE audio_chapters SET status='published' WHERE status='draft' AND book_id IN "
-        "(SELECT id FROM books WHERE publication_status='published')"
+        "INSERT INTO settings(key,value,updated_at) VALUES('draft_content_requires_approval','1',?) "
+        "ON CONFLICT(key) DO UPDATE SET value='1', updated_at=excluded.updated_at",
+        (utc_now(),),
     )
 
 
-async def publish_book_content(book_id: int) -> dict[str, int]:
-    """Публикует подготовленные главы вместе с первой публикацией книги без массовой рассылки."""
+async def list_pending_book_content(book_id: int) -> dict[str, list[dict[str, Any]]]:
+    """Return content waiting for first publication or re-publication approval.
+
+    ``draft`` means newly added content. ``review`` means an already published
+    item whose text/pages were changed and must be checked again.  Keeping
+    those states separate lets the notification layer announce only genuinely
+    new chapters and never turn an edit into a fake "new chapter" event.
+    """
+    result: dict[str, list[dict[str, Any]]] = {"chapters": [], "graphics": [], "audio": []}
+    async with connect() as db:
+        cur = await db.execute(
+            "SELECT id, book_id, number, title, status, created_at, updated_at "
+            "FROM chapters WHERE book_id=? AND status IN ('draft','review') ORDER BY number, id",
+            (int(book_id),),
+        )
+        result["chapters"] = [dict(row) for row in await cur.fetchall()]
+        cur = await db.execute(
+            "SELECT id, book_id, number, title, status, created_at, updated_at "
+            "FROM graphic_chapters WHERE book_id=? AND status IN ('draft','review') ORDER BY number, id",
+            (int(book_id),),
+        )
+        result["graphics"] = [dict(row) for row in await cur.fetchall()]
+        cur = await db.execute(
+            "SELECT id, book_id, number, title, status, created_at, updated_at "
+            "FROM audio_chapters WHERE book_id=? AND status IN ('draft','review') ORDER BY number, id",
+            (int(book_id),),
+        )
+        result["audio"] = [dict(row) for row in await cur.fetchall()]
+    return result
+
+
+async def has_pending_book_content(book_id: int) -> bool:
+    pending = await list_pending_book_content(int(book_id))
+    return any(pending.values())
+
+
+async def publish_book_content(book_id: int) -> dict[str, Any]:
+    """Publish approved pending content without creating notification side effects.
+
+    The caller receives the exact IDs and the previous state of every item, so
+    it can notify readers only about genuinely new chapters (``draft``) and not
+    about ordinary edits (``review``).
+    """
     now = utc_now()
     async with connect() as db:
+        cur = await db.execute(
+            "SELECT id, number, title, status FROM chapters "
+            "WHERE book_id=? AND status IN ('draft','review') ORDER BY number, id",
+            (int(book_id),),
+        )
+        pending_chapters = [dict(row) for row in await cur.fetchall()]
+        cur = await db.execute(
+            "SELECT id, number, title, status FROM graphic_chapters "
+            "WHERE book_id=? AND status IN ('draft','review') ORDER BY number, id",
+            (int(book_id),),
+        )
+        pending_graphics = [dict(row) for row in await cur.fetchall()]
+        cur = await db.execute(
+            "SELECT id, number, title, status FROM audio_chapters "
+            "WHERE book_id=? AND status IN ('draft','review') ORDER BY number, id",
+            (int(book_id),),
+        )
+        pending_audio = [dict(row) for row in await cur.fetchall()]
+
         chapters = await db.execute(
-            "UPDATE chapters SET status='published', updated_at=? WHERE book_id=? AND status='draft'",
+            "UPDATE chapters SET status='published', updated_at=? "
+            "WHERE book_id=? AND status IN ('draft','review')",
             (now, int(book_id)),
         )
         graphics = await db.execute(
-            "UPDATE graphic_chapters SET status='published', updated_at=? WHERE book_id=? AND status='draft'",
+            "UPDATE graphic_chapters SET status='published', updated_at=? "
+            "WHERE book_id=? AND status IN ('draft','review')",
             (now, int(book_id)),
         )
         audio = await db.execute(
-            "UPDATE audio_chapters SET status='published', updated_at=? WHERE book_id=? AND status='draft'",
+            "UPDATE audio_chapters SET status='published', updated_at=? "
+            "WHERE book_id=? AND status IN ('draft','review')",
             (now, int(book_id)),
         )
         await db.commit()
-        result = {"chapters": int(chapters.rowcount), "audio": int(audio.rowcount)}
-        if int(graphics.rowcount) > 0:
-            result["graphics"] = int(graphics.rowcount)
-        return result
+        return {
+            "chapters": int(chapters.rowcount or 0),
+            "graphics": int(graphics.rowcount or 0),
+            "audio": int(audio.rowcount or 0),
+            "pending_chapters": pending_chapters,
+            "pending_graphics": pending_graphics,
+            "pending_audio": pending_audio,
+            "new_chapter_ids": [int(item["id"]) for item in pending_chapters if item.get("status") == "draft"],
+            "edited_chapter_ids": [int(item["id"]) for item in pending_chapters if item.get("status") == "review"],
+            "new_graphic_ids": [int(item["id"]) for item in pending_graphics if item.get("status") == "draft"],
+            "edited_graphic_ids": [int(item["id"]) for item in pending_graphics if item.get("status") == "review"],
+            "new_audio_ids": [int(item["id"]) for item in pending_audio if item.get("status") == "draft"],
+            "edited_audio_ids": [int(item["id"]) for item in pending_audio if item.get("status") == "review"],
+        }
 
 
 async def list_book_notification_recipients(
@@ -6430,7 +6529,11 @@ async def get_control_queue_counts() -> dict[str, int]:
     """Сводка очередей без персональных и служебных данных."""
     async with connect() as db:
         queries = {
-            "books_review": "SELECT COUNT(*) FROM books WHERE publication_status='review'",
+            "books_review": """SELECT COUNT(DISTINCT b.id) FROM books b
+                LEFT JOIN book_moderation_queue q ON q.book_id=b.id AND q.status='pending'
+                WHERE b.publication_status='review' OR q.book_id IS NOT NULL
+                   OR EXISTS (SELECT 1 FROM chapters c WHERE c.book_id=b.id AND c.status IN ('draft','review'))
+                   OR EXISTS (SELECT 1 FROM graphic_chapters gc WHERE gc.book_id=b.id AND gc.status IN ('draft','review'))""",
             "complaints_new": "SELECT COUNT(*) FROM complaints WHERE status='new'",
             "refunds_new": "SELECT COUNT(*) FROM refund_requests WHERE status='new'",
             "payouts_new": "SELECT COUNT(*) FROM author_payout_requests WHERE status='new'",
@@ -6517,7 +6620,7 @@ async def list_due_book_moderation_reminders(limit: int = 25) -> list[aiosqlite.
             LEFT JOIN author_profiles a ON a.id=b.author_id
             LEFT JOIN users u ON u.id=a.user_id
             WHERE q.status='pending'
-              AND b.publication_status='review'
+              AND b.publication_status!='deleted'
               AND q.next_reminder_at IS NOT NULL
               AND q.next_reminder_at<=?
             ORDER BY q.next_reminder_at ASC
@@ -7331,14 +7434,17 @@ async def create_graphic_chapter_record(
     now = utc_now()
     async with connect() as db:
         cur = await db.execute(
-            "SELECT COALESCE(MAX(number), 0) + 1 AS next_number FROM graphic_chapters WHERE book_id=? AND status!='deleted'",
+            "SELECT COALESCE(MAX(number), 0) + 1 AS next_number FROM graphic_chapters WHERE book_id=?",
             (int(book_id),),
         )
         row = await cur.fetchone()
         number = int(row["next_number"] if row else 1)
         cur = await db.execute("SELECT publication_status FROM books WHERE id=?", (int(book_id),))
         book = await cur.fetchone()
-        target_status = "published" if book and book["publication_status"] == "published" else "draft"
+        # New graphic content never bypasses moderation merely because the
+        # parent book is already live. The book stays in the catalogue while
+        # this chapter remains hidden until approval.
+        target_status = "draft"
         cur = await db.execute(
             """
             INSERT INTO graphic_chapters(
@@ -10412,7 +10518,7 @@ async def add_manual_chapter(book_id: int, title: str, text: str, is_free: bool 
             chapter_price = 0 if chapter_free else requested_price
 
         cur = await db.execute(
-            "SELECT COALESCE(MAX(number), 0) + 1 AS next_number FROM chapters WHERE book_id=? AND status!='deleted'",
+            "SELECT COALESCE(MAX(number), 0) + 1 AS next_number FROM chapters WHERE book_id=?",
             (int(book_id),),
         )
         row = await cur.fetchone()
@@ -10460,7 +10566,11 @@ async def upsert_imported_chapters(
         book = await cur.fetchone()
         if not book:
             raise ValueError("Book not found")
-        target_status = "published" if book["publication_status"] == "published" else "draft"
+        published_parent = str(book["publication_status"] or "") == "published"
+        # Imported content for an established book must pass the same check as
+        # manual edits. New chapters stay draft; replacements of published
+        # chapters become review. The parent book remains published.
+        target_status = "draft"
         mode = _normalize_text_pricing_mode(int(book["price_stars"] or 0), str(book["pricing_type"] or ""))
         preview_count = max(0, int(first_free or 0))
         default_price = max(0, min(100000, int(default_price_stars or 0)))
@@ -10496,14 +10606,17 @@ async def upsert_imported_chapters(
                         WHEN chapters.price_stars>0 THEN chapters.price_stars
                         ELSE chapters.saved_price_stars
                     END,
-                    status=CASE WHEN chapters.status='published' THEN 'published' ELSE excluded.status END,
+                    status=CASE
+                        WHEN ?=1 AND chapters.status='published' THEN 'review'
+                        ELSE excluded.status
+                    END,
                     updated_at=excluded.updated_at
                 """,
                 (
                     int(book_id), number, title, text, chapter_free, chapter_price,
                     chapter_free if chapter_price > 0 else None,
                     chapter_price if chapter_price > 0 else None,
-                    target_status, now, now,
+                    target_status, now, now, 1 if published_parent else 0,
                 ),
             )
             if existing is None and target_status == "published":

@@ -199,6 +199,9 @@ from app.db import (
     resolve_book_moderation,
     resolve_comment_complaints,
     publish_book_content,
+    has_pending_book_content,
+    list_pending_book_content,
+    was_book_ever_published,
     list_catalog_books,
     search_catalog_books_page,
     find_hidden_exact_book_matches,
@@ -410,6 +413,7 @@ from app.services.moderation_revisions import (
     get_author_moderation_state,
     get_findings_for_revision_reason,
     get_revision_change_set,
+    get_open_revision_request,
     list_revision_history,
     resolve_revision_request,
 )
@@ -420,8 +424,6 @@ from app.services.notifications import (
     content_hidden_message,
     payout_message,
     refund_message,
-    new_chapter_message,
-    notify_book_followers,
     send_user_notification,
 )
 from app.services.web_import_store import (
@@ -667,22 +669,70 @@ async def _commit_graphic_chapter(
     return _row_to_dict(chapter) if chapter else {"id": chapter_id, "pages_count": len(rows)}
 
 
-async def _notify_graphic_chapter_if_published(*, book_id: int, chapter: dict[str, Any], actor_user_id: int) -> dict[str, Any] | None:
-    chapter_id = int(chapter.get("id") or 0)
-    if chapter_id <= 0:
+async def _start_published_content_revision(
+    *,
+    book_id: int,
+    actor_user_id: int,
+    reason: str,
+    source: str,
+) -> bool:
+    """Capture an approved baseline before changing content of a live book.
+
+    Returning ``True`` means the parent book is currently published.  The book
+    itself is never moved out of the catalogue; only the changed chapter is
+    switched to ``review`` (or a new chapter remains ``draft``).
+    """
+    book = await get_book(int(book_id))
+    published = bool(book and str(book["publication_status"] or "") == "published")
+    if published and not await get_open_revision_request(int(book_id)):
+        await create_revision_request(
+            int(book_id),
+            actor_user_id=int(actor_user_id),
+            reason=str(reason),
+            finding_ids=(),
+            requires_manual_confirmation=False,
+            source=str(source),
+        )
+    return published
+
+
+async def _finish_existing_graphic_content_change(
+    *,
+    book_id: int,
+    graphic_chapter_id: int,
+    actor_user_id: int,
+    actor_telegram_id: int,
+    source: str,
+    published_parent: bool,
+) -> dict[str, Any] | None:
+    """Moderate an edited graphic chapter without republishing the book."""
+    if not published_parent:
         return None
-    current = await get_graphic_chapter(chapter_id)
-    book = await get_book(book_id)
-    if not current or not book or str(book["publication_status"] or "") != "published" or str(current["status"] or "") != "published":
-        return None
-    notification = await notify_book_followers(
-        book_id=book_id,
-        event_key=f"graphic-chapter:{chapter_id}:published",
-        category="chapters",
-        text=new_chapter_message(str(book["title"] or "Произведение"), str(current["title"] or "Новая глава"), int(current["number"] or 0)),
-    )
-    await add_audit(actor_user_id, "graphic_chapter_followers_notified_web", "graphic_chapter", str(chapter_id), None, str(notification))
-    return notification
+    await set_graphic_chapter_status(int(graphic_chapter_id), "review")
+    if not settings.BOT_TOKEN:
+        return {
+            "status": "review",
+            "channel_status": "",
+            "channel_message": "",
+            "review_reasons": "Проверка ожидает запуска бота.",
+        }
+    delivery_bot = Bot(token=settings.BOT_TOKEN)
+    try:
+        result = await finish_book_content_workflow(
+            bot=delivery_bot,
+            book_id=int(book_id),
+            actor_user_id=int(actor_user_id),
+            actor_telegram_id=int(actor_telegram_id),
+            source=str(source),
+        )
+        return {
+            "status": result.workflow_status,
+            "channel_status": result.channel_status,
+            "channel_message": result.channel_message,
+            "review_reasons": result.duplicate_text,
+        }
+    finally:
+        await delivery_bot.session.close()
 
 
 def _graphic_page_payloads(*, user_id: int, chapter_id: int, pages: list[Any], include_ids: bool = False) -> list[dict[str, Any]]:
@@ -5998,25 +6048,24 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="Введите название главы.")
         if len(text) < 100:
             raise HTTPException(status_code=400, detail="Текст главы слишком короткий.")
+        # Capture the last approved version before adding content to an already
+        # published book.  The book itself stays in the catalogue; only the new
+        # chapter waits in ``draft`` until the content check is finished.
+        if book and str(book["publication_status"] or "") == "published" and not await get_open_revision_request(book_id):
+            await create_revision_request(
+                book_id,
+                actor_user_id=user.app_user_id,
+                reason="Добавлено новое содержимое. Проверяется только новая глава.",
+                finding_ids=(),
+                requires_manual_confirmation=False,
+                source="miniapp_content_change",
+            )
         chapter_id = await add_manual_chapter(
             book_id, title[:160], text,
             is_free=access_mode == "free",
             price_stars=price if access_mode == "chapter" else 0,
         )
-        book = await get_book(book_id)
-        if book and book["publication_status"] == "published":
-            await set_chapter_status(chapter_id, "published")
         await add_audit(user.app_user_id, "chapter_created_web", "chapter", str(chapter_id), None, str(book_id))
-        chapter = await get_chapter(chapter_id)
-        notification = None
-        if chapter and chapter["publication_status"] == "published" and chapter["status"] == "published":
-            notification = await notify_book_followers(
-                book_id=book_id,
-                event_key=f"chapter:{chapter_id}:published",
-                category="chapters",
-                text=new_chapter_message(chapter["book_title"], chapter["title"], chapter["number"]),
-            )
-            await add_audit(user.app_user_id, "chapter_followers_notified_web", "chapter", str(chapter_id), None, str(notification))
         workflow = None
         if settings.BOT_TOKEN:
             delivery_bot = Bot(token=settings.BOT_TOKEN)
@@ -6036,7 +6085,10 @@ def create_app() -> FastAPI:
                 }
             finally:
                 await delivery_bot.session.close()
-        return {"ok": True, "chapter": _row_to_dict(chapter), "notification": notification, "workflow": workflow}
+        else:
+            workflow = {"status": "review", "channel_status": "", "channel_message": "", "duplicate_text": "Проверка ожидает запуска бота."}
+        chapter = await get_chapter(chapter_id)
+        return {"ok": True, "chapter": _row_to_dict(chapter), "notification": None, "workflow": workflow}
 
     @app.patch("/api/author/chapter/{chapter_id}")
     async def api_author_update_chapter(
@@ -6048,22 +6100,48 @@ def create_app() -> FastAPI:
         chapter = await get_chapter(chapter_id)
         if not chapter or not await book_belongs_to_author(int(chapter["book_id"]), user.app_user_id):
             raise HTTPException(status_code=404, detail="Глава не найдена.")
-        changed = False
+        book_id = int(chapter["book_id"])
+        book = await get_book(book_id)
+        published_book = bool(book and str(book["publication_status"] or "") == "published")
+        requested_title = None
+        requested_text = None
+        content_changed = False
         if "title" in payload:
-            title = str(payload.get("title") or "").strip()
-            if len(title) < 2:
+            requested_title = str(payload.get("title") or "").strip()
+            if len(requested_title) < 2:
                 raise HTTPException(status_code=400, detail="Введите название главы.")
-            changed = await update_chapter_title(chapter_id, user.app_user_id, title) or changed
+            content_changed = content_changed or requested_title != str(chapter["title"] or "")
         if "text" in payload:
-            text = str(payload.get("text") or "").strip()
-            if len(text) < 100:
+            requested_text = str(payload.get("text") or "").strip()
+            if len(requested_text) < 100:
                 raise HTTPException(status_code=400, detail="Текст главы слишком короткий.")
-            changed = await update_chapter_text(chapter_id, user.app_user_id, text) or changed
+            content_changed = content_changed or requested_text != str(chapter["text"] or "")
+
+        # The baseline must be captured before the first real content change.
+        # Safe commerce settings are intentionally excluded from moderation.
+        if published_book and content_changed and not await get_open_revision_request(book_id):
+            await create_revision_request(
+                book_id,
+                actor_user_id=user.app_user_id,
+                reason="Изменён текст опубликованной главы. Проверяется только изменённое содержимое.",
+                finding_ids=(),
+                requires_manual_confirmation=False,
+                source="miniapp_content_change",
+            )
+
+        changed = False
+        if requested_title is not None and requested_title != str(chapter["title"] or ""):
+            changed = await update_chapter_title(chapter_id, user.app_user_id, requested_title) or changed
+        if requested_text is not None and requested_text != str(chapter["text"] or ""):
+            changed = await update_chapter_text(chapter_id, user.app_user_id, requested_text) or changed
+        if content_changed and published_book:
+            await set_chapter_status(chapter_id, "review")
+            changed = True
         if "price_stars" in payload or "access_mode" in payload:
             price = max(0, min(100000, int(payload.get("price_stars") or 0)))
             access_mode = str(payload.get("access_mode") or ("free" if price <= 0 else "chapter"))
             result = await update_chapter_access_range(
-                int(chapter["book_id"]), user.app_user_id, int(chapter["number"]), int(chapter["number"]), access_mode, price
+                book_id, user.app_user_id, int(chapter["number"]), int(chapter["number"]), access_mode, price
             )
             if not result.get("updated"):
                 reason = str(result.get("reason") or "")
@@ -6078,9 +6156,39 @@ def create_app() -> FastAPI:
             changed = True
         if not changed:
             raise HTTPException(status_code=400, detail="Нет изменений для сохранения.")
-        await add_audit(user.app_user_id, "chapter_updated_web", "chapter", str(chapter_id))
+
+        workflow = None
+        if content_changed and published_book:
+            if settings.BOT_TOKEN:
+                delivery_bot = Bot(token=settings.BOT_TOKEN)
+                try:
+                    workflow_result = await finish_book_content_workflow(
+                        bot=delivery_bot,
+                        book_id=book_id,
+                        actor_user_id=user.app_user_id,
+                        actor_telegram_id=user.telegram_id,
+                        source="miniapp_chapter_edit",
+                    )
+                    workflow = {
+                        "status": workflow_result.workflow_status,
+                        "channel_status": workflow_result.channel_status,
+                        "channel_message": workflow_result.channel_message,
+                        "duplicate_text": workflow_result.duplicate_text,
+                    }
+                finally:
+                    await delivery_bot.session.close()
+            else:
+                workflow = {"status": "review", "channel_status": "", "channel_message": "", "duplicate_text": "Проверка ожидает запуска бота."}
+        await add_audit(
+            user.app_user_id,
+            "chapter_updated_web",
+            "chapter",
+            str(chapter_id),
+            None,
+            "content" if content_changed else "settings",
+        )
         updated = await get_chapter(chapter_id)
-        return {"ok": True, "chapter": _row_to_dict(updated)}
+        return {"ok": True, "chapter": _row_to_dict(updated), "workflow": workflow}
 
     @app.delete("/api/author/chapter/{chapter_id}")
     async def api_author_delete_chapter(chapter_id: int, x_telegram_init_data: str | None = Header(default=None)):
@@ -6097,14 +6205,35 @@ def create_app() -> FastAPI:
         x_telegram_init_data: str | None = Header(default=None),
     ):
         user, _ = await author_session(x_telegram_init_data)
+        chapter_before = await get_graphic_chapter(graphic_chapter_id)
+        if not chapter_before or int(chapter_before["author_user_id"] or 0) != int(user.app_user_id):
+            raise HTTPException(status_code=404, detail="Графическая глава не найдена.")
+        book_id = int(chapter_before["book_id"])
         reading_mode = payload.get("reading_mode")
         if reading_mode is not None and str(reading_mode) not in GRAPHIC_READING_MODES:
             raise HTTPException(status_code=400, detail="Выберите режим чтения из списка.")
+        requested_title = None
+        title_changed = False
+        if "title" in payload:
+            requested_title = str(payload.get("title") or "").strip()[:160]
+            if len(requested_title) < 2:
+                raise HTTPException(status_code=400, detail="Введите название главы.")
+            title_changed = requested_title != str(chapter_before["title"] or "")
+
+        published_parent = False
+        if title_changed:
+            published_parent = await _start_published_content_revision(
+                book_id=book_id,
+                actor_user_id=user.app_user_id,
+                reason="Изменено название опубликованной графической главы.",
+                source="miniapp_graphic_content_change",
+            )
+
         price = max(0, min(100000, int(payload.get("price_stars") or 0))) if "price_stars" in payload else None
         ok = await update_graphic_chapter_for_author(
             graphic_chapter_id,
             user.app_user_id,
-            title=payload.get("title"),
+            title=requested_title if "title" in payload else None,
             reading_mode=str(reading_mode) if reading_mode is not None else None,
             is_free=(price == 0) if price is not None else None,
             price_stars=price,
@@ -6118,9 +6247,27 @@ def create_app() -> FastAPI:
             )
         if not ok and not preview_changed:
             raise HTTPException(status_code=404, detail="Графическая глава не найдена.")
-        await add_audit(user.app_user_id, "graphic_chapter_updated_web", "graphic_chapter", str(graphic_chapter_id))
+
+        workflow = None
+        if title_changed:
+            workflow = await _finish_existing_graphic_content_change(
+                book_id=book_id,
+                graphic_chapter_id=graphic_chapter_id,
+                actor_user_id=user.app_user_id,
+                actor_telegram_id=user.telegram_id,
+                source="miniapp_graphic_chapter_edit",
+                published_parent=published_parent,
+            )
+        await add_audit(
+            user.app_user_id,
+            "graphic_chapter_updated_web",
+            "graphic_chapter",
+            str(graphic_chapter_id),
+            None,
+            "content" if title_changed else "settings",
+        )
         chapter = await get_graphic_chapter(graphic_chapter_id)
-        return {"ok": True, "chapter": _row_to_dict(chapter)}
+        return {"ok": True, "chapter": _row_to_dict(chapter), "workflow": workflow}
 
     @app.patch("/api/author/book/{book_id}/graphic-volume/{volume_number}")
     async def api_author_update_graphic_volume(
@@ -6206,6 +6353,16 @@ def create_app() -> FastAPI:
             page_ids = [int(value) for value in raw_ids]
         except (TypeError, ValueError) as exc:
             raise HTTPException(status_code=400, detail="Передан неверный порядок страниц.") from exc
+        chapter_before = await get_graphic_chapter(graphic_chapter_id)
+        if not chapter_before or int(chapter_before["author_user_id"] or 0) != int(user.app_user_id):
+            raise HTTPException(status_code=404, detail="Графическая глава не найдена.")
+        book_id = int(chapter_before["book_id"])
+        published_parent = await _start_published_content_revision(
+            book_id=book_id,
+            actor_user_id=user.app_user_id,
+            reason="Изменён порядок страниц опубликованной графической главы.",
+            source="miniapp_graphic_content_change",
+        )
         if not await reorder_graphic_pages_for_author(graphic_chapter_id, user.app_user_id, page_ids):
             raise HTTPException(status_code=400, detail="Не удалось сохранить порядок страниц. Обновите редактор и повторите.")
         await add_audit(
@@ -6216,12 +6373,21 @@ def create_app() -> FastAPI:
             None,
             f"{len(page_ids)} pages",
         )
+        workflow = await _finish_existing_graphic_content_change(
+            book_id=book_id,
+            graphic_chapter_id=graphic_chapter_id,
+            actor_user_id=user.app_user_id,
+            actor_telegram_id=user.telegram_id,
+            source="miniapp_graphic_pages_reorder",
+            published_parent=published_parent,
+        )
         pages = await list_graphic_pages_for_author(graphic_chapter_id, user.app_user_id) or []
         return {
             "ok": True,
             "pages": _graphic_page_payloads(
                 user_id=user.app_user_id, chapter_id=graphic_chapter_id, pages=pages, include_ids=True
             ),
+            "workflow": workflow,
         }
 
     @app.post("/api/author/graphic-page/{graphic_page_id}/ocr")
@@ -6234,6 +6400,14 @@ def create_app() -> FastAPI:
         page = await get_graphic_page(graphic_page_id)
         if not page or int(page["author_user_id"] or 0) != int(user.app_user_id):
             raise HTTPException(status_code=404, detail="Страница не найдена.")
+        book_id = int(page["book_id"])
+        graphic_chapter_id = int(page["graphic_chapter_id"])
+        published_parent = await _start_published_content_revision(
+            book_id=book_id,
+            actor_user_id=user.app_user_id,
+            reason="Добавлен или обновлён текст OCR опубликованной графической главы.",
+            source="miniapp_graphic_content_change",
+        )
         source = _safe_graphic_path(str(page["file_path"] or ""))
         if not source:
             raise HTTPException(status_code=404, detail="Файл страницы не найден.")
@@ -6255,7 +6429,15 @@ def create_app() -> FastAPI:
             text=result["text"], confidence=float(result["confidence"]), status="published",
         )
         await add_audit(user.app_user_id, "graphic_page_ocr", "graphic_page", str(graphic_page_id), None, language)
-        return {"ok": True, **result}
+        workflow = await _finish_existing_graphic_content_change(
+            book_id=book_id,
+            graphic_chapter_id=graphic_chapter_id,
+            actor_user_id=user.app_user_id,
+            actor_telegram_id=user.telegram_id,
+            source="miniapp_graphic_page_ocr",
+            published_parent=published_parent,
+        )
+        return {"ok": True, **result, "workflow": workflow}
 
     @app.put("/api/author/graphic-page/{graphic_page_id}/text")
     async def api_author_graphic_page_text(
@@ -6264,6 +6446,17 @@ def create_app() -> FastAPI:
         x_telegram_init_data: str | None = Header(default=None),
     ):
         user, _ = await author_session(x_telegram_init_data)
+        page = await get_graphic_page(graphic_page_id)
+        if not page or int(page["author_user_id"] or 0) != int(user.app_user_id):
+            raise HTTPException(status_code=404, detail="Страница не найдена.")
+        book_id = int(page["book_id"])
+        graphic_chapter_id = int(page["graphic_chapter_id"])
+        published_parent = await _start_published_content_revision(
+            book_id=book_id,
+            actor_user_id=user.app_user_id,
+            reason="Изменён текст опубликованной графической главы.",
+            source="miniapp_graphic_content_change",
+        )
         ok = await upsert_graphic_page_text(
             graphic_page_id, user.app_user_id,
             language_code=str(payload.get("language_code") or "ru"),
@@ -6274,7 +6467,15 @@ def create_app() -> FastAPI:
         )
         if not ok:
             raise HTTPException(status_code=404, detail="Страница не найдена.")
-        return {"ok": True}
+        workflow = await _finish_existing_graphic_content_change(
+            book_id=book_id,
+            graphic_chapter_id=graphic_chapter_id,
+            actor_user_id=user.app_user_id,
+            actor_telegram_id=user.telegram_id,
+            source="miniapp_graphic_page_text",
+            published_parent=published_parent,
+        )
+        return {"ok": True, "workflow": workflow}
 
     @app.put("/api/author/graphic-page/{graphic_page_id}/translations")
     async def api_author_graphic_page_translations(
@@ -6286,12 +6487,36 @@ def create_app() -> FastAPI:
         regions = payload.get("regions")
         if not isinstance(regions, list):
             raise HTTPException(status_code=400, detail="Передайте список переводных областей.")
+        page = await get_graphic_page(graphic_page_id)
+        if not page or int(page["author_user_id"] or 0) != int(user.app_user_id):
+            raise HTTPException(status_code=404, detail="Страница не найдена.")
+        book_id = int(page["book_id"])
+        graphic_chapter_id = int(page["graphic_chapter_id"])
+        published_parent = await _start_published_content_revision(
+            book_id=book_id,
+            actor_user_id=user.app_user_id,
+            reason="Изменён перевод опубликованной графической главы.",
+            source="miniapp_graphic_content_change",
+        )
+        language_code = str(payload.get("language_code") or "ru")
         ok = await replace_graphic_translation_regions_for_author(
-            graphic_page_id, user.app_user_id, str(payload.get("language_code") or "ru"), regions
+            graphic_page_id, user.app_user_id, language_code, regions
         )
         if not ok:
             raise HTTPException(status_code=404, detail="Страница не найдена.")
-        return {"ok": True, "regions": _rows_to_dicts(await list_graphic_translation_regions(graphic_page_id, str(payload.get("language_code") or "ru")))}
+        workflow = await _finish_existing_graphic_content_change(
+            book_id=book_id,
+            graphic_chapter_id=graphic_chapter_id,
+            actor_user_id=user.app_user_id,
+            actor_telegram_id=user.telegram_id,
+            source="miniapp_graphic_page_translation",
+            published_parent=published_parent,
+        )
+        return {
+            "ok": True,
+            "regions": _rows_to_dicts(await list_graphic_translation_regions(graphic_page_id, language_code)),
+            "workflow": workflow,
+        }
 
     @app.post("/api/author/graphic-page/{graphic_page_id}/frames/auto")
     async def api_author_graphic_page_frames_auto(
@@ -6404,6 +6629,14 @@ def create_app() -> FastAPI:
         target = _safe_graphic_path(str(page["file_path"] or ""))
         if not target or not target.is_file():
             raise HTTPException(status_code=404, detail="Файл страницы не найден.")
+        book_id = int(page["book_id"])
+        graphic_chapter_id = int(page["graphic_chapter_id"])
+        published_parent = await _start_published_content_revision(
+            book_id=book_id,
+            actor_user_id=user.app_user_id,
+            reason="Заменена страница опубликованной графической главы.",
+            source="miniapp_graphic_content_change",
+        )
         temp_dir = GRAPHIC_TEMP_ROOT / f"replace-{uuid.uuid4().hex}"
         temp_dir.mkdir(parents=True, exist_ok=False)
         original_name = Path(file.filename or "replacement.png").name
@@ -6453,8 +6686,16 @@ def create_app() -> FastAPI:
             await file.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
         await add_audit(user.app_user_id, "graphic_page_replaced_web", "graphic_page", str(graphic_page_id), None, original_name)
+        workflow = await _finish_existing_graphic_content_change(
+            book_id=book_id,
+            graphic_chapter_id=graphic_chapter_id,
+            actor_user_id=user.app_user_id,
+            actor_telegram_id=user.telegram_id,
+            source="miniapp_graphic_page_replace",
+            published_parent=published_parent,
+        )
         updated = await get_graphic_page(graphic_page_id)
-        return {"ok": True, "page": _row_to_dict(updated)}
+        return {"ok": True, "page": _row_to_dict(updated), "workflow": workflow}
 
     @app.delete("/api/author/graphic-page/{graphic_page_id}")
     async def api_author_delete_graphic_page(
@@ -6462,6 +6703,17 @@ def create_app() -> FastAPI:
         x_telegram_init_data: str | None = Header(default=None),
     ):
         user, _ = await author_session(x_telegram_init_data)
+        page_before = await get_graphic_page(graphic_page_id)
+        if not page_before or int(page_before["author_user_id"] or 0) != int(user.app_user_id):
+            raise HTTPException(status_code=404, detail="Страница не найдена.")
+        book_id = int(page_before["book_id"])
+        graphic_chapter_id = int(page_before["graphic_chapter_id"])
+        published_parent = await _start_published_content_revision(
+            book_id=book_id,
+            actor_user_id=user.app_user_id,
+            reason="Удалена страница опубликованной графической главы.",
+            source="miniapp_graphic_content_change",
+        )
         deleted = await delete_graphic_page_for_author(graphic_page_id, user.app_user_id)
         if not deleted:
             raise HTTPException(status_code=404, detail="Страница не найдена.")
@@ -6470,12 +6722,21 @@ def create_app() -> FastAPI:
         delete_page_files(deleted, root=GRAPHIC_STORAGE_ROOT)
         chapter_id = int(deleted["graphic_chapter_id"])
         await add_audit(user.app_user_id, "graphic_page_deleted_web", "graphic_page", str(graphic_page_id), None, str(chapter_id))
+        workflow = await _finish_existing_graphic_content_change(
+            book_id=book_id,
+            graphic_chapter_id=graphic_chapter_id,
+            actor_user_id=user.app_user_id,
+            actor_telegram_id=user.telegram_id,
+            source="miniapp_graphic_page_delete",
+            published_parent=published_parent,
+        )
         pages = await list_graphic_pages_for_author(chapter_id, user.app_user_id) or []
         return {
             "ok": True,
             "pages": _graphic_page_payloads(
                 user_id=user.app_user_id, chapter_id=chapter_id, pages=pages, include_ids=True
             ),
+            "workflow": workflow,
         }
 
     @app.post("/api/author/book/{book_id}/graphic/upload/start")
@@ -6628,6 +6889,12 @@ def create_app() -> FastAPI:
                 split_long_pages=split_long_pages,
             )
             report = _lazy_graphic_report(prepared)
+            await _start_published_content_revision(
+                book_id=book_id,
+                actor_user_id=user.app_user_id,
+                reason="Добавлена новая графическая глава. Проверяется только новое содержимое.",
+                source="miniapp_graphic_content_change",
+            )
             chapter = await _commit_graphic_chapter(
                 book_id=book_id,
                 title=title,
@@ -6668,10 +6935,9 @@ def create_app() -> FastAPI:
                     workflow = {"status": "saved", "channel_status": "", "channel_message": ""}
                 finally:
                     await delivery_bot.session.close()
-            notification = await _notify_graphic_chapter_if_published(
-                book_id=book_id, chapter=chapter, actor_user_id=user.app_user_id
-            )
-            return {"ok": True, "chapter": chapter, "report": report, "workflow": workflow, "notification": notification}
+            # Approved new-content notifications are emitted once by the
+            # unified publication service after moderation succeeds.
+            return {"ok": True, "chapter": chapter, "report": report, "workflow": workflow, "notification": None}
         except (ChunkedUploadError, GraphicImportError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
@@ -6740,6 +7006,12 @@ def create_app() -> FastAPI:
                 _lazy_prepare_graphic_images, saved, temp_dir / "prepared", split_long_pages=use_slicing
             )
             report = _lazy_graphic_report(prepared)
+            await _start_published_content_revision(
+                book_id=book_id,
+                actor_user_id=user.app_user_id,
+                reason="Добавлена новая графическая глава. Проверяется только новое содержимое.",
+                source="miniapp_graphic_content_change",
+            )
             chapter = await _commit_graphic_chapter(
                 book_id=book_id,
                 title=clean_title,
@@ -6780,10 +7052,9 @@ def create_app() -> FastAPI:
                     workflow = {"status": "saved", "channel_status": "", "channel_message": ""}
                 finally:
                     await delivery_bot.session.close()
-            notification = await _notify_graphic_chapter_if_published(
-                book_id=book_id, chapter=chapter, actor_user_id=user.app_user_id
-            )
-            return {"ok": True, "chapter": chapter, "report": report, "workflow": workflow, "notification": notification}
+            # Approved new-content notifications are emitted once by the
+            # unified publication service after moderation succeeds.
+            return {"ok": True, "chapter": chapter, "report": report, "workflow": workflow, "notification": None}
         except GraphicImportError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         finally:
@@ -6934,6 +7205,16 @@ def create_app() -> FastAPI:
             )
         first_free = max(0, min(100000, int(payload.get("first_free") or 0)))
         default_price = max(0, min(100000, int(payload.get("default_price_stars") or 0)))
+        book_before_import = await get_book(book_id)
+        if book_before_import and str(book_before_import["publication_status"] or "") == "published" and not await get_open_revision_request(book_id):
+            await create_revision_request(
+                book_id,
+                actor_user_id=user.app_user_id,
+                reason="Импортировано новое или изменённое содержимое. Проверяются только затронутые главы.",
+                finding_ids=(),
+                requires_manual_confirmation=False,
+                source="miniapp_content_change",
+            )
         import_result = await upsert_imported_chapters(
             book_id,
             chapters,
@@ -6953,16 +7234,10 @@ def create_app() -> FastAPI:
             await set_book_duplicate_override(book_id, True)
         delete_web_import_preview(token)
         await add_audit(user.app_user_id, "book_import_confirmed_web", "book", str(book_id), None, f"{original_name}:{saved}")
+        # Reader notifications are sent only after moderation succeeds.  The
+        # publication service distinguishes genuinely new draft chapters from
+        # edited review chapters and protects delivery with idempotency keys.
         notification = None
-        book = await get_book(book_id)
-        if book and book["publication_status"] == "published" and published_ids:
-            notification = await notify_book_followers(
-                book_id=book_id,
-                event_key=f"chapter-batch:{book_id}:{max(published_ids)}:{len(published_ids)}",
-                category="chapters",
-                text=new_chapter_message(book["title"], count=len(published_ids)),
-            )
-            await add_audit(user.app_user_id, "chapter_followers_notified_web", "book", str(book_id), None, str(notification))
         workflow = None
         if settings.BOT_TOKEN:
             delivery_bot = Bot(token=settings.BOT_TOKEN)
@@ -7100,6 +7375,10 @@ def create_app() -> FastAPI:
             selection = parse_chapter_selection(str(payload.get("chapter_spec") or ""))
         except (TypeError, ValueError, ChapterSelectionError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if user_id <= 0:
+            raise HTTPException(status_code=400, detail="Сначала выберите пользователя.")
+        if book_id <= 0:
+            raise HTTPException(status_code=400, detail="Выберите книгу из списка.")
         target = await get_user_by_id(user_id)
         if not target:
             raise HTTPException(status_code=404, detail="Пользователь не найден.")
@@ -7131,6 +7410,12 @@ def create_app() -> FastAPI:
             selection = parse_chapter_selection(str(payload.get("chapter_spec") or ""))
         except (TypeError, ValueError, ChapterSelectionError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if user_id <= 0:
+            raise HTTPException(status_code=400, detail="Сначала выберите пользователя.")
+        if book_id <= 0:
+            raise HTTPException(status_code=400, detail="Выберите книгу из списка.")
+        if duration_days is not None and not 1 <= int(duration_days) <= 3650:
+            raise HTTPException(status_code=400, detail="Срок доступа должен быть от 1 до 3650 дней или без ограничения.")
         target = await get_user_by_id(user_id)
         if not target:
             raise HTTPException(status_code=404, detail="Пользователь не найден.")
@@ -7502,6 +7787,7 @@ def create_app() -> FastAPI:
         book = await get_book(book_id)
         if not book:
             raise HTTPException(status_code=404, detail="Книга не найдена.")
+        published_before_action = await was_book_ever_published(book_id) or str(book["publication_status"] or "") == "published"
 
         if action == "repost":
             if book["publication_status"] != "published":
@@ -7534,7 +7820,8 @@ def create_app() -> FastAPI:
             )
             return {"ok": True, "status": "blocked" if blocked else "hidden"}
 
-        if book["publication_status"] != "review":
+        pending_content = await has_pending_book_content(book_id)
+        if book["publication_status"] != "review" and not (published_before_action and pending_content):
             raise HTTPException(status_code=409, detail="Книга уже обработана или не находится на проверке.")
         chapters_count = await count_chapters_for_book(book_id)
         if action == "publish" and chapters_count < 1:
@@ -7575,12 +7862,17 @@ def create_app() -> FastAPI:
                 )
                 notification = await notify_after_action(
                     actor_user_id=user.app_user_id,
-                    event="book_published",
+                    event="book_content_approved" if published_before_action else "book_published",
                     target_type="book",
                     target_id=book_id,
                     app_user_id=int(book["author_user_id"]) if book["author_user_id"] is not None else None,
                     telegram_id=int(book["author_telegram_id"]) if book["author_telegram_id"] is not None else None,
-                    text=book_moderation_message(book["title"], "published"),
+                    text=(
+                        f"✅ <b>Изменения произведения одобрены</b>\n\n"
+                        f"«{escape(str(book['title'] or 'Книга'))}» остаётся в каталоге. "
+                        "Новое или изменённое содержимое опубликовано без повторного анонса книги."
+                        if published_before_action else book_moderation_message(book["title"], "published")
+                    ),
                 )
                 await notify_moderation_resolved(
                     bot,
@@ -7608,7 +7900,13 @@ def create_app() -> FastAPI:
                 book_id, actor_user_id=user.app_user_id, reason=structured_reason, finding_ids=finding_ids,
                 requires_manual_confirmation=not bool(finding_ids), source="miniapp_moderation",
             )
-            await set_book_publication_status(book_id, "draft")
+            previously_published = published_before_action
+            if not previously_published:
+                await set_book_publication_status(book_id, "draft")
+            else:
+                # Reject only the pending content.  The established book and all
+                # unaffected published chapters remain in the catalogue.
+                await set_book_publication_status(book_id, "published")
             await record_moderation_decision(
                 book_id,
                 "reject",
@@ -7643,7 +7941,7 @@ def create_app() -> FastAPI:
                     )
                 finally:
                     await bot.session.close()
-            status = "draft"
+            status = "published" if previously_published else "draft"
 
         return {
             "ok": True,

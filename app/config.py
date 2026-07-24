@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     BOT_USERNAME: str = "VoxlyraBot"
     PROJECT_NAME: str = "Вокслира"
     PUBLIC_VERSION_VISIBLE: bool = False
-    PROJECT_VERSION: str = "v1.14.0.25"
+    PROJECT_VERSION: str = "v1.14.0.26"
     MAX_BOOK_UPLOAD_MB: int = 0
     MAX_BOOK_UNPACKED_MB: int = 2048
     # Прямая загрузка больших библиотечных ZIP идёт частями. Это аварийный

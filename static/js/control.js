@@ -1300,8 +1300,11 @@
       ? state.accessBooks.filter((book) => accessBookMatches(book, needle))
       : state.accessBooks;
     select.innerHTML = '<option value="">Выберите книгу</option>' + items.map((book) => `<option value="${Number(book.id)}">#${Number(book.id)} · ${esc(book.title)} · ${Number(book.chapters_count || 0)} глав${book.pen_name ? ` · ${esc(book.pen_name)}` : ''}</option>`).join('');
-    if (current && items.some((book) => String(book.id) === current)) select.value = current;
+    const preferred = current || String(state.accessSelectedBookId || '');
+    if (preferred && items.some((book) => String(book.id) === preferred)) select.value = preferred;
     if (needle && items.length === 1) select.value = String(items[0].id);
+    state.accessSelectedBookId = Number(select.value || 0);
+    if ($('accessBookId')) $('accessBookId').value = state.accessSelectedBookId > 0 ? String(state.accessSelectedBookId) : '';
     const count = $('accessBookCount');
     if (count) count.textContent = needle
       ? `Найдено: ${items.length} из ${state.accessBooks.length}`
@@ -1314,12 +1317,19 @@
     renderAccessBookOptions($('accessBookQuery')?.value || '');
   }
 
-  async function previewChapterGrant() {
+  async function previewChapterGrant(snapshot = null) {
     if (!state.accessUser) { notify('Сначала выберите пользователя'); return; }
-    const bookId = Number($('accessBookSelect')?.value || 0);
-    const chapterSpec = String($('accessChapterSpec')?.value || '').trim();
+    const bookId = Number(snapshot?.bookId || $('accessBookSelect')?.value || state.accessSelectedBookId || 0);
+    const chapterSpec = String(snapshot?.chapterSpec ?? $('accessChapterSpec')?.value ?? '').trim();
     if (!bookId || !chapterSpec) { notify('Выберите книгу и укажите главы'); return; }
-    const data = await apiFetch('/api/control/access/chapters/preview', { method: 'POST', body: JSON.stringify({ user_id: state.accessUser.id, book_id: bookId, chapter_spec: chapterSpec }) });
+    state.accessSelectedBookId = bookId;
+    const data = await apiFetch('/api/control/access/chapters/preview', {
+      method: 'POST',
+      body: JSON.stringify({ user_id: Number(state.accessUser.id), book_id: bookId, chapter_spec: chapterSpec }),
+    });
+    if (Number(data.book?.id || 0) !== bookId) throw new Error('Выбранная книга изменилась. Выберите её повторно.');
+    state.accessSelectedBookId = Number(data.book.id);
+    if ($('accessBookId')) $('accessBookId').value = String(state.accessSelectedBookId);
     const preview = $('accessChapterPreview');
     preview.hidden = false;
     const sample = (data.chapters || []).slice(0, 12).map((chapter) => `${Number(chapter.number)}. ${esc(chapter.title)}`).join('<br>');
@@ -1330,15 +1340,33 @@
 
   async function grantChapters(event) {
     event.preventDefault();
-    const preview = await previewChapterGrant();
+    // Snapshot every value before the first await.  Telegram WebView may clear
+    // event.currentTarget after an async boundary, which previously produced an
+    // empty book_id and FastAPI 422 even though the preview had succeeded.
+    const form = event.currentTarget instanceof HTMLFormElement ? event.currentTarget : $('accessChapterForm');
+    const selectedBookId = Number($('accessBookSelect')?.value || $('accessBookId')?.value || state.accessSelectedBookId || 0);
+    const selectedUserId = Number(state.accessUser?.id || 0);
+    const chapterSpec = String(form?.elements?.chapter_spec?.value || '').trim();
+    const durationDays = String(form?.elements?.duration_days?.value ?? '0');
+    const note = String(form?.elements?.note?.value || '').trim();
+    if (!form || !selectedUserId || !selectedBookId || !chapterSpec) {
+      notify('Выберите пользователя, книгу и укажите главы');
+      return;
+    }
+    const preview = await previewChapterGrant({ bookId: selectedBookId, chapterSpec });
     if (!preview || !state.accessUser) return;
-    const form = event.currentTarget;
+    const confirmedBookId = Number(preview.book?.id || selectedBookId || 0);
+    if (!Number.isInteger(confirmedBookId) || confirmedBookId <= 0) {
+      throw new Error('Книга не выбрана. Повторите поиск и выберите книгу из списка.');
+    }
+    state.accessSelectedBookId = confirmedBookId;
+    if ($('accessBookId')) $('accessBookId').value = String(confirmedBookId);
     const payload = {
-      user_id: state.accessUser.id,
-      book_id: Number(form.elements.book_id.value),
-      chapter_spec: String(form.elements.chapter_spec.value || ''),
-      duration_days: form.elements.duration_days.value,
-      note: String(form.elements.note.value || '').trim(),
+      user_id: Number(selectedUserId),
+      book_id: confirmedBookId,
+      chapter_spec: chapterSpec,
+      duration_days: durationDays,
+      note,
     };
     if (!window.confirm(`Открыть пользователю ${accessUserTitle(state.accessUser)} главы ${preview.normalized} книги «${preview.book.title}»?`)) return;
     const result = await apiFetch('/api/control/access/chapters/grant', { method: 'POST', body: JSON.stringify(payload) });
@@ -1376,6 +1404,7 @@
           <span class="access-step-number">2</span><div><span class="eyebrow">Платные главы</span><h3>Открыть главы вручную</h3><p>Поддерживаются отдельные номера и диапазоны: <b>33</b>, <b>56-67</b>, <b>98 34,36,38</b>, <b>1-100</b>.</p></div>
           <label>Поиск книги<input id="accessBookQuery" type="search" placeholder="Название, автор или ID книги" autocomplete="off"></label>
           <small id="accessBookCount" class="access-book-count">Загружаем полный список книг…</small>
+          <input id="accessBookId" name="selected_book_id" type="hidden" value="">
           <label>Книга<select id="accessBookSelect" name="book_id" required><option value="">Загружаем книги…</option></select></label>
           <label>Главы<input id="accessChapterSpec" name="chapter_spec" required placeholder="33, 56-67, 98 34 36 38"></label>
           <div class="form-grid two"><label>Срок<select name="duration_days"><option value="0">Без ограничения</option><option value="1">1 день</option><option value="7">7 дней</option><option value="30">30 дней</option><option value="90">90 дней</option><option value="365">1 год</option></select></label><label>Причина<input name="note" maxlength="500" placeholder="Например: восстановление после сбоя"></label></div>
@@ -1395,6 +1424,12 @@
     $('accessUserQuery')?.addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); searchAccessUsers().catch(handleError); } });
     $('accessBookQuery')?.addEventListener('input', (event) => renderAccessBookOptions(event.currentTarget.value));
     $('accessBookQuery')?.addEventListener('search', (event) => renderAccessBookOptions(event.currentTarget.value));
+    $('accessBookSelect')?.addEventListener('change', (event) => {
+      state.accessSelectedBookId = Number(event.currentTarget.value || 0);
+      if ($('accessBookId')) $('accessBookId').value = state.accessSelectedBookId > 0 ? String(state.accessSelectedBookId) : '';
+      const preview = $('accessChapterPreview');
+      if (preview) preview.hidden = true;
+    });
     $('accessPreviewChapters')?.addEventListener('click', () => previewChapterGrant().catch(handleError));
     $('accessChapterForm')?.addEventListener('submit', (event) => grantChapters(event).catch(handleError));
     $('accessPremiumForm')?.addEventListener('submit', (event) => grantPremium(event).catch(handleError));

@@ -11,6 +11,8 @@ from app.db import (
     get_admin_permissions,
     get_book,
     get_book_moderation_entry,
+    has_pending_book_content,
+    was_book_ever_published,
     get_complaint,
     get_comment_for_moderation,
     get_review_for_moderation,
@@ -182,7 +184,8 @@ async def moderation_book_publish(call: CallbackQuery) -> None:
         return
     book_id = int(call.data.split(":")[-1])
     book = await get_book(book_id)
-    if not book or book["publication_status"] != "review":
+    published_before_action = bool(book) and (await was_book_ever_published(book_id) or str(book["publication_status"] or "") == "published")
+    if not book or (book["publication_status"] != "review" and not (published_before_action and await has_pending_book_content(book_id))):
         await call.answer("Книга уже обработана или не найдена", show_alert=True)
         return
     chapters_count = await count_chapters_for_book(book_id)
@@ -208,12 +211,16 @@ async def moderation_book_publish(call: CallbackQuery) -> None:
     await _notify(
         call,
         actor_user_id=int(user["id"]),
-        event="book_published",
+        event="book_content_approved" if published_before_action else "book_published",
         target_type="book",
         target_id=book_id,
         app_user_id=int(book["author_user_id"]) if book["author_user_id"] is not None else None,
         telegram_id=int(book["author_telegram_id"]) if book["author_telegram_id"] is not None else None,
-        text=book_moderation_message(book["title"], "published"),
+        text=(
+            f"✅ <b>Изменения произведения одобрены</b>\n\n"
+            f"«{book['title']}» остаётся в каталоге. Новое или изменённое содержимое опубликовано без повторного анонса книги."
+            if published_before_action else book_moderation_message(book["title"], "published")
+        ),
     )
     await resolve_book_moderation(
         book_id,
@@ -235,7 +242,8 @@ async def moderation_book_publish(call: CallbackQuery) -> None:
     channel_status = f"\n\n{result.channel_message}" if result.channel_message else ""
 
     await call.message.edit_text(
-        "Книга опубликована. Теперь она появится в каталоге." + channel_status,
+        ("Изменения одобрены. Книга оставалась в каталоге; повторный пост и уведомление о новой книге не создавались."
+         if published_before_action else "Книга опубликована. Теперь она появится в каталоге.") + channel_status,
         reply_markup=back_to_main(),
     )
     await call.answer("Опубликовано")
@@ -247,7 +255,8 @@ async def moderation_book_reject(call: CallbackQuery, state: FSMContext) -> None
         return
     book_id = int(call.data.split(":")[-1])
     book = await get_book(book_id)
-    if not book or book["publication_status"] != "review":
+    published_before_action = bool(book) and (await was_book_ever_published(book_id) or str(book["publication_status"] or "") == "published")
+    if not book or (book["publication_status"] != "review" and not (published_before_action and await has_pending_book_content(book_id))):
         await call.answer("Книга уже обработана или не найдена", show_alert=True)
         return
     await state.update_data(moderation_book_id=book_id)
@@ -288,7 +297,8 @@ async def moderation_book_revision_reason(message: Message, state: FSMContext) -
         await message.answer("Напишите причину подробнее — хотя бы одним понятным предложением.")
         return
     book = await get_book(book_id)
-    if not book or book["publication_status"] != "review":
+    published_before_action = bool(book) and (await was_book_ever_published(book_id) or str(book["publication_status"] or "") == "published")
+    if not book or (book["publication_status"] != "review" and not (published_before_action and await has_pending_book_content(book_id))):
         await state.clear()
         await message.answer("Книга уже обработана или не найдена.")
         return
@@ -299,7 +309,11 @@ async def moderation_book_revision_reason(message: Message, state: FSMContext) -
         book_id, actor_user_id=int(user["id"]), reason=structured_reason, finding_ids=finding_ids,
         requires_manual_confirmation=not bool(finding_ids), source="telegram_moderation",
     )
-    await set_book_publication_status(book_id, "draft")
+    previously_published = published_before_action
+    if previously_published:
+        await set_book_publication_status(book_id, "published")
+    else:
+        await set_book_publication_status(book_id, "draft")
     await record_moderation_decision(
         book_id,
         "reject",

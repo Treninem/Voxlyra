@@ -95,9 +95,10 @@ from app.keyboards import (
 from app.services.book_parser import BookParseError, build_import_report, parse_book_file, split_plain_text_to_chapters
 from app.services.duplicate_books import duplicate_warning_text, find_book_duplicates, sha256_file
 from app.services.import_store import delete_import_preview, load_import_preview, save_import_preview
-from app.services.notifications import discount_message, new_audio_message, new_chapter_message, notify_book_followers
+from app.services.notifications import discount_message, new_chapter_message, notify_book_followers
 from app.services.cover_storage import download_book_cover
 from app.services.publication import finish_book_content_workflow, publish_book_and_channel
+from app.services.moderation_revisions import create_revision_request, get_open_revision_request
 from app.services.automatic_moderation import evaluate_metadata_text
 from app.services.audio_tools import AudioImportError, build_audio_import_report, extract_audio_zip, format_duration, inspect_audio_file
 from app.services.pricing import recommend_book_price
@@ -381,1081 +382,6 @@ async def _notify_new_chapters(book_id: int, chapter_ids: list[int], actor_user_
         book_id=book_id, event_key=event_key, category="chapters", text=text, bot=bot
     )
     await add_audit(actor_user_id, "chapter_followers_notified", "book", str(book_id), None, str(result))
-
-
-async def _notify_new_audio(book_id: int, audio_ids: list[int], actor_user_id: int, bot: Bot) -> None:
-    if not audio_ids:
-        return
-    book = await get_book(book_id)
-    if not book or book["publication_status"] != "published":
-        return
-    if len(audio_ids) == 1:
-        audio = await get_audio_chapter(audio_ids[0])
-        if not audio or audio["status"] != "published":
-            return
-        text = new_audio_message(book["title"], audio["title"], audio["number"])
-        event_key = f"audio:{audio_ids[0]}:published"
-    else:
-        text = new_audio_message(book["title"], count=len(audio_ids))
-        event_key = f"audio-batch:{book_id}:{max(audio_ids)}:{len(audio_ids)}"
-    result = await notify_book_followers(
-        book_id=book_id, event_key=event_key, category="audio", text=text, bot=bot
-    )
-    await add_audit(actor_user_id, "audio_followers_notified", "book", str(book_id), None, str(result))
-
-@router.callback_query(F.data == "author:menu")
-async def author_menu_handler(call: CallbackQuery) -> None:
-    user = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
-    profile = await get_author_profile(user["id"])
-    if profile:
-        stats = await get_author_dashboard_stats(user["id"])
-        finance = await get_author_finance_summary(user["id"])
-        status_label = {
-            "draft": "новый автор",
-            "active": "активен",
-            "verified": "проверен",
-            "blocked": "ограничен",
-        }.get(str(profile["status"]), "активен")
-        text = (
-            "<b>✍️ Кабинет автора</b>\n\n"
-            f"<b>{profile['pen_name']}</b> · {status_label}\n\n"
-            f"📚 Книг: <b>{stats['books_total']}</b>\n"
-            f"✅ Опубликовано: <b>{stats['books_published']}</b>\n"
-            f"🕊 На проверке: <b>{stats['books_review']}</b>\n"
-            f"📝 Глав: <b>{stats['chapters']}</b> · 🎧 Аудиоглав: <b>{stats['audio']}</b>\n\n"
-            f"💫 Доступно к выводу: <b>{finance['available']} Stars</b>\n"
-            f"⏳ В удержании: <b>{finance['held']} Stars</b>\n\n"
-            "Создавайте книги, добавляйте главы и следите за доходом в одном месте."
-        )
-    else:
-        text = (
-            "<b>✍️ Стать автором</b>\n\n"
-            "Создайте профиль один раз — псевдоним и основные данные сохранятся. "
-            "После этого можно публиковать книги, аудиоверсии и получать доход от читателей."
-        )
-    await call.message.edit_text(text, reply_markup=author_menu(bool(profile)))
-    await call.answer()
-
-
-@router.callback_query(F.data == "author:cancel_flow")
-async def author_cancel_flow(call: CallbackQuery, state: FSMContext) -> None:
-    data = await state.get_data()
-    book_id = int(data.get("book_id") or 0)
-    await state.clear()
-    if book_id:
-        book = await get_book(book_id)
-        if book:
-            await call.message.edit_text(
-                "Действие отменено. Данные не изменены.",
-                reply_markup=author_book_card_menu(book_id, book["publication_status"]),
-            )
-            await call.answer("Отменено")
-            return
-    user = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
-    profile = await get_author_profile(user["id"])
-    await call.message.edit_text(
-        "Действие отменено. Вы вернулись в кабинет автора.",
-        reply_markup=author_menu(bool(profile)),
-    )
-    await call.answer("Отменено")
-
-
-@router.callback_query(F.data == "author:register")
-async def author_register_start(call: CallbackQuery, state: FSMContext) -> None:
-    user = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
-    profile = await get_author_profile(user["id"])
-    if profile:
-        await call.message.edit_text("Вы уже зарегистрированы как автор.", reply_markup=author_menu(True))
-        await call.answer()
-        return
-    if await send_next_required_document(call.message, int(user["id"]), author=True):
-        await call.answer("Сначала документы автора")
-        return
-    await state.set_state(AuthorRegister.pen_name)
-    await call.message.edit_text("Введите ваш основной псевдоним автора. Это обязательное поле.", reply_markup=navigation_menu(cancel_callback="author:cancel_flow"))
-    await call.answer()
-
-
-@router.message(AuthorRegister.pen_name)
-async def author_pen_name(message: Message, state: FSMContext) -> None:
-    pen_name = message.text.strip() if message.text else ""
-    if len(pen_name) < 2:
-        await message.answer("Псевдоним слишком короткий. Введите от 2 символов.", reply_markup=navigation_menu(cancel_callback="author:cancel_flow"))
-        return
-    await state.update_data(pen_name=pen_name[:80])
-    await state.set_state(AuthorRegister.bio)
-    await message.answer("Введите короткое описание автора или нажмите «Пропустить». Его можно добавить позже.", reply_markup=skip_back_menu("author:skip:bio", cancel_callback="author:cancel_flow"))
-
-
-@router.message(AuthorRegister.bio)
-async def author_bio(message: Message, state: FSMContext) -> None:
-    bio = message.text.strip() if message.text else ""
-    await state.update_data(bio=bio[:1000])
-    await state.set_state(AuthorRegister.country)
-    await message.answer("Укажите страну или нажмите «Пропустить». Это можно заполнить позже в профиле автора.", reply_markup=skip_back_menu("author:skip:country", cancel_callback="author:cancel_flow"))
-
-
-@router.callback_query(AuthorRegister.bio, F.data == "author:skip:bio")
-async def author_bio_skip(call: CallbackQuery, state: FSMContext) -> None:
-    await state.update_data(bio="")
-    await state.set_state(AuthorRegister.country)
-    await call.message.edit_text("Описание пропущено. Укажите страну или нажмите «Пропустить».", reply_markup=skip_back_menu("author:skip:country", cancel_callback="author:cancel_flow"))
-    await call.answer("Пропущено")
-
-
-@router.message(AuthorRegister.country)
-async def author_country(message: Message, state: FSMContext) -> None:
-    country = message.text.strip() if message.text else ""
-    await state.update_data(country=country[:80])
-    await state.set_state(AuthorRegister.adult)
-    kb = InlineKeyboardBuilder()
-    kb.button(text="Да, мне есть 18", callback_data="author:adult:yes")
-    kb.button(text="Нет", callback_data="author:adult:no")
-    kb.button(text="❌ Отмена", callback_data="author:cancel_flow")
-    kb.adjust(1)
-    await message.answer("Подтвердите возраст автора.", reply_markup=kb.as_markup())
-
-
-@router.callback_query(AuthorRegister.country, F.data == "author:skip:country")
-async def author_country_skip(call: CallbackQuery, state: FSMContext) -> None:
-    await state.update_data(country="")
-    await state.set_state(AuthorRegister.adult)
-    kb = InlineKeyboardBuilder()
-    kb.button(text="Да, мне есть 18", callback_data="author:adult:yes")
-    kb.button(text="Нет", callback_data="author:adult:no")
-    kb.button(text="❌ Отмена", callback_data="author:cancel_flow")
-    kb.adjust(1)
-    await call.message.edit_text("Страна пропущена. Подтвердите возраст автора.", reply_markup=kb.as_markup())
-    await call.answer("Пропущено")
-
-
-@router.callback_query(AuthorRegister.adult, F.data.startswith("author:adult:"))
-async def author_adult(call: CallbackQuery, state: FSMContext) -> None:
-    is_adult = call.data.endswith(":yes")
-    data = await state.get_data()
-    user = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
-    await create_author_profile(
-        user_id=user["id"],
-        pen_name=data["pen_name"],
-        bio=data.get("bio", ""),
-        country=data.get("country", ""),
-        is_adult=is_adult,
-    )
-    await add_audit(user["id"], "author_registered", "author_profile", str(user["id"]), None, data["pen_name"])
-    await state.clear()
-    await call.message.edit_text(
-        "<b>Профиль автора создан.</b>\n\n"
-        "Теперь при добавлении книг бот будет использовать ваш сохранённый псевдоним.",
-        reply_markup=author_menu(True),
-    )
-    await call.answer()
-
-
-@router.callback_query(F.data == "author:add_book")
-async def add_book_start(call: CallbackQuery, state: FSMContext) -> None:
-    user = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
-    profile = await get_author_profile(user["id"])
-    if not profile:
-        await call.message.edit_text(
-            "Сначала нужно создать профиль автора. После регистрации бот не будет каждый раз спрашивать псевдоним.",
-            reply_markup=author_menu(False),
-        )
-        await call.answer()
-        return
-    if await send_next_required_document(call.message, int(user["id"]), author=True):
-        await call.answer("Нужно обновить документы автора")
-        return
-    await state.set_state(AddBook.title)
-    await call.message.edit_text("Введите название книги.", reply_markup=navigation_menu(cancel_callback="author:cancel_flow"))
-    await call.answer()
-
-
-@router.message(AddBook.title)
-async def add_book_title(message: Message, state: FSMContext) -> None:
-    title = (message.text or "").strip()
-    if len(title) < 2:
-        await message.answer("Название слишком короткое. Введите нормальное название книги.", reply_markup=navigation_menu(cancel_callback="author:cancel_flow"))
-        return
-    user = await upsert_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
-    profile = await get_author_profile(user["id"])
-    matches = await find_book_duplicates(
-        title=title[:160],
-        author_id=int(profile["id"]) if profile else None,
-    )
-    if matches:
-        await state.update_data(pending_title=title[:160], duplicate_title_ack=False)
-        kb = InlineKeyboardBuilder()
-        kb.button(text="✅ Это другая книга", callback_data="book:duplicate_title:continue")
-        kb.button(text="✏️ Изменить название", callback_data="book:duplicate_title:change")
-        kb.button(text="❌ Отмена", callback_data="author:cancel_flow")
-        kb.adjust(1)
-        await message.answer(duplicate_warning_text(matches), reply_markup=kb.as_markup())
-        return
-    await state.update_data(title=title[:160], duplicate_title_ack=False)
-    await state.set_state(AddBook.description)
-    await message.answer("Введите описание книги или нажмите «Пропустить». Описание можно добавить/изменить позже в карточке книги.", reply_markup=skip_back_menu("book:skip:description", cancel_callback="author:cancel_flow"))
-
-
-@router.callback_query(AddBook.title, F.data == "book:duplicate_title:continue")
-async def add_book_duplicate_title_continue(call: CallbackQuery, state: FSMContext) -> None:
-    data = await state.get_data()
-    title = str(data.get("pending_title") or "").strip()
-    if not title:
-        await call.answer("Введите название заново", show_alert=True)
-        return
-    await state.update_data(title=title, duplicate_title_ack=True)
-    await state.set_state(AddBook.description)
-    await call.message.edit_text(
-        "Совпадение отмечено. Введите описание книги или нажмите «Пропустить».",
-        reply_markup=skip_back_menu("book:skip:description"),
-    )
-    await call.answer("Продолжаем")
-
-
-@router.callback_query(AddBook.title, F.data == "book:duplicate_title:change")
-async def add_book_duplicate_title_change(call: CallbackQuery, state: FSMContext) -> None:
-    await state.update_data(pending_title="", duplicate_title_ack=False)
-    await call.message.edit_text("Введите другое название книги.", reply_markup=navigation_menu(cancel_callback="author:cancel_flow"))
-    await call.answer()
-
-
-@router.message(AddBook.description)
-async def add_book_description(message: Message, state: FSMContext) -> None:
-    description = (message.text or "").strip()
-    await state.update_data(description=description[:4000], page_type=0)
-    await state.set_state(AddBook.book_type)
-    await message.answer(
-        "<b>Выберите тип книги</b>\n\n"
-        "Тип описывает форму произведения, а не содержание: роман, сборник, книга-игра, руководство и так далее. "
-        "Жанры будут выбраны следующим шагом.",
-        reply_markup=single_select_menu(
-            "type", BOOK_TYPES, cancel_callback="author:cancel_flow", page=0, per_page=9
-        ),
-    )
-
-
-@router.callback_query(AddBook.description, F.data == "book:skip:description")
-async def add_book_description_skip(call: CallbackQuery, state: FSMContext) -> None:
-    await state.update_data(description="", page_type=0)
-    await state.set_state(AddBook.book_type)
-    await call.message.edit_text(
-        "<b>Выберите тип книги</b>\n\n"
-        "Тип описывает форму произведения, а жанр — содержание. После выбора система покажет наиболее подходящие жанры.",
-        reply_markup=single_select_menu(
-            "type", BOOK_TYPES, cancel_callback="author:cancel_flow", page=0, per_page=9
-        ),
-    )
-    await call.answer("Описание пропущено")
-
-
-@router.callback_query(AddBook.book_type, F.data.startswith("single:type:p:"))
-async def add_book_type_page(call: CallbackQuery, state: FSMContext) -> None:
-    try:
-        page = max(0, int(call.data.rsplit(":", 1)[-1]))
-    except (TypeError, ValueError):
-        await call.answer()
-        return
-    await state.update_data(page_type=page)
-    await _safe_edit_reply_markup(
-        call.message,
-        reply_markup=single_select_menu(
-            "type", BOOK_TYPES, cancel_callback="author:cancel_flow", page=page, per_page=9
-        ),
-    )
-    await call.answer()
-
-
-@router.callback_query(AddBook.book_type, F.data == "single:type:noop")
-async def add_book_type_noop(call: CallbackQuery) -> None:
-    await call.answer()
-
-
-@router.callback_query(AddBook.book_type, F.data.startswith("single:type:"))
-async def add_book_type(call: CallbackQuery, state: FSMContext) -> None:
-    parts = call.data.split(":")
-    if len(parts) != 3:
-        await call.answer()
-        return
-    code = parts[-1]
-    if code not in {item.code for item in BOOK_TYPES}:
-        await call.answer("Неизвестный тип", show_alert=True)
-        return
-    await state.update_data(book_type=[code])
-    await state.set_state(AddBook.language)
-    await call.message.edit_text(
-        "Выберите язык книги.",
-        reply_markup=single_select_menu("lang", LANGUAGES, cancel_callback="author:cancel_flow"),
-    )
-    await call.answer()
-
-
-@router.callback_query(AddBook.language, F.data.startswith("single:lang:"))
-async def add_book_language(call: CallbackQuery, state: FSMContext) -> None:
-    parts = call.data.split(":")
-    if len(parts) != 3:
-        await call.answer()
-        return
-    code = parts[-1]
-    if code not in {item.code for item in LANGUAGES}:
-        await call.answer("Неизвестный язык", show_alert=True)
-        return
-    await state.update_data(
-        language=[code],
-        selected_g=[], selected_t=[], selected_a=[], selected_c=[],
-        section_g="recommended", section_t="recommended", section_a="recommended", section_c="recommended",
-        section_menu_g=False, section_menu_t=False, section_menu_a=False, section_menu_c=False,
-        page_g=0, page_t=0, page_a=0, page_c=0,
-    )
-    await state.set_state(AddBook.genres)
-    data = await state.get_data()
-    await call.message.edit_text(_option_intro("g", data), reply_markup=_smart_option_markup("g", data))
-    await call.answer()
-
-
-def _ordered_selected(choices, selected: set[str]) -> list[str]:
-    return [item.code for item in choices if item.code in selected]
-
-
-def _markup_payload(markup):
-    if markup is None:
-        return None
-    dump = getattr(markup, "model_dump", None)
-    if callable(dump):
-        return dump(exclude_none=True)
-    return markup
-
-
-async def _safe_edit_reply_markup(message: Message, *, reply_markup) -> bool:
-    """Обновляет клавиатуру без падения на повторном или двойном нажатии.
-
-    CallbackQuery может прийти повторно, пока первый запрос уже успел изменить
-    клавиатуру. Telegram в таком случае отвечает ``message is not modified``.
-    Для пользователя это нормальная ситуация: нужная клавиатура уже показана.
-    """
-    current_markup = getattr(message, "reply_markup", None)
-    if _markup_payload(current_markup) == _markup_payload(reply_markup):
-        return False
-    try:
-        await message.edit_reply_markup(reply_markup=reply_markup)
-    except TelegramBadRequest as exc:
-        if "message is not modified" in str(exc).lower():
-            return False
-        raise
-    return True
-
-
-async def _handle_multiselect(
-    call: CallbackQuery,
-    state: FSMContext,
-    *,
-    prefix: str,
-    next_state,
-    next_prefix: str | None = None,
-    min_required: int = 0,
-) -> None:
-    parts = call.data.split(":")
-    action = parts[2] if len(parts) > 2 else "noop"
-    choices = _OPTION_CHOICES[prefix]
-    valid_codes = {item.code for item in choices}
-    state_key = _OPTION_STATE_KEYS[prefix]
-    data = await state.get_data()
-    selected = set(data.get(state_key, [])) & valid_codes
-    page_key = f"page_{prefix}"
-
-    if action == "t" and len(parts) >= 4:
-        code = parts[3]
-        if code not in valid_codes:
-            await call.answer("Такого варианта нет", show_alert=True)
-            return
-        if code in selected:
-            selected.remove(code)
-        else:
-            if prefix == "c" and code == "none":
-                selected = {"none"}
-            else:
-                selected.add(code)
-                if prefix == "c":
-                    selected.discard("none")
-        ordered = _ordered_selected(choices, selected)
-        await state.update_data(**{state_key: ordered})
-        data[state_key] = ordered
-        await _safe_edit_reply_markup(call.message, reply_markup=_smart_option_markup(prefix, data, selected=selected))
-        await call.answer("Выбор обновлён")
-        return
-
-    if action == "p" and len(parts) >= 4:
-        try:
-            page = max(0, int(parts[3]))
-        except ValueError:
-            await call.answer()
-            return
-        await state.update_data(**{page_key: page})
-        data[page_key] = page
-        await _safe_edit_reply_markup(call.message, reply_markup=_smart_option_markup(prefix, data, selected=selected))
-        await call.answer()
-        return
-
-    if action == "m":
-        await state.update_data(**{f"section_menu_{prefix}": True})
-        data[f"section_menu_{prefix}"] = True
-        await _safe_edit_reply_markup(call.message, reply_markup=_smart_option_markup(prefix, data, selected=selected))
-        await call.answer("Выберите раздел")
-        return
-
-    if action == "s" and len(parts) >= 4:
-        section_code = parts[3]
-        allowed_sections = {item.code for item in sections_for_prefix(prefix, selected)}
-        if section_code not in allowed_sections:
-            await call.answer("Раздел недоступен", show_alert=True)
-            return
-        await state.update_data(
-            **{
-                f"section_{prefix}": section_code,
-                f"section_menu_{prefix}": False,
-                page_key: 0,
-            }
-        )
-        data[f"section_{prefix}"] = section_code
-        data[f"section_menu_{prefix}"] = False
-        data[page_key] = 0
-        await _safe_edit_reply_markup(call.message, reply_markup=_smart_option_markup(prefix, data, selected=selected))
-        await call.answer(section_label(prefix, section_code))
-        return
-
-    if action == "d":
-        if prefix == "c" and not selected:
-            selected = {"none"}
-            ordered = ["none"]
-            await state.update_data(selected_c=ordered)
-            data["selected_c"] = ordered
-        if len(selected) < min_required:
-            await call.answer(f"Выберите минимум {min_required} пункт(а).", show_alert=True)
-            return
-        await state.set_state(next_state)
-        if next_prefix:
-            next_key = _OPTION_STATE_KEYS[next_prefix]
-            await state.update_data(
-                **{
-                    next_key: [],
-                    f"section_{next_prefix}": "recommended",
-                    f"section_menu_{next_prefix}": False,
-                    f"page_{next_prefix}": 0,
-                }
-            )
-            data[next_key] = []
-            data[f"section_{next_prefix}"] = "recommended"
-            data[f"section_menu_{next_prefix}"] = False
-            data[f"page_{next_prefix}"] = 0
-            await call.message.edit_text(
-                _option_intro(next_prefix, data),
-                reply_markup=_smart_option_markup(next_prefix, data),
-            )
-        else:
-            recommendation = suggested_age_limit(data.get("selected_c", []), data.get("selected_g", []))
-            await state.update_data(suggested_age_limit=recommendation)
-            await call.message.edit_text(
-                "<b>Выберите возрастное ограничение</b>\n\n"
-                f"По отмеченным темам предварительно подходит <b>{recommendation}</b>. "
-                "Звёздочка — только подсказка: автор обязан выбрать достоверную маркировку по фактическому содержанию.",
-                reply_markup=age_menu(
-                    "book:age", cancel_callback="author:cancel_flow", recommended=recommendation
-                ),
-            )
-        await call.answer()
-        return
-
-    await call.answer()
-
-
-@router.callback_query(AddBook.genres, F.data.startswith("sel:g:"))
-async def add_book_genres(call: CallbackQuery, state: FSMContext) -> None:
-    await _handle_multiselect(
-        call, state, prefix="g", next_state=AddBook.tropes, next_prefix="t", min_required=1
-    )
-
-
-@router.callback_query(AddBook.tropes, F.data.startswith("sel:t:"))
-async def add_book_tropes(call: CallbackQuery, state: FSMContext) -> None:
-    await _handle_multiselect(
-        call, state, prefix="t", next_state=AddBook.audience, next_prefix="a", min_required=1
-    )
-
-
-@router.callback_query(AddBook.audience, F.data.startswith("sel:a:"))
-async def add_book_audience(call: CallbackQuery, state: FSMContext) -> None:
-    await _handle_multiselect(
-        call, state, prefix="a", next_state=AddBook.content_warnings, next_prefix="c", min_required=0
-    )
-
-
-@router.callback_query(AddBook.content_warnings, F.data.startswith("sel:c:"))
-async def add_book_content_warnings(call: CallbackQuery, state: FSMContext) -> None:
-    await _handle_multiselect(
-        call, state, prefix="c", next_state=AddBook.age_limit, next_prefix=None, min_required=0
-    )
-
-
-@router.callback_query(AddBook.age_limit, F.data.startswith("book:age:"))
-async def add_book_age(call: CallbackQuery, state: FSMContext) -> None:
-    age = call.data.split(":")[-1]
-    await state.update_data(age_limit=age)
-    await state.set_state(AddBook.writing_status)
-    await call.message.edit_text("Выберите статус книги.", reply_markup=writing_status_menu(cancel_callback="author:cancel_flow"))
-    await call.answer()
-
-
-@router.callback_query(AddBook.writing_status, F.data.startswith("book:status:"))
-async def add_book_status(call: CallbackQuery, state: FSMContext) -> None:
-    status = call.data.split(":")[-1]
-    await state.update_data(writing_status=status)
-    await state.set_state(AddBook.allow_download)
-    await call.message.edit_text(
-        "Разрешить скачивание книги после покупки или бесплатного доступа?\n\n"
-        "Если запретить, читать можно будет только внутри платформы.",
-        reply_markup=yes_no_menu("book:download", cancel_callback="author:cancel_flow"),
-    )
-    await call.answer()
-
-
-@router.callback_query(AddBook.allow_download, F.data.startswith("book:download:"))
-async def add_book_download(call: CallbackQuery, state: FSMContext) -> None:
-    allow = call.data.endswith(":yes")
-    await state.update_data(allow_download=allow)
-    await state.set_state(AddBook.pricing_type)
-    await call.message.edit_text(
-        "<b>Условия доступа к книге</b>\n\n"
-        "Бесплатная книга полностью открывает все главы. Платную можно продавать целиком/по главам либо открыть читателям с активной подпиской VoxLyra Premium.",
-        reply_markup=pricing_menu(cancel_callback="author:cancel_flow"),
-    )
-    await call.answer()
-
-
-@router.callback_query(AddBook.pricing_type, F.data.startswith("book:pricing:"))
-async def add_book_pricing(call: CallbackQuery, state: FSMContext) -> None:
-    choice = call.data.split(":")[-1]
-    data = await state.get_data()
-    if choice in {"free", "premium"}:
-        await state.update_data(pricing_type=choice, price_stars=0)
-        await state.set_state(AddBook.cover)
-        text = (
-            "Книга будет полностью бесплатной. Все её главы тоже будут бесплатными, поэтому цены глав спрашиваться не будут."
-            if choice == "free" else
-            "Книга будет доступна по VoxLyra Premium. Первые ознакомительные главы можно оставить бесплатными, остальные откроются только активным подписчикам."
-        )
-        await call.message.edit_text(
-            text + "\n\nТеперь загрузите обложку изображением или нажмите «Пропустить».",
-            reply_markup=cover_menu(cancel_callback="author:cancel_flow"),
-        )
-    else:
-        recommended = recommend_book_price(description=data.get("description", ""), pricing_type="whole_book")
-        await state.update_data(pricing_type="whole_book", recommended_price=recommended)
-        await state.set_state(AddBook.price)
-        await call.message.edit_text(
-            f"Рекомендуемая цена всей книги: <b>{recommended} Stars</b>.\n\n"
-            "Введите цену числом. После этого бот отдельно спросит, разрешать ли покупку отдельных глав.",
-            reply_markup=skip_use_menu(
-                "book:price:free", "book:price:recommended",
-                "✅ Поставить рекомендованную цену", cancel_callback="author:cancel_flow",
-            ),
-        )
-    await call.answer()
-
-
-async def _ask_book_chapter_sales(message, state: FSMContext) -> None:
-    await state.set_state(AddBook.chapter_sales)
-    await message.answer(
-        "Разрешить читателю покупать отдельные главы?\n\n"
-        "• «Нет» — продаётся только вся книга; закрытые главы открываются после её покупки.\n"
-        "• «Да» — книга продаётся целиком, а выбранным главам можно назначить отдельную цену.",
-        reply_markup=yes_no_menu("book:chapter_sales", cancel_callback="author:cancel_flow"),
-    )
-
-
-@router.callback_query(AddBook.price, F.data == "book:price:recommended")
-async def add_book_price_recommended(call: CallbackQuery, state: FSMContext) -> None:
-    data = await state.get_data()
-    await state.update_data(price_stars=max(1, int(data.get("recommended_price", 1))))
-    await _ask_book_chapter_sales(call.message, state)
-    await call.answer("Цена сохранена")
-
-
-@router.callback_query(AddBook.price, F.data == "book:price:free")
-async def add_book_price_free(call: CallbackQuery, state: FSMContext) -> None:
-    await state.update_data(pricing_type="free", price_stars=0)
-    await state.set_state(AddBook.cover)
-    await call.message.edit_text(
-        "Книга будет полностью бесплатной, включая все главы. Загрузите обложку или нажмите «Пропустить».",
-        reply_markup=cover_menu(cancel_callback="author:cancel_flow"),
-    )
-    await call.answer("Бесплатно")
-
-
-@router.message(AddBook.price)
-async def add_book_price(message: Message, state: FSMContext) -> None:
-    raw = (message.text or "").strip()
-    if not raw.isdigit():
-        await message.answer("Введите цену числом. Например: 120", reply_markup=navigation_menu(cancel_callback="author:cancel_flow"))
-        return
-    price = int(raw)
-    if price < 0 or price > 100000:
-        await message.answer("Цена должна быть от 0 до 100 000 Stars.", reply_markup=navigation_menu(cancel_callback="author:cancel_flow"))
-        return
-    if price <= 0:
-        await state.update_data(pricing_type="free", price_stars=0)
-        await state.set_state(AddBook.cover)
-        await message.answer(
-            "Книга будет полностью бесплатной, включая все главы. Загрузите обложку или нажмите «Пропустить».",
-            reply_markup=cover_menu(cancel_callback="author:cancel_flow"),
-        )
-        return
-    await state.update_data(price_stars=price)
-    await _ask_book_chapter_sales(message, state)
-
-
-@router.callback_query(AddBook.chapter_sales, F.data.startswith("book:chapter_sales:"))
-async def add_book_chapter_sales(call: CallbackQuery, state: FSMContext) -> None:
-    enabled = call.data.endswith(":yes")
-    await state.update_data(pricing_type="chapters" if enabled else "whole_book")
-    await state.set_state(AddBook.cover)
-    result_text = (
-        "Продажа отдельных глав включена. Их цены можно будет назначить после создания книги."
-        if enabled else
-        "Будет продаваться только вся книга. Отдельные цены глав не запрашиваются."
-    )
-    await call.message.edit_text(
-        result_text + "\n\nЗагрузите обложку изображением или нажмите «Пропустить».",
-        reply_markup=cover_menu(cancel_callback="author:cancel_flow"),
-    )
-    await call.answer("Сохранено")
-
-
-@router.message(AddBook.cover, F.photo)
-async def add_book_cover_photo(message: Message, state: FSMContext) -> None:
-    file_id = message.photo[-1].file_id
-    await state.update_data(cover_file_id=file_id)
-    await state.set_state(AddBook.confirm)
-    await _show_book_confirm(message, state)
-
-
-@router.message(AddBook.cover, F.document)
-async def add_book_cover_document(message: Message, state: FSMContext) -> None:
-    document = message.document
-    filename = (document.file_name or "").lower()
-    mime = (document.mime_type or "").lower()
-    if not (mime.startswith("image/") or filename.endswith((".jpg", ".jpeg", ".png", ".webp"))):
-        await message.answer(
-            "Для обложки отправьте изображение JPG, PNG или WEBP.",
-            reply_markup=cover_menu(cancel_callback="author:cancel_flow"),
-        )
-        return
-    await state.update_data(cover_file_id=document.file_id)
-    await state.set_state(AddBook.confirm)
-    await _show_book_confirm(message, state)
-
-
-@router.callback_query(AddBook.cover, F.data == "book:cover:skip")
-async def add_book_cover_skip(call: CallbackQuery, state: FSMContext) -> None:
-    await state.update_data(cover_file_id=None)
-    await state.set_state(AddBook.confirm)
-    await _show_book_confirm(call.message, state)
-    await call.answer()
-
-
-async def _show_book_confirm(message: Message, state: FSMContext) -> None:
-    data = await state.get_data()
-    text = (
-        "<b>Проверьте книгу</b>\n\n"
-        f"Название: <b>{data.get('title', '')}</b>\n"
-        f"Тип: <b>{', '.join(labels_for('type', data.get('book_type', [])))}</b>\n"
-        f"Язык: <b>{', '.join(labels_for('lang', data.get('language', [])))}</b>\n"
-        f"Жанры: <b>{', '.join(labels_for('g', data.get('selected_g', []))[:6])}</b>\n"
-        f"Теги: <b>{', '.join(labels_for('t', data.get('selected_t', []))[:6])}</b>\n"
-        f"Аудитория: <b>{', '.join(labels_for('a', data.get('selected_a', []))[:4])}</b>\n"
-        f"Предупреждения: <b>{', '.join(labels_for('c', data.get('selected_c', []))[:4])}</b>\n"
-        f"Возраст: <b>{data.get('age_limit', '16+')}</b>\n"
-        f"Статус: <b>{STATUS_RU.get(data.get('writing_status', 'writing'), data.get('writing_status', 'writing'))}</b>\n"
-        f"Скачивание: <b>{'разрешено' if data.get('allow_download') else 'запрещено'}</b>\n"
-        f"Цена всей книги: <b>{data.get('price_stars', 0)} Stars</b>\n"
-        "Цены отдельных глав задаются после создания книги.\n"
-        f"Обложка: <b>{'загружена' if data.get('cover_file_id') else 'нет'}</b>\n\n"
-        "Сохранить черновик?"
-    )
-    kb = InlineKeyboardBuilder()
-    kb.button(text="✅ Сохранить", callback_data="book:confirm:yes")
-    kb.button(text="❌ Отмена", callback_data="book:confirm:no")
-    kb.adjust(1)
-    await message.answer(text, reply_markup=kb.as_markup())
-
-
-@router.callback_query(AddBook.confirm, F.data.startswith("book:confirm:"))
-async def add_book_confirm(call: CallbackQuery, state: FSMContext, bot: Bot) -> None:
-    if call.data.endswith(":no"):
-        await state.clear()
-        await call.message.edit_text("Добавление книги отменено.", reply_markup=author_menu(True))
-        await call.answer()
-        return
-
-    user = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
-    profile = await get_author_profile(user["id"])
-    if not profile:
-        await state.clear()
-        await call.message.edit_text("Профиль автора не найден. Создайте профиль заново.", reply_markup=author_menu(False))
-        await call.answer()
-        return
-    data = await state.get_data()
-    book_id = await create_book(
-        author_id=profile["id"],
-        title=data["title"],
-        description=data.get("description", ""),
-        age_limit=data.get("age_limit", "16+"),
-        writing_status=data.get("writing_status", "writing"),
-        allow_download=bool(data.get("allow_download")),
-        pricing_type=data.get("pricing_type", "free"),
-        price_stars=int(data.get("price_stars", 0)),
-        cover_file_id=data.get("cover_file_id"),
-    )
-    option_payload = {
-        "book_type": data.get("book_type", []),
-        "language": data.get("language", []),
-        "genres": data.get("selected_g", []),
-        "tropes": data.get("selected_t", []),
-        "audience": data.get("selected_a", []),
-        "warnings": data.get("selected_c", []),
-    }
-    for group, codes in option_payload.items():
-        await set_book_options(book_id, group, codes)
-    if data.get("duplicate_title_ack"):
-        await set_book_duplicate_override(book_id, True)
-    cover_file_id = data.get("cover_file_id")
-    if cover_file_id:
-        try:
-            await download_book_cover(bot, book_id, str(cover_file_id))
-        except Exception:
-            logger.exception("Could not save cover for newly created book_id=%s", book_id)
-    await add_audit(user["id"], "book_created", "book", str(book_id), None, data["title"])
-    await state.clear()
-    await call.message.edit_text(
-        "<b>Черновик книги создан.</b>\n\n"
-        "Теперь добавьте главы: вручную или загрузкой файла TXT/DOCX/FB2/EPUB/PDF/ZIP.",
-        reply_markup=book_created_menu(book_id),
-    )
-    await call.answer()
-
-
-@router.callback_query(F.data == "author:books")
-async def author_books(call: CallbackQuery) -> None:
-    user = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
-    profile = await get_author_profile(user["id"])
-    if not profile:
-        await call.message.edit_text("Сначала создайте профиль автора.", reply_markup=author_menu(False))
-        await call.answer()
-        return
-    books = await list_books_for_author(user["id"])
-    if not books:
-        await call.message.edit_text("У вас пока нет книг.", reply_markup=author_books_menu([]))
-    else:
-        await call.message.edit_text("<b>Мои книги</b>\n\nВыберите книгу.", reply_markup=author_books_menu(books))
-    await call.answer()
-
-
-@router.callback_query(F.data.startswith("author:book:"))
-async def author_book_card(call: CallbackQuery) -> None:
-    book_id = int(call.data.split(":")[-1])
-    book = await get_book(book_id)
-    if not book:
-        await call.answer("Книга не найдена", show_alert=True)
-        return
-    text = (
-        f"<b>{book['title']}</b>\n\n"
-        f"Автор: <b>{book['pen_name'] or 'не указан'}</b>\n"
-        f"Возраст: <b>{book['age_limit']}</b>\n"
-        f"Статус книги: <b>{STATUS_RU.get(book['writing_status'], book['writing_status'])}</b>\n"
-        f"Публикация: <b>{PUBLICATION_RU.get(book['publication_status'], book['publication_status'])}</b>\n"
-        f"Скачивание: <b>{'разрешено' if book['allow_download'] else 'запрещено'}</b>\n"
-        f"Цена всей книги: <b>{book['price_stars']} Stars</b>\n"
-        f"Обложка: <b>{'установлена' if (book['cover_file_id'] or book['cover_path']) else 'не установлена'}</b>\n"
-        f"Цены отдельных глав задаются в разделе «Главы».\n\n"
-        f"{book['description'] or ''}"
-    )
-    await call.message.edit_text(text[:4096], reply_markup=author_book_card_menu(book_id, book["publication_status"]))
-    await call.answer()
-
-
-@router.callback_query(EditBookDetails.cover, F.data.startswith("book:edit_cover_cancel:"))
-async def book_edit_cover_cancel(call: CallbackQuery, state: FSMContext) -> None:
-    book_id = int(call.data.split(":")[-1])
-    book = await get_book(book_id)
-    await state.clear()
-    await call.message.edit_text(
-        "Изменение обложки отменено.",
-        reply_markup=author_book_card_menu(book_id, str(book["publication_status"] if book else "draft")),
-    )
-    await call.answer()
-
-
-@router.callback_query(F.data.startswith("book:edit_cover:"))
-async def book_edit_cover_start(call: CallbackQuery, state: FSMContext) -> None:
-    book_id = int(call.data.split(":")[-1])
-    ok, _ = await _author_can_edit_book(call, book_id)
-    if not ok:
-        await call.answer("Книга не найдена или недоступна", show_alert=True)
-        return
-    await state.update_data(book_id=book_id)
-    await state.set_state(EditBookDetails.cover)
-    await call.message.edit_text(
-        "<b>Обложка книги</b>\n\n"
-        "Отправьте новую обложку как фотографию или файл JPG, PNG либо WEBP. "
-        "Обложку можно добавить даже если при создании книги вы нажали «Пропустить», "
-        "а также заменить позже у черновика, книги на проверке или опубликованной книги.",
-        reply_markup=book_cover_edit_menu(book_id),
-    )
-    await call.answer()
-
-
-async def _save_edited_book_cover(message: Message, state: FSMContext, bot: Bot, file_id: str) -> None:
-    data = await state.get_data()
-    book_id = int(data.get("book_id") or 0)
-    user = await upsert_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
-    if not book_id or not await book_belongs_to_author(book_id, user["id"]):
-        await state.clear()
-        await message.answer("Книга не найдена или недоступна.", reply_markup=author_menu(True))
-        return
-    try:
-        stored_path = await download_book_cover(bot, book_id, str(file_id))
-    except Exception:
-        logger.exception("Could not replace cover for book_id=%s", book_id)
-        await message.answer(
-            "Не удалось сохранить обложку. Отправьте изображение ещё раз.",
-            reply_markup=book_cover_edit_menu(book_id),
-        )
-        return
-    if not await update_book_cover_file_id(book_id, user["id"], str(file_id)):
-        await state.clear()
-        await message.answer("Книга не найдена или недоступна.", reply_markup=author_menu(True))
-        return
-    await add_audit(user["id"], "book_cover_updated", "book", str(book_id), None, stored_path)
-    await state.clear()
-    book = await get_book(book_id)
-    await message.answer(
-        "✅ Обложка добавлена и сохранена. Она уже будет использоваться в карточке книги и при следующей проверке.",
-        reply_markup=author_book_card_menu(book_id, str(book["publication_status"] if book else "draft")),
-    )
-
-
-@router.message(EditBookDetails.cover, F.photo)
-async def book_edit_cover_photo(message: Message, state: FSMContext, bot: Bot) -> None:
-    await _save_edited_book_cover(message, state, bot, message.photo[-1].file_id)
-
-
-@router.message(EditBookDetails.cover, F.document)
-async def book_edit_cover_document(message: Message, state: FSMContext, bot: Bot) -> None:
-    document = message.document
-    filename = (document.file_name or "").lower()
-    mime = (document.mime_type or "").lower()
-    if not (mime.startswith("image/") or filename.endswith((".jpg", ".jpeg", ".png", ".webp"))):
-        data = await state.get_data()
-        await message.answer(
-            "Для обложки отправьте изображение JPG, PNG или WEBP.",
-            reply_markup=book_cover_edit_menu(int(data.get("book_id") or 0)),
-        )
-        return
-    await _save_edited_book_cover(message, state, bot, document.file_id)
-
-
-@router.message(EditBookDetails.cover)
-async def book_edit_cover_invalid(message: Message, state: FSMContext) -> None:
-    data = await state.get_data()
-    await message.answer(
-        "Отправьте обложку изображением или файлом JPG, PNG либо WEBP.",
-        reply_markup=book_cover_edit_menu(int(data.get("book_id") or 0)),
-    )
-
-
-@router.callback_query(F.data.startswith("book:edit_description:"))
-async def book_edit_description_start(call: CallbackQuery, state: FSMContext) -> None:
-    book_id = int(call.data.split(":")[-1])
-    ok, _ = await _author_can_edit_book(call, book_id)
-    if not ok:
-        await call.answer("Книга не найдена или недоступна", show_alert=True)
-        return
-    await state.update_data(book_id=book_id)
-    await state.set_state(EditBookDetails.description)
-    await call.message.edit_text("Введите новое описание книги или нажмите «Очистить». Описание можно менять в любое время до публикации и после неё.", reply_markup=skip_back_menu("book:edit_desc_clear", f"author:book:{book_id}", "Очистить"))
-    await call.answer()
-
-
-@router.message(EditBookDetails.description)
-async def book_edit_description_save(message: Message, state: FSMContext) -> None:
-    data = await state.get_data()
-    book_id = int(data["book_id"])
-    user = await upsert_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
-    value = (message.text or "").strip()[:4000]
-    current = await get_book(book_id)
-    reasons = evaluate_metadata_text(value, age_limit=str(current["age_limit"] if current else "0+"), field_name="Описание")
-    if reasons:
-        await message.answer("Изменение не сохранено:\n• " + "\n• ".join(reasons))
-        return
-    ok = await update_book_description(book_id, user["id"], value)
-    await state.clear()
-    await message.answer("Описание книги обновлено." if ok else "Книга не найдена или недоступна.", reply_markup=author_menu(True))
-
-
-@router.callback_query(EditBookDetails.description, F.data == "book:edit_desc_clear")
-async def book_edit_description_clear(call: CallbackQuery, state: FSMContext) -> None:
-    data = await state.get_data()
-    book_id = int(data["book_id"])
-    user = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
-    ok = await update_book_description(book_id, user["id"], "")
-    await state.clear()
-    await call.message.edit_text("Описание очищено." if ok else "Книга не найдена или недоступна.", reply_markup=author_book_card_menu(book_id, "draft"))
-    await call.answer("Готово")
-
-
-@router.callback_query(F.data.startswith("book:edit_price:"))
-async def book_edit_price_start(call: CallbackQuery, state: FSMContext) -> None:
-    book_id = int(call.data.split(":")[-1])
-    ok, _ = await _author_can_edit_book(call, book_id)
-    if not ok:
-        await call.answer("Книга не найдена или недоступна", show_alert=True)
-        return
-    await state.update_data(book_id=book_id)
-    await state.set_state(EditBookDetails.price)
-    builder = InlineKeyboardBuilder()
-    builder.button(text="🆓 Сделать всю книгу бесплатной", callback_data="book:edit_price_free")
-    builder.button(text="👑 Читать по VoxLyra Premium", callback_data="book:edit_price_premium")
-    builder.button(text="⬅️ Назад", callback_data=f"author:book:{book_id}")
-    builder.adjust(1)
-    await call.message.edit_text(
-        "<b>Условия доступа к книге</b>\n\n"
-        "Введите цену всей книги в Stars для разовой покупки либо выберите бесплатный доступ или VoxLyra Premium кнопкой ниже.",
-        reply_markup=builder.as_markup(),
-    )
-    await call.answer()
-
-
-@router.message(EditBookDetails.price)
-async def book_edit_price_save(message: Message, state: FSMContext) -> None:
-    raw = (message.text or "").strip()
-    if not raw.isdigit():
-        await message.answer("Введите цену числом. Например: 120", reply_markup=navigation_menu(cancel_callback="author:cancel_flow"))
-        return
-    price = int(raw)
-    if price < 0 or price > 100000:
-        await message.answer("Цена должна быть от 0 до 100 000 Stars.", reply_markup=navigation_menu(cancel_callback="author:cancel_flow"))
-        return
-    if price <= 0:
-        await state.set_state(EditBookDetails.confirm_free)
-        await message.answer(
-            "Сделать книгу полностью бесплатной?\n\n"
-            "Все существующие и будущие главы станут бесплатными. Продажа отдельных глав и текстовых пакетов будет отключена.",
-            reply_markup=yes_no_menu("book:confirm_free", cancel_callback="author:cancel_flow"),
-        )
-        return
-    await state.update_data(price_stars=price)
-    await state.set_state(EditBookDetails.chapter_sales)
-    await message.answer(
-        "Разрешить покупку отдельных глав?\n\n"
-        "«Нет» — только покупка всей книги.\n"
-        "«Да» — вся книга плюс выбранные главы по отдельности.",
-        reply_markup=yes_no_menu("book:edit_chapter_sales", cancel_callback="author:cancel_flow"),
-    )
-
-
-@router.callback_query(EditBookDetails.chapter_sales, F.data.startswith("book:edit_chapter_sales:"))
-async def book_edit_chapter_sales(call: CallbackQuery, state: FSMContext) -> None:
-    data = await state.get_data()
-    book_id = int(data["book_id"])
-    price = int(data["price_stars"])
-    mode = "chapters" if call.data.endswith(":yes") else "whole_book"
-    user = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
-    ok = await update_book_price(book_id, user["id"], mode, price)
-    await state.clear()
-    text = (
-        f"Цена всей книги: <b>{price} Stars</b>. "
-        + ("Продажа отдельных глав включена." if mode == "chapters" else "Продаётся только вся книга.")
-    ) if ok else "Книга не найдена или недоступна."
-    await call.message.edit_text(text, reply_markup=author_book_card_menu(book_id, "draft"))
-    await call.answer("Сохранено" if ok else "Недоступно")
-
-
-@router.callback_query(EditBookDetails.price, F.data == "book:edit_price_premium")
-async def book_edit_price_premium(call: CallbackQuery, state: FSMContext) -> None:
-    data = await state.get_data()
-    book_id = int(data["book_id"])
-    user = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
-    ok = await update_book_price(book_id, user["id"], "premium", 0)
-    await state.clear()
-    await call.message.edit_text(
-        "Книга переведена в режим VoxLyra Premium. Бесплатные ознакомительные главы сохраняются, остальные доступны активным подписчикам." if ok else "Книга не найдена или недоступна.",
-        reply_markup=author_book_card_menu(book_id, "draft"),
-    )
-    await call.answer("Готово" if ok else "Недоступно")
-
-
-@router.callback_query(EditBookDetails.price, F.data == "book:edit_price_free")
-async def book_edit_price_free_ask(call: CallbackQuery, state: FSMContext) -> None:
-    await state.set_state(EditBookDetails.confirm_free)
-    await call.message.edit_text(
-        "Сделать книгу полностью бесплатной?\n\n"
-        "Все главы станут бесплатными. Продажа отдельных глав и текстовых пакетов отключится. "
-        "Старые цены сохранятся только как скрытый черновик и сами не вернутся.",
-        reply_markup=yes_no_menu("book:confirm_free", cancel_callback="author:cancel_flow"),
-    )
-    await call.answer()
-
-
-@router.callback_query(EditBookDetails.confirm_free, F.data == "book:confirm_free:no")
-async def book_edit_price_free_cancel(call: CallbackQuery, state: FSMContext) -> None:
-    data = await state.get_data()
-    book_id = int(data["book_id"])
-    await state.clear()
-    await call.message.edit_text("Цена не изменена.", reply_markup=author_book_card_menu(book_id, "draft"))
-    await call.answer("Отменено")
-
-
-@router.callback_query(EditBookDetails.confirm_free, F.data == "book:confirm_free:yes")
-async def book_edit_price_free_confirm(call: CallbackQuery, state: FSMContext) -> None:
-    data = await state.get_data()
-    book_id = int(data["book_id"])
-    user = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
-    ok = await update_book_price(book_id, user["id"], "free", 0)
-    await state.clear()
-    await call.message.edit_text(
-        "Книга и все её главы теперь бесплатны. Продажа отдельных глав отключена." if ok else "Книга не найдена или недоступна.",
-        reply_markup=author_book_card_menu(book_id, "draft"),
-    )
-    await call.answer("Готово" if ok else "Недоступно")
-
-
-@router.callback_query(F.data.startswith("author:submit_book:"))
-async def author_submit_book(call: CallbackQuery) -> None:
-    book_id = int(call.data.split(":")[-1])
-    user = await upsert_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
-    if not await book_belongs_to_author(book_id, int(user["id"])):
-        await call.answer("Книга не найдена или недоступна", show_alert=True)
-        return
-    if await count_chapters_for_book(book_id) < 1:
-        await call.answer("Перед отправкой добавьте хотя бы одну главу", show_alert=True)
-        return
-    workflow = await finish_book_content_workflow(
-        bot=call.bot,
-        book_id=book_id,
-        actor_user_id=int(user["id"]),
-        actor_telegram_id=int(call.from_user.id),
-        source="telegram_submit",
-    )
-    await add_audit(user["id"], "book_submitted", "book", str(book_id), None, workflow.workflow_status)
-    if workflow.workflow_status == "published":
-        text = "<b>Книга опубликована.</b> Она появилась в каталоге.\n\n" + workflow.channel_message
-    else:
-        text = (
-            "<b>Книга передана на проверку.</b>\n\n"
-            "Владелец, администраторы и модераторы книг получили уведомление. "
-            "Если решение задержится, бот напомнит им повторно."
-        )
-    await call.message.edit_text(text, reply_markup=author_menu(True))
-    await call.answer("Готово")
-
 
 
 async def _author_can_edit_book(call_or_message, book_id: int) -> tuple[bool, int]:
@@ -1760,6 +686,17 @@ async def _finish_manual_chapter(message_or_call, state: FSMContext, access_mode
     elif access not in {"free", "book", "chapter", "premium"}:
         access, active_price = "free", 0
 
+    tg = message_or_call.from_user
+    user = await upsert_user(tg.id, tg.username, tg.full_name)
+    if book and str(book["publication_status"] or "") == "published" and not await get_open_revision_request(book_id):
+        await create_revision_request(
+            book_id,
+            actor_user_id=int(user["id"]),
+            reason="Добавлено новое содержимое. Проверяется только новая глава.",
+            finding_ids=(),
+            requires_manual_confirmation=False,
+            source="telegram_content_change",
+        )
     chapter_id = await add_manual_chapter(
         book_id,
         data.get("title") or "Глава",
@@ -1768,23 +705,28 @@ async def _finish_manual_chapter(message_or_call, state: FSMContext, access_mode
         price_stars=active_price if access == "chapter" else 0,
     )
     await state.clear()
-    tg = message_or_call.from_user
-    user = await upsert_user(tg.id, tg.username, tg.full_name)
-    book = await get_book(book_id)
-    if book and book["publication_status"] == "published":
-        await set_chapter_status(chapter_id, "published")
     await add_audit(user["id"], "chapter_created_manual", "chapter", str(chapter_id), None, f"access={access}; price={active_price}")
-    bot = message_or_call.bot
-    await _notify_new_chapters(book_id, [chapter_id], int(user["id"]), bot)
+    workflow = await finish_book_content_workflow(
+        bot=message_or_call.bot,
+        book_id=book_id,
+        actor_user_id=int(user["id"]),
+        actor_telegram_id=int(tg.id),
+        source="telegram_manual_chapter",
+    )
     target_message = message_or_call.message if isinstance(message_or_call, CallbackQuery) else message_or_call
-    status_text = {
-        "free": "Глава сохранена как бесплатная.",
-        "book": "Глава сохранена с доступом после покупки всей книги.",
-        "chapter": f"Глава сохранена с отдельной ценой {active_price} Stars.",
-        "premium": "Глава сохранена с доступом по VoxLyra Premium.",
+    access_text = {
+        "free": "бесплатная",
+        "book": "доступна после покупки всей книги",
+        "chapter": f"продаётся отдельно за {active_price} Stars",
+        "premium": "доступна по VoxLyra Premium",
     }[access]
-    if book and book["publication_status"] == "published":
-        status_text = status_text.replace("сохранена", "опубликована", 1)
+    if workflow.workflow_status == "published":
+        status_text = f"Глава опубликована и {access_text}."
+    elif workflow.workflow_status == "review":
+        status_text = f"Глава сохранена и {access_text}. Она ждёт проверки; опубликованная книга остаётся в каталоге."
+    else:
+        status_text = f"Глава сохранена и {access_text}. Статус проверки: {workflow.workflow_status or 'ожидает запуска'}."
+    book = await get_book(book_id)
     await target_message.answer(status_text, reply_markup=author_chapters_menu(book_id, _book_text_pricing_mode(book)))
 
 
@@ -2052,6 +994,16 @@ async def chapter_import_confirm(call: CallbackQuery, state: FSMContext) -> None
         await call.answer("Данные импорта не найдены. Загрузите файл заново.", show_alert=True)
         await state.clear()
         return
+    current_book_before_import = await get_book(book_id)
+    if current_book_before_import and str(current_book_before_import["publication_status"] or "") == "published" and not await get_open_revision_request(book_id):
+        await create_revision_request(
+            book_id,
+            actor_user_id=int(user_id),
+            reason="Импортировано новое или изменённое содержимое. Проверяются только затронутые главы.",
+            finding_ids=(),
+            requires_manual_confirmation=False,
+            source="telegram_content_change",
+        )
     import_result = await upsert_imported_chapters(
         book_id,
         chapters,
@@ -2068,7 +1020,8 @@ async def chapter_import_confirm(call: CallbackQuery, state: FSMContext) -> None
         duplicate_override=bool(data.get("duplicate_ack")),
     )
     await add_audit(user_id, "chapters_imported", "book", str(book_id), None, str(saved))
-    await _notify_new_chapters(book_id, published_ids, int(user_id), call.bot)
+    # Notifications are emitted only after content moderation succeeds.  The
+    # unified publication workflow deduplicates them per new chapter.
 
     workflow = await finish_book_content_workflow(
         bot=call.bot,
@@ -2344,11 +1297,41 @@ async def chapter_edit_title_save(message: Message, state: FSMContext) -> None:
     chapter_id = int(data["chapter_id"])
     book_id = int(data["book_id"])
     user = await upsert_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
-    ok = await update_chapter_title(chapter_id, user["id"], title)
+    chapter = await get_chapter(chapter_id)
+    book = await get_book(book_id)
+    actual_change = bool(chapter and title != str(chapter["title"] or ""))
+    if book and str(book["publication_status"] or "") == "published" and actual_change and not await get_open_revision_request(book_id):
+        await create_revision_request(
+            book_id,
+            actor_user_id=int(user["id"]),
+            reason="Изменено название опубликованной главы. Проверяется только изменённое содержимое.",
+            finding_ids=(),
+            requires_manual_confirmation=False,
+            source="telegram_content_change",
+        )
+    ok = actual_change and await update_chapter_title(chapter_id, user["id"], title)
+    workflow = None
+    if ok and book and str(book["publication_status"] or "") == "published":
+        await set_chapter_status(chapter_id, "review")
+        workflow = await finish_book_content_workflow(
+            bot=message.bot,
+            book_id=book_id,
+            actor_user_id=int(user["id"]),
+            actor_telegram_id=int(message.from_user.id),
+            source="telegram_chapter_title_edit",
+        )
     await add_audit(user["id"], "chapter_title_updated", "chapter", str(chapter_id), None, title)
     await state.clear()
     book = await get_book(book_id)
-    await message.answer("Название главы обновлено." if ok else "Глава не найдена или недоступна.", reply_markup=author_chapters_menu(book_id, _book_text_pricing_mode(book)))
+    if not actual_change:
+        result_text = "Название не изменилось."
+    elif not ok:
+        result_text = "Глава не найдена или недоступна."
+    elif workflow and workflow.workflow_status == "review":
+        result_text = "Название сохранено и отправлено на проверку. Книга остаётся в каталоге."
+    else:
+        result_text = "Название главы обновлено."
+    await message.answer(result_text, reply_markup=author_chapters_menu(book_id, _book_text_pricing_mode(book)))
 
 
 @router.callback_query(F.data.startswith("chapter:edit_text:"))
@@ -2381,11 +1364,42 @@ async def chapter_edit_text_save(message: Message, state: FSMContext) -> None:
     chapter_id = int(data["chapter_id"])
     book_id = int(data["book_id"])
     user = await upsert_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
-    ok = await update_chapter_text(chapter_id, user["id"], text[:300000])
+    chapter = await get_chapter(chapter_id)
+    book = await get_book(book_id)
+    clean_text = text[:300000]
+    actual_change = bool(chapter and clean_text != str(chapter["text"] or ""))
+    if book and str(book["publication_status"] or "") == "published" and actual_change and not await get_open_revision_request(book_id):
+        await create_revision_request(
+            book_id,
+            actor_user_id=int(user["id"]),
+            reason="Изменён текст опубликованной главы. Проверяется только изменённое содержимое.",
+            finding_ids=(),
+            requires_manual_confirmation=False,
+            source="telegram_content_change",
+        )
+    ok = actual_change and await update_chapter_text(chapter_id, user["id"], clean_text)
+    workflow = None
+    if ok and book and str(book["publication_status"] or "") == "published":
+        await set_chapter_status(chapter_id, "review")
+        workflow = await finish_book_content_workflow(
+            bot=message.bot,
+            book_id=book_id,
+            actor_user_id=int(user["id"]),
+            actor_telegram_id=int(message.from_user.id),
+            source="telegram_chapter_text_edit",
+        )
     await add_audit(user["id"], "chapter_text_updated", "chapter", str(chapter_id), None, f"{len(text)} chars")
     await state.clear()
     book = await get_book(book_id)
-    await message.answer("Текст главы обновлён." if ok else "Глава не найдена или недоступна.", reply_markup=author_chapters_menu(book_id, _book_text_pricing_mode(book)))
+    if not actual_change:
+        result_text = "Текст не изменился."
+    elif not ok:
+        result_text = "Глава не найдена или недоступна."
+    elif workflow and workflow.workflow_status == "review":
+        result_text = "Текст сохранён и отправлен на проверку. Книга остаётся в каталоге."
+    else:
+        result_text = "Текст главы обновлён."
+    await message.answer(result_text, reply_markup=author_chapters_menu(book_id, _book_text_pricing_mode(book)))
 
 
 @router.callback_query(F.data.startswith("chapter:edit_price:"))
@@ -2721,6 +1735,13 @@ async def _save_telegram_audio(message: Message, bot: Bot, state: FSMContext, fi
     except AudioImportError as exc:
         await message.answer(f"Не удалось принять аудио.\n\nПричина: {exc}")
         return
+    book = await get_book(book_id)
+    if book and str(book["publication_status"] or "") == "published" and not await get_open_revision_request(book_id):
+        await create_revision_request(
+            book_id, actor_user_id=int(user_id),
+            reason="Добавлена новая аудиоглава. Проверяется только новое содержимое.",
+            finding_ids=(), requires_manual_confirmation=False, source="telegram_audio_content_change",
+        )
     audio_id = await add_audio_chapter(
         book_id=book_id,
         title=data["title"],
@@ -2735,11 +1756,11 @@ async def _save_telegram_audio(message: Message, bot: Bot, state: FSMContext, fi
         price_stars=int(data.get("price_stars", 0)),
         sample_seconds=60,
     )
-    book = await get_book(book_id)
-    if book and book["publication_status"] == "published":
-        await set_audio_chapter_status(audio_id, "published")
     await add_audit(user_id, "audio_chapter_created", "audio_chapter", str(audio_id), None, source_name)
-    await _notify_new_audio(book_id, [audio_id], int(user_id), bot)
+    workflow = await finish_book_content_workflow(
+        bot=bot, book_id=book_id, actor_user_id=int(user_id),
+        actor_telegram_id=int(message.from_user.id), source="telegram_audio_upload",
+    )
     await state.clear()
     await message.answer(
         "<b>Аудиоглава сохранена.</b>\n\n"
@@ -2747,7 +1768,8 @@ async def _save_telegram_audio(message: Message, bot: Bot, state: FSMContext, fi
         f"Диктор: <b>{data.get('narrator') or 'не указан'}</b>\n"
         f"Длительность: <b>{format_duration(info.duration_seconds)}</b>\n"
         f"Размер: <b>{round(info.file_size / 1024 / 1024, 2)} МБ</b>\n"
-        f"Цена: <b>{int(data.get('price_stars', 0))} Stars</b>",
+        f"Цена: <b>{int(data.get('price_stars', 0))} Stars</b>\n"
+        f"Статус: <b>{'опубликована' if workflow.published else 'ожидает проверки'}</b>",
         reply_markup=author_audio_menu(book_id),
     )
 
@@ -2844,9 +1866,13 @@ async def audio_zip_file(message: Message, state: FSMContext, bot: Bot) -> None:
         await message.answer(f"Не удалось разобрать ZIP.\n\nПричина: {exc}")
         return
     saved = 0
-    published_audio_ids: list[int] = []
     book = await get_book(book_id)
-    publish_now = bool(book and book["publication_status"] == "published")
+    if book and str(book["publication_status"] or "") == "published" and not await get_open_revision_request(book_id):
+        await create_revision_request(
+            book_id, actor_user_id=int(user_id),
+            reason="Добавлены новые аудиоглавы из ZIP. Проверяется только новое содержимое.",
+            finding_ids=(), requires_manual_confirmation=False, source="telegram_audio_content_change",
+        )
     for info in infos:
         audio_id = await add_audio_chapter(
             book_id=book_id,
@@ -2862,12 +1888,12 @@ async def audio_zip_file(message: Message, state: FSMContext, bot: Bot) -> None:
             price_stars=int(data.get("price_stars", 0)),
             sample_seconds=60,
         )
-        if publish_now:
-            await set_audio_chapter_status(audio_id, "published")
-            published_audio_ids.append(audio_id)
         await add_audit(user_id, "audio_chapter_imported_zip", "audio_chapter", str(audio_id), None, info.source_filename)
         saved += 1
-    await _notify_new_audio(book_id, published_audio_ids, int(user_id), bot)
+    workflow = await finish_book_content_workflow(
+        bot=bot, book_id=book_id, actor_user_id=int(user_id),
+        actor_telegram_id=int(message.from_user.id), source="telegram_audio_zip",
+    )
     report = build_audio_import_report(infos)
     await state.clear()
     preview_lines = [f"• {item['title']} · {item['duration']} · {item['size_mb']} МБ" for item in report["preview"]]
@@ -2878,7 +1904,8 @@ async def audio_zip_file(message: Message, state: FSMContext, bot: Bot) -> None:
         f"Общая длительность: <b>{report['total_duration']}</b>\n"
         f"Общий размер: <b>{report['total_size_mb']} МБ</b>\n\n"
         f"{chr(10).join(preview_lines)}\n\n"
-        f"<b>Проверка:</b>\n{problems}",
+        f"<b>Проверка:</b>\n{problems}\n\n"
+        f"Статус: <b>{'опубликованы' if workflow.published else 'ожидают проверки'}</b>",
         reply_markup=author_audio_menu(book_id),
     )
 

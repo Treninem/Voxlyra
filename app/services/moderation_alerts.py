@@ -70,13 +70,22 @@ async def notify_book_needs_moderation(
     recipients = await _recipient_telegram_ids()
     reason_lines = reasons or ["Автоматическая проверка не смогла принять надёжное решение."]
     reason_text = "\n".join(f"• {html.escape(str(item))}" for item in reason_lines[:8])
-    prefix = "⏰ Напоминание: книга ждёт проверки" if reminder else "🛡 Новая книга ждёт проверки"
+    is_existing_publication = str(book["publication_status"] or "") == "published"
+    if reminder:
+        prefix = "⏰ Напоминание: изменения ждут проверки" if is_existing_publication else "⏰ Напоминание: книга ждёт проверки"
+    else:
+        prefix = "🛡 Новое содержимое ждёт проверки" if is_existing_publication else "🛡 Новая книга ждёт проверки"
+    availability = (
+        "Книга остаётся в каталоге. Новые или изменённые главы станут доступны только после решения модератора."
+        if is_existing_publication else
+        "Книга ещё не опубликована и останется в очереди до решения."
+    )
     text = (
         f"<b>{prefix}</b>\n\n"
         f"Книга: <b>{html.escape(str(book['title'] or 'Без названия'))}</b>\n"
         f"Автор: <b>{html.escape(str(book['pen_name'] or 'не указан'))}</b>\n\n"
         f"Почему нужна ручная проверка:\n{reason_text}\n\n"
-        "Книга не заблокирована и не опубликована. Она останется в очереди до решения."
+        f"{availability}"
     )
     totals = {"sent": 0, "failed": 0}
     for telegram_id in recipients:

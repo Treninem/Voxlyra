@@ -5,7 +5,7 @@ import json
 from dataclasses import dataclass
 from typing import Any, Iterable
 
-from app.db import connect, get_book, list_chapters_for_book, list_graphic_chapters_for_book, utc_now
+from app.db import connect, get_book, list_chapters_for_book, list_graphic_chapters_for_book, list_audio_chapters_for_book, utc_now
 
 
 @dataclass(slots=True)
@@ -18,6 +18,7 @@ class RevisionChangeSet:
     changed_metadata_fields: set[str]
     changed_text_ids: set[int]
     changed_graphic_ids: set[int]
+    changed_audio_ids: set[int]
     summary: dict[str, int]
     requires_manual_confirmation: bool = False
 
@@ -181,6 +182,32 @@ async def _current_items(book_id: int) -> dict[str, dict[str, Any]]:
                 "content_hash": _hash(payload),
                 "updated_at": str(row["updated_at"] or ""),
             }
+    audio_chapters = await list_audio_chapters_for_book(int(book_id), include_deleted=False, published_only=False)
+    for row in audio_chapters:
+        if str(row["status"] or "") == "deleted":
+            continue
+        audio_id = int(row["id"])
+        key = f"audio:{audio_id}"
+        payload = {
+            "number": int(row["number"] or 0),
+            "title": str(row["title"] or ""),
+            "duration_seconds": int(row["duration_seconds"] or 0),
+            "narrator": str(row["narrator"] or ""),
+            "source_filename": str(row["source_filename"] or ""),
+            "file_size": int(row["file_size"] or 0),
+            "status": str(row["status"] or ""),
+        }
+        items[key] = {
+            "item_key": key,
+            "source_type": "audio",
+            "source_id": audio_id,
+            "field_name": "",
+            "item_number": int(row["number"] or 0),
+            "title": str(row["title"] or ""),
+            "content_hash": _hash(payload),
+            "updated_at": str(row["updated_at"] or ""),
+        }
+
     return items
 
 
@@ -371,7 +398,7 @@ async def _snapshot_items(snapshot_id: int) -> dict[str, dict[str, Any]]:
 async def get_revision_change_set(book_id: int) -> RevisionChangeSet:
     request = await get_open_revision_request(int(book_id))
     if not request:
-        return RevisionChangeSet(None, None, False, set(), set(), set(), set(), set(), {})
+        return RevisionChangeSet(None, None, False, set(), set(), set(), set(), set(), set(), {})
     baseline_id = int(request["baseline_snapshot_id"])
     before = await _snapshot_items(baseline_id)
     after = await _current_items(int(book_id))
@@ -380,6 +407,7 @@ async def get_revision_change_set(book_id: int) -> RevisionChangeSet:
     metadata_fields: set[str] = set()
     text_ids: set[int] = set()
     graphic_ids: set[int] = set()
+    audio_ids: set[int] = set()
 
     for key, current in after.items():
         previous = before.get(key)
@@ -394,6 +422,8 @@ async def get_revision_change_set(book_id: int) -> RevisionChangeSet:
             text_ids.add(int(current["source_id"]))
         elif source_type == "graphic":
             graphic_ids.add(int(current["source_id"]))
+        elif source_type == "audio":
+            audio_ids.add(int(current["source_id"]))
 
     for key, previous in before.items():
         if key in after:
@@ -407,11 +437,14 @@ async def get_revision_change_set(book_id: int) -> RevisionChangeSet:
             text_ids.add(int(previous["source_id"]))
         elif source_type == "graphic" and previous["source_id"] is not None:
             graphic_ids.add(int(previous["source_id"]))
+        elif source_type == "audio" and previous["source_id"] is not None:
+            audio_ids.add(int(previous["source_id"]))
 
     summary = {
         "metadata": len(metadata_fields),
         "text_chapters": len(text_ids),
         "graphic_chapters": len(graphic_ids),
+        "audio_chapters": len(audio_ids),
         "deleted": len(deleted),
         "total": len(changed) + len(deleted),
     }
@@ -424,6 +457,7 @@ async def get_revision_change_set(book_id: int) -> RevisionChangeSet:
         changed_metadata_fields=metadata_fields,
         changed_text_ids=text_ids,
         changed_graphic_ids=graphic_ids,
+        changed_audio_ids=audio_ids,
         summary=summary,
         requires_manual_confirmation=bool(request["requires_manual_confirmation"]),
     )

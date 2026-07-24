@@ -13,6 +13,9 @@ from app.db import (
     count_chapters_for_book,
     get_book,
     get_book_options,
+    get_chapter,
+    get_graphic_chapter,
+    get_audio_chapter,
     publish_book_content,
     enqueue_book_moderation,
     resolve_book_moderation,
@@ -32,6 +35,7 @@ from app.services.moderation_revisions import (
     resolve_revision_request,
 )
 from app.services.moderation_alerts import notify_book_needs_moderation
+from app.services.notifications import new_chapter_message, notify_book_followers
 
 
 @dataclass(slots=True)
@@ -215,6 +219,80 @@ async def post_book_to_channel(
         return PublicationResult(True, "failed", error, workflow_status="published")
 
 
+async def _notify_restored_new_chapters(
+    bot: Bot,
+    *,
+    book_id: int,
+    content_result: dict,
+    actor_user_id: int | None,
+) -> None:
+    """Notify only genuinely new approved content, never ordinary edits.
+
+    All event keys are stable, so retries, repeated moderator clicks and process
+    restarts cannot send the same notification twice.  The same rule is used
+    for text, graphic and audio chapters.
+    """
+    for chapter_id in content_result.get("new_chapter_ids") or []:
+        chapter = await get_chapter(int(chapter_id))
+        if not chapter or str(chapter["status"] or "") != "published":
+            continue
+        result = await notify_book_followers(
+            book_id=int(book_id),
+            event_key=f"chapter:{int(chapter_id)}:published",
+            category="chapters",
+            text=new_chapter_message(
+                str(chapter["book_title"] or "Книга"),
+                str(chapter["title"] or "Новая глава"),
+                int(chapter["number"] or 0),
+            ),
+            bot=bot,
+        )
+        await add_audit(
+            actor_user_id, "chapter_followers_notified_after_moderation",
+            "chapter", str(chapter_id), None, str(result),
+        )
+
+    book = await get_book(int(book_id))
+    book_title = str(book["title"] or "Произведение") if book else "Произведение"
+    for graphic_id in content_result.get("new_graphic_ids") or []:
+        chapter = await get_graphic_chapter(int(graphic_id))
+        if not chapter or str(chapter["status"] or "") != "published":
+            continue
+        result = await notify_book_followers(
+            book_id=int(book_id),
+            event_key=f"graphic-chapter:{int(graphic_id)}:published",
+            category="chapters",
+            text=new_chapter_message(
+                book_title, str(chapter["title"] or "Новая графическая глава"),
+                int(chapter["number"] or 0),
+            ),
+            bot=bot,
+        )
+        await add_audit(
+            actor_user_id, "graphic_chapter_followers_notified_after_moderation",
+            "graphic_chapter", str(graphic_id), None, str(result),
+        )
+
+    for audio_id in content_result.get("new_audio_ids") or []:
+        chapter = await get_audio_chapter(int(audio_id))
+        if not chapter or str(chapter["status"] or "") != "published":
+            continue
+        result = await notify_book_followers(
+            book_id=int(book_id),
+            event_key=f"audio-chapter:{int(audio_id)}:published",
+            category="audio",
+            text=new_chapter_message(
+                book_title, str(chapter["title"] or "Новая аудиоглава"),
+                int(chapter["number"] or 0),
+            ),
+            bot=bot,
+        )
+        await add_audit(
+            actor_user_id, "audio_chapter_followers_notified_after_moderation",
+            "audio_chapter", str(audio_id), None, str(result),
+        )
+
+
 async def _duplicate_guard(book_id: int) -> str:
     book = await get_book(book_id)
     if not book or bool(book["duplicate_override"]):
@@ -242,7 +320,14 @@ async def publish_book_and_channel(
     book = await get_book(book_id)
     if not book:
         return PublicationResult(False, "failed", "Книга не найдена")
-    published_before = await was_book_ever_published(book_id)
+    # Legacy installations may not have an old ``book_published`` audit row.
+    # The current published status is therefore also authoritative; otherwise
+    # restoring approved content could create a duplicate channel post and a
+    # second “new book” notification.
+    published_before = (
+        str(book["publication_status"] or "") == "published"
+        or await was_book_ever_published(book_id)
+    )
     if await count_chapters_for_book(book_id) < 1:
         return PublicationResult(False, "failed", "Нельзя публиковать книгу без глав")
 
@@ -266,12 +351,26 @@ async def publish_book_and_channel(
             )
 
     await set_book_publication_status(book_id, "published")
-    await publish_book_content(book_id)
-    await add_audit(actor_user_id, "book_published", "book", str(book_id), None, "published")
+    content_result = await publish_book_content(book_id)
+    await add_audit(
+        actor_user_id,
+        "book_published",
+        "book",
+        str(book_id),
+        None,
+        f"published;new_chapters={len(content_result.get('new_chapter_ids') or [])};edited_chapters={len(content_result.get('edited_chapter_ids') or [])}",
+    )
     if published_before and not force_channel:
-        # Это восстановление ранее опубликованной книги после проверки или
-        # старого ошибочного перехода в review. Не создаём повторный анонс, не
-        # уведомляем подписчиков как о новой книге и не дублируем очередь канала.
+        # Restoration or approval of new/edited content for an existing book.
+        # The book keeps its old channel announcement and followers never
+        # receive a fake "new book" event.  Only genuinely new chapters are
+        # announced, with an idempotency key that survives retries.
+        await _notify_restored_new_chapters(
+            bot,
+            book_id=int(book_id),
+            content_result=content_result,
+            actor_user_id=actor_user_id,
+        )
         return PublicationResult(True, "restored", workflow_status="published")
     # Импортированные книги ставит в очередь Library Manager. Обычные авторские
     # книги идут в отдельную справедливую очередь, чтобы сотни публикаций не спамили канал.
@@ -332,15 +431,14 @@ async def finish_book_content_workflow(
             book_id, actor_telegram_id=actor_telegram_id, revision_mode=True
         )
         if check.auto_publish or not check.reasons:
-            if book["publication_status"] == "published":
-                await publish_book_content(book_id)
-                result = PublicationResult(True, "already_sent", workflow_status="published")
-            else:
-                result = await publish_book_and_channel(
-                    bot,
-                    book_id,
-                    actor_user_id=actor_user_id,
-                )
+            # One publication path for first publication, restoration and
+            # approval of pending chapters.  The helper knows whether the book
+            # was published before and suppresses repeated book announcements.
+            result = await publish_book_and_channel(
+                bot,
+                book_id,
+                actor_user_id=actor_user_id,
+            )
             if result.published:
                 await resolve_book_moderation(
                     book_id, resolution="revision_auto_approved", actor_user_id=actor_user_id,
@@ -357,7 +455,14 @@ async def finish_book_content_workflow(
             )
             return result
 
-        if book["publication_status"] != "review":
+        previously_published = await was_book_ever_published(book_id)
+        if previously_published or book["publication_status"] == "published":
+            # A content edit must never remove an established book from the
+            # catalogue.  Pending chapters stay draft/review until approval;
+            # the published book and all unaffected chapters remain available.
+            if book["publication_status"] != "published":
+                await set_book_publication_status(book_id, "published")
+        elif book["publication_status"] != "review":
             submitted = await submit_book_for_review(book_id, actor_user_id)
             if not submitted:
                 await set_book_publication_status(book_id, "review")
