@@ -10816,7 +10816,7 @@ _ACHIEVEMENT_CATALOG: dict[str, dict[str, Any]] = {
         "title": "Первая глава", "description": "Прочитать первую главу до конца.", "icon": "📖", "icon_asset": "/media/achievements/first_chapter.png", "group": "reader", "category": "reading", "rarity": "common", "goal": 1
     },
     "hundred_chapters": {
-        "title": "100 глав", "description": "Прочитать сто глав до конца.", "icon": "💯", "icon_asset": "/media/achievements/hundred_chapters.png", "group": "reader", "category": "reading", "rarity": "epic", "goal": 100
+        "title": "Сто глав", "description": "Завершить сто текстовых глав.", "icon": "💯", "icon_asset": "/media/achievements/hundred_chapters.png", "group": "reader", "category": "reading", "rarity": "epic", "goal": 100
     },
     "night_reader": {
         "title": "Ночной читатель", "description": "Читать поздним вечером или ночью.", "icon": "🌙", "icon_asset": "/media/achievements/night_reader.png", "group": "reader", "category": "reading", "rarity": "rare", "goal": 1
@@ -10831,7 +10831,7 @@ _ACHIEVEMENT_CATALOG: dict[str, dict[str, Any]] = {
         "title": "Первый комментарий", "description": "Опубликовать первый комментарий к главе.", "icon": "💬", "icon_asset": "/media/achievements/first_comment.png", "group": "reader", "category": "community", "rarity": "common", "goal": 1
     },
     "reading_streak_7": {
-        "title": "Серия 7 дней", "description": "Читать, слушать или смотреть комиксы семь дней подряд.", "icon": "🔥", "icon_asset": "/media/achievements/reading_streak_7.png", "group": "reader", "category": "reading", "rarity": "rare", "goal": 7
+        "title": "Семь дней подряд", "description": "Сохранять подтверждённую активность семь дней подряд.", "icon": "🔥", "icon_asset": "/media/achievements/reading_streak_7.png", "group": "reader", "category": "reading", "rarity": "rare", "goal": 7
     },
     "reading_streak_30": {
         "title": "Верный читатель", "description": "Сохранять активную серию тридцать дней подряд.", "icon": "✦", "icon_asset": "/media/achievements/reading_streak_30.png", "group": "reader", "category": "reading", "rarity": "legendary", "goal": 30
@@ -10876,10 +10876,10 @@ _ACHIEVEMENT_CATALOG: dict[str, dict[str, Any]] = {
         "title": "Автор месяца", "description": "Стать первым по уникальным читателям месяца.", "icon": "🏆", "icon_asset": "/media/achievements/author_month.png", "group": "author", "category": "author", "rarity": "mythic", "goal": 1
     },
     "five_hundred_chapters": {
-        "title": "500 глав", "description": "Прочитать пятьсот глав до конца.", "icon": "📚", "icon_asset": "/media/achievements/five_hundred_chapters.png", "group": "reader", "category": "reading", "rarity": "legendary", "goal": 500
+        "title": "Академия мудрости", "description": "Завершить пятьсот глав и пройти большой путь читателя.", "icon": "📚", "icon_asset": "/media/achievements/five_hundred_chapters.png", "group": "reader", "category": "reading", "rarity": "legendary", "goal": 500
     },
     "thousand_chapters": {
-        "title": "1000 глав", "description": "Прочитать тысячу глав до конца.", "icon": "✦", "icon_asset": "/media/achievements/thousand_chapters.png", "group": "reader", "category": "reading", "rarity": "legendary", "goal": 1000
+        "title": "Тысяча глав", "description": "Завершить тысячу текстовых глав.", "icon": "✦", "icon_asset": "/media/achievements/thousand_chapters.png", "group": "reader", "category": "reading", "rarity": "legendary", "goal": 1000
     },
     "collector_fifty": {
         "title": "Большая библиотека", "description": "Сохранить пятьдесят произведений в личной библиотеке.", "icon": "🏛", "icon_asset": "/media/achievements/collector_fifty.png", "group": "reader", "category": "reading", "rarity": "epic", "goal": 50
@@ -10906,7 +10906,7 @@ _ACHIEVEMENT_CATALOG: dict[str, dict[str, Any]] = {
         "title": "Личная библиотека 100", "description": "Сохранить сто произведений в личной библиотеке.", "icon": "🏛", "icon_asset": "/media/achievements/collector_hundred.png", "group": "reader", "category": "reading", "rarity": "legendary", "goal": 100
     },
     "reviewer_fifty": {
-        "title": "Критик VoxLyra", "description": "Опубликовать пятьдесят отзывов на произведения.", "icon": "⭐", "icon_asset": "/media/achievements/reviewer_fifty.png", "group": "reader", "category": "community", "rarity": "epic", "goal": 50
+        "title": "Пятьдесят рецензий", "description": "Опубликовать пятьдесят содержательных отзывов на произведения.", "icon": "⭐", "icon_asset": "/media/achievements/reviewer_fifty.png", "group": "reader", "category": "community", "rarity": "epic", "goal": 50
     },
     "commentator_hundred": {
         "title": "Голос сообщества", "description": "Опубликовать сто комментариев к главам.", "icon": "💬", "icon_asset": "/media/achievements/commentator_hundred.png", "group": "reader", "category": "community", "rarity": "epic", "goal": 100
@@ -10915,7 +10915,7 @@ _ACHIEVEMENT_CATALOG: dict[str, dict[str, Any]] = {
         "title": "100 часов аудио", "description": "Прослушать суммарно сто часов аудиокниг.", "icon": "🎧", "icon_asset": "/media/achievements/audio_hundred_hours.png", "group": "reader", "category": "audio", "rarity": "legendary", "goal": 6000
     },
     "comic_five_thousand_pages": {
-        "title": "5000 страниц", "description": "Просмотреть пять тысяч страниц комиксов, манги или манхвы.", "icon": "💠", "icon_asset": "/media/achievements/comic_five_thousand_pages.png", "group": "reader", "category": "comic", "rarity": "legendary", "goal": 5000
+        "title": "Пять тысяч страниц", "description": "Просмотреть пять тысяч страниц комиксов, манги или манхвы.", "icon": "💠", "icon_asset": "/media/achievements/comic_five_thousand_pages.png", "group": "reader", "category": "comic", "rarity": "legendary", "goal": 5000
     },
     "author_hundred_books": {
         "title": "Автор 100 книг", "description": "Опубликовать сто самостоятельных произведений.", "icon": "📚", "icon_asset": "/media/achievements/author_hundred_books.png", "group": "author", "category": "author", "rarity": "mythic", "goal": 100
@@ -10931,6 +10931,24 @@ _ACHIEVEMENT_CATALOG: dict[str, dict[str, Any]] = {
     },
     "reader_five_thousand_chapters": {
         "title": "Хронист 5000", "description": "Завершить пять тысяч текстовых глав — рубеж преданного читателя.", "icon": "✦", "icon_asset": "/media/achievements/reader_five_thousand_chapters.png", "group": "reader", "category": "reading", "rarity": "mythic", "goal": 5000
+    },
+    "reader_seventy_five_chapters": {
+        "title": "75 глав", "description": "Завершить семьдесят пять текстовых глав.", "icon": "📖", "icon_asset": "/media/achievements/reader_seventy_five_chapters.png", "group": "reader", "category": "reading", "rarity": "rare", "goal": 75
+    },
+    "reader_one_hundred_fifty_chapters": {
+        "title": "150 глав", "description": "Завершить сто пятьдесят текстовых глав.", "icon": "📚", "icon_asset": "/media/achievements/reader_one_hundred_fifty_chapters.png", "group": "reader", "category": "reading", "rarity": "epic", "goal": 150
+    },
+    "reader_seven_hundred_fifty_chapters": {
+        "title": "750 глав", "description": "Завершить семьсот пятьдесят текстовых глав.", "icon": "✦", "icon_asset": "/media/achievements/reader_seven_hundred_fifty_chapters.png", "group": "reader", "category": "reading", "rarity": "legendary", "goal": 750
+    },
+    "reader_one_thousand_five_hundred_chapters": {
+        "title": "1500 глав", "description": "Завершить тысячу пятьсот текстовых глав.", "icon": "✦", "icon_asset": "/media/achievements/reader_one_thousand_five_hundred_chapters.png", "group": "reader", "category": "reading", "rarity": "legendary", "goal": 1500
+    },
+    "reader_two_thousand_chapters": {
+        "title": "2000 глав", "description": "Завершить две тысячи текстовых глав.", "icon": "✦", "icon_asset": "/media/achievements/reader_two_thousand_chapters.png", "group": "reader", "category": "reading", "rarity": "mythic", "goal": 2000
+    },
+    "reader_seven_thousand_five_hundred_chapters": {
+        "title": "7500 глав", "description": "Завершить семь тысяч пятьсот текстовых глав.", "icon": "✦", "icon_asset": "/media/achievements/reader_seven_thousand_five_hundred_chapters.png", "group": "reader", "category": "reading", "rarity": "mythic", "goal": 7500
     },
     "reading_streak_14": {
         "title": "Две недели вместе", "description": "Сохранять подтверждённую активность четырнадцать дней подряд.", "icon": "🔥", "icon_asset": "/media/achievements/reading_streak_14.png", "group": "reader", "category": "reading", "rarity": "rare", "goal": 14
@@ -10948,7 +10966,7 @@ _ACHIEVEMENT_CATALOG: dict[str, dict[str, Any]] = {
         "title": "Архивариус", "description": "Сохранить двести пятьдесят произведений в личной библиотеке.", "icon": "🏛", "icon_asset": "/media/achievements/collector_two_hundred_fifty.png", "group": "reader", "category": "reading", "rarity": "legendary", "goal": 250
     },
     "reviewer_ten": {
-        "title": "Вдумчивый критик", "description": "Опубликовать десять содержательных отзывов на произведения.", "icon": "⭐", "icon_asset": "/media/achievements/reviewer_ten.png", "group": "reader", "category": "community", "rarity": "rare", "goal": 10
+        "title": "Десять рецензий", "description": "Опубликовать десять содержательных отзывов на произведения.", "icon": "⭐", "icon_asset": "/media/achievements/reviewer_ten.png", "group": "reader", "category": "community", "rarity": "rare", "goal": 10
     },
     "commentator_twenty_five": {
         "title": "Участник обсуждений", "description": "Опубликовать двадцать пять комментариев к главам.", "icon": "💬", "icon_asset": "/media/achievements/commentator_twenty_five.png", "group": "reader", "category": "community", "rarity": "rare", "goal": 25
@@ -10957,31 +10975,31 @@ _ACHIEVEMENT_CATALOG: dict[str, dict[str, Any]] = {
         "title": "25 часов звучания", "description": "Прослушать суммарно двадцать пять часов аудиокниг.", "icon": "🎧", "icon_asset": "/media/achievements/audio_twenty_five_hours.png", "group": "reader", "category": "audio", "rarity": "epic", "goal": 1500
     },
     "audio_five_hundred_hours": {
-        "title": "Голос эпох", "description": "Прослушать суммарно пятьсот часов аудиокниг.", "icon": "✦", "icon_asset": "/media/achievements/audio_five_hundred_hours.png", "group": "reader", "category": "audio", "rarity": "mythic", "goal": 30000
+        "title": "Мастер истории", "description": "Большой аудио-рубеж в мире историй VoxLyra.", "icon": "✦", "icon_asset": "/media/achievements/audio_five_hundred_hours.png", "group": "reader", "category": "audio", "rarity": "mythic", "goal": 30000
     },
     "comic_twenty_five_thousand_pages": {
-        "title": "Галерея миров", "description": "Просмотреть двадцать пять тысяч страниц комиксов, манги или манхвы.", "icon": "💠", "icon_asset": "/media/achievements/comic_twenty_five_thousand_pages.png", "group": "reader", "category": "comic", "rarity": "mythic", "goal": 25000
+        "title": "Вершитель саг", "description": "Пройти грандиозный путь по графическим историям VoxLyra.", "icon": "💠", "icon_asset": "/media/achievements/comic_twenty_five_thousand_pages.png", "group": "reader", "category": "comic", "rarity": "mythic", "goal": 25000
     },
     "quote_fifty": {
-        "title": "Хранитель 50 цитат", "description": "Сохранить пятьдесят значимых цитат из произведений.", "icon": "📜", "icon_asset": "/media/achievements/quote_fifty.png", "group": "reader", "category": "reading", "rarity": "epic", "goal": 50
+        "title": "Легендарный читатель", "description": "Собрать редкую коллекцию ярких мыслей, строк и цитат.", "icon": "📜", "icon_asset": "/media/achievements/quote_fifty.png", "group": "reader", "category": "reading", "rarity": "epic", "goal": 50
     },
     "author_fifty_chapters": {
-        "title": "Автор 50 глав", "description": "Опубликовать пятьдесят текстовых или графических глав.", "icon": "🪶", "icon_asset": "/media/achievements/author_fifty_chapters.png", "group": "author", "category": "author", "rarity": "rare", "goal": 50
+        "title": "Мастер коллекции", "description": "Собрать заметную авторскую коллекцию и укрепить своё наследие в VoxLyra.", "icon": "🪶", "icon_asset": "/media/achievements/author_fifty_chapters.png", "group": "author", "category": "author", "rarity": "rare", "goal": 50
     },
     "author_two_hundred_fifty_chapters": {
-        "title": "Автор 250 глав", "description": "Опубликовать двести пятьдесят текстовых или графических глав.", "icon": "🪶", "icon_asset": "/media/achievements/author_two_hundred_fifty_chapters.png", "group": "author", "category": "author", "rarity": "epic", "goal": 250
+        "title": "Мудрец времени", "description": "Пройти долгий авторский путь и доказать верность творчеству.", "icon": "🪶", "icon_asset": "/media/achievements/author_two_hundred_fifty_chapters.png", "group": "author", "category": "author", "rarity": "epic", "goal": 250
     },
     "author_thousand_chapters": {
-        "title": "Автор 1000 глав", "description": "Опубликовать тысячу текстовых или графических глав.", "icon": "🏛", "icon_asset": "/media/achievements/author_thousand_chapters.png", "group": "author", "category": "author", "rarity": "legendary", "goal": 1000
+        "title": "Хранитель знаний", "description": "Создать великое наследие историй, идей и знаний.", "icon": "🏛", "icon_asset": "/media/achievements/author_thousand_chapters.png", "group": "author", "category": "author", "rarity": "legendary", "goal": 1000
     },
     "author_five_books": {
-        "title": "Автор 5 книг", "description": "Опубликовать пять самостоятельных произведений.", "icon": "📚", "icon_asset": "/media/achievements/author_five_books.png", "group": "author", "category": "author", "rarity": "rare", "goal": 5
+        "title": "Путешественник миров", "description": "Открыть для читателей новые миры и самостоятельные произведения.", "icon": "📚", "icon_asset": "/media/achievements/author_five_books.png", "group": "author", "category": "author", "rarity": "rare", "goal": 5
     },
     "author_hundred_readers": {
-        "title": "Первые 100 читателей", "description": "Собрать сто уникальных читателей своих произведений.", "icon": "👥", "icon_asset": "/media/achievements/author_hundred_readers.png", "group": "author", "category": "author", "rarity": "epic", "goal": 100
+        "title": "Покоритель вселенной", "description": "Собрать крепкую авторскую аудиторию и оставить яркий след.", "icon": "👥", "icon_asset": "/media/achievements/author_hundred_readers.png", "group": "author", "category": "author", "rarity": "epic", "goal": 100
     },
     "author_ten_thousand_readers": {
-        "title": "Аудитория 10 000", "description": "Собрать десять тысяч уникальных читателей своих произведений.", "icon": "✦", "icon_asset": "/media/achievements/author_ten_thousand_readers.png", "group": "author", "category": "author", "rarity": "mythic", "goal": 10000
+        "title": "Властелин знаний", "description": "Достичь высшей ступени признания и огромной аудитории.", "icon": "✦", "icon_asset": "/media/achievements/author_ten_thousand_readers.png", "group": "author", "category": "author", "rarity": "mythic", "goal": 10000
     },
     "completed_book_1": {
         "title": 'Завершённая история', "description": 'Полностью прочитать первое произведение.', "icon": '✦',
@@ -10989,17 +11007,17 @@ _ACHIEVEMENT_CATALOG: dict[str, dict[str, Any]] = {
         "category": "reading", "rarity": "common", "goal": 1
     },
     "completed_books_5": {
-        "title": 'Пять завершённых миров', "description": 'Полностью прочитать пять произведений.', "icon": '✦',
+        "title": 'Легенда знаний', "description": 'Сделать большой шаг по пути завершённых произведений VoxLyra.', "icon": '✦',
         "icon_asset": "/media/achievements/completed_books_5.png", "group": "reader",
         "category": "reading", "rarity": "rare", "goal": 5
     },
     "completed_books_25": {
-        "title": 'Созвездие историй', "description": 'Полностью прочитать двадцать пять произведений.', "icon": '✦',
+        "title": "Двадцать пять завершённых миров", "description": "Полностью прочитать двадцать пять произведений.", "icon": '✦',
         "icon_asset": "/media/achievements/completed_books_25.png", "group": "reader",
         "category": "reading", "rarity": "epic", "goal": 25
     },
     "completed_books_100": {
-        "title": 'Страж сотни миров', "description": 'Полностью прочитать сто произведений.', "icon": '✦',
+        "title": 'Вершитель эпох', "description": 'Пройти через множество больших историй и завершённых миров.', "icon": '✦',
         "icon_asset": "/media/achievements/completed_books_100.png", "group": "reader",
         "category": "reading", "rarity": "legendary", "goal": 100
     },
@@ -11054,7 +11072,7 @@ _ACHIEVEMENT_CATALOG: dict[str, dict[str, Any]] = {
         "category": "reading", "rarity": "epic", "goal": 50
     },
     "notes_200": {
-        "title": 'Архив мыслей', "description": 'Сохранить двести личных заметок.', "icon": '✦',
+        "title": "Двести заметок", "description": "Создать двести личных заметок во время чтения.", "icon": '✦',
         "icon_asset": "/media/achievements/notes_200.png", "group": "reader",
         "category": "reading", "rarity": "legendary", "goal": 200
     },
@@ -11064,17 +11082,17 @@ _ACHIEVEMENT_CATALOG: dict[str, dict[str, Any]] = {
         "category": "reading", "rarity": "legendary", "goal": 100
     },
     "quotes_250": {
-        "title": 'Голос тысячелетий', "description": 'Сохранить двести пятьдесят значимых цитат.', "icon": '✦',
+        "title": "Двести пятьдесят цитат", "description": "Сохранить двести пятьдесят значимых цитат.", "icon": '✦',
         "icon_asset": "/media/achievements/quotes_250.png", "group": "reader",
         "category": "reading", "rarity": "mythic", "goal": 250
     },
     "graphic_chapters_25": {
-        "title": 'Двадцать пять панелей', "description": 'Полностью просмотреть двадцать пять графических глав.', "icon": '🖼',
+        "title": "25 графических глав", "description": "Завершить двадцать пять графических глав.", "icon": '🖼',
         "icon_asset": "/media/achievements/graphic_chapters_25.png", "group": "reader",
         "category": "comic", "rarity": "rare", "goal": 25
     },
     "graphic_chapters_250": {
-        "title": 'Мастер визуальных миров', "description": 'Полностью просмотреть двести пятьдесят графических глав.', "icon": '🖼',
+        "title": "250 графических глав", "description": "Завершить двести пятьдесят графических глав.", "icon": '🖼',
         "icon_asset": "/media/achievements/graphic_chapters_250.png", "group": "reader",
         "category": "comic", "rarity": "epic", "goal": 250
     },
@@ -11164,7 +11182,7 @@ _ACHIEVEMENT_CATALOG: dict[str, dict[str, Any]] = {
         "category": "author", "rarity": "epic", "goal": 50
     },
     "author_rating_250": {
-        "title": 'Эталон VoxLyra', "description": 'Сохранить среднюю оценку не ниже 4,7 при минимум 250 отзывах.', "icon": '🪶',
+        "title": "250 высоких оценок", "description": "Получить двести пятьдесят отзывов при среднем рейтинге автора не ниже 4,7.", "icon": '🪶',
         "icon_asset": "/media/achievements/author_rating_250.png", "group": "author",
         "category": "author", "rarity": "legendary", "goal": 250
     },
@@ -11188,8 +11206,8 @@ _ACHIEVEMENT_CATALOG: dict[str, dict[str, Any]] = {
 
 _RARE_ACHIEVEMENT_CATALOG: dict[str, dict[str, Any]] = {
     "founding_member": {
-        "title": "Первые хранители",
-        "description": "Быть среди читателей VoxLyra до контрольной даты раннего сообщества.",
+        "title": "Легенда знаний",
+        "description": "Сделать большой шаг по пути завершённых произведений VoxLyra.",
         "icon": "✦",
         "icon_asset": "/media/achievements/founding_member.png",
         "group": "reader",
@@ -12093,6 +12111,12 @@ async def sync_user_achievements(user_id: int) -> dict[str, Any]:
             "author_ten_thousand_reactions": (author_reactions >= 10000, author_reactions),
             "reader_twenty_five_chapters": (completed >= 25, completed),
             "reader_two_hundred_fifty_chapters": (completed >= 250, completed),
+            "reader_seventy_five_chapters": (completed >= 75, completed),
+            "reader_one_hundred_fifty_chapters": (completed >= 150, completed),
+            "reader_seven_hundred_fifty_chapters": (completed >= 750, completed),
+            "reader_one_thousand_five_hundred_chapters": (completed >= 1500, completed),
+            "reader_two_thousand_chapters": (completed >= 2000, completed),
+            "reader_seven_thousand_five_hundred_chapters": (completed >= 7500, completed),
             "reader_five_thousand_chapters": (completed >= 5000, completed),
             "reading_streak_14": (longest_streak >= 14, longest_streak),
             "reading_streak_100": (longest_streak >= 100, longest_streak),
@@ -12273,6 +12297,12 @@ async def sync_user_achievements(user_id: int) -> dict[str, Any]:
         "founding_member": 1 if candidates.get("founding_member", (False, 0))[0] else 0,
         "reader_twenty_five_chapters": completed,
         "reader_two_hundred_fifty_chapters": completed,
+        "reader_seventy_five_chapters": completed,
+        "reader_one_hundred_fifty_chapters": completed,
+        "reader_seven_hundred_fifty_chapters": completed,
+        "reader_one_thousand_five_hundred_chapters": completed,
+        "reader_two_thousand_chapters": completed,
+        "reader_seven_thousand_five_hundred_chapters": completed,
         "reader_five_thousand_chapters": completed,
         "reading_streak_14": longest_streak,
         "reading_streak_100": longest_streak,
