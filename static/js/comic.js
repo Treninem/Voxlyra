@@ -749,8 +749,11 @@ async function initGraphicReader() {
     }
     restoreGraphicPreferences(meta);
     restoreGraphicAdvancedPreferences();
-    const hashMatch = String(window.location.hash || '').match(/^#page-(\d+)$/);
-    const targetPage = hashMatch ? Number(hashMatch[1]) : Number(meta.progress_page || 1);
+    const requestedAnchor = typeof voxRequestedContentAnchor === 'function'
+      ? voxRequestedContentAnchor()
+      : String(window.location.hash || '').replace(/^#/, '');
+    const anchorMatch = String(requestedAnchor || '').match(/^page-(\d+)$/);
+    const targetPage = anchorMatch ? Number(anchorMatch[1]) : Number(meta.progress_page || 1);
     const progressIndex = graphicState.pages.findIndex((page) => Number(page.number) === targetPage);
     graphicState.currentIndex = Math.max(0, progressIndex);
     document.getElementById('graphicBookTitle').textContent = meta.chapter.book_title || 'Произведение';
@@ -898,7 +901,9 @@ async function searchGraphicText() {
 
 function goToGraphicSearchResult(chapterId, pageNumber) {
   if (Number(chapterId) !== Number(graphicState.chapterId)) {
-    window.location.href = `/comic/${Number(chapterId)}#page-${Number(pageNumber)}`;
+    const route = `/comic/${Number(chapterId)}#page-${Number(pageNumber)}`;
+    if (typeof voxNavigateToInternalRoute === 'function' && voxNavigateToInternalRoute(route)) return;
+    window.location.assign(route);
     return;
   }
   const index = graphicState.pages.findIndex((page) => Number(page.number) === Number(pageNumber));

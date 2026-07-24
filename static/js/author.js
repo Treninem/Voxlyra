@@ -432,7 +432,7 @@ async function loadAuthorCover(image) {
   if (!bookId || !tgInitData()) return;
   try {
     const response = await fetch(`/api/author/book/${bookId}/cover`, {
-      headers: { 'X-Telegram-Init-Data': tgInitData() }, cache: 'no-store',
+      headers: { 'X-Telegram-Init-Data': tgInitData() }, cache: 'no-store', credentials: 'same-origin',
     });
     if (!response.ok) return;
     const blob = await response.blob();

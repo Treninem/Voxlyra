@@ -1,7 +1,9 @@
 const VOX_ROUTE_STATE_KEY = 'voxlyra:last-route:v11336';
 const VOX_ROUTE_STACK_KEY = 'voxlyra:route-stack:v11336';
 const VOX_SKIP_RESTORE_KEY = 'voxlyra:skip-restore-once';
-const VOX_TG_LAUNCH_HASH_KEY = 'voxlyra:telegram-launch-hash:v114027';
+const VOX_TG_LAUNCH_HASH_KEY = 'voxlyra:telegram-launch-hash:v114028';
+const VOX_CONTENT_ANCHOR_PARAM = 'vox_anchor';
+const VOX_TG_LAUNCH_LEGACY_KEYS = ['voxlyra:telegram-launch-hash:v114027'];
 const VOX_ROUTE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 function voxTelegramWebApp() {
@@ -20,8 +22,14 @@ function voxCaptureTelegramLaunchHash() {
     return current;
   }
   try {
-    const saved = String(sessionStorage.getItem(VOX_TG_LAUNCH_HASH_KEY) || '');
-    return /(?:^#|&)tgWebAppData=/.test(saved) ? saved : '';
+    const keys = [VOX_TG_LAUNCH_HASH_KEY, ...VOX_TG_LAUNCH_LEGACY_KEYS];
+    for (const key of keys) {
+      const saved = String(sessionStorage.getItem(key) || '');
+      if (!/(?:^#|&)tgWebAppData=/.test(saved)) continue;
+      if (key !== VOX_TG_LAUNCH_HASH_KEY) sessionStorage.setItem(VOX_TG_LAUNCH_HASH_KEY, saved);
+      return saved;
+    }
+    return '';
   } catch (_) { return ''; }
 }
 
@@ -36,6 +44,33 @@ function voxInitDataFromLaunchHash() {
 
 function voxHasTelegramAuth() {
   return Boolean(voxTelegramWebApp()?.initData || voxInitDataFromLaunchHash());
+}
+
+function voxSafeContentAnchor(raw = '') {
+  const value = String(raw || '').trim().replace(/^#/, '');
+  if (!value) return '';
+  if (/^page(?:-|=)\d+$/.test(value)) return value.replace('=', '-');
+  if (/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(value)) return value;
+  return '';
+}
+
+function voxRequestedContentAnchor() {
+  try {
+    const url = new URL(window.location.href);
+    const fromQuery = voxSafeContentAnchor(url.searchParams.get(VOX_CONTENT_ANCHOR_PARAM) || '');
+    if (fromQuery) return fromQuery;
+    return voxSafeContentAnchor(url.hash || '');
+  } catch (_) { return ''; }
+}
+
+function voxScrollToContentAnchor(raw = voxRequestedContentAnchor(), { smooth = false } = {}) {
+  const anchor = voxSafeContentAnchor(raw);
+  if (!anchor || /^page-\d+$/.test(anchor)) return false;
+  const element = document.getElementById(anchor);
+  if (!element) return false;
+  try { element.scrollIntoView({ behavior: smooth ? 'smooth' : 'auto', block: 'start' }); }
+  catch (_) { element.scrollIntoView(); }
+  return true;
 }
 
 function voxSafeRoute(raw = '') {
@@ -53,9 +88,13 @@ function voxSafeRoute(raw = '') {
     [...params.keys()].forEach((key) => {
       if (/^tgWebApp/i.test(key) || key === 'startapp') params.delete(key);
     });
+    const queryAnchor = voxSafeContentAnchor(params.get(VOX_CONTENT_ANCHOR_PARAM) || '');
+    const hashAnchor = voxSafeContentAnchor(url.hash || '');
+    const anchor = hashAnchor || queryAnchor;
+    if (anchor) params.set(VOX_CONTENT_ANCHOR_PARAM, anchor);
+    else params.delete(VOX_CONTENT_ANCHOR_PARAM);
     const query = params.toString();
-    const hash = /^#page(?:-|=)\d+$/.test(url.hash || '') ? url.hash : '';
-    return `${path}${query ? `?${query}` : ''}${hash}`;
+    return `${path}${query ? `?${query}` : ''}`;
   } catch (_) {
     return '';
   }
@@ -105,10 +144,16 @@ function voxRouteWithTelegramLaunchContext(route) {
     current.searchParams.forEach((value, key) => {
       if (/^tgWebApp/i.test(key) && !target.searchParams.has(key)) target.searchParams.set(key, value);
     });
+    const contentAnchor = voxSafeContentAnchor(target.hash || '')
+      || voxSafeContentAnchor(target.searchParams.get(VOX_CONTENT_ANCHOR_PARAM) || '');
+    if (contentAnchor) target.searchParams.set(VOX_CONTENT_ANCHOR_PARAM, contentAnchor);
+    else target.searchParams.delete(VOX_CONTENT_ANCHOR_PARAM);
+    target.hash = '';
     // Полная навигация внутри Telegram перезагружает документ. Без исходного
     // launch-фрагмента telegram-web-app.js теряет initData, и защищённые API
-    // начинают отвечать 401. Храним фрагмент только в sessionStorage текущего
-    // WebView и возвращаем его на маршруты книги/читалки/личных разделов.
+    // начинают отвечать 401. Смысловой якорь страницы хранится отдельно в
+    // query-параметре, поэтому launch-фрагмент больше не затирает страницу
+    // комикса, каталог или блок пакетов глав.
     const launchHash = voxCaptureTelegramLaunchHash();
     if (launchHash) target.hash = launchHash;
     return `${target.pathname}${target.search}${target.hash}`;
@@ -335,6 +380,17 @@ function notify(message) {
   toast._hideTimer = setTimeout(() => toast.classList.remove('show'), 2200);
 }
 
+let lastUnhandledClientErrorAt = 0;
+window.addEventListener('unhandledrejection', (event) => {
+  const error = event?.reason;
+  if (!error || error?.name === 'AbortError') return;
+  const now = Date.now();
+  if (now - lastUnhandledClientErrorAt < 1200) return;
+  lastUnhandledClientErrorAt = now;
+  const message = String(error?.message || 'Не удалось выполнить действие').trim();
+  notify(message.length <= 180 ? message : 'Не удалось выполнить действие. Повторите попытку.');
+});
+
 let contentProtectionBound = false;
 
 function protectedTarget(event) {
@@ -521,11 +577,12 @@ function voxRequestId() {
 }
 
 async function apiFetch(url, options = {}) {
-  const headers = Object.assign({}, options.headers || {}, { 'X-Telegram-Init-Data': tgInitData() });
+  const headers = Object.assign({ Accept: 'application/json' }, options.headers || {}, { 'X-Telegram-Init-Data': tgInitData() });
   const method = String(options.method || 'GET').toUpperCase();
   if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method) && !headers['X-Vox-Request-Id']) headers['X-Vox-Request-Id'] = voxRequestId();
   if (options.body && !(options.body instanceof FormData) && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
-  const response = await fetch(url, Object.assign({}, options, { headers }));
+  const requestOptions = Object.assign({ cache: 'no-store', credentials: 'same-origin' }, options, { headers });
+  const response = await fetch(url, requestOptions);
   if (!response.ok) {
     let message = 'Не удалось выполнить действие';
     try {
@@ -1253,11 +1310,16 @@ async function cacheReaderTtsSegment(segment) {
 
 async function apiFetchWithRetry(url, options = {}, attempts = 3, timeoutMs = 120000) {
   let lastError = null;
+  const retryOptions = Object.assign({}, options, { headers: Object.assign({}, options.headers || {}) });
+  const method = String(retryOptions.method || 'GET').toUpperCase();
+  if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method) && !retryOptions.headers['X-Vox-Request-Id']) {
+    retryOptions.headers['X-Vox-Request-Id'] = voxRequestId();
+  }
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      return await apiFetch(url, Object.assign({}, options, { signal: controller.signal }));
+      return await apiFetch(url, Object.assign({}, retryOptions, { signal: controller.signal }));
     } catch (error) {
       lastError = error;
       const status = Number(error?.status || 0);
@@ -2254,7 +2316,10 @@ function bindAudioPlayerEvents(player) {
     stopAudioPeriodicSave();
     saveAudioProgress().catch(() => {});
     const next = document.getElementById('nextAudioLink');
-    if (getPrefs().autoplayNext && next) window.location.href = next.href;
+    if (getPrefs().autoplayNext && next) {
+      const route = next.getAttribute('href') || next.href;
+      if (!voxNavigateToInternalRoute(route)) window.location.assign(route);
+    }
   });
 }
 
@@ -2990,7 +3055,7 @@ function applyReadingJournalPayload(page, result) {
 async function downloadReadingJournal(format) {
   try {
     const response = await fetch(`/api/library/journal/export?format=${encodeURIComponent(format)}`, {
-      headers: { 'X-Telegram-Init-Data': tgInitData() },
+      headers: { 'X-Telegram-Init-Data': tgInitData() }, cache: 'no-store', credentials: 'same-origin',
     });
     if (!response.ok) {
       let message = 'Не удалось выгрузить дневник';
@@ -3218,7 +3283,7 @@ function readingJournalImportHistoryMarkup(history) {
 }
 
 async function downloadReadingJournalBackup(runId) {
-  const response = await fetch(`/api/library/journal/import/${Number(runId)}/backup`, { headers: { 'X-Telegram-Init-Data': tgInitData() } });
+  const response = await fetch(`/api/library/journal/import/${Number(runId)}/backup`, { headers: { 'X-Telegram-Init-Data': tgInitData() }, cache: 'no-store', credentials: 'same-origin' });
   if (!response.ok) {
     let message = 'Не удалось скачать резервную точку';
     try { message = (await response.json()).detail || message; } catch (_) {}
@@ -4101,16 +4166,10 @@ async function createReaderQuoteCard() {
   if (button) { button.disabled = true; button.textContent = 'Создаём…'; }
   clearReaderQuotePreview();
   try {
-    const response = await fetch(`/api/reader/${chapterId}/quote-card`, {
+    const response = await apiFetch(`/api/reader/${chapterId}/quote-card`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': tgInitData() },
       body: JSON.stringify({ quote, style: document.getElementById('readerQuoteStyle')?.value || 'standard' }),
     });
-    if (!response.ok) {
-      let message = 'Не удалось создать карточку';
-      try { message = (await response.json()).detail || message; } catch (_) {}
-      throw new Error(message);
-    }
     const blob = await response.blob();
     readerQuoteObjectUrl = URL.createObjectURL(blob);
     const image = document.getElementById('readerQuoteImage');
@@ -4249,7 +4308,8 @@ async function openChapterByNumber(form) {
   }
   try {
     const data = await apiFetch(`/api/book/${bookId}/chapter-number/${chapterNumber}`);
-    window.location.href = data.reader_url;
+    const route = String(data.reader_url || '');
+    if (!route || !voxNavigateToInternalRoute(route)) throw new Error('Сервер не вернул адрес главы.');
   } catch (error) {
     notify(error.message || 'Такая глава не найдена');
     input?.focus();
@@ -5100,7 +5160,7 @@ async function downloadPrivacyExport() {
   if (!button) return;
   button.disabled = true;
   try {
-    const response = await fetch('/api/privacy/export', { headers: { 'X-Telegram-Init-Data': tgInitData() }, cache: 'no-store' });
+    const response = await fetch('/api/privacy/export', { headers: { 'X-Telegram-Init-Data': tgInitData() }, cache: 'no-store', credentials: 'same-origin' });
     if (!response.ok) { let message = 'Не удалось создать экспорт'; try { message = (await response.json()).detail || message; } catch (_) {} throw new Error(message); }
     const blob = await response.blob();
     const disposition = response.headers.get('content-disposition') || '';
@@ -5228,17 +5288,26 @@ function bindRoutePersistence() {
     }
     voxSaveRouteState(url.toString());
 
+    const rawHref = String(link.getAttribute('href') || '').trim();
+    if (rawHref.startsWith('#')) {
+      const anchor = voxSafeContentAnchor(rawHref);
+      if (anchor && voxScrollToContentAnchor(anchor, { smooth: true })) event.preventDefault();
+      return;
+    }
+
     // В Telegram обычный <a href> создаёт новый документ без исходного hash.
-    // Перед самой навигацией переписываем только защищённые внутренние маршруты,
-    // чтобы книга, читалка, реакции и личные API сохранили подтверждённый профиль.
+    // Переписываем любой разрешённый внутренний маршрут, а не только карточки
+    // книг. Это сохраняет Telegram-сессию в каталоге, аудио, комиксах,
+    // настройках, авторской и владелецкой панелях.
+    const safeRoute = voxSafeRoute(url.toString());
     if (
-      voxHasTelegramAuth()
+      safeRoute
+      && voxHasTelegramAuth()
       && !link.hasAttribute('download')
       && String(link.getAttribute('target') || '').toLowerCase() !== '_blank'
-      && /^\/(book|reader|comic|audio|library|settings|premium|author|control)(\/|$)/.test(url.pathname)
+      && url.pathname !== '/'
     ) {
-      const route = `${url.pathname}${url.search}`;
-      const enhanced = voxRouteWithTelegramLaunchContext(route);
+      const enhanced = voxRouteWithTelegramLaunchContext(safeRoute);
       if (enhanced) link.setAttribute('href', enhanced);
     }
   }, { capture: true });
@@ -5252,6 +5321,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initVoxSplash();
   initExternalBrowserMode();
   bindRoutePersistence();
+  window.setTimeout(() => voxScrollToContentAnchor(), 80);
   applySettings();
   flushProgressSyncQueue().catch(() => {});
   syncNotificationPreferences();
@@ -5319,7 +5389,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     const fallback = fallbackUrl();
     prepareHomeNavigation(fallback);
-    window.location.assign(fallback);
+    window.location.assign(voxRouteWithTelegramLaunchContext(fallback));
   }
 
   home?.addEventListener('click', () => {

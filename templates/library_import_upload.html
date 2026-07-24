@@ -61,6 +61,30 @@
 (() => {
   const tg = window.Telegram?.WebApp;
   if (tg) { tg.ready(); tg.expand(); }
+  const launchHashKey = 'voxlyra:telegram-launch-hash:v114028';
+  const legacyLaunchHashKeys = ['voxlyra:telegram-launch-hash:v114027'];
+  const currentHash = String(window.location.hash || '');
+  let launchHash = /(?:^#|&)tgWebAppData=/.test(currentHash) ? currentHash : '';
+  try {
+    if (launchHash) sessionStorage.setItem(launchHashKey, launchHash);
+    else {
+      for (const key of [launchHashKey, ...legacyLaunchHashKeys]) {
+        const saved = String(sessionStorage.getItem(key) || '');
+        if (!/(?:^#|&)tgWebAppData=/.test(saved)) continue;
+        launchHash = saved;
+        if (key !== launchHashKey) sessionStorage.setItem(launchHashKey, saved);
+        break;
+      }
+    }
+  } catch (_) {}
+  const withLaunchHash = (route) => {
+    try {
+      const url = new URL(route, window.location.origin);
+      if (url.origin !== window.location.origin) return route;
+      if (launchHash) url.hash = launchHash;
+      return `${url.pathname}${url.search}${url.hash}`;
+    } catch (_) { return route; }
+  };
 
   const backButton = document.getElementById('uploadBackButton');
   const hasSameOriginReferrer = (() => {
@@ -76,7 +100,7 @@
       tg.close();
       return;
     }
-    window.location.assign('/control?section=library-import');
+    window.location.assign(withLaunchHash('/control?section=library-import'));
   };
   backButton?.addEventListener('click', goBack);
   if (tg?.BackButton) {

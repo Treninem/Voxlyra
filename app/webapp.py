@@ -1212,14 +1212,19 @@ def create_app() -> FastAPI:
         for key, value in security_headers().items():
             response.headers.setdefault(key, value)
         no_cache_path = (
-            request.url.path.startswith(("/api/me", "/api/privacy", "/api/legal/status", "/api/catalog/search"))
-            or request.url.path in {"/", "/catalog", "/comics", "/static/js/app.js"}
+            request.url.path.startswith(("/api/", "/static/js/"))
+            or request.url.path in {"/", "/catalog", "/comics"}
             or str(response.headers.get("content-type") or "").lower().startswith("text/html")
         )
         if no_cache_path:
             response.headers["Cache-Control"] = "private, no-store, no-cache, must-revalidate, max-age=0"
             response.headers["Pragma"] = "no-cache"
             response.headers["Expires"] = "0"
+        if request.url.path.startswith("/api/"):
+            vary = [item.strip() for item in str(response.headers.get("Vary") or "").split(",") if item.strip()]
+            if "X-Telegram-Init-Data" not in vary:
+                vary.append("X-Telegram-Init-Data")
+            response.headers["Vary"] = ", ".join(vary)
         response.headers["X-VoxLyra-Build"] = OWNER_BUILD_VERSION
         return response
     app.mount("/static", StaticFiles(directory="static"), name="static")

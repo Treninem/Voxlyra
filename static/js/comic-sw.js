@@ -1,10 +1,11 @@
 /* Voxlyra comics shell service worker.
    It caches only the reader shell and static interface files. Signed page URLs
    are intentionally left to the encrypted/local IndexedDB cache in comic.js. */
-const SHELL_CACHE = "voxlyra-comic-shell-v11400";
-const STATIC_CACHE = "voxlyra-comic-static-v11400";
+const SHELL_CACHE = "voxlyra-comic-shell-v114028";
+const STATIC_CACHE = "voxlyra-comic-static-v114028";
 const CORE_FILES = [
   "/static/css/style.css",
+  "/static/css/app.css",
   "/static/js/app.js",
   "/static/js/comic.js",
 ];

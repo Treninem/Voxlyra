@@ -14,7 +14,7 @@
   async function downloadLibraryBatchReport(batchId, format) {
     const response = await fetch(`/api/control/library-import/batch/${Number(batchId)}/report?format=${encodeURIComponent(format)}`, {
       headers: { 'X-Telegram-Init-Data': tgInitData() },
-      cache: 'no-store',
+      cache: 'no-store', credentials: 'same-origin',
     });
     if (!response.ok) {
       let message = 'Не удалось скачать отчёт.';
@@ -435,7 +435,14 @@
       button.textContent = 'Открываем загрузку…';
       try {
         const session = await apiFetch('/api/control/library-import/session', { method: 'POST' });
-        window.location.assign(session.upload_url);
+        let uploadUrl = String(session.upload_url || '');
+        try {
+          const parsed = new URL(uploadUrl, window.location.origin);
+          if (parsed.origin === window.location.origin && typeof voxRouteWithTelegramLaunchContext === 'function') {
+            uploadUrl = voxRouteWithTelegramLaunchContext(`${parsed.pathname}${parsed.search}${parsed.hash}`);
+          }
+        } catch (_) {}
+        window.location.assign(uploadUrl);
       } catch (error) {
         button.disabled = false;
         button.textContent = 'Выбрать ZIP и импортировать';
@@ -1050,7 +1057,7 @@
   async function downloadAchievementManifest(format) {
     const selected = format === 'json' ? 'json' : 'md';
     const response = await fetch(`/api/control/achievement-artwork/manifest?format=${selected}`, {
-      headers: { 'X-Telegram-Init-Data': tgInitData() }, cache: 'no-store',
+      headers: { 'X-Telegram-Init-Data': tgInitData() }, cache: 'no-store', credentials: 'same-origin',
     });
     if (!response.ok) {
       let message = 'Не удалось скачать манифест.';

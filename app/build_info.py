@@ -5,12 +5,12 @@
 передаётся.
 """
 
-OWNER_BUILD_VERSION = "v1.14.0.27"
-OWNER_BUILD_NAME = "telegram route auth continuity and reaction repair"
+OWNER_BUILD_VERSION = "v1.14.0.28"
+OWNER_BUILD_NAME = "navigation anchors, API freshness and action retry hardening"
 
 
 def owner_build_label() -> str:
     return f"{OWNER_BUILD_VERSION} · {OWNER_BUILD_NAME}"
 
 
-WORKING_BUILD_STAGE = "v1.14.0.27 · protected navigation keeps Telegram auth, books open reliably, reactions verified"
+WORKING_BUILD_STAGE = "v1.14.0.28 · all internal routes preserve Telegram auth and content anchors; API actions are fresh and retry-safe"
