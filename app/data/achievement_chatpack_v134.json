@@ -1,0 +1,102 @@
+{
+  "version": "v1.14.0.34",
+  "created_at_utc": "2026-07-24T22:39:20.056143+00:00",
+  "archive": "VoxLyra_ALL_IMAGES_FROM_CHAT(1).zip",
+  "source_png_count": 18,
+  "duplicate_against_previous_pack_count": 0,
+  "installed_png_count": 18,
+  "automatic_rewards_total": 104,
+  "assignments": [
+    {
+      "code": "thousand_chapters",
+      "filename": "chatpack_thousand_chapters.png",
+      "rationale": "Открытая книга и крупный знак 1000 — тысяча завершённых глав."
+    },
+    {
+      "code": "first_review",
+      "filename": "chatpack_first_review.png",
+      "rationale": "Рукопись, перо и чернильница — первый опубликованный отзыв."
+    },
+    {
+      "code": "genres_10",
+      "filename": "chatpack_genres_10.png",
+      "rationale": "Знак 10 и символы разных жанров."
+    },
+    {
+      "code": "five_hundred_chapters",
+      "filename": "chatpack_five_hundred_chapters.png",
+      "rationale": "Знак 500, книга и множество миров — пятьсот глав."
+    },
+    {
+      "code": "completed_books_50",
+      "filename": "chatpack_completed_books_50.png",
+      "rationale": "Знак 50, книга и миры — пятьдесят полностью прочитанных книг."
+    },
+    {
+      "code": "notes_50",
+      "filename": "chatpack_notes_50.png",
+      "rationale": "Коллекция блокнотов, записей и перьев — пятьдесят заметок."
+    },
+    {
+      "code": "genres_20",
+      "filename": "chatpack_genres_20.png",
+      "rationale": "Знак 20 и кольцо тематических миров — двадцать жанров."
+    },
+    {
+      "code": "thousand_readers",
+      "filename": "chatpack_thousand_readers.png",
+      "rationale": "Знак 1000 и множество миров вокруг компаса — тысяча читателей."
+    },
+    {
+      "code": "quote_collector",
+      "filename": "chatpack_quote_collector.png",
+      "rationale": "Книга, карточки с мыслями и письменные принадлежности — коллекция цитат."
+    },
+    {
+      "code": "first_book",
+      "filename": "chatpack_first_book.png",
+      "rationale": "Премиальный авторский том и перо — первая опубликованная книга."
+    },
+    {
+      "code": "genres_5",
+      "filename": "chatpack_genres_5.png",
+      "rationale": "Знак 5 и пять тематических символов — пять жанров."
+    },
+    {
+      "code": "author_words_100k",
+      "filename": "chatpack_author_words_100k.png",
+      "rationale": "Рукопись, авторская книга и перо — крупный объём написанного текста."
+    },
+    {
+      "code": "completed_books_250",
+      "filename": "chatpack_completed_books_250.png",
+      "rationale": "Знак 250 и множество книжных миров — 250 завершённых книг."
+    },
+    {
+      "code": "notes_200",
+      "filename": "chatpack_notes_200.png",
+      "rationale": "Знак 200 и набор книг/письменных принадлежностей — двести заметок."
+    },
+    {
+      "code": "reviewer_ten",
+      "filename": "chatpack_reviewer_ten.png",
+      "rationale": "Развёрнутый текст, пометка и перо — серия содержательных рецензий."
+    },
+    {
+      "code": "active_days_365",
+      "filename": "chatpack_active_days_365.png",
+      "rationale": "Знак 365, четыре сезона и открытая книга — активность в 365 разные дни."
+    },
+    {
+      "code": "active_days_1000",
+      "filename": "chatpack_active_days_1000.png",
+      "rationale": "Крупный знак 1000 в космической эмблеме — тысяча активных дней."
+    },
+    {
+      "code": "reading_streak_365",
+      "filename": "chatpack_reading_streak_365.png",
+      "rationale": "Знак 365 и сезонный венок — непрерывная серия длиной в год."
+    }
+  ],
+  "note": "В v1.14.0.33 фактически было 103 автоматические награды; поле target_total=106 не соответствовало каталогу. Добавлен один качественный рубеж, теперь фактически 104."
+}
