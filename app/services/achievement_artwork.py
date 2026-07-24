@@ -19,6 +19,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 BUNDLED_ROOT = PROJECT_ROOT / "static" / "img" / "achievements"
 MANIFEST_JSON = PROJECT_ROOT / "app" / "data" / "achievement_art_manifest.json"
 MANIFEST_MD = PROJECT_ROOT / "app" / "data" / "achievement_art_manifest.md"
+REJECTED_IMPORT_JSON = PROJECT_ROOT / "app" / "data" / "achievement_art_rejected_v130.json"
 OVERRIDE_ROOT = Path(str(settings.ACHIEVEMENT_ARTWORK_STORAGE_ROOT or "data/achievement_artwork"))
 if not OVERRIDE_ROOT.is_absolute():
     OVERRIDE_ROOT = PROJECT_ROOT / OVERRIDE_ROOT
@@ -81,6 +82,25 @@ def safe_filename(value: Any) -> str:
     return text
 
 
+
+
+@lru_cache(maxsize=1)
+def rejected_import_hashes() -> dict[str, str]:
+    try:
+        payload = json.loads(REJECTED_IMPORT_JSON.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {}
+    items = payload.get("items")
+    if not isinstance(items, dict):
+        return {}
+    result: dict[str, str] = {}
+    for filename, raw in items.items():
+        clean = safe_filename(filename)
+        digest = str((raw or {}).get("sha256") or "").strip().lower() if isinstance(raw, dict) else ""
+        if clean and len(digest) == 64 and all(ch in "0123456789abcdef" for ch in digest):
+            result[clean] = digest
+    return result
+
 def bundled_path(filename: str) -> Path | None:
     clean = safe_filename(filename)
     if not clean:
@@ -102,7 +122,17 @@ def override_path(filename: str) -> Path | None:
         path.relative_to(OVERRIDE_ROOT.resolve())
     except ValueError:
         return None
-    return path if path.is_file() and path.stat().st_size > 0 else None
+    if not path.is_file() or path.stat().st_size <= 0:
+        return None
+    rejected_digest = rejected_import_hashes().get(clean)
+    if rejected_digest:
+        try:
+            if _sha256(path) == rejected_digest:
+                path.unlink(missing_ok=True)
+                return None
+        except OSError:
+            return None
+    return path
 
 
 def effective_path(filename: str) -> Path | None:

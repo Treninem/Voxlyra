@@ -1,0 +1,73 @@
+{
+  "version": "v1.14.0.31",
+  "items": {
+    "audio_twenty_five_hours.png": {
+      "sha256": "b8b7ad5cc4ad1d45cc9ad23dbd2428dbc0a0b5f49341e77bf9f14c027036ee8b",
+      "reason": "Название награды написано внутри изображения."
+    },
+    "collector_two_hundred_fifty.png": {
+      "sha256": "d7c690384a2e8963e52c30c270f40b7f692af066094246d90b0a42ee99e4d5f7",
+      "reason": "Название «АРХИВАРИУС» и подпись написаны внутри изображения."
+    },
+    "commentator_twenty_five.png": {
+      "sha256": "c2cbaac33e2936f741df53b2f2b137be921ecbff3aa15cc52e2d0ea91f82123d",
+      "reason": "Название и поясняющий текст написаны внутри изображения."
+    },
+    "completed_books_250.png": {
+      "sha256": "7dbe6ec41d000b53e54fdb6e1373c09a0fca8d851cb524d4deaaa38c4b5f6596",
+      "reason": "Название и поясняющий текст написаны внутри изображения."
+    },
+    "reading_streak_365.png": {
+      "sha256": "372149f407991e2fcbbb99776953eb53bf0c2d71a8d77a9c0942c94461412713",
+      "reason": "Подпись «ГОД С VOXLYRA» написана внутри изображения."
+    },
+    "audio_five_hundred_hours.png": {
+      "sha256": "d43ec27533b0fc723b4f013de36a1beba7b4c31d2acdc4c4c0cdadbc0f5fc404",
+      "reason": "На изображении книга/перо и рубеж 50, а нужна награда за 500 часов аудио."
+    },
+    "author_fifty_chapters.png": {
+      "sha256": "280344777e0d834745ee6b8a347e22b508d6add8658a09944df0cb687c28f796",
+      "reason": "На изображении указана коллекция 500 книг, а нужна публикация 50 глав."
+    },
+    "author_five_books.png": {
+      "sha256": "4be66b65eea13abedf91a8b896cd261c39a9675dc1d94cdf4a0496fe1c985f62",
+      "reason": "На изображении указано 2500 часов/путешественник миров, а нужны 5 книг автора."
+    },
+    "author_hundred_readers.png": {
+      "sha256": "99834f05dd138b241f723d2ef6c63b9df7aa1398c4e63bc4785522ae1c7ac38f",
+      "reason": "На изображении указан другой рубеж и часы, а нужны 100 читателей."
+    },
+    "author_ten_thousand_readers.png": {
+      "sha256": "2479d628bf72941e97ef9d156833a766719e38cd8d5bdad3278969bbf83bcdce",
+      "reason": "На изображении «Властелин знаний» и 7500 часов, а нужны 10 000 читателей."
+    },
+    "author_thousand_chapters.png": {
+      "sha256": "54e40f03036f2c6610ac13821831b3f630453ac12314b322115f882cdfac747a",
+      "reason": "На изображении 1000 часов, а нужны 1000 опубликованных глав."
+    },
+    "author_two_hundred_fifty_chapters.png": {
+      "sha256": "8e4534adca3180109ada46c83219d6ea3f83920e386559cd67a89a509e5d1af8",
+      "reason": "На изображении 750 часов, а нужны 250 опубликованных глав."
+    },
+    "comic_twenty_five_thousand_pages.png": {
+      "sha256": "f391d48520ea77801a895c7e72c8e011950ddaec52e58b825aa13d4e15767573",
+      "reason": "На изображении 100 книг, а нужны 25 000 страниц комиксов."
+    },
+    "completed_books_5.png": {
+      "sha256": "e2dee0f67a7f8f7fe57131d3261e3f69f1f28e93baceab325e0f637e479a9ec1",
+      "reason": "На изображении 15 000 часов, а нужны 5 полностью прочитанных книг."
+    },
+    "completed_books_25.png": {
+      "sha256": "7cb218694c4bc61daa47f99dc18b6f0837e37503e15afeb85585fe3dcd41e5cc",
+      "reason": "На изображении 250 000 часов, а нужны 25 полностью прочитанных книг."
+    },
+    "completed_books_100.png": {
+      "sha256": "c610aee74302286db315c724b23a64a2914c20ff41563f4804d5550a18fa6850",
+      "reason": "На изображении 500 000 часов, а нужны 100 полностью прочитанных книг."
+    },
+    "quote_fifty.png": {
+      "sha256": "b16655931d8670c81f0fecf4ba0735a9e625682dfe80e865fd52d1b9a05cf167",
+      "reason": "На изображении 250 книг/легендарный читатель, а нужны 50 сохранённых цитат."
+    }
+  }
+}

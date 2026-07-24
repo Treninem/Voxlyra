@@ -5,12 +5,12 @@
 передаётся.
 """
 
-OWNER_BUILD_VERSION = "v1.14.0.29"
-OWNER_BUILD_NAME = "owner diagnostics and post-deploy integrity audit"
+OWNER_BUILD_VERSION = "v1.14.0.31"
+OWNER_BUILD_NAME = "corrected reward icon semantic audit"
 
 
 def owner_build_label() -> str:
     return f"{OWNER_BUILD_VERSION} · {OWNER_BUILD_NAME}"
 
 
-WORKING_BUILD_STAGE = "v1.14.0.29 · automatic owner diagnostics audit database, moderation, covers, reactions and notifications"
+WORKING_BUILD_STAGE = "v1.14.0.31 · six verified reward icons retained; mismatched v1.14.0.30 imports automatically removed"

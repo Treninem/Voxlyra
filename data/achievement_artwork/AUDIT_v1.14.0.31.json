@@ -1,0 +1,196 @@
+{
+  "version": "v1.14.0.31",
+  "source": "VoxLyra_rewards_ORGANIZED_WITH_STATUS(1).zip",
+  "summary": {
+    "checked": 23,
+    "category_match": 11,
+    "fully_accepted": 6,
+    "rejected": 17
+  },
+  "items": [
+    {
+      "filename": "audio_five_hundred_hours.png",
+      "title": "Голос эпох",
+      "tier": "Легенда",
+      "condition": "Прослушать суммарно пятьсот часов аудиокниг.",
+      "status": "rejected_semantic_mismatch",
+      "reason": "На изображении книга/перо и рубеж 50, а нужна награда за 500 часов аудио."
+    },
+    {
+      "filename": "audio_twenty_five_hours.png",
+      "title": "25 часов звучания",
+      "tier": "Золото",
+      "condition": "Прослушать суммарно двадцать пять часов аудиокниг.",
+      "status": "rejected_text_rule",
+      "reason": "Название награды написано внутри изображения."
+    },
+    {
+      "filename": "author_fifty_chapters.png",
+      "title": "Автор 50 глав",
+      "tier": "Серебро",
+      "condition": "Опубликовать пятьдесят текстовых или графических глав.",
+      "status": "rejected_semantic_mismatch",
+      "reason": "На изображении указана коллекция 500 книг, а нужна публикация 50 глав."
+    },
+    {
+      "filename": "author_five_books.png",
+      "title": "Автор 5 книг",
+      "tier": "Серебро",
+      "condition": "Опубликовать пять самостоятельных произведений.",
+      "status": "rejected_semantic_mismatch",
+      "reason": "На изображении указано 2500 часов/путешественник миров, а нужны 5 книг автора."
+    },
+    {
+      "filename": "author_hundred_readers.png",
+      "title": "Первые 100 читателей",
+      "tier": "Золото",
+      "condition": "Собрать сто уникальных читателей своих произведений.",
+      "status": "rejected_semantic_mismatch",
+      "reason": "На изображении указан другой рубеж и часы, а нужны 100 читателей."
+    },
+    {
+      "filename": "author_ten_thousand_readers.png",
+      "title": "Аудитория 10 000",
+      "tier": "Легенда",
+      "condition": "Собрать десять тысяч уникальных читателей своих произведений.",
+      "status": "rejected_semantic_mismatch",
+      "reason": "На изображении «Властелин знаний» и 7500 часов, а нужны 10 000 читателей."
+    },
+    {
+      "filename": "author_thousand_chapters.png",
+      "title": "Автор 1000 глав",
+      "tier": "Платина",
+      "condition": "Опубликовать тысячу текстовых или графических глав.",
+      "status": "rejected_semantic_mismatch",
+      "reason": "На изображении 1000 часов, а нужны 1000 опубликованных глав."
+    },
+    {
+      "filename": "author_two_hundred_fifty_chapters.png",
+      "title": "Автор 250 глав",
+      "tier": "Золото",
+      "condition": "Опубликовать двести пятьдесят текстовых или графических глав.",
+      "status": "rejected_semantic_mismatch",
+      "reason": "На изображении 750 часов, а нужны 250 опубликованных глав."
+    },
+    {
+      "filename": "collector_twenty_five.png",
+      "title": "Полка на 25",
+      "tier": "Серебро",
+      "condition": "Сохранить двадцать пять произведений в личной библиотеке.",
+      "status": "accepted",
+      "reason": "Категория, рубеж, уровень и композиция соответствуют; название награды внутри не написано."
+    },
+    {
+      "filename": "collector_two_hundred_fifty.png",
+      "title": "Архивариус",
+      "tier": "Платина",
+      "condition": "Сохранить двести пятьдесят произведений в личной библиотеке.",
+      "status": "rejected_text_rule",
+      "reason": "Название «АРХИВАРИУС» и подпись написаны внутри изображения."
+    },
+    {
+      "filename": "comic_twenty_five_thousand_pages.png",
+      "title": "Галерея миров",
+      "tier": "Легенда",
+      "condition": "Просмотреть двадцать пять тысяч страниц комиксов, манги или манхвы.",
+      "status": "rejected_semantic_mismatch",
+      "reason": "На изображении 100 книг, а нужны 25 000 страниц комиксов."
+    },
+    {
+      "filename": "commentator_twenty_five.png",
+      "title": "Участник обсуждений",
+      "tier": "Серебро",
+      "condition": "Опубликовать двадцать пять комментариев к главам.",
+      "status": "rejected_text_rule",
+      "reason": "Название и поясняющий текст написаны внутри изображения."
+    },
+    {
+      "filename": "completed_books_100.png",
+      "title": "Страж сотни миров",
+      "tier": "Платина",
+      "condition": "Полностью прочитать сто произведений.",
+      "status": "rejected_semantic_mismatch",
+      "reason": "На изображении 500 000 часов, а нужны 100 полностью прочитанных книг."
+    },
+    {
+      "filename": "completed_books_25.png",
+      "title": "Созвездие историй",
+      "tier": "Золото",
+      "condition": "Полностью прочитать двадцать пять произведений.",
+      "status": "rejected_semantic_mismatch",
+      "reason": "На изображении 250 000 часов, а нужны 25 полностью прочитанных книг."
+    },
+    {
+      "filename": "completed_books_250.png",
+      "title": "Владыка библиотеки",
+      "tier": "Легенда",
+      "condition": "Полностью прочитать двести пятьдесят произведений.",
+      "status": "rejected_text_rule",
+      "reason": "Название и поясняющий текст написаны внутри изображения."
+    },
+    {
+      "filename": "completed_books_5.png",
+      "title": "Пять завершённых миров",
+      "tier": "Серебро",
+      "condition": "Полностью прочитать пять произведений.",
+      "status": "rejected_semantic_mismatch",
+      "reason": "На изображении 15 000 часов, а нужны 5 полностью прочитанных книг."
+    },
+    {
+      "filename": "quote_fifty.png",
+      "title": "Хранитель 50 цитат",
+      "tier": "Золото",
+      "condition": "Сохранить пятьдесят значимых цитат из произведений.",
+      "status": "rejected_semantic_mismatch",
+      "reason": "На изображении 250 книг/легендарный читатель, а нужны 50 сохранённых цитат."
+    },
+    {
+      "filename": "reader_five_thousand_chapters.png",
+      "title": "Хронист 5000",
+      "tier": "Легенда",
+      "condition": "Завершить пять тысяч текстовых глав — рубеж преданного читателя.",
+      "status": "accepted",
+      "reason": "Категория, рубеж, уровень и композиция соответствуют; название награды внутри не написано."
+    },
+    {
+      "filename": "reader_twenty_five_chapters.png",
+      "title": "Первые 25 глав",
+      "tier": "Бронза",
+      "condition": "Завершить двадцать пять текстовых глав.",
+      "status": "accepted",
+      "reason": "Категория, рубеж, уровень и композиция соответствуют; название награды внутри не написано."
+    },
+    {
+      "filename": "reader_two_hundred_fifty_chapters.png",
+      "title": "250 глав",
+      "tier": "Серебро",
+      "condition": "Завершить двести пятьдесят текстовых глав.",
+      "status": "accepted",
+      "reason": "Категория, рубеж, уровень и композиция соответствуют; название награды внутри не написано."
+    },
+    {
+      "filename": "reading_streak_100.png",
+      "title": "Сто дней пути",
+      "tier": "Платина",
+      "condition": "Сохранять подтверждённую активность сто дней подряд.",
+      "status": "accepted",
+      "reason": "Категория, рубеж, уровень и композиция соответствуют; название награды внутри не написано."
+    },
+    {
+      "filename": "reading_streak_14.png",
+      "title": "Две недели вместе",
+      "tier": "Серебро",
+      "condition": "Сохранять подтверждённую активность четырнадцать дней подряд.",
+      "status": "accepted",
+      "reason": "Категория, рубеж, уровень и композиция соответствуют; название награды внутри не написано."
+    },
+    {
+      "filename": "reading_streak_365.png",
+      "title": "Год с VoxLyra",
+      "tier": "Легенда",
+      "condition": "Сохранять подтверждённую активность триста шестьдесят пять дней подряд.",
+      "status": "rejected_text_rule",
+      "reason": "Подпись «ГОД С VOXLYRA» написана внутри изображения."
+    }
+  ]
+}
