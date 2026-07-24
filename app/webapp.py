@@ -4909,14 +4909,22 @@ def create_app() -> FastAPI:
             "message": "Жалоба отправлена модераторам." if result["created"] else "Эта жалоба уже находится на проверке.",
         }
 
+    async def _require_public_chapter_interaction_access(*, user: TMAUser, chapter_id: int) -> Any:
+        chapter = await get_chapter(int(chapter_id))
+        if not chapter or chapter["publication_status"] != "published" or chapter["status"] != "published":
+            raise HTTPException(status_code=404, detail="Глава не найдена.")
+        # Автор своей книги и владелец платформы не должны покупать собственную
+        # главу ради реакции. Для остальных действует тот же доступ, что в читалке.
+        is_author = await book_belongs_to_author(int(chapter["book_id"]), int(user.app_user_id))
+        is_owner = int(user.telegram_id) in settings.owner_ids
+        if not is_author and not is_owner and not await user_can_access_chapter(user.app_user_id, int(chapter_id)):
+            raise HTTPException(status_code=403, detail="Реакции доступны после открытия главы.")
+        return chapter
+
     @app.get("/api/reader/{chapter_id}/reactions")
     async def api_chapter_reactions(chapter_id: int, x_telegram_init_data: str | None = Header(default=None)):
         user = await _tma_user(x_telegram_init_data)
-        chapter = await get_chapter(chapter_id)
-        if not chapter or chapter["publication_status"] != "published" or chapter["status"] != "published":
-            raise HTTPException(status_code=404, detail="Глава не найдена.")
-        if not await user_can_access_chapter(user.app_user_id, chapter_id):
-            raise HTTPException(status_code=403, detail="Реакции доступны после открытия главы.")
+        await _require_public_chapter_interaction_access(user=user, chapter_id=chapter_id)
         return {"ok": True, "reactions": await list_chapter_reactions(chapter_id, user.app_user_id)}
 
     @app.post("/api/reader/{chapter_id}/reactions")
@@ -4926,15 +4934,11 @@ def create_app() -> FastAPI:
         x_telegram_init_data: str | None = Header(default=None),
     ):
         user = await _tma_user(x_telegram_init_data)
-        chapter = await get_chapter(chapter_id)
-        if not chapter or chapter["publication_status"] != "published" or chapter["status"] != "published":
-            raise HTTPException(status_code=404, detail="Глава не найдена.")
-        if not await user_can_access_chapter(user.app_user_id, chapter_id):
-            raise HTTPException(status_code=403, detail="Реакции доступны после открытия главы.")
+        await _require_public_chapter_interaction_access(user=user, chapter_id=chapter_id)
         try:
             reactions = await set_chapter_reaction(user.app_user_id, chapter_id, str(payload.get("reaction") or ""))
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+            raise HTTPException(status_code=400, detail="Неизвестная реакция.") from exc
         return {"ok": True, "reactions": reactions}
 
     @app.post("/api/reader/ad-click")

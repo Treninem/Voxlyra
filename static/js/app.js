@@ -1,14 +1,41 @@
 const VOX_ROUTE_STATE_KEY = 'voxlyra:last-route:v11336';
 const VOX_ROUTE_STACK_KEY = 'voxlyra:route-stack:v11336';
 const VOX_SKIP_RESTORE_KEY = 'voxlyra:skip-restore-once';
+const VOX_TG_LAUNCH_HASH_KEY = 'voxlyra:telegram-launch-hash:v114027';
 const VOX_ROUTE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 function voxTelegramWebApp() {
   return window.Telegram?.WebApp || null;
 }
 
+function voxCurrentTelegramLaunchHash() {
+  const hash = String(window.location.hash || '');
+  return /(?:^#|&)tgWebAppData=/.test(hash) ? hash : '';
+}
+
+function voxCaptureTelegramLaunchHash() {
+  const current = voxCurrentTelegramLaunchHash();
+  if (current) {
+    try { sessionStorage.setItem(VOX_TG_LAUNCH_HASH_KEY, current); } catch (_) {}
+    return current;
+  }
+  try {
+    const saved = String(sessionStorage.getItem(VOX_TG_LAUNCH_HASH_KEY) || '');
+    return /(?:^#|&)tgWebAppData=/.test(saved) ? saved : '';
+  } catch (_) { return ''; }
+}
+
+function voxInitDataFromLaunchHash() {
+  const raw = voxCaptureTelegramLaunchHash().replace(/^#/, '');
+  if (!raw) return '';
+  try {
+    const params = new URLSearchParams(raw);
+    return String(params.get('tgWebAppData') || '');
+  } catch (_) { return ''; }
+}
+
 function voxHasTelegramAuth() {
-  return Boolean(voxTelegramWebApp()?.initData);
+  return Boolean(voxTelegramWebApp()?.initData || voxInitDataFromLaunchHash());
 }
 
 function voxSafeRoute(raw = '') {
@@ -78,13 +105,26 @@ function voxRouteWithTelegramLaunchContext(route) {
     current.searchParams.forEach((value, key) => {
       if (/^tgWebApp/i.test(key) && !target.searchParams.has(key)) target.searchParams.set(key, value);
     });
-    // Telegram launch authentication normally arrives in the fragment. Preserve
-    // it across the first redirect; a saved comic page is recovered from progress.
-    if (/tgWebAppData=/.test(current.hash || '')) target.hash = current.hash;
+    // Полная навигация внутри Telegram перезагружает документ. Без исходного
+    // launch-фрагмента telegram-web-app.js теряет initData, и защищённые API
+    // начинают отвечать 401. Храним фрагмент только в sessionStorage текущего
+    // WebView и возвращаем его на маршруты книги/читалки/личных разделов.
+    const launchHash = voxCaptureTelegramLaunchHash();
+    if (launchHash) target.hash = launchHash;
     return `${target.pathname}${target.search}${target.hash}`;
   } catch (_) {
     return route;
   }
+}
+
+function voxNavigateToInternalRoute(route, { replace = false } = {}) {
+  const safe = voxSafeRoute(route);
+  if (!safe) return false;
+  const target = voxRouteWithTelegramLaunchContext(safe);
+  voxSaveRouteState(target);
+  if (replace) window.location.replace(target);
+  else window.location.assign(target);
+  return true;
 }
 
 function voxTelegramLaunchUrl(route = window.location.href) {
@@ -135,6 +175,7 @@ function voxRegisterCurrentRoute() {
 }
 
 (function initTelegramAndLaunchRoute() {
+  voxCaptureTelegramLaunchHash();
   const tg = voxTelegramWebApp();
   if (tg) {
     try {
@@ -473,7 +514,7 @@ async function resetSettings() {
   notify('Настройки возвращены к исходным');
 }
 
-function tgInitData() { return window.Telegram?.WebApp?.initData || ''; }
+function tgInitData() { return window.Telegram?.WebApp?.initData || voxInitDataFromLaunchHash() || ''; }
 
 function voxRequestId() {
   try { return crypto.randomUUID(); } catch (_) { return `${Date.now()}-${Math.random().toString(36).slice(2)}`; }
@@ -487,7 +528,27 @@ async function apiFetch(url, options = {}) {
   const response = await fetch(url, Object.assign({}, options, { headers }));
   if (!response.ok) {
     let message = 'Не удалось выполнить действие';
-    try { message = (await response.json()).detail || message; } catch (_) {}
+    try {
+      const raw = await response.text();
+      if (raw) {
+        try {
+          const payload = JSON.parse(raw);
+          const detail = payload?.detail;
+          message = typeof detail === 'string'
+            ? detail
+            : Array.isArray(detail)
+              ? detail.map((item) => item?.msg || item?.message || '').filter(Boolean).join('; ') || message
+              : payload?.message || message;
+        } catch (_) {
+          if (raw.length <= 240 && !/<html/i.test(raw)) message = raw;
+        }
+      }
+    } catch (_) {}
+    if (response.status === 401 && !tgInitData()) {
+      message = 'Сессия Telegram потеряна. Полностью закройте Mini App и откройте его из бота.';
+    } else if (message === 'Не удалось выполнить действие') {
+      message = `Не удалось выполнить действие · ошибка ${response.status}`;
+    }
     const error = new Error(message);
     error.status = response.status;
     throw error;
@@ -4465,7 +4526,13 @@ function bindEvents() {
   });
   document.addEventListener('click', async (event) => {
     const target = event.target.closest('button, a');
-    if (!target) return;
+    if (!target) {
+      const card = event.target.closest?.('[data-catalog-card], [data-recommendation-card]');
+      const openLink = card?.querySelector?.('.book-title-link, .book-cover-link, .card-action.primary');
+      const href = openLink?.getAttribute?.('href') || '';
+      if (href && voxNavigateToInternalRoute(href)) event.preventDefault();
+      return;
+    }
 
     if (target.id === 'refreshRecommendations') { event.preventDefault(); await loadForYouRecommendations(); return; }
     if (target.matches('[data-recommendation-dismiss]')) {
@@ -4482,6 +4549,18 @@ function bindEvents() {
           reason: target.dataset.recommendationReason || '',
         }),
       }).catch(() => {});
+    }
+
+    // Явная навигация для карточек произведений. Некоторые версии Telegram
+    // WebView проглатывали обычный переход после обновления DOM или теряли
+    // launch-фрагмент. Теперь обложка, название и кнопка Читать всегда ведут
+    // на подтверждённый внутренний маршрут с сохранением Telegram-сессии.
+    if (target.matches('a.book-cover-link, a.book-title-link, a.card-action.primary, a.continue-card')) {
+      const href = target.getAttribute('href') || '';
+      if (href && voxNavigateToInternalRoute(href)) {
+        event.preventDefault();
+        return;
+      }
     }
 
     if (target.matches('[data-profile-frame]')) { event.preventDefault(); setPref('profileFrame', target.dataset.profileFrame); notify('Рамка профиля сохранена'); return; }
@@ -4516,7 +4595,7 @@ function bindEvents() {
     if (target.id === 'readerTtsForward') { event.preventDefault(); seekReaderTts(15); return; }
     if (target.id === 'readerTtsSave') { event.preventDefault(); try { await saveReaderTtsProgress(); notify('Место озвучивания сохранено'); } catch (_) { notify('Не удалось сохранить место'); } return; }
     if (target.matches('[data-tts-sleep]')) { event.preventDefault(); setReaderTtsSleep(Number(target.dataset.ttsSleep)); return; }
-    if (target.matches('[data-reader-nav="next"]')) { event.preventDefault(); const href = target.href; try { await saveReaderProgress(100); } catch (_) {} window.location.href = href; return; }
+    if (target.matches('[data-reader-nav="next"]')) { event.preventDefault(); const href = target.getAttribute('href') || target.href; try { await saveReaderProgress(100); } catch (_) {} voxNavigateToInternalRoute(href); return; }
     if (target.id === 'saveAudioProgress') { event.preventDefault(); try { await saveAudioProgress(); notify('Место сохранено'); } catch (_) { notify('Не удалось сохранить место'); } return; }
     if (target.id === 'audioBack') { event.preventDefault(); seekAudio(-getPrefs().rewindStep); return; }
     if (target.id === 'audioForward') { event.preventDefault(); seekAudio(getPrefs().rewindStep); return; }
@@ -4795,7 +4874,7 @@ function bindEvents() {
       try {
         const data = await apiFetch(`/api/book/${page.dataset.bookId}/review`, { method: 'POST', body: JSON.stringify({ rating: document.getElementById('reviewRating')?.value || 5, text: document.getElementById('reviewText')?.value || '' }) });
         renderReviews(data.reviews); notify('Отзыв сохранён');
-      } catch (_) { notify('Откройте Mini App из бота'); }
+      } catch (error) { notify(error.message || 'Не удалось сохранить отзыв'); }
       return;
     }
 
@@ -5148,6 +5227,20 @@ function bindRoutePersistence() {
       return;
     }
     voxSaveRouteState(url.toString());
+
+    // В Telegram обычный <a href> создаёт новый документ без исходного hash.
+    // Перед самой навигацией переписываем только защищённые внутренние маршруты,
+    // чтобы книга, читалка, реакции и личные API сохранили подтверждённый профиль.
+    if (
+      voxHasTelegramAuth()
+      && !link.hasAttribute('download')
+      && String(link.getAttribute('target') || '').toLowerCase() !== '_blank'
+      && /^\/(book|reader|comic|audio|library|settings|premium|author|control)(\/|$)/.test(url.pathname)
+    ) {
+      const route = `${url.pathname}${url.search}`;
+      const enhanced = voxRouteWithTelegramLaunchContext(route);
+      if (enhanced) link.setAttribute('href', enhanced);
+    }
   }, { capture: true });
   window.addEventListener('pagehide', () => voxSaveRouteState());
   document.addEventListener('visibilitychange', () => {
