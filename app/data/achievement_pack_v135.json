@@ -1,0 +1,286 @@
+{
+  "version": "v1.14.0.35",
+  "generated_at_utc": "2026-07-25T23:11:55.074766+00:00",
+  "source_archive": "VoxLyra_rewards_NEW_ONLY_AFTER_RAW42_24 (1).zip",
+  "validated_unique_images": 24,
+  "reillustrated_existing_rewards": [
+    "active_days_365",
+    "author_five_hundred_chapters",
+    "author_library_additions_1000",
+    "author_rating_250",
+    "author_thousand_chapters",
+    "author_two_hundred_fifty_chapters",
+    "collector_two_hundred_fifty",
+    "completed_books_250",
+    "completed_books_50",
+    "five_hundred_chapters",
+    "graphic_chapters_250",
+    "quotes_250",
+    "reader_seven_hundred_fifty_chapters",
+    "reader_two_hundred_fifty_chapters",
+    "reading_streak_365"
+  ],
+  "new_automatic_rewards": {
+    "audio_chapters_600": {
+      "title": "600 аудиоглав",
+      "description": "Прослушать до конца шестьсот опубликованных аудиоглав.",
+      "icon": "🎧",
+      "icon_asset": "/media/achievements/pack24_audio_chapters_600.png",
+      "group": "reader",
+      "category": "audio",
+      "rarity": "legendary",
+      "goal": 600
+    },
+    "reviews_350": {
+      "title": "350 рецензий",
+      "description": "Опубликовать триста пятьдесят содержательных отзывов на произведения.",
+      "icon": "⭐",
+      "icon_asset": "/media/achievements/pack24_reviews_350.png",
+      "group": "reader",
+      "category": "community",
+      "rarity": "legendary",
+      "goal": 350
+    },
+    "quotes_350": {
+      "title": "350 цитат",
+      "description": "Сохранить триста пятьдесят значимых цитат из произведений.",
+      "icon": "📜",
+      "icon_asset": "/media/achievements/pack24_quotes_350.png",
+      "group": "reader",
+      "category": "reading",
+      "rarity": "mythic",
+      "goal": 350
+    },
+    "comments_400": {
+      "title": "400 комментариев",
+      "description": "Опубликовать четыреста комментариев к главам.",
+      "icon": "💬",
+      "icon_asset": "/media/achievements/pack24_comments_400.png",
+      "group": "reader",
+      "category": "community",
+      "rarity": "legendary",
+      "goal": 400
+    },
+    "active_days_60": {
+      "title": "60 дней активности",
+      "description": "Быть активным в VoxLyra в шестьдесят разные дни.",
+      "icon": "✦",
+      "icon_asset": "/media/achievements/pack24_active_days_60.png",
+      "group": "reader",
+      "category": "reading",
+      "rarity": "epic",
+      "goal": 60
+    },
+    "author_seven_hundred_chapters": {
+      "title": "Автор 700 глав",
+      "description": "Опубликовать семьсот текстовых или графических глав.",
+      "icon": "🪶",
+      "icon_asset": "/media/achievements/pack24_author_700_chapters.png",
+      "group": "author",
+      "category": "author",
+      "rarity": "legendary",
+      "goal": 700
+    },
+    "reviews_250": {
+      "title": "250 рецензий",
+      "description": "Опубликовать двести пятьдесят содержательных отзывов на произведения.",
+      "icon": "⭐",
+      "icon_asset": "/media/achievements/pack24_reviews_250.png",
+      "group": "reader",
+      "category": "community",
+      "rarity": "legendary",
+      "goal": 250
+    },
+    "graphic_chapters_550": {
+      "title": "550 графических глав",
+      "description": "Завершить пятьсот пятьдесят графических глав.",
+      "icon": "💠",
+      "icon_asset": "/media/achievements/pack24_graphic_chapters_550.png",
+      "group": "reader",
+      "category": "comic",
+      "rarity": "legendary",
+      "goal": 550
+    },
+    "active_days_300": {
+      "title": "300 дней активности",
+      "description": "Быть активным в VoxLyra в триста разные дни.",
+      "icon": "✦",
+      "icon_asset": "/media/achievements/pack24_active_days_300.png",
+      "group": "reader",
+      "category": "reading",
+      "rarity": "legendary",
+      "goal": 300
+    }
+  },
+  "automatic_rewards_total": 113,
+  "images": [
+    {
+      "source": "750_achievement_badge_with_ornate_gold_trim.png",
+      "filename": "pack24_reader_750.png",
+      "code": "reader_seven_hundred_fifty_chapters",
+      "bytes": 419274,
+      "sha256": "4b841d6cb5cfef6d8e54cec049ee693d60750434593ffa43143ebd0c076a316b"
+    },
+    {
+      "source": "a_highly_detailed_centered_game_badge_style_icon.png",
+      "filename": "pack24_audio_chapters_600.png",
+      "code": "audio_chapters_600",
+      "bytes": 465772,
+      "sha256": "df849e139a8bf3c33c8644bf8911048177cb335871e6c54b603b984def326ebd"
+    },
+    {
+      "source": "a_highly_detailed_clean_vector_like_fantasy_badg.png",
+      "filename": "pack24_author_500_chapters.png",
+      "code": "author_five_hundred_chapters",
+      "bytes": 364096,
+      "sha256": "2c9d3c3099df6bc43f39b48cca31ebc8fb65cb5ffd94f6de40fb4351458e2414"
+    },
+    {
+      "source": "a_highly_detailed_fantasy_game_achievement_emble.png",
+      "filename": "pack24_active_days_365.png",
+      "code": "active_days_365",
+      "bytes": 507490,
+      "sha256": "7ac584cae735f102cd38e3f6e9826a10344c40529d5257ee4d0e8751521575e9"
+    },
+    {
+      "source": "epic_achievement_badge_with_250_points.png",
+      "filename": "pack24_author_rating_250.png",
+      "code": "author_rating_250",
+      "bytes": 618554,
+      "sha256": "965f16f73ffc77863b4b2239298958125d2fc5d036a5beab21993873ca11c3d9"
+    },
+    {
+      "source": "epic_achievement_badge_with_glowing_gems.png",
+      "filename": "pack24_reader_250.png",
+      "code": "reader_two_hundred_fifty_chapters",
+      "bytes": 662081,
+      "sha256": "543447ae73691fa28a247fcfc813d27cda58c200b53541d42a26e5861589579f"
+    },
+    {
+      "source": "epic_achievement_badge_with_ornate_details.png",
+      "filename": "pack24_reviews_350.png",
+      "code": "reviews_350",
+      "bytes": 598068,
+      "sha256": "4b8713b5ce250be5167a361eded26886d79aa7b32f21848a72d64e6807bda777"
+    },
+    {
+      "source": "fantasy_library_medallion_with_glowing_250.png",
+      "filename": "pack24_collector_250.png",
+      "code": "collector_two_hundred_fifty",
+      "bytes": 462513,
+      "sha256": "adc4df03c69f6d3da714540096ddd9bb455449c45dc1a120af982d12ea9ccefc"
+    },
+    {
+      "source": "gleaming_achievement_medallion_350_badge.png",
+      "filename": "pack24_quotes_350.png",
+      "code": "quotes_350",
+      "bytes": 604037,
+      "sha256": "c9cda33999db1ca5cbc6dd1c7c6433b90199015d347164e3bd200a6235a2d642"
+    },
+    {
+      "source": "glowing_365_emblem_of_grandeur.png",
+      "filename": "pack24_streak_365.png",
+      "code": "reading_streak_365",
+      "bytes": 596079,
+      "sha256": "3200cd48a528cead7de60d735955ec36f0d8a94146127ccbd436d230cdb1f19c"
+    },
+    {
+      "source": "glowing_400_achievement_medallion.png",
+      "filename": "pack24_comments_400.png",
+      "code": "comments_400",
+      "bytes": 306217,
+      "sha256": "e54265679df7bd32c92ebac29442b6766dc828c3adbb3d0cab6cb6e6c32053cf"
+    },
+    {
+      "source": "golden_50th_achievement_medal_emblem.png",
+      "filename": "pack24_completed_books_50.png",
+      "code": "completed_books_50",
+      "bytes": 373768,
+      "sha256": "202394f2354b3b8f639db3f89e2328aa65e3d3a9365a41193d333d0c4a78be04"
+    },
+    {
+      "source": "legendary_achievement_badge_with_golden_light.png",
+      "filename": "pack24_author_1000_chapters.png",
+      "code": "author_thousand_chapters",
+      "bytes": 392768,
+      "sha256": "1c849929b3eeb10ba94cf20cf52f27d394ac84b552726ecd4f3051d9465d46dd"
+    },
+    {
+      "source": "legendary_achievement_emblem_with_1000_marker.png",
+      "filename": "pack24_library_additions_1000.png",
+      "code": "author_library_additions_1000",
+      "bytes": 494759,
+      "sha256": "9f0c79ed4b42ef0c5609d1e638cb5e535c6d56b90f93bb9f211f1566b2752fe4"
+    },
+    {
+      "source": "luxurious_60th_achievement_medallion.png",
+      "filename": "pack24_active_days_60.png",
+      "code": "active_days_60",
+      "bytes": 423189,
+      "sha256": "091a7684de43e5c52b774748cd07be4cd44cfbb414c9b96cd88216130d40b730"
+    },
+    {
+      "source": "magical_achievement_emblem_with_books.png",
+      "filename": "pack24_author_700_chapters.png",
+      "code": "author_seven_hundred_chapters",
+      "bytes": 448606,
+      "sha256": "4f1e4210ffd85ba456dd4a4184e026483622cf442dfdeff867679e981dae584c"
+    },
+    {
+      "source": "magical_book_emblem_with_regal_details.png",
+      "filename": "pack24_author_250_chapters.png",
+      "code": "author_two_hundred_fifty_chapters",
+      "bytes": 605542,
+      "sha256": "e051aa2693d0610c5bf694d69aa3b5e2f62d3883b3e3ce006ae98b2ff1765910"
+    },
+    {
+      "source": "magical_portal_achievement_emblem_500.png",
+      "filename": "pack24_reader_500.png",
+      "code": "five_hundred_chapters",
+      "bytes": 492129,
+      "sha256": "9edae3e3677c1c767d0190248ed5c9217105747197d1f49f8c7a8f77f5ae247e"
+    },
+    {
+      "source": "mystical_achievement_medal_with_glowing_book.png",
+      "filename": "pack24_quotes_250.png",
+      "code": "quotes_250",
+      "bytes": 456345,
+      "sha256": "c253f364f8d223d40ca1efa3a7a71fa25f4027054a3b315e023cf3c04ec8258c"
+    },
+    {
+      "source": "radiant_250_achievement_emblem.png",
+      "filename": "pack24_completed_books_250.png",
+      "code": "completed_books_250",
+      "bytes": 659786,
+      "sha256": "8c2833e64a281a0d69a9ae79ee274b83e2c05f1baf58127d546c41e8b4983b65"
+    },
+    {
+      "source": "regal_achievement_250_emblem.png",
+      "filename": "pack24_graphic_chapters_250.png",
+      "code": "graphic_chapters_250",
+      "bytes": 604625,
+      "sha256": "e22c525fe88db1eb8a3bd773ef2853f9dda5c762ab366b4cd9e22ac38bbe470a"
+    },
+    {
+      "source": "regal_achievement_crest_with_purple_gems.png",
+      "filename": "pack24_reviews_250.png",
+      "code": "reviews_250",
+      "bytes": 629094,
+      "sha256": "69197bc34883a8c13896e16e91f5679c1e9524c01cba86a00eeb2d91da113559"
+    },
+    {
+      "source": "royal_achievement_badge_with_number_550.png",
+      "filename": "pack24_graphic_chapters_550.png",
+      "code": "graphic_chapters_550",
+      "bytes": 414394,
+      "sha256": "499b537650554e959d723c9fde28a7c9de0f26d80f3014c6fa086d742b40e62b"
+    },
+    {
+      "source": "shiny_300_achievement_medallion.png",
+      "filename": "pack24_active_days_300.png",
+      "code": "active_days_300",
+      "bytes": 400053,
+      "sha256": "2c8afd9c193311152648bb52ae31477582f02afb64584dcb856462529cd546cc"
+    }
+  ]
+}
