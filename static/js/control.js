@@ -927,8 +927,8 @@
     const rare = cfg.rare || {};
     const season = cfg.season || {};
     const summary = data.summary || {};
-    const levelFields = [0,1,2,3,4].map((index) => {
-      const item = levels[index] || { threshold: index ? index * 100 : 0, name: `Уровень ${index + 1}` };
+    const editableLevels = levels.length ? levels : [{ threshold: 0, name: 'Новичок' }];
+    const levelFields = editableLevels.map((item, index) => {
       return `<div class="achievement-admin-level"><label class="payment-secret-field"><span>Название уровня ${index + 1}</span><input type="text" maxlength="48" name="level_name_${index}" value="${esc(item.name || '')}"></label><label class="payment-secret-field"><span>Порог очков</span><input type="number" min="${index ? 1 : 0}" max="10000000" step="1" name="level_threshold_${index}" value="${Number(item.threshold || 0)}" ${index === 0 ? 'readonly' : ''}></label></div>`;
     }).join('');
     const popular = (summary.popular || []).map((item) => `<span class="achievement-admin-popular"><b>${esc(item.code || '')}</b><small>${Number(item.awarded || 0)} выдач</small></span>`).join('') || '<span class="muted">Награды ещё не выдавались.</span>';
@@ -953,7 +953,7 @@
         <label class="payment-secret-field"><span>Платиновая</span><input type="number" min="1" max="10000" name="points_legendary" value="${Number(points.legendary || 150)}"></label>
         <label class="payment-secret-field"><span>Легенда</span><input type="number" min="1" max="10000" name="points_mythic" value="${Number(points.mythic || 300)}"></label>
       </div></article>
-      <article class="control-item payment-settings-card"><div class="control-item-main"><span>Коллекционер</span><h3>Названия и пороги уровней</h3><p>Первый уровень всегда начинается с нуля. Каждый следующий порог должен быть больше предыдущего.</p></div><div class="payment-settings-stack achievement-level-admin">${levelFields}</div></article>
+      <article class="control-item payment-settings-card"><div class="control-item-main"><span>Коллекционер</span><h3>${editableLevels.length} уровней коллекционера</h3><p>Первый уровень начинается с нуля. Финальный уровень рассчитан почти на полное собрание наград, поэтому его нельзя получить уже за первые 10% коллекции.</p></div><div class="payment-settings-stack achievement-level-admin">${levelFields}</div></article>
       <article class="control-item payment-settings-card"><div class="control-item-main"><span>Редкие награды</span><h3>Особые знаки сообщества</h3><p>Отключение скрывает ещё не полученную награду, но не отнимает её у уже награждённых пользователей.</p></div><div class="payment-settings-stack">
         ${paymentToggle('founding_member_enabled', '«Первые хранители»', rare.founding_member_enabled !== false, 'Автоматически выдаётся пользователям, зарегистрированным не позже контрольной даты.')}
         <label class="payment-secret-field"><span>Контрольная дата раннего сообщества</span><input type="date" name="founding_cutoff_date" value="${esc(rare.founding_cutoff_date || '2026-07-23')}"><small>Дата учитывается включительно.</small></label>
@@ -998,7 +998,7 @@
     const form = $('achievementSettingsForm');
     form?.addEventListener('submit', async (event) => {
       event.preventDefault();
-      const configuredLevels = [0,1,2,3,4].map((index) => ({
+      const configuredLevels = editableLevels.map((_item, index) => ({
         name: String(form.elements[`level_name_${index}`].value || '').trim(),
         threshold: index === 0 ? 0 : Number(form.elements[`level_threshold_${index}`].value || 0),
       }));

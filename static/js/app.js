@@ -3621,7 +3621,7 @@ const achievementTierByRarity = {
   mythic: 'legend',
 };
 
-const achievementArtworkVersion = 'v1.14.0.19';
+const achievementArtworkVersion = 'v1.14.0.36';
 
 function achievementAssetUrl(url) {
   let clean = String(url || '');
@@ -3666,7 +3666,7 @@ function renderAchievementCollectorSummary(payload) {
   const points = document.getElementById('achievementCollectorPoints');
   const progress = document.getElementById('achievementCollectorProgress');
   const next = document.getElementById('achievementCollectorNext');
-  if (level) level.textContent = `Уровень ${Number(summary.level || 1)} · ${summary.level_name || 'Новичок'}`;
+  if (level) level.textContent = `Уровень ${Number(summary.level || 1)} из ${Number(summary.level_total || 25)} · ${summary.level_name || 'Новичок'}`;
   if (count) count.textContent = `${Number(summary.unlocked_count || 0)} из ${Number(summary.total_count || 0)} наград`;
   if (points) points.textContent = String(Number(summary.points || 0));
   if (progress) progress.style.width = `${Math.max(0, Math.min(100, Number(summary.level_progress_percent || 0)))}%`;
@@ -3675,11 +3675,15 @@ function renderAchievementCollectorSummary(payload) {
     : 'Максимальный уровень коллекционера открыт';
   const profileBadge = document.getElementById('libraryCollectorBadge');
   if (profileBadge) {
-    profileBadge.textContent = `Ур. ${Number(summary.level || 1)} · ${summary.level_name || 'Новичок'}`;
+    profileBadge.textContent = `Ур. ${Number(summary.level || 1)}/${Number(summary.level_total || 25)} · ${summary.level_name || 'Новичок'}`;
     profileBadge.hidden = false;
   }
   const medallion = document.getElementById('libraryProfileFrame');
-  if (medallion) medallion.dataset.collectorLevel = String(Math.max(1, Math.min(5, Number(summary.level || 1))));
+  if (medallion) {
+    const levelNumber = Math.max(1, Number(summary.level || 1));
+    const levelTotal = Math.max(1, Number(summary.level_total || 25));
+    medallion.dataset.collectorLevel = String(Math.max(1, Math.min(5, Math.ceil(levelNumber * 5 / levelTotal))));
+  }
 }
 
 function achievementShowcaseMarkup(payload) {

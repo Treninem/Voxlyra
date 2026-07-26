@@ -11266,12 +11266,33 @@ _ACHIEVEMENT_POINTS_BY_RARITY: dict[str, int] = {
 }
 _ACHIEVEMENT_COLLECTOR_LEVELS: tuple[tuple[int, str], ...] = (
     (0, "Новичок"),
+    (40, "Наблюдатель"),
     (100, "Искатель"),
-    (250, "Коллекционер"),
-    (500, "Хранитель"),
-    (1000, "Легенда VoxLyra"),
+    (180, "Собиратель"),
+    (300, "Ученик архивариуса"),
+    (480, "Коллекционер"),
+    (700, "Знаток"),
+    (950, "Хранитель полки"),
+    (1250, "Хронист"),
+    (1600, "Архивариус"),
+    (2050, "Исследователь миров"),
+    (2550, "Мастер коллекции"),
+    (3150, "Хранитель историй"),
+    (3800, "Старший архивариус"),
+    (4550, "Проводник миров"),
+    (5400, "Магистр коллекции"),
+    (6350, "Летописец VoxLyra"),
+    (7400, "Повелитель полок"),
+    (8550, "Страж библиотеки"),
+    (9800, "Владыка коллекции"),
+    (10900, "Хранитель эпох"),
+    (11950, "Великий хронист"),
+    (12900, "Мифический архивариус"),
+    (13800, "Легендарный коллекционер"),
+    (14500, "Легенда VoxLyra"),
 )
-_ACHIEVEMENT_PROGRAM_SETTING_KEY = "achievement_program_v2"
+_ACHIEVEMENT_PROGRAM_SETTING_KEY = "achievement_program_v3"
+_ACHIEVEMENT_PROGRAM_LEGACY_SETTING_KEY = "achievement_program_v2"
 _MANUAL_ACHIEVEMENT_CATALOG_SETTING_KEY = "achievement_manual_catalog_v1"
 _ACHIEVEMENT_RARITIES = {"common", "rare", "epic", "legendary", "mythic"}
 
@@ -11406,16 +11427,34 @@ def _normalize_achievement_program(payload: Any, *, partial: bool = False) -> di
 
 async def get_achievement_program_settings() -> dict[str, Any]:
     raw = await get_setting(_ACHIEVEMENT_PROGRAM_SETTING_KEY, "")
-    if not raw:
-        return _default_achievement_program()
-    try:
-        parsed = json.loads(raw)
-    except (TypeError, ValueError):
-        return _default_achievement_program()
-    try:
-        return _normalize_achievement_program(parsed)
-    except ValueError:
-        return _default_achievement_program()
+    if raw:
+        try:
+            parsed = json.loads(raw)
+            return _normalize_achievement_program(parsed)
+        except (TypeError, ValueError):
+            pass
+
+    # Однократная безопасная миграция старой пятиуровневой шкалы.
+    # Очки редкостей, сезон и редкие награды сохраняются, а уровни заменяются
+    # новой длинной прогрессией. Уже выданные награды и набранные очки не меняются.
+    legacy_raw = await get_setting(_ACHIEVEMENT_PROGRAM_LEGACY_SETTING_KEY, "")
+    migrated_source: dict[str, Any] = {}
+    if legacy_raw:
+        try:
+            legacy = json.loads(legacy_raw)
+            if isinstance(legacy, dict):
+                for key in ("points", "rare", "season"):
+                    if key in legacy:
+                        migrated_source[key] = legacy[key]
+        except (TypeError, ValueError):
+            migrated_source = {}
+    migrated_source["levels"] = _default_achievement_program()["levels"]
+    normalized = _normalize_achievement_program(migrated_source)
+    await set_setting(
+        _ACHIEVEMENT_PROGRAM_SETTING_KEY,
+        json.dumps(normalized, ensure_ascii=False, separators=(",", ":")),
+    )
+    return normalized
 
 
 async def set_achievement_program_settings(payload: dict[str, Any]) -> dict[str, Any]:
@@ -11544,8 +11583,10 @@ def _achievement_collector_summary(
     return {
         "points": points,
         "level": level_index + 1,
+        "level_total": len(configured_levels),
         "level_name": name,
         "level_progress_percent": level_progress,
+        "collector_completion_percent": min(100, round(points * 100 / max(1, configured_levels[-1][0]))),
         "next_level_name": next_name,
         "next_level_points": next_threshold,
         "points_to_next": points_to_next,
