@@ -1,5 +1,5 @@
 {
-  "version": "v1.14.0.35",
+  "version": "v1.14.0.37",
   "target_total": 113,
   "approved_untouched": 40,
   "rejected_to_replace": 20,
@@ -98,7 +98,7 @@
       "number": 4,
       "status": "approved_from_user_pack_v132",
       "code": "reading_streak_14",
-      "filename": "reading_streak_14.png",
+      "filename": "pack36_reading_streak_14.png",
       "title": "Две недели вместе",
       "tier": "Серебро",
       "condition": "Сохранять подтверждённую активность четырнадцать дней подряд.",
@@ -357,7 +357,7 @@
       "number": 24,
       "status": "approved_from_user_pack_v132",
       "code": "completed_books_100",
-      "filename": "completed_books_100.png",
+      "filename": "pack36_completed_books_100.png",
       "title": "Вершитель эпох",
       "tier": "Платина",
       "condition": "Полностью прочитать сто произведений.",
@@ -383,7 +383,7 @@
       "number": 26,
       "status": "НОВАЯ — пока заглушка",
       "code": "active_days_30",
-      "filename": "active_days_30.png",
+      "filename": "pack36_active_days_30.png",
       "title": "Месяц активности",
       "tier": "Серебро",
       "condition": "Быть активным в VoxLyra в тридцать разные дни.",
@@ -468,7 +468,7 @@
       "number": 33,
       "status": "НОВАЯ — пока заглушка",
       "code": "notes_10",
-      "filename": "notes_10.png",
+      "filename": "pack36_notes_10.png",
       "title": "Десять мыслей",
       "tier": "Серебро",
       "condition": "Сохранить десять личных заметок во время чтения.",
@@ -505,7 +505,7 @@
       "number": 36,
       "status": "НОВАЯ — пока заглушка",
       "code": "quotes_100",
-      "filename": "quotes_100.png",
+      "filename": "pack36_quotes_100.png",
       "title": "Сотня строк",
       "tier": "Платина",
       "condition": "Сохранить сто значимых цитат.",
@@ -580,7 +580,7 @@
       "number": 42,
       "status": "НОВАЯ — пока заглушка",
       "code": "audio_chapters_100",
-      "filename": "audio_chapters_100.png",
+      "filename": "pack36_audio_chapters_100.png",
       "title": "Сотня голосов",
       "tier": "Золото",
       "condition": "Полностью прослушать сто аудиоглав.",
@@ -592,7 +592,7 @@
       "number": 43,
       "status": "НОВАЯ — пока заглушка",
       "code": "audio_chapters_500",
-      "filename": "audio_chapters_500.png",
+      "filename": "pack36_audio_chapters_500.png",
       "title": "Хранитель звучащих миров",
       "tier": "Платина",
       "condition": "Полностью прослушать пятьсот аудиоглав.",
@@ -604,7 +604,7 @@
       "number": 44,
       "status": "НОВАЯ — пока заглушка",
       "code": "reviews_200",
-      "filename": "reviews_200.png",
+      "filename": "pack36_reviews_200.png",
       "title": "Мастер критики",
       "tier": "Платина",
       "condition": "Опубликовать двести содержательных отзывов.",
@@ -616,7 +616,7 @@
       "number": 45,
       "status": "НОВАЯ — пока заглушка",
       "code": "reviews_500",
-      "filename": "reviews_500.png",
+      "filename": "pack36_reviews_500.png",
       "title": "Верховный критик",
       "tier": "Легенда",
       "condition": "Опубликовать пятьсот содержательных отзывов.",
@@ -628,7 +628,7 @@
       "number": 46,
       "status": "НОВАЯ — пока заглушка",
       "code": "comments_500",
-      "filename": "comments_500.png",
+      "filename": "pack36_comments_500.png",
       "title": "Голос пятисот обсуждений",
       "tier": "Платина",
       "condition": "Опубликовать пятьсот комментариев к главам.",
@@ -688,7 +688,7 @@
       "number": 51,
       "status": "НОВАЯ — пока заглушка",
       "code": "author_completed_books_50",
-      "filename": "author_completed_books_50.png",
+      "filename": "pack36_author_completed_books_50.png",
       "title": "Создатель эпох",
       "tier": "Легенда",
       "condition": "Завершить и опубликовать пятьдесят произведений.",
@@ -773,7 +773,7 @@
       "number": 58,
       "status": "УТВЕРЖДЕНО — пользовательский архив v1.14.0.35",
       "code": "author_library_additions_1000",
-      "filename": "pack24_library_additions_1000.png",
+      "filename": "pack36_author_library_additions_1000.png",
       "title": "Тысяча библиотек",
       "tier": "Платина",
       "condition": "Произведения автора добавили в личные библиотеки тысячу раз.",
@@ -826,7 +826,7 @@
     },
     {
       "code": "reader_seven_hundred_fifty_chapters",
-      "filename": "pack24_reader_750.png",
+      "filename": "pack36_reader_750.png",
       "title": "750 глав",
       "description": "Завершить семьсот пятьдесят текстовых глав.",
       "tier": "Платина",
@@ -997,7 +997,7 @@
       "number": 77,
       "code": "graphic_chapters_550",
       "status": "УТВЕРЖДЕНО — пользовательский архив v1.14.0.35",
-      "filename": "pack24_graphic_chapters_550.png",
+      "filename": "pack36_graphic_chapters_550.png",
       "title": "550 графических глав",
       "tier": "Платина",
       "condition": "Завершить пятьсот пятьдесят графических глав.",
@@ -1018,6 +1018,72 @@
       "goal": 300,
       "composition": "Готовая отдельная премиальная иконка из пользовательского архива; число и символика соответствуют рубежу.",
       "palette": "Премиальная палитра изображения из утверждённого пользовательского набора."
+    },
+    {
+      "code": "quotes_120",
+      "filename": "pack36_quotes_120.png",
+      "title": "120 цитат",
+      "level": "imported"
+    },
+    {
+      "code": "reader_one_hundred_twenty_chapters",
+      "filename": "pack36_reader_120.png",
+      "title": "120 глав",
+      "level": "imported"
+    },
+    {
+      "code": "reader_two_hundred_ten_chapters",
+      "filename": "pack36_reader_210.png",
+      "title": "210 глав",
+      "level": "imported"
+    },
+    {
+      "code": "completed_books_300",
+      "filename": "pack36_completed_books_300.png",
+      "title": "300 завершённых миров",
+      "level": "imported"
+    },
+    {
+      "code": "reader_three_hundred_seventy_five_chapters",
+      "filename": "pack36_reader_375.png",
+      "title": "375 глав",
+      "level": "imported"
+    },
+    {
+      "code": "author_words_500k",
+      "filename": "pack36_author_words_500k.png",
+      "title": "Пятьсот тысяч слов",
+      "level": "imported"
+    },
+    {
+      "code": "author_library_additions_250",
+      "filename": "pack36_author_library_additions_250.png",
+      "title": "250 библиотек",
+      "level": "imported"
+    },
+    {
+      "code": "author_library_additions_500",
+      "filename": "pack36_author_library_additions_500.png",
+      "title": "500 библиотек",
+      "level": "imported"
+    },
+    {
+      "code": "reader_nine_hundred_chapters",
+      "filename": "pack36_reader_900.png",
+      "title": "900 глав",
+      "level": "imported"
+    },
+    {
+      "code": "reader_one_thousand_chapters",
+      "filename": "pack36_reader_1000.png",
+      "title": "1000 глав",
+      "level": "imported"
+    },
+    {
+      "code": "completed_books_500",
+      "filename": "pack36_completed_books_500.png",
+      "title": "500 завершённых миров",
+      "level": "imported"
     }
   ],
   "imported_user_pack": "VoxLyra_rewards_ORGANIZED_WITH_STATUS(1).zip",
