@@ -1,6 +1,6 @@
 {
-  "version": "v1.14.0.37",
-  "target_total": 113,
+  "version": "v1.14.0.38",
+  "target_total": 147,
   "approved_untouched": 40,
   "rejected_to_replace": 20,
   "new_with_placeholders": 40,
@@ -317,7 +317,7 @@
     },
     {
       "number": 21,
-      "status": "НОВАЯ — пока заглушка",
+      "status": "approved_from_user_pack_40",
       "code": "completed_book_1",
       "filename": "completed_book_1.png",
       "title": "Завершённая история",
@@ -393,7 +393,7 @@
     },
     {
       "number": 27,
-      "status": "НОВАЯ — пока заглушка",
+      "status": "approved_from_user_pack_40",
       "code": "active_days_100",
       "filename": "active_days_100.png",
       "title": "Сто дней открытий",
@@ -554,7 +554,7 @@
     },
     {
       "number": 40,
-      "status": "НОВАЯ — пока заглушка",
+      "status": "approved_from_user_pack_40",
       "code": "graphic_chapters_1000",
       "filename": "graphic_chapters_1000.png",
       "title": "Хранитель галерей",
@@ -566,7 +566,7 @@
     },
     {
       "number": 41,
-      "status": "НОВАЯ — пока заглушка",
+      "status": "approved_from_user_pack_40",
       "code": "audio_chapters_10",
       "filename": "audio_chapters_10.png",
       "title": "Десять голосов",
@@ -638,7 +638,7 @@
     },
     {
       "number": 47,
-      "status": "НОВАЯ — пока заглушка",
+      "status": "approved_from_user_pack_40",
       "code": "comments_1000",
       "filename": "comments_1000.png",
       "title": "Сердце сообщества",
@@ -650,7 +650,7 @@
     },
     {
       "number": 48,
-      "status": "НОВАЯ — пока заглушка",
+      "status": "approved_from_user_pack_40",
       "code": "author_completed_book_1",
       "filename": "author_completed_book_1.png",
       "title": "Завершённое произведение",
@@ -662,7 +662,7 @@
     },
     {
       "number": 49,
-      "status": "НОВАЯ — пока заглушка",
+      "status": "approved_from_user_pack_40",
       "code": "author_completed_books_5",
       "filename": "author_completed_books_5.png",
       "title": "Пять завершённых произведений",
@@ -674,7 +674,7 @@
     },
     {
       "number": 50,
-      "status": "НОВАЯ — пока заглушка",
+      "status": "approved_from_user_pack_40",
       "code": "author_completed_books_20",
       "filename": "author_completed_books_20.png",
       "title": "Мастер завершённых историй",
@@ -710,7 +710,7 @@
     },
     {
       "number": 53,
-      "status": "НОВАЯ — пока заглушка",
+      "status": "approved_from_user_pack_40",
       "code": "author_words_1m",
       "filename": "author_words_1m.png",
       "title": "Миллион слов",
@@ -722,7 +722,7 @@
     },
     {
       "number": 54,
-      "status": "НОВАЯ — пока заглушка",
+      "status": "approved_from_user_pack_40",
       "code": "author_words_5m",
       "filename": "author_words_5m.png",
       "title": "Пять миллионов слов",
@@ -734,7 +734,7 @@
     },
     {
       "number": 55,
-      "status": "НОВАЯ — пока заглушка",
+      "status": "approved_from_user_pack_40",
       "code": "author_words_10m",
       "filename": "author_words_10m.png",
       "title": "Летописец эпох",
@@ -746,7 +746,7 @@
     },
     {
       "number": 56,
-      "status": "НОВАЯ — пока заглушка",
+      "status": "approved_from_user_pack_40",
       "code": "author_rating_50",
       "filename": "author_rating_50.png",
       "title": "Признанное качество",
@@ -784,7 +784,7 @@
     },
     {
       "number": 59,
-      "status": "НОВАЯ — пока заглушка",
+      "status": "approved_from_user_pack_40",
       "code": "author_hundred_thousand_readers",
       "filename": "author_hundred_thousand_readers.png",
       "title": "Аудитория 100 000",
@@ -796,7 +796,7 @@
     },
     {
       "number": 60,
-      "status": "НОВАЯ — пока заглушка",
+      "status": "approved_from_user_pack_40",
       "code": "author_hundred_thousand_reactions",
       "filename": "author_hundred_thousand_reactions.png",
       "title": "Сто тысяч откликов",
@@ -1084,17 +1084,200 @@
       "filename": "pack36_completed_books_500.png",
       "title": "500 завершённых миров",
       "level": "imported"
+    },
+    {
+      "code": "collector_thirty",
+      "filename": "pack40_collector_30.png",
+      "title": "Библиотека на 30",
+      "description": "Сохранить тридцать произведений в личной библиотеке.",
+      "status": "approved_from_user_pack_40",
+      "tier": "rare"
+    },
+    {
+      "code": "collector_five_hundred",
+      "filename": "pack40_collector_500.png",
+      "title": "Библиотека на 500",
+      "description": "Сохранить пятьсот произведений в личной библиотеке.",
+      "status": "approved_from_user_pack_40",
+      "tier": "mythic"
+    },
+    {
+      "code": "reader_four_hundred_fifty_chapters",
+      "filename": "pack40_reader_450.png",
+      "title": "450 глав",
+      "description": "Завершить четыреста пятьдесят текстовых глав.",
+      "status": "approved_from_user_pack_40",
+      "tier": "legendary"
+    },
+    {
+      "code": "reader_five_hundred_fifty_chapters",
+      "filename": "pack40_reader_550.png",
+      "title": "550 глав",
+      "description": "Завершить пятьсот пятьдесят текстовых глав.",
+      "status": "approved_from_user_pack_40",
+      "tier": "legendary"
+    },
+    {
+      "code": "reader_six_hundred_chapters",
+      "filename": "pack40_reader_600.png",
+      "title": "600 глав",
+      "description": "Завершить шестьсот текстовых глав.",
+      "status": "approved_from_user_pack_40",
+      "tier": "legendary"
+    },
+    {
+      "code": "reader_seven_hundred_chapters",
+      "filename": "pack40_reader_700.png",
+      "title": "700 глав",
+      "description": "Завершить семьсот текстовых глав.",
+      "status": "approved_from_user_pack_40",
+      "tier": "legendary"
+    },
+    {
+      "code": "active_days_40",
+      "filename": "pack40_active_days_40.png",
+      "title": "Сорок дней открытий",
+      "description": "Быть активным в VoxLyra в сорок разные дни.",
+      "status": "approved_from_user_pack_40",
+      "tier": "rare"
+    },
+    {
+      "code": "notes_250",
+      "filename": "pack40_notes_250.png",
+      "title": "250 заметок",
+      "description": "Сохранить двести пятьдесят личных заметок к произведениям.",
+      "status": "approved_from_user_pack_40",
+      "tier": "legendary"
+    },
+    {
+      "code": "notes_500",
+      "filename": "pack40_notes_500.png",
+      "title": "500 заметок",
+      "description": "Сохранить пятьсот личных заметок к произведениям.",
+      "status": "approved_from_user_pack_40",
+      "tier": "mythic"
+    },
+    {
+      "code": "quotes_550",
+      "filename": "pack40_quotes_550.png",
+      "title": "550 цитат",
+      "description": "Сохранить пятьсот пятьдесят значимых цитат из произведений.",
+      "status": "approved_from_user_pack_40",
+      "tier": "mythic"
+    },
+    {
+      "code": "reviews_450",
+      "filename": "pack40_reviews_450.png",
+      "title": "450 рецензий",
+      "description": "Опубликовать четыреста пятьдесят содержательных отзывов.",
+      "status": "approved_from_user_pack_40",
+      "tier": "legendary"
+    },
+    {
+      "code": "reviews_550",
+      "filename": "pack40_reviews_550.png",
+      "title": "550 рецензий",
+      "description": "Опубликовать пятьсот пятьдесят содержательных отзывов.",
+      "status": "approved_from_user_pack_40",
+      "tier": "mythic"
+    },
+    {
+      "code": "reviews_600",
+      "filename": "pack40_reviews_600.png",
+      "title": "600 рецензий",
+      "description": "Опубликовать шестьсот содержательных отзывов.",
+      "status": "approved_from_user_pack_40",
+      "tier": "mythic"
+    },
+    {
+      "code": "comments_50",
+      "filename": "pack40_comments_50.png",
+      "title": "50 комментариев",
+      "description": "Опубликовать пятьдесят комментариев к главам.",
+      "status": "approved_from_user_pack_40",
+      "tier": "epic"
+    },
+    {
+      "code": "comments_550",
+      "filename": "pack40_comments_550.png",
+      "title": "550 комментариев",
+      "description": "Опубликовать пятьсот пятьдесят комментариев к главам.",
+      "status": "approved_from_user_pack_40",
+      "tier": "legendary"
+    },
+    {
+      "code": "audio_chapters_25",
+      "filename": "pack40_audio_chapters_25.png",
+      "title": "25 аудиоглав",
+      "description": "Прослушать до конца двадцать пять опубликованных аудиоглав.",
+      "status": "approved_from_user_pack_40",
+      "tier": "rare"
+    },
+    {
+      "code": "audio_chapters_550",
+      "filename": "pack40_audio_chapters_550.png",
+      "title": "550 аудиоглав",
+      "description": "Прослушать до конца пятьсот пятьдесят опубликованных аудиоглав.",
+      "status": "approved_from_user_pack_40",
+      "tier": "legendary"
+    },
+    {
+      "code": "audio_six_hundred_hours",
+      "filename": "pack40_audio_hours_600.png",
+      "title": "600 часов звучания",
+      "description": "Прослушать суммарно шестьсот часов аудиокниг.",
+      "status": "approved_from_user_pack_40",
+      "tier": "mythic"
+    },
+    {
+      "code": "graphic_chapters_600",
+      "filename": "pack40_graphic_chapters_600.png",
+      "title": "600 графических глав",
+      "description": "Завершить шестьсот графических глав.",
+      "status": "approved_from_user_pack_40",
+      "tier": "legendary"
+    },
+    {
+      "code": "author_library_additions_750",
+      "filename": "pack40_author_library_750.png",
+      "title": "750 библиотек",
+      "description": "Произведения автора добавили в личные библиотеки семьсот пятьдесят раз.",
+      "status": "approved_from_user_pack_40",
+      "tier": "legendary"
+    },
+    {
+      "code": "author_completed_books_250",
+      "filename": "pack40_author_completed_books_250.png",
+      "title": "250 завершённых произведений",
+      "description": "Завершить и опубликовать двести пятьдесят самостоятельных произведений.",
+      "status": "approved_from_user_pack_40",
+      "tier": "mythic"
+    },
+    {
+      "code": "author_five_hundred_books",
+      "filename": "pack40_author_books_500.png",
+      "title": "Автор 500 книг",
+      "description": "Опубликовать пятьсот самостоятельных произведений.",
+      "status": "approved_from_user_pack_40",
+      "tier": "mythic"
+    },
+    {
+      "code": "author_completed_books_500",
+      "filename": "pack40_author_completed_books_500.png",
+      "title": "500 завершённых произведений",
+      "description": "Завершить и опубликовать пятьсот самостоятельных произведений.",
+      "status": "approved_from_user_pack_40",
+      "tier": "mythic"
     }
   ],
   "imported_user_pack": "VoxLyra_rewards_ORGANIZED_WITH_STATUS(1).zip",
   "archive_png_total": 42,
   "archive_icons_integrated": 42,
   "last_import": {
-    "archive": "VoxLyra_ALL_IMAGES_FROM_CHAT(1).zip",
-    "unique_png": 18,
-    "installed": 18,
-    "new_automatic_rewards": 1,
-    "actual_automatic_rewards_total": 104
+    "archive": "VoxLyra_rewards_AFTER_LAST_ARCHIVE_40_2026-07-28(1).zip",
+    "current_placeholders_closed": 14,
+    "new_automatic_rewards": 23,
+    "images_activated": 37
   },
   "new_pack_v135": {
     "source": "VoxLyra_rewards_NEW_ONLY_AFTER_RAW42_24 (1).zip",
@@ -1103,5 +1286,5 @@
     "new_automatic_rewards": 9,
     "actual_automatic_rewards_total": 113
   },
-  "actual_automatic_rewards_total": 113
+  "actual_automatic_rewards_total": 147
 }

@@ -11226,7 +11226,30 @@ _ACHIEVEMENT_CATALOG: dict[str, dict[str, Any]] = {
     "reader_nine_hundred_chapters": {"title": "900 глав", "description": "Завершить девятьсот текстовых глав.", "icon": "📖", "icon_asset": "/media/achievements/pack36_reader_900.png", "group": "reader", "category": "reading", "rarity": "legendary", "goal": 900},
     "reader_one_thousand_chapters": {"title": "1000 глав", "description": "Завершить тысячу текстовых глав.", "icon": "📖", "icon_asset": "/media/achievements/pack36_reader_1000.png", "group": "reader", "category": "reading", "rarity": "mythic", "goal": 1000},
     "author_five_hundred_chapters": {"title": "Автор 500 глав", "description": "Опубликовать пятьсот текстовых или графических глав.", "icon": "🪶", "icon_asset": "/media/achievements/pack36_author_five_hundred_chapters.png", "group": "author", "category": "author", "rarity": "legendary", "goal": 500},
-    "completed_books_500": {"title": "500 завершённых миров", "description": "Полностью прочитать пятьсот произведений.", "icon": "📚", "icon_asset": "/media/achievements/pack36_completed_books_500.png", "group": "reader", "category": "reading", "rarity": "mythic", "goal": 500}
+    "completed_books_500": {"title": "500 завершённых миров", "description": "Полностью прочитать пятьсот произведений.", "icon": "📚", "icon_asset": "/media/achievements/pack36_completed_books_500.png", "group": "reader", "category": "reading", "rarity": "mythic", "goal": 500},
+    "collector_thirty": {"title": "Библиотека на 30", "description": "Сохранить тридцать произведений в личной библиотеке.", "icon": "📚", "icon_asset": "/media/achievements/pack40_collector_30.png", "group": "reader", "category": "reading", "rarity": "rare", "goal": 30},
+    "collector_five_hundred": {"title": "Библиотека на 500", "description": "Сохранить пятьсот произведений в личной библиотеке.", "icon": "🏛", "icon_asset": "/media/achievements/pack40_collector_500.png", "group": "reader", "category": "reading", "rarity": "mythic", "goal": 500},
+    "reader_four_hundred_fifty_chapters": {"title": "450 глав", "description": "Завершить четыреста пятьдесят текстовых глав.", "icon": "📖", "icon_asset": "/media/achievements/pack40_reader_450.png", "group": "reader", "category": "reading", "rarity": "legendary", "goal": 450},
+    "reader_five_hundred_fifty_chapters": {"title": "550 глав", "description": "Завершить пятьсот пятьдесят текстовых глав.", "icon": "📖", "icon_asset": "/media/achievements/pack40_reader_550.png", "group": "reader", "category": "reading", "rarity": "legendary", "goal": 550},
+    "reader_six_hundred_chapters": {"title": "600 глав", "description": "Завершить шестьсот текстовых глав.", "icon": "📖", "icon_asset": "/media/achievements/pack40_reader_600.png", "group": "reader", "category": "reading", "rarity": "legendary", "goal": 600},
+    "reader_seven_hundred_chapters": {"title": "700 глав", "description": "Завершить семьсот текстовых глав.", "icon": "📖", "icon_asset": "/media/achievements/pack40_reader_700.png", "group": "reader", "category": "reading", "rarity": "legendary", "goal": 700},
+    "active_days_40": {"title": "Сорок дней открытий", "description": "Быть активным в VoxLyra в сорок разные дни.", "icon": "✦", "icon_asset": "/media/achievements/pack40_active_days_40.png", "group": "reader", "category": "reading", "rarity": "rare", "goal": 40},
+    "notes_250": {"title": "250 заметок", "description": "Сохранить двести пятьдесят личных заметок к произведениям.", "icon": "📝", "icon_asset": "/media/achievements/pack40_notes_250.png", "group": "reader", "category": "reading", "rarity": "legendary", "goal": 250},
+    "notes_500": {"title": "500 заметок", "description": "Сохранить пятьсот личных заметок к произведениям.", "icon": "📝", "icon_asset": "/media/achievements/pack40_notes_500.png", "group": "reader", "category": "reading", "rarity": "mythic", "goal": 500},
+    "quotes_550": {"title": "550 цитат", "description": "Сохранить пятьсот пятьдесят значимых цитат из произведений.", "icon": "📜", "icon_asset": "/media/achievements/pack40_quotes_550.png", "group": "reader", "category": "reading", "rarity": "mythic", "goal": 550},
+    "reviews_450": {"title": "450 рецензий", "description": "Опубликовать четыреста пятьдесят содержательных отзывов.", "icon": "⭐", "icon_asset": "/media/achievements/pack40_reviews_450.png", "group": "reader", "category": "community", "rarity": "legendary", "goal": 450},
+    "reviews_550": {"title": "550 рецензий", "description": "Опубликовать пятьсот пятьдесят содержательных отзывов.", "icon": "⭐", "icon_asset": "/media/achievements/pack40_reviews_550.png", "group": "reader", "category": "community", "rarity": "mythic", "goal": 550},
+    "reviews_600": {"title": "600 рецензий", "description": "Опубликовать шестьсот содержательных отзывов.", "icon": "⭐", "icon_asset": "/media/achievements/pack40_reviews_600.png", "group": "reader", "category": "community", "rarity": "mythic", "goal": 600},
+    "comments_50": {"title": "50 комментариев", "description": "Опубликовать пятьдесят комментариев к главам.", "icon": "💬", "icon_asset": "/media/achievements/pack40_comments_50.png", "group": "reader", "category": "community", "rarity": "epic", "goal": 50},
+    "comments_550": {"title": "550 комментариев", "description": "Опубликовать пятьсот пятьдесят комментариев к главам.", "icon": "💬", "icon_asset": "/media/achievements/pack40_comments_550.png", "group": "reader", "category": "community", "rarity": "legendary", "goal": 550},
+    "audio_chapters_25": {"title": "25 аудиоглав", "description": "Прослушать до конца двадцать пять опубликованных аудиоглав.", "icon": "🎧", "icon_asset": "/media/achievements/pack40_audio_chapters_25.png", "group": "reader", "category": "audio", "rarity": "rare", "goal": 25},
+    "audio_chapters_550": {"title": "550 аудиоглав", "description": "Прослушать до конца пятьсот пятьдесят опубликованных аудиоглав.", "icon": "🎧", "icon_asset": "/media/achievements/pack40_audio_chapters_550.png", "group": "reader", "category": "audio", "rarity": "legendary", "goal": 550},
+    "audio_six_hundred_hours": {"title": "600 часов звучания", "description": "Прослушать суммарно шестьсот часов аудиокниг.", "icon": "🎧", "icon_asset": "/media/achievements/pack40_audio_hours_600.png", "group": "reader", "category": "audio", "rarity": "mythic", "goal": 36000},
+    "graphic_chapters_600": {"title": "600 графических глав", "description": "Завершить шестьсот графических глав.", "icon": "💠", "icon_asset": "/media/achievements/pack40_graphic_chapters_600.png", "group": "reader", "category": "comic", "rarity": "legendary", "goal": 600},
+    "author_library_additions_750": {"title": "750 библиотек", "description": "Произведения автора добавили в личные библиотеки семьсот пятьдесят раз.", "icon": "🪶", "icon_asset": "/media/achievements/pack40_author_library_750.png", "group": "author", "category": "author", "rarity": "legendary", "goal": 750},
+    "author_completed_books_250": {"title": "250 завершённых произведений", "description": "Завершить и опубликовать двести пятьдесят самостоятельных произведений.", "icon": "📚", "icon_asset": "/media/achievements/pack40_author_completed_books_250.png", "group": "author", "category": "author", "rarity": "mythic", "goal": 250},
+    "author_five_hundred_books": {"title": "Автор 500 книг", "description": "Опубликовать пятьсот самостоятельных произведений.", "icon": "📚", "icon_asset": "/media/achievements/pack40_author_books_500.png", "group": "author", "category": "author", "rarity": "mythic", "goal": 500},
+    "author_completed_books_500": {"title": "500 завершённых произведений", "description": "Завершить и опубликовать пятьсот самостоятельных произведений.", "icon": "📚", "icon_asset": "/media/achievements/pack40_author_completed_books_500.png", "group": "author", "category": "author", "rarity": "mythic", "goal": 500}
 }
 
 
@@ -11278,33 +11301,33 @@ _ACHIEVEMENT_POINTS_BY_RARITY: dict[str, int] = {
 }
 _ACHIEVEMENT_COLLECTOR_LEVELS: tuple[tuple[int, str], ...] = (
     (0, "Новичок"),
-    (40, "Наблюдатель"),
-    (100, "Искатель"),
-    (180, "Собиратель"),
-    (300, "Ученик архивариуса"),
-    (480, "Коллекционер"),
-    (700, "Знаток"),
-    (950, "Хранитель полки"),
-    (1250, "Хронист"),
-    (1600, "Архивариус"),
-    (2050, "Исследователь миров"),
-    (2550, "Мастер коллекции"),
-    (3150, "Хранитель историй"),
-    (3800, "Старший архивариус"),
-    (4550, "Проводник миров"),
-    (5400, "Магистр коллекции"),
-    (6350, "Летописец VoxLyra"),
-    (7400, "Повелитель полок"),
-    (8550, "Страж библиотеки"),
-    (9800, "Владыка коллекции"),
-    (10900, "Хранитель эпох"),
-    (11950, "Великий хронист"),
-    (12900, "Мифический архивариус"),
-    (13800, "Легендарный коллекционер"),
-    (14500, "Легенда VoxLyra"),
+    (50, "Наблюдатель"),
+    (130, "Искатель"),
+    (230, "Собиратель"),
+    (380, "Ученик архивариуса"),
+    (600, "Коллекционер"),
+    (900, "Знаток"),
+    (1250, "Хранитель полки"),
+    (1650, "Хронист"),
+    (2100, "Архивариус"),
+    (2700, "Исследователь миров"),
+    (3400, "Мастер коллекции"),
+    (4200, "Хранитель историй"),
+    (5100, "Старший архивариус"),
+    (6100, "Проводник миров"),
+    (7200, "Магистр коллекции"),
+    (8500, "Летописец VoxLyra"),
+    (9900, "Повелитель полок"),
+    (11400, "Страж библиотеки"),
+    (13000, "Владыка коллекции"),
+    (14500, "Хранитель эпох"),
+    (15800, "Великий хронист"),
+    (16800, "Мифический архивариус"),
+    (17700, "Легендарный коллекционер"),
+    (18500, "Легенда VoxLyra"),
 )
-_ACHIEVEMENT_PROGRAM_SETTING_KEY = "achievement_program_v3"
-_ACHIEVEMENT_PROGRAM_LEGACY_SETTING_KEY = "achievement_program_v2"
+_ACHIEVEMENT_PROGRAM_SETTING_KEY = "achievement_program_v4"
+_ACHIEVEMENT_PROGRAM_LEGACY_SETTING_KEY = "achievement_program_v3"
 _MANUAL_ACHIEVEMENT_CATALOG_SETTING_KEY = "achievement_manual_catalog_v1"
 _ACHIEVEMENT_RARITIES = {"common", "rare", "epic", "legendary", "mythic"}
 
@@ -11446,11 +11469,13 @@ async def get_achievement_program_settings() -> dict[str, Any]:
         except (TypeError, ValueError):
             pass
 
-    # Однократная безопасная миграция старой пятиуровневой шкалы.
-    # Очки редкостей, сезон и редкие награды сохраняются, а уровни заменяются
-    # новой длинной прогрессией. Уже выданные награды и набранные очки не меняются.
+    # Однократная безопасная миграция v3 -> v4 после расширения каталога.
+    # Очки редкостей, сезон, редкие награды и пользовательские названия уровней
+    # сохраняются. Пороги пересчитываются под новый объём каталога, чтобы
+    # максимальный уровень по-прежнему требовал почти полной коллекции.
     legacy_raw = await get_setting(_ACHIEVEMENT_PROGRAM_LEGACY_SETTING_KEY, "")
     migrated_source: dict[str, Any] = {}
+    legacy_level_names: list[str] = []
     if legacy_raw:
         try:
             legacy = json.loads(legacy_raw)
@@ -11458,9 +11483,21 @@ async def get_achievement_program_settings() -> dict[str, Any]:
                 for key in ("points", "rare", "season"):
                     if key in legacy:
                         migrated_source[key] = legacy[key]
+                raw_levels = legacy.get("levels")
+                if isinstance(raw_levels, list):
+                    legacy_level_names = [
+                        str(item.get("name") or "").strip()
+                        for item in raw_levels if isinstance(item, dict)
+                    ]
         except (TypeError, ValueError):
             migrated_source = {}
-    migrated_source["levels"] = _default_achievement_program()["levels"]
+            legacy_level_names = []
+    migrated_levels = _default_achievement_program()["levels"]
+    if len(legacy_level_names) == len(migrated_levels):
+        for index, name in enumerate(legacy_level_names):
+            if name:
+                migrated_levels[index]["name"] = name[:60]
+    migrated_source["levels"] = migrated_levels
     normalized = _normalize_achievement_program(migrated_source)
     await set_setting(
         _ACHIEVEMENT_PROGRAM_SETTING_KEY,
@@ -12265,6 +12302,29 @@ async def sync_user_achievements(user_id: int) -> dict[str, Any]:
             "reader_one_thousand_chapters": (completed_chapters >= 1000, completed_chapters),
             "author_five_hundred_chapters": (published_chapters >= 500, published_chapters),
             "completed_books_500": (completed_books >= 500, completed_books),
+            "collector_thirty": (saved >= 30, saved),
+            "collector_five_hundred": (saved >= 500, saved),
+            "reader_four_hundred_fifty_chapters": (completed >= 450, completed),
+            "reader_five_hundred_fifty_chapters": (completed >= 550, completed),
+            "reader_six_hundred_chapters": (completed >= 600, completed),
+            "reader_seven_hundred_chapters": (completed >= 700, completed),
+            "active_days_40": (active_days >= 40, active_days),
+            "notes_250": (notes_count >= 250, notes_count),
+            "notes_500": (notes_count >= 500, notes_count),
+            "quotes_550": (quotes_count >= 550, quotes_count),
+            "reviews_450": (reviews >= 450, reviews),
+            "reviews_550": (reviews >= 550, reviews),
+            "reviews_600": (reviews >= 600, reviews),
+            "comments_50": (comments_count >= 50, comments_count),
+            "comments_550": (comments_count >= 550, comments_count),
+            "audio_chapters_25": (completed_audio_chapters >= 25, completed_audio_chapters),
+            "audio_chapters_550": (completed_audio_chapters >= 550, completed_audio_chapters),
+            "audio_six_hundred_hours": (audio_minutes >= 36000, audio_minutes),
+            "graphic_chapters_600": (completed_graphic_chapters >= 600, completed_graphic_chapters),
+            "author_library_additions_750": (author_library_additions >= 750, author_library_additions),
+            "author_completed_books_250": (author_completed_books >= 250, author_completed_books),
+            "author_five_hundred_books": (published_books >= 500, published_books),
+            "author_completed_books_500": (author_completed_books >= 500, author_completed_books),
 }
         all_rounder_progress = sum((
             1 if completed >= 1 else 0,
@@ -12474,6 +12534,29 @@ async def sync_user_achievements(user_id: int) -> dict[str, Any]:
         "reader_one_thousand_chapters": completed_chapters,
         "author_five_hundred_chapters": published_chapters,
         "completed_books_500": completed_books,
+        "collector_thirty": saved,
+        "collector_five_hundred": saved,
+        "reader_four_hundred_fifty_chapters": completed,
+        "reader_five_hundred_fifty_chapters": completed,
+        "reader_six_hundred_chapters": completed,
+        "reader_seven_hundred_chapters": completed,
+        "active_days_40": active_days,
+        "notes_250": notes_count,
+        "notes_500": notes_count,
+        "quotes_550": quotes_count,
+        "reviews_450": reviews,
+        "reviews_550": reviews,
+        "reviews_600": reviews,
+        "comments_50": comments_count,
+        "comments_550": comments_count,
+        "audio_chapters_25": completed_audio_chapters,
+        "audio_chapters_550": completed_audio_chapters,
+        "audio_six_hundred_hours": audio_minutes,
+        "graphic_chapters_600": completed_graphic_chapters,
+        "author_library_additions_750": author_library_additions,
+        "author_completed_books_250": author_completed_books,
+        "author_five_hundred_books": published_books,
+        "author_completed_books_500": author_completed_books,
 }
     if season_code:
         live_progress[season_code] = season_completed

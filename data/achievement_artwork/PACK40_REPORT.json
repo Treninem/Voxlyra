@@ -1,0 +1,268 @@
+{
+  "version": "v1.14.0.38",
+  "source_archive": "VoxLyra_rewards_AFTER_LAST_ARCHIVE_40_2026-07-28(1).zip",
+  "source_unique_images": 40,
+  "remaining_placeholders_closed": 14,
+  "new_automatic_rewards_added": 23,
+  "automatic_rewards_total": 147,
+  "rare_rewards_total": 2,
+  "maximum_catalog_points_without_seasonal_manual": 19770,
+  "unused_successful_images": [
+    "shiny_achievement_badge_with_chat_motif.png",
+    "golden_achievement_medallion_with_ruby_heart.png",
+    "a_highly_detailed_fantasy_gaming_style_emblem_meda.png"
+  ],
+  "unused_reason": "They are successful alternatives for achievements that already have approved final artwork; approved images were not overwritten.",
+  "closed": [
+    {
+      "filename": "comments_1000.png",
+      "bytes": 507290,
+      "sha256": "2c7066d6a722b0d1d473d062a0e03578587aa6233f461a7232aa5a0f57ce9340",
+      "old_sha256": "ea0c251e09ccf7cddd5ba92a1f84af5a69ad425e235cb21021535f2ba0d28326"
+    },
+    {
+      "filename": "author_completed_book_1.png",
+      "bytes": 271710,
+      "sha256": "18d40decc4039ce54b49a1c90c98944c4361a86874de99c06ae6614438997f7d",
+      "old_sha256": "8a8477ad10b4b461c2f06ee7e513e8ad209293f3b9a67170a27d51c4859995ff"
+    },
+    {
+      "filename": "author_completed_books_5.png",
+      "bytes": 349515,
+      "sha256": "35cf2f6de57289f90200fbf2acb37795d246c6d053d658ac4cae0d7c53ec36f9",
+      "old_sha256": "c50eadc0e9e29bb9a4ee97664b18376af477aad2d0eeb471d69f40afdacaad83"
+    },
+    {
+      "filename": "author_completed_books_20.png",
+      "bytes": 402152,
+      "sha256": "73918bb9a1e67d6a2c33d8d3bc155a4d869f944a50376d6a1e9bee6ef932bcf3",
+      "old_sha256": "275adde0c112d2c0971a443ec43bb1a9179358241d657ff96481ac6c69dffc77"
+    },
+    {
+      "filename": "author_words_1m.png",
+      "bytes": 387988,
+      "sha256": "9601af2866930fcc07ac17c2211deb986bde2770a3f9a444a1f5be94101ce46a",
+      "old_sha256": "6349a33cf87dacb4e964976fa8b7afec2ec05a9e720c49f9657f2a480ca26350"
+    },
+    {
+      "filename": "author_words_5m.png",
+      "bytes": 428385,
+      "sha256": "6071971f774047afe54a8eadc21453a6d8a6e1ebb221088fad48babef460c700",
+      "old_sha256": "1f8070ee7c09a55cd9f74ff61741b10250d5c8f757c831a669d7bb8c7079f9be"
+    },
+    {
+      "filename": "author_words_10m.png",
+      "bytes": 531974,
+      "sha256": "ee18f1f53dff9991a08a9252c3e22b866c67fe58542e3109f7367b5f35287bd5",
+      "old_sha256": "cc7bd624d29dcc49fa8c8d3b161e804772a0742f9661eccb617cbb00804d5837"
+    },
+    {
+      "filename": "author_rating_50.png",
+      "bytes": 467259,
+      "sha256": "310d8376639343d3852a72e0c2121efaba4d533d3d689ac1c2fe1d4c9e9a0c26",
+      "old_sha256": "dc1ab48eb1ac449ff4dbf29738de6fc2e2afff9a7db8e799517a7653b38f849a"
+    },
+    {
+      "filename": "author_hundred_thousand_readers.png",
+      "bytes": 566482,
+      "sha256": "4cb43d595051d5bf63d2e4fac562e1233da023075333f530fbb92b3f982ade6d",
+      "old_sha256": "3e252145c685e13cf86e1c217fb895b0b8014e7420a144ffa73b29436cf11ea5"
+    },
+    {
+      "filename": "author_hundred_thousand_reactions.png",
+      "bytes": 507520,
+      "sha256": "403d93ee405e0043e0faca9fed9bc547484acfe4429c2e3467decfe21a425430",
+      "old_sha256": "3e252145c685e13cf86e1c217fb895b0b8014e7420a144ffa73b29436cf11ea5"
+    },
+    {
+      "filename": "completed_book_1.png",
+      "bytes": 383971,
+      "sha256": "dd4e7e95115e038c6cc55670cf216b695c6211ebf40c9f14ae7adfcd28d744d7",
+      "old_sha256": "fa4af600685ce697de0b06bb2ef373fc759232ea2d6e1e9c1f64474fc7f5ca00"
+    },
+    {
+      "filename": "active_days_100.png",
+      "bytes": 404601,
+      "sha256": "f0ab2bfe3a7308185b8e5e2484bddc45fc966c01ac92508b3b6c39f88894a3d7",
+      "old_sha256": "629cabdbe9058f326ace7807e87c6b43216447c68be222df8c5b5a730f55f315"
+    },
+    {
+      "filename": "graphic_chapters_1000.png",
+      "bytes": 562419,
+      "sha256": "2dabe82fbe463b1bb3ab44a86709b3435da188b0208ccbd144b13ed2a3bfde71",
+      "old_sha256": "1fe7f80c6f177e89a7b9e27241046b6ff3a2a537b786abb37604ca87d968b899"
+    },
+    {
+      "filename": "audio_chapters_10.png",
+      "bytes": 428200,
+      "sha256": "b598162aab54ada58ad028d38e3096b0a8f52564e968b1ed223392b3bab1db0e",
+      "old_sha256": "849d22a500001aa84a611a72457da028169b93622a24e61727a814d828a4df58"
+    }
+  ],
+  "new": [
+    {
+      "filename": "pack40_collector_30.png",
+      "bytes": 269499,
+      "sha256": "ef1828b6abaaa4c8fb599ea547b19dde80fea107b71466a767cd8ecb381978d3",
+      "code": "collector_thirty",
+      "source": "30th_achievement_badge_with_glowing_crystals.png"
+    },
+    {
+      "filename": "pack40_collector_500.png",
+      "bytes": 347406,
+      "sha256": "8a05694be04469d9eb21b201d26accbfc43feae264ce8d0507b84a9ff40de257",
+      "code": "collector_five_hundred",
+      "source": "500_achievement_badge_with_glowing_book.png"
+    },
+    {
+      "filename": "pack40_reader_450.png",
+      "bytes": 345370,
+      "sha256": "c0466dce01acf35e5dd57ddd8105039f1639c54a0fd0bce88af74644340c9aca",
+      "code": "reader_four_hundred_fifty_chapters",
+      "source": "medal_of_achievement_450.png"
+    },
+    {
+      "filename": "pack40_reader_550.png",
+      "bytes": 355380,
+      "sha256": "8a00818c1d26d3cb65fed6a6a6a36b187566bf84a3db461cd506cad31049eb99",
+      "code": "reader_five_hundred_fifty_chapters",
+      "source": "achievement_badge_of_the_550th_rank.png"
+    },
+    {
+      "filename": "pack40_reader_600.png",
+      "bytes": 279134,
+      "sha256": "9e2211a9def182fb2c08296c2291003a4bf64c87eb3d4709482a7dee21b6fce0",
+      "code": "reader_six_hundred_chapters",
+      "source": "600_achievement_emblem_with_gemstone_accents.png"
+    },
+    {
+      "filename": "pack40_reader_700.png",
+      "bytes": 291866,
+      "sha256": "cb8e134e2d3c1f96bb525eecb973ba37631c544caa31e0b5ed94a62ad5abd94f",
+      "code": "reader_seven_hundred_chapters",
+      "source": "golden_achievement_medallion_with_700_score.png"
+    },
+    {
+      "filename": "pack40_active_days_40.png",
+      "bytes": 336114,
+      "sha256": "2385d9000e3db538394e29ec9c6f35652233ae7a994f66d3a08b04b8ebae20bf",
+      "code": "active_days_40",
+      "source": "fortieth_achievement_emblem_with_cosmic_flair.png"
+    },
+    {
+      "filename": "pack40_notes_250.png",
+      "bytes": 263717,
+      "sha256": "783b933c146f38914a9ed5eb3210611b51405b90426ce68c9957d9fb7f6ff591",
+      "code": "notes_250",
+      "source": "achievement_emblem_with_gold_and_red.png"
+    },
+    {
+      "filename": "pack40_notes_500.png",
+      "bytes": 261838,
+      "sha256": "d81c917330429104cce1546a0b948a7b0b3a9dbacb16d35340c13ca7c8925d80",
+      "code": "notes_500",
+      "source": "glowing_500_achievement_medallion.png"
+    },
+    {
+      "filename": "pack40_quotes_550.png",
+      "bytes": 310222,
+      "sha256": "3043a9ee410c48a5aed69d60b470de0248191de3e4ce75ad3118fda634d8234e",
+      "code": "quotes_550",
+      "source": "golden_achievement_medallion_with_purple_accents.png"
+    },
+    {
+      "filename": "pack40_reviews_450.png",
+      "bytes": 323037,
+      "sha256": "cdcf316c983f718a872cc65d85b0fd7e2a657c72c401cc81ebde164249e324b3",
+      "code": "reviews_450",
+      "source": "golden_achievement_crest_with_ruby_gem.png"
+    },
+    {
+      "filename": "pack40_reviews_550.png",
+      "bytes": 366898,
+      "sha256": "171d6f34204d010c50e4e02933029ddd38742bc3ffb46ace62e8f76a9184ed59",
+      "code": "reviews_550",
+      "source": "550_achievement_emblem_with_ornate_frame.png"
+    },
+    {
+      "filename": "pack40_reviews_600.png",
+      "bytes": 325954,
+      "sha256": "869e485b89dcabba0da7520f7dd3d198feca2ed796a37d4c996f314245325490",
+      "code": "reviews_600",
+      "source": "epic_achievement_badge_with_glowing_book.png"
+    },
+    {
+      "filename": "pack40_comments_50.png",
+      "bytes": 283815,
+      "sha256": "3effbdecd53b3b29c801449a19f8641ae737d7af759bee0af7bb8d7c94348f69",
+      "code": "comments_50",
+      "source": "mystical_achievement_badge_with_musical_seal.png"
+    },
+    {
+      "filename": "pack40_comments_550.png",
+      "bytes": 284633,
+      "sha256": "127b2907697287704112f4329c02953b1e93aafa46b809d5888052f7dbed1a49",
+      "code": "comments_550",
+      "source": "achievement_emblem_with_glowing_crystal_details.png"
+    },
+    {
+      "filename": "pack40_audio_chapters_25.png",
+      "bytes": 277889,
+      "sha256": "d90315add118945c9edbb8fdeab014b21d3c24907238345984cfbdf9f5ea9612",
+      "code": "audio_chapters_25",
+      "source": "magical_music_and_reading_emblem.png"
+    },
+    {
+      "filename": "pack40_audio_chapters_550.png",
+      "bytes": 256076,
+      "sha256": "f308ad0169747ca1d1eb4fd69d270d03345cc9f2a877f653f925ece153a60a11",
+      "code": "audio_chapters_550",
+      "source": "golden_achievement_badge_with_ornate_details.png"
+    },
+    {
+      "filename": "pack40_audio_hours_600.png",
+      "bytes": 266890,
+      "sha256": "d6784058bd02d22cb850fc2e92cd5646434c5e034aaa1c2e3d185e0a5bfd3236",
+      "code": "audio_six_hundred_hours",
+      "source": "golden_600_achievement_medallion_with_music.png"
+    },
+    {
+      "filename": "pack40_graphic_chapters_600.png",
+      "bytes": 287011,
+      "sha256": "e002b093f9e137830e9e3b033cc6d322cfe0e0a66e85431933cd29658a93dbe1",
+      "code": "graphic_chapters_600",
+      "source": "achievement_of_icy_mastery_600.png"
+    },
+    {
+      "filename": "pack40_author_library_750.png",
+      "bytes": 281550,
+      "sha256": "78d77825a1b9a4b017fb66c30e711214f8915b9d9f1940a44f36344a8713c0bf",
+      "code": "author_library_additions_750",
+      "source": "luxurious_750_achievement_badge.png"
+    },
+    {
+      "filename": "pack40_author_completed_books_250.png",
+      "bytes": 409256,
+      "sha256": "bf41e170d14d06272b7020c6d57860c74f0d35c298ce276ffee0704346ea2415",
+      "code": "author_completed_books_250",
+      "source": "regal_250_achievement_emblem.png"
+    },
+    {
+      "filename": "pack40_author_books_500.png",
+      "bytes": 295125,
+      "sha256": "73edeeca7cbc6a4c4f7c4493e85b91a5c46d08fc2fdab0914c97e66b53734a2c",
+      "code": "author_five_hundred_books",
+      "source": "prestigious_achievement_badge_of_honor.png"
+    },
+    {
+      "filename": "pack40_author_completed_books_500.png",
+      "bytes": 307068,
+      "sha256": "304680f573f9c730ed3b789fa369f9132cc084f03e0661aa4ab9a25c995074bc",
+      "code": "author_completed_books_500",
+      "source": "magical_achievement_emblem_with_golden_crest.png"
+    }
+  ],
+  "collector_levels": 25,
+  "collector_final_threshold": 18500,
+  "collector_final_threshold_percent_of_catalog_points": 93.6
+}
