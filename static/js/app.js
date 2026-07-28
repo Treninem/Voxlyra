@@ -661,7 +661,12 @@ async function syncNotificationPreferences() {
 }
 
 function loadMeData() {
-  if (!meDataPromise) meDataPromise = apiFetch('/api/me');
+  if (!meDataPromise) {
+    meDataPromise = apiFetch('/api/me').catch((error) => {
+      meDataPromise = null;
+      throw error;
+    });
+  }
   return meDataPromise;
 }
 
@@ -4138,8 +4143,17 @@ async function initLibrary() {
     const initialTab = ['continue','activity','journal','saved','shelves','history','notes','subscriptions','purchases'].includes(requestedTab) ? requestedTab : 'continue';
     document.querySelectorAll('[data-library-tab]').forEach((button) => button.classList.toggle('active', button.dataset.libraryTab === initialTab));
     renderLibraryTab(initialTab, data);
-  } catch (_) {
-    if (content) content.innerHTML = emptyStateMarkup('nothing-found', 'Не удалось открыть полку', 'Закройте Mini App и откройте его снова из бота.');
+  } catch (error) {
+    const message = String(error?.message || '').trim();
+    if (content) {
+      content.innerHTML = emptyStateMarkup(
+        'nothing-found',
+        'Не удалось открыть полку',
+        message || 'Не удалось загрузить личные данные. Повторите запрос.',
+        window.location.pathname + window.location.search,
+        'Повторить'
+      );
+    }
   }
 }
 
