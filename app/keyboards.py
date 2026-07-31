@@ -116,6 +116,11 @@ def moderation_menu(permissions: set[str]) -> InlineKeyboardMarkup:
 
 def author_menu(has_profile: bool) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
+    if has_profile and settings.WEBAPP_URL:
+        kb.button(
+            text="📱 Открыть кабинет автора",
+            web_app=WebAppInfo(url=f"{settings.WEBAPP_URL.rstrip('/')}/author"),
+        )
     if has_profile:
         rows = [
             ("📚 Мои произведения", "author:books"),
@@ -136,7 +141,10 @@ def author_menu(has_profile: bool) -> InlineKeyboardMarkup:
             web_app=WebAppInfo(url=f"{settings.WEBAPP_URL.rstrip('/')}/author?new=graphic"),
         )
     kb.button(text="⬅️ Назад", callback_data="menu:main")
-    kb.adjust(2, 2, 2, 1)
+    if has_profile and settings.WEBAPP_URL:
+        kb.adjust(1, 2, 2, 2, 1, 1)
+    else:
+        kb.adjust(1)
     return kb.as_markup()
 
 

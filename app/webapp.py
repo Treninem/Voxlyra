@@ -1974,6 +1974,7 @@ def create_app() -> FastAPI:
         init_data = str(payload.get("init_data") or x_telegram_init_data or "")
         user, _ = await library_import_upload_session(init_data, token)
         cfg = await get_import_settings()
+        upload_id = ""
         try:
             meta, resumed = await asyncio.to_thread(
                 partial(
@@ -1985,10 +1986,11 @@ def create_app() -> FastAPI:
                     resume_upload_id=str(payload.get("resume_upload_id") or ""),
                 )
             )
+            upload_id = str(meta["upload_id"])
             status = await asyncio.to_thread(
                 partial(
                     get_upload_status,
-                    str(meta["upload_id"]),
+                    upload_id,
                     user_id=user.app_user_id,
                     book_id=0,
                 )
@@ -1996,7 +1998,8 @@ def create_app() -> FastAPI:
         except ChunkedUploadError as exc:
             raise HTTPException(status_code=507 if "мест" in str(exc).lower() else 400, detail=str(exc)) from exc
         except OSError as exc:
-            await asyncio.to_thread(release_upload_finish, upload_id)
+            if upload_id:
+                await asyncio.to_thread(release_upload_finish, upload_id)
             if exc.errno == errno.ENOSPC or "no space left" in str(exc).lower():
                 raise HTTPException(
                     status_code=507,
