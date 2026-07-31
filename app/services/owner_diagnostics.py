@@ -9,7 +9,7 @@ from typing import Any
 
 from app.build_info import owner_build_label
 from app.config import settings
-from app.db import connect, normalize_book_search_text
+from app.db import connect, get_achievement_artwork_catalog, normalize_book_search_text
 from app.services.cover_storage import find_cover_file
 from app.services.diagnostics import diagnostics_summary
 
@@ -354,6 +354,52 @@ async def run_owner_diagnostics(*, trigger: str = "manual") -> dict[str, Any]:
                 "database_exception", "База данных", "Глубокая проверка базы", "error",
                 f"{type(exc).__name__}: {str(exc)[:500]}",
                 hint="Скачайте резервную копию и передайте текст ошибки разработчику.",
+            ))
+
+        try:
+            achievement_catalog = await get_achievement_artwork_catalog()
+            artwork_root = Path(__file__).resolve().parents[2] / "static" / "img" / "achievements"
+            missing_artwork: list[dict[str, Any]] = []
+            codes: set[str] = set()
+            duplicate_codes: list[str] = []
+            for raw in achievement_catalog:
+                if not isinstance(raw, dict):
+                    continue
+                code = str(raw.get("code") or "").strip()
+                if code in codes:
+                    duplicate_codes.append(code)
+                elif code:
+                    codes.add(code)
+                filename = Path(str(raw.get("icon_asset") or "")).name
+                if not filename or not (artwork_root / filename).is_file():
+                    missing_artwork.append({"code": code, "filename": filename or "не указан"})
+            items.append(_item(
+                "achievement_catalog_unique",
+                "Награды",
+                "Коды наград уникальны",
+                "ok" if not duplicate_codes else "error",
+                f"Проверено наград: {len(achievement_catalog)}." if not duplicate_codes else f"Повторяющихся кодов: {len(duplicate_codes)}.",
+                affected_count=len(duplicate_codes),
+                affected=[{"code": code} for code in duplicate_codes[:12]],
+            ))
+            items.append(_item(
+                "achievement_artwork_files",
+                "Награды",
+                "Все изображения наград доступны",
+                "ok" if not missing_artwork else "error",
+                "Все изображения найдены." if not missing_artwork else f"Не найдено изображений: {len(missing_artwork)}.",
+                affected_count=len(missing_artwork),
+                affected=missing_artwork[:12],
+                hint="Проверьте, что компактное обновление полностью загружено в GitHub." if missing_artwork else "",
+            ))
+        except Exception as exc:
+            items.append(_item(
+                "achievement_catalog_exception",
+                "Награды",
+                "Проверка каталога наград",
+                "warning",
+                f"{type(exc).__name__}: {str(exc)[:300]}",
+                hint="Полка продолжит работать: движок наград изолирован от основных разделов.",
             ))
 
         status_rank = {"ok": 0, "warning": 1, "error": 2}

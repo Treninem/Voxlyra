@@ -1039,6 +1039,82 @@ async def _upload_to_temporary_file(upload: UploadFile, *, max_bytes: int, suffi
         await upload.close()
 
 
+async def _safe_sync_user_achievements(user_id: int, *, source: str = "") -> dict[str, Any]:
+    """Keep primary user actions available if the optional reward engine fails.
+
+    Reading progress, bookmarks, the personal shelf and author dashboards must not
+    return HTTP 500 after their main database write has already succeeded.  The
+    original exception is logged with its call site, while the client receives a
+    stable degraded payload that it can render without hiding the rest of the page.
+    """
+    try:
+        payload = await sync_user_achievements(int(user_id))
+        if not isinstance(payload, dict):
+            raise TypeError("Achievement sync returned an invalid payload.")
+        payload.setdefault("degraded", False)
+        return payload
+    except Exception as exc:
+        logging.getLogger(__name__).exception(
+            "Achievement synchronization failed without blocking the primary action: user_id=%s source=%s",
+            int(user_id),
+            str(source or "unknown")[:80],
+        )
+        try:
+            program = await get_achievement_program_settings()
+        except Exception:
+            program = {"points": {}, "levels": [], "season": {"enabled": False}}
+        try:
+            raw_catalog = await get_achievement_artwork_catalog()
+        except Exception:
+            raw_catalog = []
+        catalog = []
+        for raw in raw_catalog:
+            if not isinstance(raw, dict):
+                continue
+            item = dict(raw)
+            item.update({
+                "points": int(item.get("custom_points") or 0),
+                "progress_value": 0,
+                "goal": max(1, int(item.get("goal") or 1)),
+                "progress_percent": 0,
+                "unlocked": False,
+                "awarded_at": None,
+                "showcased": False,
+                "showcase_position": None,
+            })
+            catalog.append(item)
+        levels = program.get("levels") if isinstance(program.get("levels"), list) else []
+        first_level = levels[0] if levels and isinstance(levels[0], dict) else {"name": "Новичок"}
+        return {
+            "new": [],
+            "items": [],
+            "catalog": catalog,
+            "showcase": [],
+            "summary": {
+                "points": 0,
+                "level": 1,
+                "level_total": max(1, len(levels)),
+                "level_name": str(first_level.get("name") or "Новичок"),
+                "level_progress_percent": 0,
+                "collector_completion_percent": 0,
+                "next_level_name": str(first_level.get("name") or "Новичок"),
+                "next_level_points": 0,
+                "points_to_next": 0,
+                "unlocked_count": 0,
+                "total_count": len(catalog),
+            },
+            "program": {
+                "points": program.get("points") if isinstance(program, dict) else {},
+                "levels": levels,
+                "season": program.get("season") if isinstance(program, dict) else {"enabled": False},
+            },
+            "degraded": True,
+            "retryable": True,
+            "error_code": "achievement_sync_temporarily_unavailable",
+            "error_detail": str(exc)[:180],
+        }
+
+
 def create_app() -> FastAPI:
     logger = logging.getLogger(__name__)
 
@@ -3215,7 +3291,7 @@ def create_app() -> FastAPI:
         is_owner = user.telegram_id in settings.owner_ids
         permissions = set(PERMISSION_BY_CODE) if is_owner else await get_admin_permissions(user.app_user_id)
         preferences = await get_user_preferences(user.app_user_id)
-        achievements = await sync_user_achievements(user.app_user_id)
+        achievements = await _safe_sync_user_achievements(user.app_user_id, source="api_me")
         premium = await get_user_premium_status(user.app_user_id)
         wallet = await get_wallet_summary(user.app_user_id)
         bonus_economy = await public_revenue_split_settings()
@@ -3283,7 +3359,7 @@ def create_app() -> FastAPI:
             await set_user_achievement_showcase(user.app_user_id, [str(code) for code in codes])
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return {"ok": True, "achievements": await sync_user_achievements(user.app_user_id)}
+        return {"ok": True, "achievements": await _safe_sync_user_achievements(user.app_user_id, source="achievement_showcase")}
 
     @app.get("/api/library/organizer")
     async def api_library_organizer(x_telegram_init_data: str | None = Header(default=None)):
@@ -4062,7 +4138,7 @@ def create_app() -> FastAPI:
             return {"ok": True, "bookmark": None}
         await set_bookmark(user.app_user_id, book_id, status=status)
         bookmark = await get_bookmark(user.app_user_id, book_id)
-        achievements = await sync_user_achievements(user.app_user_id)
+        achievements = await _safe_sync_user_achievements(user.app_user_id, source="bookmark")
         await _notify_new_achievements(user, achievements)
         return {"ok": True, "bookmark": _row_to_dict(bookmark) if bookmark else None, "achievements": achievements}
 
@@ -4139,7 +4215,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="Отзыв слишком длинный.")
         await upsert_review(user.app_user_id, book_id, rating, text)
         reviews = await list_reviews_for_book(book_id, limit=20)
-        achievements = await sync_user_achievements(user.app_user_id)
+        achievements = await _safe_sync_user_achievements(user.app_user_id, source="review")
         await _notify_new_achievements(user, achievements)
         return {"ok": True, "reviews": _rows_to_dicts(reviews), "achievements": achievements}
 
@@ -4733,7 +4809,7 @@ def create_app() -> FastAPI:
             await record_premium_content_event(user.app_user_id, chapter_id, "open")
             if percent >= 90:
                 await record_premium_content_event(user.app_user_id, chapter_id, "complete")
-                achievements = await sync_user_achievements(user.app_user_id)
+                achievements = await _safe_sync_user_achievements(user.app_user_id, source="reader_progress")
                 await _notify_new_achievements(user, achievements)
         return {
             "ok": True,
@@ -5513,7 +5589,7 @@ def create_app() -> FastAPI:
         user, profile = await author_session(x_telegram_init_data)
         stats = await get_author_dashboard_stats(user.app_user_id)
         analytics = await get_author_analytics(user.app_user_id, 30)
-        achievements = await sync_user_achievements(user.app_user_id)
+        achievements = await _safe_sync_user_achievements(user.app_user_id, source="author_dashboard")
         finance = await get_author_finance_summary(user.app_user_id)
         rub_finance = {
             "held_minor": int(finance.get("held_minor", 0)),
@@ -5585,7 +5661,7 @@ def create_app() -> FastAPI:
     async def api_author_analytics(days: int = 30, x_telegram_init_data: str | None = Header(default=None)):
         user, _ = await author_session(x_telegram_init_data)
         analytics = await get_author_analytics(user.app_user_id, days)
-        achievements = await sync_user_achievements(user.app_user_id)
+        achievements = await _safe_sync_user_achievements(user.app_user_id, source="author_analytics")
         return {"ok": True, "analytics": analytics, "achievements": achievements}
 
     @app.get("/api/author/sbp-banks")

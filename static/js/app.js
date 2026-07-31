@@ -3859,6 +3859,35 @@ function renderLibraryAchievements(payload, options = {}) {
   const showcase = document.getElementById('achievementShowcase');
   const toggle = document.getElementById('toggleAllAchievements');
   if (!panel || !grid) return;
+  const degraded = Boolean(payload?.degraded);
+  panel.classList.toggle('achievement-panel-degraded', degraded);
+  if (degraded) {
+    panel.hidden = false;
+    if (showcase) showcase.innerHTML = '';
+    grid.innerHTML = `<article class="empty-card premium-empty compact-empty" data-achievement-sync-warning>
+      <h3>Награды временно обновляются</h3>
+      <p>Полка, чтение и остальные разделы продолжают работать. Повторите только загрузку наград.</p>
+      <button type="button" class="secondary compact" data-retry-achievements>Повторить</button>
+    </article>`;
+    if (toggle) toggle.hidden = true;
+    grid.querySelector('[data-retry-achievements]')?.addEventListener('click', async (event) => {
+      const button = event.currentTarget;
+      button.disabled = true;
+      button.textContent = 'Проверяем…';
+      try {
+        meDataPromise = null;
+        const data = await loadMeData();
+        const page = document.getElementById('libraryPage');
+        if (page) page._libraryData = data;
+        renderLibraryAchievements(data?.achievements || {}, { skipUnlocks: false });
+      } catch (error) {
+        button.disabled = false;
+        button.textContent = 'Повторить';
+        notify(error?.message || 'Награды пока недоступны');
+      }
+    });
+    return;
+  }
   const items = payload?.items || [];
   panel.hidden = !items.length && !(payload?.catalog || []).length;
   if (showcase) showcase.innerHTML = achievementShowcaseMarkup(payload);
