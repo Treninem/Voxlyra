@@ -20,11 +20,11 @@ from contextlib import asynccontextmanager
 from functools import partial
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote
 
 from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from aiogram import Bot
@@ -42,6 +42,14 @@ from app.services.bonus_economy import public_revenue_split_settings, load_reven
 from app.services.yookassa_checkout import test_shop_connection, YooKassaCheckoutError
 from app.services.pricing import split_platform_commission, final_price_for_desired_net, two_rate_price
 from app.services.rankings import attach_ranking, attach_rankings
+from app.services.account_identity import (
+    AccountLinkError, consume_link_code, create_link_code, identity_status,
+)
+from app.services.vk_payments import (
+    VKPaymentError, charge_vk_intent, create_vk_payment_intent,
+    get_vk_payment_intent, refund_vk_order, verify_callback_signature,
+    vk_callback_error,
+)
 from app.db import (
     add_comment,
     add_audit,
@@ -530,7 +538,7 @@ def _effective_library_upload_limit_mb(configured_limit: object) -> int:
 
 def _reader_watermark_label(user: TMAUser) -> str:
     name = (user.full_name or (f"@{user.username}" if user.username else "Читатель")).strip()[:48]
-    tail = str(user.telegram_id)[-4:]
+    tail = str(user.external_id or user.telegram_id)[-4:]
     return f"{name} · {tail}"
 
 
@@ -870,7 +878,7 @@ async def _has_book_moderation_access(*, app_user_id: int, telegram_id: int, cha
     Владелец может проверять любую неудалённую книгу. Делегированный сотрудник —
     опубликованную книгу либо книгу, реально находящуюся в очереди review.
     """
-    if int(telegram_id) in settings.owner_ids:
+    if settings.is_owner_identity(int(telegram_id)):
         return str(chapter["publication_status"] or "") != "deleted" and str(chapter["status"] or "") != "deleted"
     permissions = await get_admin_permissions(int(app_user_id))
     if "mod_books" not in permissions:
@@ -905,7 +913,7 @@ async def _graphic_access(*, app_user_id: int, telegram_id: int, chapter: Any) -
     )
     if is_public and await user_can_access_graphic(int(app_user_id), int(chapter["id"])):
         return True, False
-    if int(telegram_id) in settings.owner_ids:
+    if settings.is_owner_identity(int(telegram_id)):
         moderation = str(chapter["publication_status"] or "") != "deleted" and str(chapter["status"] or "") != "deleted"
         return moderation, moderation
     permissions = await get_admin_permissions(int(app_user_id))
@@ -1428,7 +1436,7 @@ def create_app() -> FastAPI:
 
     async def control_session(init_data: str | None, *required: str) -> tuple[TMAUser, bool, set[str]]:
         user = await _tma_user(init_data)
-        is_owner = user.telegram_id in settings.owner_ids
+        is_owner = settings.is_owner_identity(user.telegram_id)
         permissions = set(PERMISSION_BY_CODE) if is_owner else await get_admin_permissions(user.app_user_id)
         if not permissions:
             raise HTTPException(status_code=403, detail="У вас нет доступа к панели управления.")
@@ -2258,6 +2266,119 @@ def create_app() -> FastAPI:
         finally:
             await bot.session.close()
 
+    @app.get("/api/account-link/status")
+    async def api_account_link_status(x_telegram_init_data: str | None = Header(default=None)):
+        user = await _tma_user(x_telegram_init_data)
+        return {"ok": True, "platform": user.platform, **(await identity_status(user.app_user_id))}
+
+    @app.post("/api/account-link/code")
+    async def api_account_link_code(x_telegram_init_data: str | None = Header(default=None)):
+        user = await _tma_user(x_telegram_init_data)
+        result = await create_link_code(user.app_user_id, user.platform, ttl_minutes=10)
+        await add_audit(user.app_user_id, "cross_platform_link_code_created", "account", str(user.app_user_id), user.platform, "")
+        return {"ok": True, **result}
+
+    @app.post("/api/account-link/consume")
+    async def api_account_link_consume(
+        request: Request, x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        payload = await request.json()
+        try:
+            result = await consume_link_code(
+                current_user_id=user.app_user_id, current_platform=user.platform,
+                external_id=user.external_id, code=str((payload or {}).get("code") or ""),
+            )
+        except AccountLinkError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        await add_audit(result["canonical_user_id"], "cross_platform_account_linked", "account", str(result["canonical_user_id"]), user.platform, "")
+        return {"ok": True, "reload_required": True, **result}
+
+    @app.post("/api/vk/payments/intent")
+    async def api_vk_payment_intent(
+        request: Request, x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        if user.platform != "vk" or not user.vk_id:
+            raise HTTPException(status_code=400, detail="Оплата голосами доступна только внутри VK Mini App.")
+        if not settings.VK_ENABLED:
+            raise HTTPException(status_code=503, detail="Платежи VK сейчас выключены.")
+        payload = await request.json()
+        try:
+            result = await create_vk_payment_intent(
+                user_id=user.app_user_id, vk_user_id=int(user.vk_id),
+                kind=str((payload or {}).get("kind") or ""),
+                target_id=(payload or {}).get("target_id"),
+                promo_code=str((payload or {}).get("promo_code") or "") or None,
+                amount_stars=(payload or {}).get("amount_stars"),
+                book_id=(payload or {}).get("book_id"),
+            )
+        except (VKPaymentError, ValueError, TypeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        await add_audit(user.app_user_id, "vk_votes_checkout_created", "payment", result["item_key"], None, str(result["amount_votes"]))
+        return {"ok": True, **result}
+
+    @app.get("/api/vk/payments/intent/{item_key}")
+    async def api_vk_payment_intent_status(
+        item_key: str, x_telegram_init_data: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        intent = await get_vk_payment_intent(item_key, user_id=user.app_user_id)
+        if not intent:
+            raise HTTPException(status_code=404, detail="Счёт не найден.")
+        return {
+            "ok": True, "item_key": str(intent["item_key"]), "status": str(intent["status"]),
+            "amount_votes": int(intent["amount_votes"]), "purchase_id": intent.get("purchase_id"),
+        }
+
+    @app.post("/api/vk/payments/callback")
+    async def api_vk_payment_callback(request: Request):
+        # VK sends application/x-www-form-urlencoded notifications. The route is
+        # public by design; authenticity is enforced by the payment signature.
+        raw = (await request.body()).decode("utf-8", errors="replace")
+        parsed = parse_qs(raw, keep_blank_values=True)
+        params = {key: values[-1] if values else "" for key, values in parsed.items()}
+        if not params:
+            params = {str(key): str(value) for key, value in request.query_params.items()}
+        if not verify_callback_signature(params):
+            return JSONResponse(vk_callback_error(10, "Неверная подпись платежного уведомления."), status_code=200)
+        notification = str(params.get("notification_type") or "")
+        test_mode = notification.endswith("_test") or str(params.get("test_mode") or "") == "1"
+        base_notification = notification.removesuffix("_test")
+        try:
+            if base_notification == "get_item":
+                item_key = str(params.get("item") or "")
+                vk_user_id = int(params.get("user_id") or 0)
+                intent = await get_vk_payment_intent(item_key)
+                if not intent or int(intent["vk_user_id"]) != vk_user_id or str(intent["status"]) not in {"active", "paid"}:
+                    return JSONResponse(vk_callback_error(20, "Товар не найден."), status_code=200)
+                photo_url = (str(settings.WEBAPP_URL or "").rstrip("/") + "/static/img/miniapp/voxlyra-v.webp") if settings.WEBAPP_URL else ""
+                return {"response": {
+                    "item_id": str(intent["item_key"]), "title": str(intent["title"])[:100],
+                    "photo_url": photo_url, "price": int(intent["amount_votes"]), "expiration": 0,
+                }}
+            if base_notification == "order_status_change":
+                order_id = str(params.get("order_id") or "")
+                status = str(params.get("status") or "")
+                item_key = str(params.get("item") or params.get("item_id") or "")
+                vk_user_id = int(params.get("user_id") or 0)
+                if status == "chargeable":
+                    result = await charge_vk_intent(
+                        item_key=item_key, order_id=order_id, vk_user_id=vk_user_id,
+                        item_price=int(params.get("item_price") or 0), test_mode=test_mode,
+                    )
+                    return {"response": {"order_id": result["order_id"], "app_order_id": result["app_order_id"]}}
+                if status == "refunded":
+                    await refund_vk_order(order_id, test_mode=test_mode)
+                    return {"response": {"order_id": order_id, "app_order_id": order_id}}
+                return JSONResponse(vk_callback_error(30, "Неизвестный статус заказа."), status_code=200)
+        except VKPaymentError as exc:
+            return JSONResponse(vk_callback_error(40, str(exc)), status_code=200)
+        except Exception as exc:
+            logger.exception("VK payment callback failed")
+            return JSONResponse(vk_callback_error(100, "Временная ошибка обработки оплаты."), status_code=200)
+        return JSONResponse(vk_callback_error(30, "Неизвестный тип платежного уведомления."), status_code=200)
+
     @app.get("/health")
     async def health(request: Request):
         """Always-answering process probe for Bothost."""
@@ -2464,7 +2585,7 @@ def create_app() -> FastAPI:
         if clean_query and int(result.get("total") or 0) == 0 and x_telegram_init_data:
             try:
                 current_user = await _tma_user(x_telegram_init_data)
-                if int(current_user.telegram_id) in settings.owner_ids:
+                if settings.is_owner_identity(int(current_user.telegram_id)):
                     hidden_matches = await find_hidden_exact_book_matches(clean_query)
             except HTTPException:
                 hidden_matches = []
@@ -3238,16 +3359,26 @@ def create_app() -> FastAPI:
         user = await _tma_user(x_telegram_init_data)
         # uid is not trusted as authentication; it is only a per-user browser-cache key.
         # Reject a mismatched key so one Telegram account can never request another account's photo.
-        if uid is not None and int(uid) != int(user.telegram_id):
+        if uid is not None and int(uid) != int(user.external_id or user.telegram_id):
             raise HTTPException(
                 status_code=403,
-                detail="Фото профиля принадлежит другой сессии Telegram.",
+                detail="Фото профиля принадлежит другой сессии.",
                 headers={
                     "Cache-Control": "private, no-store, no-cache, must-revalidate, max-age=0",
                     "Pragma": "no-cache",
                     "Expires": "0",
                 },
             )
+        no_cache_headers = {
+            "Cache-Control": "private, no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+            "X-Content-Type-Options": "nosniff",
+        }
+        if user.platform == "vk":
+            if user.photo_url:
+                return RedirectResponse(user.photo_url, status_code=302, headers=no_cache_headers)
+            raise HTTPException(status_code=404, detail="Фото профиля VK не найдено.", headers=no_cache_headers)
         path = await ensure_profile_avatar(user.telegram_id)
         no_cache_headers = {
             "Cache-Control": "private, no-store, no-cache, must-revalidate, max-age=0",
@@ -3291,7 +3422,7 @@ def create_app() -> FastAPI:
         reread_summary = await get_user_reread_summary(user.app_user_id)
         journal_import_history = await list_user_reading_import_history(user.app_user_id)
         author_profile = await get_author_profile(user.app_user_id)
-        is_owner = user.telegram_id in settings.owner_ids
+        is_owner = settings.is_owner_identity(user.telegram_id)
         permissions = set(PERMISSION_BY_CODE) if is_owner else await get_admin_permissions(user.app_user_id)
         preferences = await get_user_preferences(user.app_user_id)
         achievements = await _safe_sync_user_achievements(user.app_user_id, source="api_me")
@@ -3302,7 +3433,10 @@ def create_app() -> FastAPI:
             "ok": True,
             "user": {
                 "id": user.app_user_id,
-                "telegram_id": user.telegram_id,
+                "telegram_id": user.telegram_id if user.platform == "telegram" else None,
+                "vk_id": user.vk_id,
+                "platform": user.platform,
+                "external_id": user.external_id,
                 "username": user.username,
                 "full_name": user.full_name,
                 "photo_url": user.photo_url,
@@ -4066,7 +4200,7 @@ def create_app() -> FastAPI:
         x_vox_request_id: str | None = Header(default=None),
     ):
         user = await _tma_user(x_telegram_init_data)
-        if user.telegram_id in settings.owner_ids:
+        if settings.is_owner_identity(user.telegram_id):
             raise HTTPException(status_code=409, detail="Профиль владельца нельзя удалить из пользовательского интерфейса.")
         claim_sensitive_request(user, x_vox_request_id, "privacy_delete_preview")
         try:
@@ -4083,7 +4217,7 @@ def create_app() -> FastAPI:
         x_vox_request_id: str | None = Header(default=None),
     ):
         user = await _tma_user(x_telegram_init_data)
-        if user.telegram_id in settings.owner_ids:
+        if settings.is_owner_identity(user.telegram_id):
             raise HTTPException(status_code=409, detail="Профиль владельца нельзя удалить из пользовательского интерфейса.")
         claim_sensitive_request(user, x_vox_request_id, "privacy_delete_confirm")
         if str((payload or {}).get("confirmation_phrase") or "").strip().upper() != "УДАЛИТЬ":
@@ -4110,7 +4244,7 @@ def create_app() -> FastAPI:
         if book_row["author_id"] is not None:
             author_subscription = await get_author_subscription(user.app_user_id, int(book_row["author_id"]))
         reviews = await list_reviews_for_book(book_id, limit=20)
-        is_owner = user.telegram_id in settings.owner_ids
+        is_owner = settings.is_owner_identity(user.telegram_id)
         catalog_promotion = await get_catalog_promotion_availability(
             book_id, user.app_user_id, owner=is_owner
         )
@@ -5029,7 +5163,7 @@ def create_app() -> FastAPI:
         # Автор своей книги и владелец платформы не должны покупать собственную
         # главу ради реакции. Для остальных действует тот же доступ, что в читалке.
         is_author = await book_belongs_to_author(int(chapter["book_id"]), int(user.app_user_id))
-        is_owner = int(user.telegram_id) in settings.owner_ids
+        is_owner = settings.is_owner_identity(int(user.telegram_id))
         if not is_author and not is_owner and not await user_can_access_chapter(user.app_user_id, int(chapter_id)):
             raise HTTPException(status_code=403, detail="Реакции доступны после открытия главы.")
         return chapter
@@ -5447,7 +5581,7 @@ def create_app() -> FastAPI:
         if not page:
             raise HTTPException(status_code=404, detail="Страница не найдена.")
         if str(page["moderation_status"] or "approved") == "rejected":
-            can_review = bool(int(media_user["telegram_id"]) in settings.owner_ids)
+            can_review = bool(settings.is_owner_identity(int(media_user["telegram_id"])))
             if media_user and not can_review:
                 can_review = "mod_books" in await get_admin_permissions(int(user_id))
             if not can_review:
@@ -8446,5 +8580,18 @@ def create_app() -> FastAPI:
         if not path.exists() or not path.is_file():
             raise HTTPException(status_code=404, detail="Аудиофайл не найден.")
         return FileResponse(path, media_type=audio["mime_type"] or "audio/mpeg", filename=audio["source_filename"] or path.name)
+
+
+    @app.get("/api/platform")
+    async def api_platform(x_telegram_init_data: str | None = Header(default=None)):
+        user = await _tma_user(x_telegram_init_data)
+        return {
+            "ok": True,
+            "platform": user.platform,
+            "external_id": user.external_id,
+            "telegram_id": user.telegram_id if user.platform == "telegram" else None,
+            "vk_id": user.vk_id,
+            "vk_enabled": bool(settings.VK_ENABLED),
+        }
 
     return app

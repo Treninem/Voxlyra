@@ -579,7 +579,7 @@ async def evaluate_book_for_auto_publication(
     block_reasons, review_reasons = _reason_summary(open_rows)
 
     enabled = await is_auto_moderation_enabled()
-    is_owner_upload = actor_telegram_id is not None and int(actor_telegram_id) in settings.owner_ids
+    is_owner_upload = actor_telegram_id is not None and settings.is_owner_identity(int(actor_telegram_id))
     reasons: list[str]
     if not enabled:
         reasons = block_reasons + review_reasons + ["Автомодерация отключена владельцем. Требуется ручная проверка."]

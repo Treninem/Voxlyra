@@ -9,6 +9,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 
 from app.config import settings
 from app.services.security import pseudonymous_log_id
+from app.services.vk_api import send_vk_message
 from app.db import (
     claim_notification_delivery,
     finish_notification_delivery,
@@ -188,7 +189,19 @@ async def send_user_notification(
     reply_markup: InlineKeyboardMarkup | None = None,
     parse_mode: ParseMode | str | None = None,
 ) -> NotificationStatus:
-    if not settings.BOT_TOKEN or not telegram_id:
+    if not telegram_id:
+        return "unavailable"
+    identity_id = int(telegram_id)
+    vk_user_id = settings.vk_user_id_from_identity(identity_id)
+    if vk_user_id:
+        if app_user_id is not None:
+            preferences = await get_user_preferences(int(app_user_id))
+            if preferences.get("notifications") == "0":
+                return "disabled"
+            if category and preferences.get(f"notifications_{category}", "1") == "0":
+                return "disabled"
+        return "sent" if await send_vk_message(vk_user_id, text) else "unavailable"
+    if identity_id <= 0 or not settings.BOT_TOKEN:
         return "unavailable"
     if app_user_id is not None:
         preferences = await get_user_preferences(int(app_user_id))

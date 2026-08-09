@@ -79,6 +79,24 @@
   <article class="setting-card"><div class="setting-toggle-row"><div><h3>Достижения</h3><p>Сообщать о новых наградах читателя и автора.</p></div><button type="button" class="toggle-pill" data-toggle="notificationAchievements"><span>Награды</span><span>Включено</span></button></div></article>
 </section>
 
+<section class="settings-group-title"><h2>🔗 Telegram + VK</h2></section>
+<section class="settings-panel" id="crossPlatformAccountPanel">
+  <article class="setting-card">
+    <div class="setting-head"><div><h3>Одна библиотека на двух платформах</h3><p>Привяжите Telegram и VK один раз. После этого книги, полки, прогресс, покупки, награды и авторский кабинет будут использовать одну учётную запись VoxLyra.</p></div></div>
+    <div id="crossPlatformStatus"><p class="muted">Проверяем привязку…</p></div>
+    <div class="segmented two">
+      <button type="button" id="crossPlatformCreateCode">Создать код</button>
+      <button type="button" id="crossPlatformRefresh">Обновить</button>
+    </div>
+    <div id="crossPlatformCodeBox" hidden></div>
+    <form id="crossPlatformConsumeForm" class="settings-inline-form">
+      <input id="crossPlatformCodeInput" maxlength="8" autocomplete="one-time-code" placeholder="Код из другой платформы">
+      <button type="submit" class="secondary">Привязать</button>
+    </form>
+    <p class="muted">Код действует 10 минут и используется один раз. Откройте VoxLyra на второй платформе и введите его здесь.</p>
+  </article>
+</section>
+
 <section class="settings-group-title"><h2>💎 Premium</h2></section>
 <section class="settings-panel">
   <article class="setting-card premium-settings-card"><div><h3>VoxLyra Premium</h3><p>Управление подпиской, премиальной рамкой, карточками цитат и личной статистикой.</p></div><a class="button-link full" href="/premium">Открыть Premium</a></article>

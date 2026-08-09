@@ -4,6 +4,7 @@ const VOX_SKIP_RESTORE_KEY = 'voxlyra:skip-restore-once';
 const VOX_TG_LAUNCH_HASH_KEY = 'voxlyra:telegram-launch-hash:v114028';
 const VOX_CONTENT_ANCHOR_PARAM = 'vox_anchor';
 const VOX_TG_LAUNCH_LEGACY_KEYS = ['voxlyra:telegram-launch-hash:v114027'];
+const VOX_VK_LAUNCH_QUERY_KEY = 'voxlyra:vk-launch-query:v1150';
 const VOX_ROUTE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 function voxTelegramWebApp() {
@@ -46,6 +47,44 @@ function voxHasTelegramAuth() {
   return Boolean(voxTelegramWebApp()?.initData || voxInitDataFromLaunchHash());
 }
 
+function voxCurrentVKLaunchQuery() {
+  try {
+    const params = new URLSearchParams(window.location.search || '');
+    if (!params.get('vk_user_id') || !params.get('vk_app_id') || !params.get('sign')) return '';
+    const launch = new URLSearchParams();
+    [...params.entries()].forEach(([key, value]) => {
+      if (key.startsWith('vk_') || key === 'sign') launch.append(key, value);
+    });
+    return launch.toString();
+  } catch (_) { return ''; }
+}
+
+function voxCaptureVKLaunchQuery() {
+  const current = voxCurrentVKLaunchQuery();
+  if (current) {
+    try { sessionStorage.setItem(VOX_VK_LAUNCH_QUERY_KEY, current); } catch (_) {}
+    return current;
+  }
+  try {
+    const saved = String(sessionStorage.getItem(VOX_VK_LAUNCH_QUERY_KEY) || '');
+    const params = new URLSearchParams(saved);
+    return params.get('vk_user_id') && params.get('vk_app_id') && params.get('sign') ? saved : '';
+  } catch (_) { return ''; }
+}
+
+function voxHasVKAuth() { return Boolean(voxCaptureVKLaunchQuery()); }
+function voxHasPlatformAuth() { return voxHasTelegramAuth() || voxHasVKAuth(); }
+function voxPlatform() { return voxHasVKAuth() ? 'vk' : voxHasTelegramAuth() ? 'telegram' : 'web'; }
+
+async function voxInitVKBridge() {
+  if (!voxHasVKAuth() || !window.vkBridge?.send) return;
+  try {
+    await window.vkBridge.send('VKWebAppInit');
+    const info = await window.vkBridge.send('VKWebAppGetUserInfo').catch(() => null);
+    if (info) window.__voxVKUserInfo = info;
+  } catch (_) {}
+}
+
 function voxSafeContentAnchor(raw = '') {
   const value = String(raw || '').trim().replace(/^#/, '');
   if (!value) return '';
@@ -86,7 +125,7 @@ function voxSafeRoute(raw = '') {
     if (!allowed.some((pattern) => pattern.test(path))) return '';
     const params = new URLSearchParams(url.search);
     [...params.keys()].forEach((key) => {
-      if (/^tgWebApp/i.test(key) || key === 'startapp') params.delete(key);
+      if (/^tgWebApp/i.test(key) || /^vk_/i.test(key) || key === 'sign' || key === 'startapp') params.delete(key);
     });
     const queryAnchor = voxSafeContentAnchor(params.get(VOX_CONTENT_ANCHOR_PARAM) || '');
     const hashAnchor = voxSafeContentAnchor(url.hash || '');
@@ -144,6 +183,13 @@ function voxRouteWithTelegramLaunchContext(route) {
     current.searchParams.forEach((value, key) => {
       if (/^tgWebApp/i.test(key) && !target.searchParams.has(key)) target.searchParams.set(key, value);
     });
+    const vkLaunch = voxCaptureVKLaunchQuery();
+    if (vkLaunch) {
+      const vkParams = new URLSearchParams(vkLaunch);
+      vkParams.forEach((value, key) => {
+        if ((key.startsWith('vk_') || key === 'sign') && !target.searchParams.has(key)) target.searchParams.set(key, value);
+      });
+    }
     const contentAnchor = voxSafeContentAnchor(target.hash || '')
       || voxSafeContentAnchor(target.searchParams.get(VOX_CONTENT_ANCHOR_PARAM) || '');
     if (contentAnchor) target.searchParams.set(VOX_CONTENT_ANCHOR_PARAM, contentAnchor);
@@ -221,6 +267,7 @@ function voxRegisterCurrentRoute() {
 
 (function initTelegramAndLaunchRoute() {
   voxCaptureTelegramLaunchHash();
+  voxCaptureVKLaunchQuery();
   const tg = voxTelegramWebApp();
   if (tg) {
     try {
@@ -230,8 +277,10 @@ function voxRegisterCurrentRoute() {
       tg.setBackgroundColor?.('#090b18');
     } catch (_) {}
   }
+  voxInitVKBridge();
   document.documentElement.classList.toggle('vox-telegram-auth', voxHasTelegramAuth());
-  document.documentElement.classList.toggle('vox-external-browser', !voxHasTelegramAuth());
+  document.documentElement.classList.toggle('vox-vk-auth', voxHasVKAuth());
+  document.documentElement.classList.toggle('vox-external-browser', !voxHasPlatformAuth());
 
   const path = window.location.pathname || '/';
   if (path !== '/' && path !== '') {
@@ -254,7 +303,7 @@ function voxRegisterCurrentRoute() {
     skipRestore = sessionStorage.getItem(VOX_SKIP_RESTORE_KEY) === '1';
     sessionStorage.removeItem(VOX_SKIP_RESTORE_KEY);
   } catch (_) {}
-  if (!skipRestore && voxHasTelegramAuth()) {
+  if (!skipRestore && voxHasPlatformAuth()) {
     const saved = voxReadRouteState();
     if (saved?.route && saved.route !== '/') {
       window.location.replace(voxRouteWithTelegramLaunchContext(saved.route));
@@ -570,7 +619,12 @@ async function resetSettings() {
   notify('Настройки возвращены к исходным');
 }
 
-function tgInitData() { return window.Telegram?.WebApp?.initData || voxInitDataFromLaunchHash() || ''; }
+function tgInitData() {
+  const tg = window.Telegram?.WebApp?.initData || voxInitDataFromLaunchHash() || '';
+  if (tg) return tg;
+  const vk = voxCaptureVKLaunchQuery();
+  return vk ? `vk:${vk}` : '';
+}
 
 function voxRequestId() {
   try { return crypto.randomUUID(); } catch (_) { return `${Date.now()}-${Math.random().toString(36).slice(2)}`; }
@@ -602,7 +656,7 @@ async function apiFetch(url, options = {}) {
       }
     } catch (_) {}
     if (response.status === 401 && !tgInitData()) {
-      message = 'Сессия Telegram потеряна. Полностью закройте Mini App и откройте его из бота.';
+      message = voxPlatform() === 'vk' ? 'Сессия VK потеряна. Закройте Mini App и откройте его снова во VK.' : 'Сессия Telegram потеряна. Полностью закройте Mini App и откройте его из бота.';
     } else if (message === 'Не удалось выполнить действие') {
       message = `Не удалось выполнить действие · ошибка ${response.status}`;
     }
@@ -3333,7 +3387,10 @@ function purchaseCard(item) {
   let href = isPremium ? '/premium' : item.audio_chapter_id ? `/audio/${Number(item.audio_chapter_id)}` : item.chapter_id ? `/reader/${Number(item.chapter_id)}` : item.book_id ? `/book/${Number(item.book_id)}` : '#';
   let type = isPremium ? 'Подписка' : isPackage ? 'Пакет глав' : item.audio_chapter_id ? 'Аудиоглава' : item.chapter_id ? 'Глава' : 'Книга';
   const stateText = refunded ? 'Возврат оформлен' : isPremium ? 'Управление подпиской' : isPackage ? `Осталось открытий: ${Number(item.chapter_package_remaining || 0)} из ${packageTotal}` : 'Доступ открыт';
-  return `<a class="purchase-card${refunded ? ' refunded' : ''}" href="${href}"><div><span>${type}</span><h3>${escapeHtml(title)}</h3><p>${escapeHtml(stateText)}</p></div><b>${Number(item.amount_stars || 0)} Stars</b></a>`;
+  const platformPrice = String(item.payment_platform || 'telegram') === 'vk'
+    ? `${Number(item.amount_platform || 0)} голос.`
+    : `${Number(item.amount_stars || 0)} Stars`;
+  return `<a class="purchase-card${refunded ? ' refunded' : ''}" href="${href}"><div><span>${type}</span><h3>${escapeHtml(title)}</h3><p>${escapeHtml(stateText)}</p></div><b>${platformPrice}</b></a>`;
 }
 
 function subscriptionBookCard(item) {
@@ -3938,7 +3995,7 @@ async function refreshPremiumPage() {
     const plan = (data.plans || [])[0] || {};
     const sub = data.subscription || {};
     document.getElementById('premiumPlanTitle').textContent = plan.title || 'VoxLyra Premium';
-    document.getElementById('premiumPrice').textContent = Number(plan.price_stars || 0);
+    document.getElementById('premiumPrice').textContent = voxPlatform() === 'vk' ? 'голоса VK' : Number(plan.price_stars || 0);
     document.getElementById('premiumPlanDescription').textContent = plan.description || '';
     const features = document.getElementById('premiumFeatures');
     if (features) features.innerHTML = (plan.features || []).map((item) => `<article><span>✦</span><b>${escapeHtml(item.title || '')}</b></article>`).join('');
@@ -3977,6 +4034,11 @@ async function openPremiumCheckout() {
   const button = document.getElementById('premiumSubscribe');
   if (button) button.disabled = true;
   try {
+    if (voxPlatform() === 'vk') {
+      const result = await startVKPayment('premium', 'monthly');
+      if (result?.paid) setTimeout(() => refreshPremiumPage(), 700);
+      return;
+    }
     const data = await apiFetch('/api/premium/checkout', { method: 'POST', body: JSON.stringify({ plan_code: 'monthly' }) });
     const tg = window.Telegram?.WebApp;
     if (tg?.openInvoice) {
@@ -4017,6 +4079,14 @@ async function openWalletTopup(amount) {
   const buttons = document.querySelectorAll('[data-wallet-topup]');
   buttons.forEach((button) => { button.disabled = true; });
   try {
+    if (voxPlatform() === 'vk') {
+      const result = await startVKPayment('wallet_topup', Number(amount));
+      if (result?.paid) {
+        meDataPromise = null;
+        setTimeout(() => { loadMeData().then(renderWalletSummary).catch(() => {}); }, 700);
+      }
+      return;
+    }
     const data = await apiFetch('/api/wallet/checkout', {
       method: 'POST',
       body: JSON.stringify({ amount_stars: Number(amount) }),
@@ -4135,8 +4205,8 @@ async function initLibrary() {
     showInitialFallback();
     if (profileIcon) {
       profileIcon.addEventListener('error', showInitialFallback);
-      const avatarTelegramId = Number(data.user?.telegram_id || 0);
-      const avatarUrl = `/api/me/avatar?uid=${encodeURIComponent(String(avatarTelegramId))}&v=${encodeURIComponent(String(avatarTelegramId))}`;
+      const avatarIdentityId = Number(data.user?.external_id || data.user?.telegram_id || 0);
+      const avatarUrl = String(data.user?.photo_url || '') || `/api/me/avatar?uid=${encodeURIComponent(String(avatarIdentityId))}&v=${encodeURIComponent(String(avatarIdentityId))}`;
       apiFetch(avatarUrl, { cache: 'no-store' })
         .then((response) => response.blob())
         .then((blob) => {
@@ -5296,7 +5366,10 @@ function initPrivacySettings() {
 }
 
 function initExternalBrowserMode() {
-  if (voxHasTelegramAuth()) return;
+  if (voxHasPlatformAuth()) {
+    if (voxPlatform() === 'vk') document.querySelectorAll('.telegram-payment-action').forEach((element) => { element.hidden = true; element.setAttribute('aria-hidden', 'true'); });
+    return;
+  }
   const notice = document.getElementById('externalBrowserNotice');
   const open = document.getElementById('externalBrowserOpen');
   const launchUrl = voxTelegramLaunchUrl();
@@ -5349,7 +5422,7 @@ function bindRoutePersistence() {
     const safeRoute = voxSafeRoute(url.toString());
     if (
       safeRoute
-      && voxHasTelegramAuth()
+      && voxHasPlatformAuth()
       && !link.hasAttribute('download')
       && String(link.getAttribute('target') || '').toLowerCase() !== '_blank'
       && url.pathname !== '/'
@@ -5462,3 +5535,135 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 })();
 
+
+// v1.15.1 — native VK-votes checkout + one canonical VoxLyra account on Telegram/VK.
+async function startVKPayment(kind, targetId, options = {}) {
+  if (voxPlatform() !== 'vk') throw new Error('Оплата голосами доступна только внутри VK.');
+  await voxInitVKBridge();
+  if (!window.vkBridge?.send) throw new Error('VK Bridge недоступен. Откройте приложение внутри VK.');
+  const intent = await apiFetch('/api/vk/payments/intent', {
+    method: 'POST',
+    body: JSON.stringify({
+      kind: String(kind || ''),
+      target_id: targetId,
+      promo_code: options.promoCode || '',
+      amount_stars: options.amountStars ?? null,
+      book_id: options.bookId ?? null,
+    }),
+  });
+  const result = await window.vkBridge.send('VKWebAppShowOrderBox', {
+    type: 'item', item: String(intent.item_key),
+  });
+  const status = String(result?.status || '').toLowerCase();
+  if (status === 'cancel' || status === 'cancelled') {
+    notify('Оплата отменена');
+    return { paid: false, cancelled: true };
+  }
+  const started = Date.now();
+  while (Date.now() - started < 25000) {
+    await new Promise((resolve) => setTimeout(resolve, 850));
+    try {
+      const state = await apiFetch(`/api/vk/payments/intent/${encodeURIComponent(intent.item_key)}`);
+      if (state.status === 'paid') {
+        notify(`Оплачено: ${Number(intent.amount_votes || 0)} голос.`);
+        return { paid: true, intent: state };
+      }
+      if (state.status === 'refunded') throw new Error('Платёж был возвращён.');
+    } catch (error) {
+      if (Date.now() - started > 5000) throw error;
+    }
+  }
+  notify('VK принял оплату. Доступ появится после подтверждения платежа.');
+  return { paid: false, pending: true };
+}
+
+function vkPurchaseTargetFromTelegramLink(href) {
+  if (voxPlatform() !== 'vk') return null;
+  let url;
+  try { url = new URL(String(href || ''), window.location.href); } catch (_) { return null; }
+  if (!/^(t\.me|telegram\.me)$/i.test(url.hostname)) return null;
+  const start = String(url.searchParams.get('start') || '');
+  const match = start.match(/^buy_(chapter_package|chapter|book|audio|graphic)_(\d+)$/);
+  if (!match) return null;
+  return { kind: match[1], targetId: Number(match[2]) };
+}
+
+function bindVKPurchaseInterception() {
+  if (voxPlatform() !== 'vk') return;
+  document.addEventListener('click', (event) => {
+    const link = event.target.closest?.('a[href]');
+    if (!link) return;
+    const target = vkPurchaseTargetFromTelegramLink(link.getAttribute('href'));
+    if (!target) return;
+    event.preventDefault();
+    event.stopPropagation();
+    link.setAttribute('aria-busy', 'true');
+    startVKPayment(target.kind, target.targetId)
+      .then((result) => {
+        if (result?.paid) window.setTimeout(() => window.location.reload(), 600);
+      })
+      .catch((error) => notify(error.message || 'Не удалось открыть оплату VK'))
+      .finally(() => link.removeAttribute('aria-busy'));
+  }, { capture: true });
+  // Telegram Stars labels are platform-specific. In VK the exact vote price is
+  // always verified by the server and shown by the native VK order dialog.
+  document.querySelectorAll('.paywall-card, #audioPaywall, #graphicPreviewNotice').forEach((root) => {
+    root?.querySelectorAll?.('a[href*="t.me"], a[href*="telegram.me"]').forEach((link) => {
+      link.textContent = String(link.textContent || '').replace(/\s*·\s*\d+\s*Stars?/i, '').replace(/Купить/i, 'Купить за голоса');
+    });
+  });
+}
+
+async function refreshCrossPlatformAccount() {
+  const panel = document.getElementById('crossPlatformAccountPanel');
+  if (!panel || !tgInitData()) return;
+  const statusNode = document.getElementById('crossPlatformStatus');
+  try {
+    const data = await apiFetch('/api/account-link/status');
+    const tg = Boolean(data.telegram);
+    const vk = Boolean(data.vk);
+    statusNode.innerHTML = data.linked
+      ? '<p><b>✅ Telegram и VK связаны.</b><br><span class="muted">Личная библиотека и прогресс общие.</span></p>'
+      : `<p><b>Текущая платформа: ${escapeHtml(data.platform === 'vk' ? 'VK' : 'Telegram')}</b><br><span class="muted">Telegram: ${tg ? 'подключён' : 'не подключён'} · VK: ${vk ? 'подключён' : 'не подключён'}</span></p>`;
+  } catch (error) {
+    statusNode.innerHTML = `<p class="muted">${escapeHtml(error.message || 'Не удалось проверить привязку.')}</p>`;
+  }
+}
+
+function initCrossPlatformAccount() {
+  const panel = document.getElementById('crossPlatformAccountPanel');
+  if (!panel) return;
+  document.getElementById('crossPlatformRefresh')?.addEventListener('click', refreshCrossPlatformAccount);
+  document.getElementById('crossPlatformCreateCode')?.addEventListener('click', async () => {
+    const button = document.getElementById('crossPlatformCreateCode');
+    if (button) button.disabled = true;
+    try {
+      const data = await apiFetch('/api/account-link/code', { method: 'POST' });
+      const box = document.getElementById('crossPlatformCodeBox');
+      if (box) {
+        box.hidden = false;
+        box.innerHTML = `<div class="empty-card"><span class="eyebrow">Код привязки</span><h3 style="letter-spacing:.18em">${escapeHtml(data.code || '')}</h3><p>Введите этот код в VoxLyra на второй платформе в течение 10 минут.</p></div>`;
+      }
+    } catch (error) { notify(error.message || 'Не удалось создать код'); }
+    finally { if (button) button.disabled = false; }
+  });
+  document.getElementById('crossPlatformConsumeForm')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const input = document.getElementById('crossPlatformCodeInput');
+    const code = String(input?.value || '').trim().toUpperCase();
+    if (!code) { notify('Введите код привязки'); return; }
+    try {
+      await apiFetch('/api/account-link/consume', { method: 'POST', body: JSON.stringify({ code }) });
+      notify('Аккаунты связаны. Перезагружаем общую библиотеку…');
+      window.setTimeout(() => window.location.reload(), 900);
+    } catch (error) { notify(error.message || 'Не удалось привязать аккаунты'); }
+  });
+  refreshCrossPlatformAccount();
+}
+
+// Register after the main initialization. The call is idempotent and only acts
+// on pages where the corresponding controls exist.
+document.addEventListener('DOMContentLoaded', () => {
+  bindVKPurchaseInterception();
+  initCrossPlatformAccount();
+});

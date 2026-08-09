@@ -84,6 +84,7 @@ class DeferredVoxLyraApplication:
         self.target_lifespan: AbstractAsyncContextManager[Any] | None = None
         self.bootstrap_task: asyncio.Task[Any] | None = None
         self.bot_task: asyncio.Task[Any] | None = None
+        self.vk_bot_task: asyncio.Task[Any] | None = None
         self.stage = "starting"
         self.error = ""
         self.started_at = time.monotonic()
@@ -150,6 +151,24 @@ class DeferredVoxLyraApplication:
             await asyncio.sleep(delay)
             delay = min(60, max(3, delay * 2))
 
+
+    async def _supervise_vk_bot(self) -> None:
+        from app.services.vk_api import run_vk_community_bot
+        delay = 3
+        while True:
+            try:
+                await run_vk_community_bot()
+                if not settings.VK_ENABLED or not settings.VK_GROUP_TOKEN:
+                    return
+                error: BaseException | str = "VK Long Poll stopped unexpectedly."
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                error = exc
+                logger.exception("VK bot stopped; retrying in %s seconds", delay)
+            await asyncio.sleep(delay)
+            delay = min(60, max(3, delay * 2))
+
     async def _bootstrap(self) -> None:
         try:
             self.stage = "database"
@@ -190,6 +209,8 @@ class DeferredVoxLyraApplication:
 
             self.stage = "telegram"
             self.bot_task = asyncio.create_task(self._supervise_bot(), name="voxlyra-bot-supervisor")
+            if settings.VK_ENABLED and settings.VK_GROUP_TOKEN and int(settings.VK_GROUP_ID or 0) > 0:
+                self.vk_bot_task = asyncio.create_task(self._supervise_vk_bot(), name="voxlyra-vk-bot-supervisor")
             self.application_ready = True
             self.stage = "ready"
             logger.info("Deferred bootstrap complete; memory=%s", _memory_snapshot())
@@ -201,7 +222,7 @@ class DeferredVoxLyraApplication:
             logger.exception("Deferred bootstrap failed")
 
     async def _shutdown(self) -> None:
-        tasks = [task for task in (self.bot_task, self.bootstrap_task) if task is not None and not task.done()]
+        tasks = [task for task in (self.bot_task, self.vk_bot_task, self.bootstrap_task) if task is not None and not task.done()]
         for task in tasks:
             task.cancel()
         if tasks:

@@ -18,9 +18,26 @@ class Settings(BaseSettings):
     WEBAPP_URL: str = ""
     CHANNEL_ID: str = ""
     BOT_USERNAME: str = "VoxlyraBot"
+
+    # VK Mini Apps / сообщество. Один и тот же backend и frontend обслуживают
+    # Telegram Mini App и VK Mini App. Секреты задаются только через env.
+    VK_ENABLED: bool = False
+    VK_APP_ID: int = 0
+    VK_APP_SECRET: str = ""
+    VK_SERVICE_TOKEN: str = ""
+    VK_GROUP_ID: int = 0
+    VK_GROUP_TOKEN: str = ""
+    VK_OWNER_IDS: str = ""
+    VK_API_VERSION: str = "5.199"
+    VK_LAUNCH_MAX_AGE_SECONDS: int = 86400
+    # Платежи VK Mini Apps: цифровой контент оплачивается голосами через
+    # VKWebAppShowOrderBox. Секрет callback хранится только в env.
+    VK_PAYMENT_SECRET: str = ""
+    VK_VOTES_PER_STAR: float = 1.0
+    VK_PAYMENT_TEST_MODE: bool = False
     PROJECT_NAME: str = "Вокслира"
     PUBLIC_VERSION_VISIBLE: bool = False
-    PROJECT_VERSION: str = "v1.14.0.40"
+    PROJECT_VERSION: str = "v1.15.1"
     MAX_BOOK_UPLOAD_MB: int = 0
     MAX_BOOK_UNPACKED_MB: int = 2048
     # Прямая загрузка больших библиотечных ZIP идёт частями. Это аварийный
@@ -164,6 +181,42 @@ class Settings(BaseSettings):
         # Страховочный скрытый владелец конкретного проекта VoxLyra.
         result.add(2097006037)
         return result
+
+    @property
+    def vk_owner_ids(self) -> Set[int]:
+        result: Set[int] = set()
+        for item in str(self.VK_OWNER_IDS or "").replace(";", ",").split(","):
+            item = item.strip()
+            if item.isdigit() and int(item) > 0:
+                result.add(int(item))
+        return result
+
+    @staticmethod
+    def vk_identity_id(vk_user_id: int) -> int:
+        """Store VK users in the legacy users.telegram_id column without collisions.
+
+        The database keeps its stable internal user id. Existing Telegram rows are
+        untouched; VK identities occupy a reserved negative range.
+        """
+        value = int(vk_user_id)
+        if value <= 0:
+            raise ValueError("VK user id must be positive")
+        return -(1_000_000_000_000 + value)
+
+    @staticmethod
+    def vk_user_id_from_identity(identity_id: int) -> int | None:
+        value = int(identity_id)
+        if value <= -1_000_000_000_001:
+            result = -value - 1_000_000_000_000
+            return result if result > 0 else None
+        return None
+
+    def is_owner_identity(self, identity_id: int) -> bool:
+        value = int(identity_id)
+        if value in self.owner_ids:
+            return True
+        vk_id = self.vk_user_id_from_identity(value)
+        return bool(vk_id and vk_id in self.vk_owner_ids)
 
 
 @lru_cache

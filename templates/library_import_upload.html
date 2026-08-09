@@ -125,7 +125,7 @@
     const mb = Number(value || 0) / 1024 / 1024;
     return `${mb.toFixed(mb >= 10 ? 1 : 2)} МБ`;
   };
-  const initData = () => String(tg?.initData || '');
+  const initData = () => { const t=String(tg?.initData||''); if(t) return t; try{const p=new URLSearchParams(location.search); if(p.get('vk_user_id')&&p.get('vk_app_id')&&p.get('sign')) return 'vk:'+p.toString();}catch(_){} return ''; };
   const endpoint = (path) => new URL(path, window.location.origin).toString();
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 

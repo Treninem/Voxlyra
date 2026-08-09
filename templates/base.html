@@ -6,6 +6,7 @@
   <meta name="color-scheme" content="dark light">
   <meta name="theme-color" content="#090b18">
   <meta name="voxlyra-bot-username" content="{{ bot_username or '' }}">
+  <meta name="voxlyra-vk-app-id" content="{{ vk_app_id or '' }}">
   <title>{% block title %}{{ project_name }}{% endblock %}</title>
   <link rel="icon" href="/favicon.ico?v={{ asset_version }}" sizes="any">
   <link rel="icon" type="image/webp" href="/static/img/miniapp/voxlyra-v.webp?v={{ asset_version }}">
@@ -16,7 +17,8 @@
   <link rel="stylesheet" href="/static/css/app.css?v={{ asset_version }}">
   <link rel="stylesheet" href="/static/css/hotfix-v1117.css?v={{ asset_version }}">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
-  <script>document.documentElement.classList.toggle("vox-external-browser",!window.Telegram?.WebApp?.initData);document.documentElement.classList.toggle("vox-telegram-auth",!!window.Telegram?.WebApp?.initData)</script>
+  <script src="https://unpkg.com/@vkontakte/vk-bridge@2.15.0/dist/browser.min.js"></script>
+  <script>try{const q=new URLSearchParams(location.search);const vk=!!(q.get("vk_user_id")&&q.get("vk_app_id")&&q.get("sign"));const tg=!!window.Telegram?.WebApp?.initData;document.documentElement.classList.toggle("vox-external-browser",!(tg||vk));document.documentElement.classList.toggle("vox-telegram-auth",tg);document.documentElement.classList.toggle("vox-vk-auth",vk)}catch(_){}</script>
 </head>
 <body class="{% block body_class %}{% endblock %}">
   <div class="app-ambient" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i></div>
@@ -38,8 +40,8 @@
     <a class="route-nav-home" href="/" aria-label="Перейти в главное меню">⌂ <span>В меню</span></a>
   </nav>
   <aside class="external-browser-notice" id="externalBrowserNotice" hidden aria-live="polite">
-    <div><strong>VoxLyra работает внутри Telegram</strong><span>Каталог можно посмотреть здесь, а чтение, покупки, личная библиотека и прогресс открываются после безопасной проверки Telegram.</span></div>
-    <a class="button-link compact-button" id="externalBrowserOpen" href="#">Открыть в Telegram</a>
+    <div><strong>Откройте VoxLyra в Telegram или VK</strong><span>Чтение, личная библиотека и прогресс доступны после безопасной проверки платформы.</span></div>
+    <a class="button-link compact-button" id="externalBrowserOpen" href="#">Открыть VoxLyra</a>
   </aside>
   <main class="app-shell">
     {% block content %}{% endblock %}
