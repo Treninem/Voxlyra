@@ -27,7 +27,12 @@ const readingModeLabels = {
 };
 const graphicTypes = new Set(['comic', 'manga', 'manhwa', 'webtoon', 'graphic_novel']);
 
-function formatStars(value) { return `${Number(value || 0).toLocaleString('ru-RU')} Stars`; }
+function formatStars(value) {
+  const amount = Number(value || 0);
+  return voxPlatform() === 'vk'
+    ? `${votesForStars(amount).toLocaleString('ru-RU')} голос.`
+    : `${amount.toLocaleString('ru-RU')} Stars`;
+}
 function formatRubMinor(value) { return `${(Number(value || 0) / 100).toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ₽`; }
 function isGraphicType(value) { return graphicTypes.has(String(value || 'book')); }
 function defaultReadingMode(contentType) {
@@ -282,13 +287,15 @@ function setAuthorLoading(show) {
   if (loading) loading.hidden = !show;
 }
 
-function showAuthorError(message) {
+function showAuthorError(message, status = 0) {
   setAuthorLoading(false);
   document.getElementById('authorDashboard')?.setAttribute('hidden', '');
   const box = document.getElementById('authorError');
   const text = document.getElementById('authorErrorText');
-  if (text) text.textContent = message || 'Откройте этот раздел из Telegram.';
+  if (text) text.textContent = message || 'Откройте этот раздел через Telegram или VK.';
   if (box) box.hidden = false;
+  const registration = document.getElementById('authorRegistration');
+  if (registration) registration.hidden = Number(status) !== 403;
 }
 
 
@@ -401,8 +408,10 @@ function renderAuthorDashboard(data) {
   const commissionStars = Number(example.commission_stars || 2);
   const netStars = Number(example.net_stars || 8);
   const authorNet = Number(example.author_net_minor || 800);
-  document.getElementById('authorPriceExample').textContent = `При цене ${grossStars} Stars: покупателю показывается ориентир ${formatRubMinor(buyerEstimate)}, платформенная и бонусная части вместе ${commissionStars} Stars, автору ${netStars} Stars = ${formatRubMinor(authorNet)}. Начисления всегда целые.`;
-  document.getElementById('authorPayoutState').textContent = 'Продажи принимаются только в Stars. Рублёвая сумма автора фиксируется для каждой продажи, а выплата подтверждается владельцем вручную.';
+  document.getElementById('authorPriceExample').textContent = `При базовой цене ${formatStars(grossStars)}: покупателю показывается ориентир ${formatRubMinor(buyerEstimate)}, комиссия ${formatStars(commissionStars)}, автору ${formatStars(netStars)} = ${formatRubMinor(authorNet)}.`;
+  document.getElementById('authorPayoutState').textContent = voxPlatform() === 'vk'
+    ? 'Покупатель во VK платит голосами. Доход автора фиксируется в общем балансе VoxLyra.'
+    : 'Покупатель в Telegram платит Stars. Доход автора фиксируется в общем балансе VoxLyra.';
   const desired = document.getElementById('authorDesiredNet');
   const suggested = document.getElementById('authorSuggestedFinal');
   const recalc = () => {
@@ -777,7 +786,31 @@ async function loadAuthorDashboard() {
         notify(graphic ? 'Выберите PDF, архив или изображения страниц' : 'Выберите файл, затем нажмите «Загрузить и проверить»');
       }
     }
-  } catch (error) { showAuthorError(error.message); }
+  } catch (error) { showAuthorError(error.message, error.status); }
+}
+
+async function registerAuthorFromMiniApp(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const submit = form.querySelector('button[type="submit"]');
+  if (submit) submit.disabled = true;
+  try {
+    await apiFetch('/api/author/register', {
+      method: 'POST',
+      body: JSON.stringify({
+        pen_name: document.getElementById('authorRegisterPenName')?.value || '',
+        bio: document.getElementById('authorRegisterBio')?.value || '',
+        country: document.getElementById('authorRegisterCountry')?.value || '',
+        is_adult: Boolean(document.getElementById('authorRegisterAdult')?.checked),
+        accept_author_terms: Boolean(document.getElementById('authorRegisterTerms')?.checked),
+      }),
+    });
+    notify('Профиль автора создан');
+    document.getElementById('authorRegistration').hidden = true;
+    setAuthorLoading(true);
+    await loadAuthorDashboard();
+  } catch (error) { notify(error.message || 'Не удалось создать профиль автора'); }
+  finally { if (submit) submit.disabled = false; }
 }
 
 async function openAuthorBook(bookId) {
@@ -1820,6 +1853,7 @@ document.addEventListener('DOMContentLoaded', () => {
   if (!document.getElementById('authorStudio')) return;
   document.querySelector('[data-close-moderation]')?.addEventListener('click', () => setModerationSuccessVisible(false));
   bindAuthorEvents();
+  document.getElementById('authorRegistrationForm')?.addEventListener('submit', registerAuthorFromMiniApp);
   document.getElementById('authorAnalyticsPeriod')?.addEventListener('change', (event) => loadAuthorAnalytics(event.target.value));
   setGraphicUploadTab('file');
   document.getElementById('graphicAutoStructure')?.addEventListener('change', syncGraphicAutoStructure);

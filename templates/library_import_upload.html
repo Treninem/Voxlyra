@@ -260,7 +260,7 @@
     const telegramInitData = initData();
     if (!telegramInitData) {
       status.className = 'status error';
-      status.textContent = 'Откройте эту страницу кнопкой из сообщения бота в Telegram.';
+      status.textContent = 'Откройте эту страницу из подтверждённой сессии VoxLyra в Telegram или VK.';
       return;
     }
     if (navigator.onLine === false) {

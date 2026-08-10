@@ -6,10 +6,21 @@ from typing import Any
 
 from PIL import Image, ImageOps
 
-try:
-    import pytesseract
-except Exception:  # pragma: no cover - optional runtime fallback
-    pytesseract = None
+pytesseract = None
+_pytesseract_checked = False
+
+
+def _pytesseract():
+    """Load OCR Python glue only when OCR is explicitly requested."""
+    global pytesseract, _pytesseract_checked
+    if not _pytesseract_checked:
+        _pytesseract_checked = True
+        try:
+            import pytesseract as module
+            pytesseract = module
+        except Exception:  # pragma: no cover - optional runtime fallback
+            pytesseract = None
+    return pytesseract
 
 
 class GraphicOCRError(RuntimeError):
@@ -17,14 +28,15 @@ class GraphicOCRError(RuntimeError):
 
 
 def ocr_engine_available() -> bool:
-    return bool(pytesseract is not None and shutil.which("tesseract"))
+    return bool(shutil.which("tesseract") and _pytesseract() is not None)
 
 
 def available_ocr_languages() -> list[str]:
-    if not ocr_engine_available():
+    engine = _pytesseract()
+    if not shutil.which("tesseract") or engine is None:
         return []
     try:
-        return sorted({str(item).strip().lower() for item in pytesseract.get_languages(config="") if str(item).strip()})
+        return sorted({str(item).strip().lower() for item in engine.get_languages(config="") if str(item).strip()})
     except Exception:
         return []
 
@@ -43,11 +55,14 @@ def _resolve_ocr_languages(requested: str) -> str:
 
 
 def _extract_ocr_candidate(image: Image.Image, *, languages: str, psm: int) -> dict[str, Any]:
-    data = pytesseract.image_to_data(
+    engine = _pytesseract()
+    if engine is None:
+        raise GraphicOCRError("Локальный OCR пока недоступен на сервере")
+    data = engine.image_to_data(
         image,
         lang=languages,
         config=f"--oem 1 --psm {int(psm)}",
-        output_type=pytesseract.Output.DICT,
+        output_type=engine.Output.DICT,
     )
     words: list[str] = []
     confidences: list[float] = []

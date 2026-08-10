@@ -10,6 +10,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from app.config import settings
 from app.services.security import pseudonymous_log_id
 from app.services.vk_api import send_vk_message
+from app.services.account_identity import identity_status
 from app.db import (
     claim_notification_delivery,
     finish_notification_delivery,
@@ -90,10 +91,10 @@ def refund_message(status: str, amount_stars: object, note: object = "") -> str:
     except (TypeError, ValueError):
         amount = 0
     if status == "refunded":
-        return f"⭐ Возврат выполнен\n\n{amount} Stars возвращены на ваш баланс Telegram."
+        return f"⭐ Возврат выполнен\n\nВозврат на сумму {amount} базовых единиц подтверждён через исходный способ оплаты."
     safe_note = _clean(note, 500)
     suffix = f"\n\nПричина: {safe_note}" if safe_note else ""
-    return f"⭐ Возврат отклонён\n\nЗапрос на возврат {amount} Stars не был одобрен.{suffix}"
+    return f"⭐ Возврат отклонён\n\nЗапрос на возврат суммы {amount} не был одобрен.{suffix}"
 
 
 def payout_message(status: str, amount_stars: object, note: object = "") -> str:
@@ -192,17 +193,6 @@ async def send_user_notification(
     if not telegram_id:
         return "unavailable"
     identity_id = int(telegram_id)
-    vk_user_id = settings.vk_user_id_from_identity(identity_id)
-    if vk_user_id:
-        if app_user_id is not None:
-            preferences = await get_user_preferences(int(app_user_id))
-            if preferences.get("notifications") == "0":
-                return "disabled"
-            if category and preferences.get(f"notifications_{category}", "1") == "0":
-                return "disabled"
-        return "sent" if await send_vk_message(vk_user_id, text) else "unavailable"
-    if identity_id <= 0 or not settings.BOT_TOKEN:
-        return "unavailable"
     if app_user_id is not None:
         preferences = await get_user_preferences(int(app_user_id))
         if preferences.get("notifications") == "0":
@@ -210,26 +200,54 @@ async def send_user_notification(
         if category and preferences.get(f"notifications_{category}", "1") == "0":
             return "disabled"
 
-    owns_bot = bot is None
-    delivery_bot = bot or Bot(token=settings.BOT_TOKEN)
-    try:
-        kwargs = {
-            "chat_id": int(telegram_id),
-            "text": text,
-            "disable_web_page_preview": True,
-        }
-        if reply_markup is not None:
-            kwargs["reply_markup"] = reply_markup
-        if parse_mode is not None:
-            kwargs["parse_mode"] = parse_mode
-        await delivery_bot.send_message(**kwargs)
+    telegram_target = identity_id if identity_id > 0 else 0
+    vk_target = settings.vk_user_id_from_identity(identity_id) or 0
+    if app_user_id is not None:
+        try:
+            linked = await identity_status(int(app_user_id))
+            for item in linked.get("identities") or []:
+                platform = str(item.get("platform") or "")
+                external = str(item.get("external_id") or "")
+                if not external.isdigit() or int(external) <= 0:
+                    continue
+                if platform == "telegram":
+                    telegram_target = int(external)
+                elif platform == "vk":
+                    vk_target = int(external)
+        except Exception as exc:
+            logger.warning("Could not resolve linked notification identities for user %s: %s", app_user_id, exc)
+
+    results: list[NotificationStatus] = []
+    if vk_target:
+        results.append("sent" if await send_vk_message(vk_target, text) else "failed")
+
+    if telegram_target > 0 and settings.BOT_TOKEN:
+        owns_bot = bot is None
+        delivery_bot = bot or Bot(token=settings.BOT_TOKEN)
+        try:
+            kwargs = {
+                "chat_id": telegram_target,
+                "text": text,
+                "disable_web_page_preview": True,
+            }
+            if reply_markup is not None:
+                kwargs["reply_markup"] = reply_markup
+            if parse_mode is not None:
+                kwargs["parse_mode"] = parse_mode
+            await delivery_bot.send_message(**kwargs)
+            results.append("sent")
+        except Exception as exc:  # Telegram may reject delivery when the user blocked the bot.
+            logger.warning("Notification delivery failed for user %s: %s", pseudonymous_log_id(telegram_target), exc)
+            results.append("failed")
+        finally:
+            if owns_bot:
+                await delivery_bot.session.close()
+
+    if "sent" in results:
         return "sent"
-    except Exception as exc:  # Telegram may reject delivery when the user blocked the bot.
-        logger.warning("Notification delivery failed for user %s: %s", pseudonymous_log_id(telegram_id), exc)
+    if results:
         return "failed"
-    finally:
-        if owns_bot:
-            await delivery_bot.session.close()
+    return "unavailable"
 
 async def notify_book_followers(
     *,
@@ -314,4 +332,3 @@ async def notify_author_followers(
         if owns_bot and delivery_bot is not None:
             await delivery_bot.session.close()
     return totals
-

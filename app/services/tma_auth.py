@@ -34,9 +34,9 @@ class TMAUser:
 
 def _validate_init_data_raw(init_data: str, bot_token: str, max_age_seconds: int | None = None) -> dict[str, str]:
     if not init_data:
-        raise TMAAuthError("Откройте этот раздел из Telegram, чтобы сохранить доступ и прогресс.")
+        raise TMAAuthError("Откройте этот раздел через Telegram или VK, чтобы сохранить доступ и прогресс.")
     if not bot_token:
-        raise TMAAuthError("Сейчас не удалось проверить сессию. Откройте раздел заново из Telegram.")
+        raise TMAAuthError("Сейчас не удалось проверить сессию. Откройте раздел заново через Telegram или VK.")
 
     if len(init_data.encode("utf-8")) > 16 * 1024:
         raise TMAAuthError("Данные сессии Telegram имеют неверный размер. Откройте раздел заново.")
@@ -59,13 +59,13 @@ def _validate_init_data_raw(init_data: str, bot_token: str, max_age_seconds: int
         raise TMAAuthError("Время сессии Telegram не прошло проверку. Откройте раздел заново.")
     effective_max_age = int(settings.TMA_INIT_DATA_MAX_AGE_SECONDS if max_age_seconds is None else max_age_seconds)
     if effective_max_age > 0 and now - auth_date > effective_max_age:
-        raise TMAAuthError("Сессия Mini App устарела. Откройте раздел заново из Telegram.")
+        raise TMAAuthError("Сессия Mini App устарела. Откройте раздел заново через Telegram или VK.")
 
     data_check_string = "\n".join(f"{key}={value}" for key, value in sorted(pairs.items()))
     secret_key = hmac.new(b"WebAppData", bot_token.encode("utf-8"), hashlib.sha256).digest()
     calculated_hash = hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(calculated_hash, received_hash):
-        raise TMAAuthError("Сессия не прошла проверку. Откройте раздел заново из Telegram.")
+        raise TMAAuthError("Сессия не прошла проверку. Откройте раздел заново через Telegram или VK.")
     return pairs
 
 

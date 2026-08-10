@@ -80,7 +80,8 @@ async def get_vk_user_profile(vk_user_id: int) -> dict[str, Any] | None:
 
 
 def vk_main_keyboard(vk_user_id: int | None = None) -> str:
-    """Visible inline menu that launches the signed native VK Mini App."""
+    """VK equivalent of Telegram's mixed menu: content opens the Mini App,
+    while personal, author and service sections stay inside the bot chat."""
     app_id = int(settings.VK_APP_ID or 0)
     owner_id = -abs(int(settings.VK_GROUP_ID or 0))
     if app_id <= 0 or owner_id == 0:
@@ -97,20 +98,133 @@ def vk_main_keyboard(vk_user_id: int | None = None) -> str:
             },
         }
 
+    def command_button(label: str, command: str) -> dict[str, Any]:
+        return {
+            "action": {
+                "type": "text",
+                "label": label,
+                "payload": json.dumps({"vox": command}, ensure_ascii=False, separators=(",", ":")),
+            },
+            "color": "secondary",
+        }
+
     buttons = [
         [app_button("📚 Книги", "catalog"), app_button("🖼 Комиксы", "comics")],
         [app_button("🎧 Слушать", "audio")],
-        [app_button("⭐ Моё", "library"), app_button("✍ Автору", "author")],
-        [app_button("⚙ Ещё", "settings")],
+        [command_button("⭐ Моё", "my"), command_button("✍ Автору", "author")],
+        [command_button("⚙ Ещё", "more")],
     ]
     if vk_user_id is not None and int(vk_user_id) in settings.vk_owner_ids:
-        buttons.append([app_button("👑 Управление", "control")])
+        buttons.append([command_button("👑 Управление", "owner")])
 
     keyboard = {
         "inline": True,
         "buttons": buttons,
     }
     return json.dumps(keyboard, ensure_ascii=False, separators=(",", ":"))
+
+
+def _vk_command_keyboard(rows: list[list[tuple[str, str]]], *, inline: bool = False) -> str:
+    buttons = []
+    for row in rows:
+        buttons.append([
+            {
+                "action": {
+                    "type": "text", "label": label,
+                    "payload": json.dumps({"vox": command}, ensure_ascii=False, separators=(",", ":")),
+                },
+                "color": "primary" if command == "main" else "secondary",
+            }
+            for label, command in row
+        ])
+    return json.dumps({"inline": bool(inline), "one_time": False, "buttons": buttons}, ensure_ascii=False, separators=(",", ":"))
+
+
+def _vk_app_and_commands_keyboard(location: str, label: str, rows: list[list[tuple[str, str]]]) -> str:
+    app_id = int(settings.VK_APP_ID or 0)
+    owner_id = -abs(int(settings.VK_GROUP_ID or 0))
+    buttons: list[list[dict[str, Any]]] = []
+    if app_id > 0 and owner_id:
+        buttons.append([{"action": {"type": "open_app", "app_id": app_id, "owner_id": owner_id, "hash": location, "label": label}}])
+    command_keyboard = json.loads(_vk_command_keyboard(rows))
+    buttons.extend(command_keyboard["buttons"])
+    return json.dumps({"inline": False, "one_time": False, "buttons": buttons}, ensure_ascii=False, separators=(",", ":"))
+
+
+def _vk_message_command(message: dict[str, Any]) -> str:
+    payload = message.get("payload")
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            payload = {}
+    if isinstance(payload, dict) and str(payload.get("vox") or "").strip():
+        return str(payload["vox"]).strip().lower()
+    text = str(message.get("text") or "").strip().casefold()
+    aliases = {
+        "начать": "main", "старт": "main", "/start": "main", "меню": "main", "главное меню": "main",
+        "⭐ моё": "my", "мое": "my", "моё": "my", "✍ автору": "author", "автору": "author",
+        "⚙ ещё": "more", "еще": "more", "ещё": "more", "💎 баланс и бонусы": "bonuses",
+        "🛟 поддержка": "support", "📜 правила": "legal", "🎨 настройки": "settings",
+        "🔗 связать telegram + vk": "link", "👑 управление": "owner",
+    }
+    return aliases.get(text, "main")
+
+
+async def _vk_resolve_app_user(vk_user_id: int) -> tuple[int, Any]:
+    from app.db import get_user_by_id, upsert_user
+    from app.services.account_identity import resolve_external_identity
+
+    identity_id = settings.vk_identity_id(int(vk_user_id))
+    legacy = await upsert_user(identity_id, None, f"VK пользователь {int(vk_user_id)}")
+    canonical_id = await resolve_external_identity("vk", int(vk_user_id), int(legacy["id"]))
+    return canonical_id, (await get_user_by_id(canonical_id) or legacy)
+
+
+async def _vk_bot_screen(vk_user_id: int, command: str) -> tuple[str, str]:
+    """Render VK chat sections without forcing every action into Mini App."""
+    from app.db import get_author_dashboard_stats, get_author_finance_summary, get_author_profile, get_bonus_balance, get_reader_wallet_balance
+    from app.services.account_identity import identity_status
+
+    app_user_id, _ = await _vk_resolve_app_user(vk_user_id)
+    if command == "my":
+        wallet = await get_reader_wallet_balance(app_user_id)
+        bonuses = await get_bonus_balance(app_user_id)
+        identities = await identity_status(app_user_id)
+        linked = "Telegram и VK связаны" if identities.get("linked") else "аккаунты ещё не связаны"
+        return (
+            f"⭐ Моё\n\nБаланс: {wallet} Stars внутреннего учёта\nБонусы: {bonuses}\nПрофиль: {linked}.",
+            _vk_app_and_commands_keyboard("library", "📚 Открыть мою библиотеку", [[("💎 Баланс и бонусы", "bonuses")], [("🔗 Связать Telegram + VK", "link")], [("🏠 Главное меню", "main")]]),
+        )
+    if command == "bonuses":
+        wallet = await get_reader_wallet_balance(app_user_id)
+        bonuses = await get_bonus_balance(app_user_id)
+        return (f"💎 Баланс и бонусы\n\nБаланс доступа: {wallet}\nБонусных баллов: {bonuses}\n\nВо VK цены и оплата показываются в голосах, в Telegram — в Stars.", _vk_app_and_commands_keyboard("library", "💳 Открыть баланс", [[("⬅ Моё", "my")], [("🏠 Главное меню", "main")]]))
+    if command == "author":
+        profile = await get_author_profile(app_user_id)
+        if profile:
+            stats = await get_author_dashboard_stats(app_user_id)
+            finance = await get_author_finance_summary(app_user_id)
+            text = (f"✍ Кабинет автора\n\n{profile['pen_name']}\nПроизведений: {stats.get('books_total', 0)}\nОпубликовано: {stats.get('books_published', 0)}\nНа проверке: {stats.get('books_review', 0)}\nДоступно автору: {finance.get('available', 0)} Stars внутреннего расчёта.")
+        else:
+            identities = await identity_status(app_user_id)
+            text = "✍ Стать автором\n\nПрофиль автора для этого аккаунта пока не создан. Создайте его во VK или свяжите существующий Telegram-профиль."
+            if not identities.get("linked"):
+                text += " При привязке можно объединить два профиля либо выбрать основной."
+        return (text, _vk_app_and_commands_keyboard("author", "✍ Открыть кабинет автора", [[("🔗 Связать Telegram + VK", "link")], [("🏠 Главное меню", "main")]]))
+    if command == "link":
+        return ("🔗 Один аккаунт VoxLyra\n\nОткройте настройки, создайте код на одной платформе и введите его на другой. Если профили уже разные, VoxLyra предложит: объединить данные, оставить Telegram или оставить VK.", _vk_app_and_commands_keyboard("settings", "🔗 Открыть привязку аккаунтов", [[("⬅ Моё", "my")], [("🏠 Главное меню", "main")]]))
+    if command == "support":
+        return ("🛟 Поддержка\n\nОпишите проблему одним сообщением. Для покупки укажите произведение, главу и время оплаты. Сообщение будет сохранено в диалоге сообщества.", _vk_command_keyboard([[('⬅ Ещё', 'more')], [('🏠 Главное меню', 'main')]]))
+    if command == "legal":
+        return ("📜 Правила VoxLyra\n\nДокументы, согласия, управление личными данными и удаление профиля доступны одинаково для VK и Telegram.", _vk_app_and_commands_keyboard("settings", "📜 Открыть документы", [[("⬅ Ещё", "more")], [("🏠 Главное меню", "main")]]))
+    if command == "settings":
+        return ("🎨 Настройки\n\nТема, шрифт, уведомления, приватность и привязка аккаунтов сохраняются в едином профиле VoxLyra.", _vk_app_and_commands_keyboard("settings", "⚙ Открыть настройки", [[("⬅ Ещё", "more")], [("🏠 Главное меню", "main")]]))
+    if command == "more":
+        return ("⚙ Ещё\n\nВыберите раздел.", _vk_command_keyboard([[('🎨 Настройки', 'settings')], [('💎 Баланс и бонусы', 'bonuses'), ('🛟 Поддержка', 'support')], [('📜 Правила', 'legal')], [('🏠 Главное меню', 'main')]]))
+    if command == "owner" and int(vk_user_id) in settings.vk_owner_ids:
+        return ("👑 Управление VoxLyra\n\nПанель владельца использует тот же внутренний аккаунт и базу данных.", _vk_app_and_commands_keyboard("control", "👑 Открыть панель управления", [[("🏠 Главное меню", "main")]]))
+    return ("VoxLyra — книги, аудио, комиксы и личная библиотека. Выберите раздел в меню ниже.", vk_main_keyboard(vk_user_id))
 
 
 async def send_vk_message(vk_user_id: int, text: str, *, keyboard: str | None = None) -> bool:
@@ -170,6 +284,8 @@ async def run_vk_community_bot() -> None:
     group_id = int(settings.VK_GROUP_ID)
     app_url = vk_app_url()
     delay = 2
+    processed_event_ids: set[str] = set()
+    processed_event_order: list[str] = []
     while True:
         try:
             lp = await vk_api_call("groups.getLongPollServer", {"group_id": group_id}, token=settings.VK_GROUP_TOKEN)
@@ -186,12 +302,25 @@ async def run_vk_community_bot() -> None:
                     for event in payload.get("updates") or []:
                         if event.get("type") != "message_new":
                             continue
+                        event_id = str(event.get("event_id") or "").strip()
+                        if event_id and event_id in processed_event_ids:
+                            continue
+                        if event_id:
+                            processed_event_ids.add(event_id)
+                            processed_event_order.append(event_id)
+                            if len(processed_event_order) > 2048:
+                                processed_event_ids.discard(processed_event_order.pop(0))
                         message = ((event.get("object") or {}).get("message") or {})
                         from_id = int(message.get("from_id") or 0)
                         if from_id <= 0:
                             continue
-                        keyboard = vk_main_keyboard(from_id)
-                        text = "VoxLyra — книги, аудио, комиксы и личная библиотека. Выберите раздел в меню ниже."
+                        command = _vk_message_command(message)
+                        try:
+                            text, keyboard = await _vk_bot_screen(from_id, command)
+                        except Exception as screen_exc:
+                            logger.exception("VK screen %s failed for user %s", command, from_id)
+                            text = "Не удалось открыть выбранный раздел. Главное меню уже восстановлено — попробуйте ещё раз."
+                            keyboard = vk_main_keyboard(from_id)
                         if not keyboard and app_url:
                             text += f"\n\nОткрыть приложение: {app_url}"
                         await send_vk_message(from_id, text, keyboard=keyboard)

@@ -10,7 +10,6 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 from xml.etree import ElementTree
 
-import fitz  # PyMuPDF
 from bs4 import BeautifulSoup
 from PIL import Image, ImageOps, UnidentifiedImageError
 
@@ -313,6 +312,12 @@ def _image_candidates_from_epub(source: Path, extract_dir: Path) -> list[tuple[P
 
 
 def _render_pdf(source: Path, render_dir: Path) -> list[tuple[Path, str]]:
+    # PyMuPDF is a sizeable native dependency. Keep it out of the permanent
+    # web/bot baseline and load it only for an actual PDF graphics import.
+    try:
+        import fitz  # type: ignore  # PyMuPDF
+    except Exception as exc:
+        raise GraphicImportError("Для импорта PDF не установлен PyMuPDF.") from exc
     max_pages = max(1, int(settings.MAX_COMIC_PAGES or 500))
     try:
         document = fitz.open(source)

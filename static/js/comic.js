@@ -703,7 +703,7 @@ async function initGraphicReader() {
   await registerGraphicServiceWorker();
   updateGraphicNetworkStatus();
   if (!tgInitData()) {
-    status.textContent = 'Откройте главу через Mini App в Telegram.';
+    status.textContent = 'Откройте главу через Mini App в Telegram или VK.';
     return;
   }
   try {

@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     VK_PAYMENT_TEST_MODE: bool = False
     PROJECT_NAME: str = "Вокслира"
     PUBLIC_VERSION_VISIBLE: bool = False
-    PROJECT_VERSION: str = "v1.15.8"
+    PROJECT_VERSION: str = "v1.15.9"
     MAX_BOOK_UPLOAD_MB: int = 0
     MAX_BOOK_UNPACKED_MB: int = 2048
     # Прямая загрузка больших библиотечных ZIP идёт частями. Это аварийный
@@ -49,7 +49,10 @@ class Settings(BaseSettings):
     LIBRARY_IMPORT_MIN_FREE_DISK_MB: int = 256
     # Keep a small cgroup memory reserve so a large book cannot kill the whole
     # 256 MB Bothost container while the import worker is parsing it.
-    LIBRARY_IMPORT_MEMORY_RESERVE_MB: int = 12
+    # Heavy OCR/PDF libraries are loaded lazily. Six megabytes is enough for
+    # controlled shutdown/reporting without rejecting every job on a 256 MB
+    # container that has 8-12 MB free after application bootstrap.
+    LIBRARY_IMPORT_MEMORY_RESERVE_MB: int = 6
     # Большие ZIP и незавершённые части должны лежать рядом с постоянной
     # базой, а не в эфемерной папке storage. На Bothost каталог data уже
     # используется для SQLite и переживает Redeploy.

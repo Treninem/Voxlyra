@@ -76,6 +76,7 @@ from app.db import (
     get_author_financial_profile,
     get_author_rub_finance_summary,
     get_author_profile,
+    create_author_profile,
     create_author_rub_payout_request,
     get_author_rub_payout_request,
     get_admin_permissions,
@@ -1530,7 +1531,7 @@ def create_app() -> FastAPI:
         if not profile or profile["status"] not in {"active", "approved"}:
             raise HTTPException(
                 status_code=403,
-                detail="Сначала создайте профиль автора в боте. После этого кабинет откроется здесь.",
+                detail="Профиль автора для этого аккаунта не найден. Свяжите Telegram и VK либо создайте профиль здесь.",
             )
         return user, profile
 
@@ -5853,6 +5854,42 @@ def create_app() -> FastAPI:
             },
         )
 
+    @app.post("/api/author/register")
+    async def api_author_register(
+        request: Request,
+        payload: dict[str, Any],
+        x_telegram_init_data: str | None = Header(default=None),
+        x_vox_request_id: str | None = Header(default=None),
+    ):
+        user = await _tma_user(x_telegram_init_data)
+        claim_sensitive_request(user, x_vox_request_id, "author_register")
+        if await get_author_profile(user.app_user_id):
+            return {"ok": True, "already_exists": True}
+        pen_name = str((payload or {}).get("pen_name") or "").strip()
+        bio = str((payload or {}).get("bio") or "").strip()
+        country = str((payload or {}).get("country") or "").strip()
+        if len(pen_name) < 2 or len(pen_name) > 80:
+            raise HTTPException(status_code=400, detail="Псевдоним должен содержать от 2 до 80 символов.")
+        if len(bio) > 1000 or len(country) > 80:
+            raise HTTPException(status_code=400, detail="Описание или страна превышают допустимую длину.")
+        if not bool((payload or {}).get("accept_author_terms")):
+            raise HTTPException(status_code=400, detail="Для публикации необходимо принять правила автора.")
+        author_docs = [get_doc("author_license"), get_doc("author_data_consent")]
+        if any(doc is None for doc in author_docs):
+            raise HTTPException(status_code=503, detail="Документы автора временно недоступны.")
+        for doc in author_docs:
+            await accept_legal_document(
+                user.app_user_id, doc.code, doc.version, doc_hash=doc.digest,
+                source=f"{user.platform}_miniapp",
+                user_agent=str(request.headers.get("User-Agent") or "")[:500],
+                ip_hash=request_ip_hash(request.client.host if request.client else ""),
+            )
+        await create_author_profile(
+            user.app_user_id, pen_name, bio, country, bool((payload or {}).get("is_adult")),
+        )
+        await add_audit(user.app_user_id, "author_registered_miniapp", "author_profile", str(user.app_user_id), user.platform, pen_name)
+        return {"ok": True, "platform": user.platform}
+
     @app.get("/api/author/dashboard")
     async def api_author_dashboard(x_telegram_init_data: str | None = Header(default=None)):
         user, profile = await author_session(x_telegram_init_data)
@@ -8736,7 +8773,7 @@ def create_app() -> FastAPI:
         if not audio or audio["publication_status"] != "published" or audio["status"] != "published" or not audio["file_path"]:
             raise HTTPException(status_code=404, detail="Аудиоглава не найдена.")
         if not audio["is_free"]:
-            raise HTTPException(status_code=403, detail="Аудио открывается после проверки доступа в Telegram.")
+            raise HTTPException(status_code=403, detail="Аудио открывается после проверки доступа через Telegram или VK.")
         path = Path(audio["file_path"])
         if not path.exists() or not path.is_file():
             raise HTTPException(status_code=404, detail="Аудиофайл не найден.")

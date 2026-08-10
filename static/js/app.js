@@ -680,6 +680,9 @@ function localizeVKPrices(rootNode = document.body) {
 
 function initVKPlatformUI() {
   if (voxPlatform() !== 'vk') return;
+  document.documentElement.dataset.voxPlatform = 'vk';
+  const premiumCurrency = document.getElementById('premiumCurrencyLabel');
+  if (premiumCurrency) premiumCurrency.textContent = 'голосов VK / 30 дней';
   localizeVKPrices();
   let scheduled = false;
   const observer = new MutationObserver(() => {
@@ -1068,10 +1071,10 @@ async function initReader() {
           ? `<button class="button-link gold-button" id="unlockChapterWithPackage" type="button">Открыть за 1 главу из пакета · осталось ${packageRemaining}</button>`
           : '';
         const chapterOffer = canBuyChapter
-          ? `<p><b>Эта глава: ${Number(data.chapter.price_stars || 0)} Stars</b> · ≈ ${(Number(data.chapter.buyer_estimate_minor || 0) / 100).toFixed(2)} ₽</p>${data.purchase_url ? `<a class="button-link secondary" href="${escapeHtml(data.purchase_url)}">Купить только эту главу</a>` : ''}`
+          ? `<p><b>Эта глава: ${Number(data.chapter.price_stars || 0)} Stars</b> · ≈ ${(Number(data.chapter.buyer_estimate_minor || 0) / 100).toFixed(2)} ₽</p>${data.purchase_url ? `<a class="button-link secondary telegram-payment-action" data-vk-purchase-kind="chapter" data-vk-purchase-target="${Number(data.chapter.id || reader.dataset.chapterId)}" href="${escapeHtml(data.purchase_url)}">Купить только эту главу</a>` : ''}`
           : '<p>Отдельная покупка этой главы не предусмотрена.</p>';
         const bookOffer = data.book_purchase_url
-          ? `<a class="button-link gold-button" href="${escapeHtml(data.book_purchase_url)}">Купить всю книгу · ${Number(data.chapter.book_price_stars || 0)} Stars</a>`
+          ? `<a class="button-link gold-button telegram-payment-action" data-vk-purchase-kind="book" data-vk-purchase-target="${Number(data.chapter.book_id || 0)}" href="${escapeHtml(data.book_purchase_url)}">Купить всю книгу · ${Number(data.chapter.book_price_stars || 0)} Stars</a>`
           : '';
         const packagesLink = canBuyChapter ? `<a class="quiet-link" href="/book/${Number(data.chapter.book_id)}#chapterPackages">Посмотреть пакеты глав</a>` : '';
         paragraphs.innerHTML = `<section class="empty-card paywall-card"><div class="empty-icon">◇</div><h3>Глава закрыта</h3>${chapterOffer}${packageButton}${bookOffer}${packagesLink}</section>`;
@@ -1267,7 +1270,7 @@ async function crossfadeReaderTtsPlayers(oldPlayer, nextPlayer, { shouldPlay = t
     try { await nextPlayer.play(); }
     catch (_) {
       reportReaderTtsEvent('autoplay_blocked', { reason: String(error?.message || 'play_failed') });
-      throw new Error('Telegram остановил автоматическое продолжение. Нажмите воспроизведение один раз.');
+      throw new Error('Платформа остановила автоматическое продолжение. Нажмите воспроизведение один раз.');
     }
   }
   await Promise.all([
@@ -2282,7 +2285,7 @@ async function initReaderTts() {
   bindReaderTtsLifecycleEvents();
   readerTtsPlayers().forEach(bindReaderTtsPlayerEvents);
   if (!tgInitData()) {
-    updateReaderTtsStatus('Откройте книгу внутри Telegram, чтобы включить озвучивание.');
+    updateReaderTtsStatus('Откройте книгу внутри Telegram или VK, чтобы включить озвучивание.');
     return;
   }
   try {
@@ -2538,11 +2541,18 @@ function renderAudioPaywall(meta) {
     if (title) title.textContent = 'Аудиоглава закрыта';
     if (text) text.textContent = 'После покупки доступ подтянется автоматически.';
     if (price) price.textContent = `${Number(meta.audio.price_stars)} Stars`;
-    if (link) { link.href = meta.purchase_url || '#'; link.textContent = 'Купить аудио'; link.hidden = !meta.purchase_url; }
+    if (link) {
+      link.href = meta.purchase_url || '#';
+      link.textContent = voxPlatform() === 'vk' ? 'Купить за голоса' : 'Купить аудио';
+      link.hidden = !meta.purchase_url;
+      link.classList.add('telegram-payment-action');
+      link.dataset.vkPurchaseKind = 'audio';
+      link.dataset.vkPurchaseTarget = String(meta.audio?.id || document.getElementById('audioPage')?.dataset.audioId || 0);
+    }
     setAudioStatus('Для этой аудиоглавы нужен доступ.');
   } else {
-    if (title) title.textContent = 'Откройте аудио в Telegram';
-    if (text) text.textContent = 'Обновите страницу внутри Telegram. Платёж для этой записи сейчас недоступен.';
+    if (title) title.textContent = 'Не удалось подтвердить доступ';
+    if (text) text.textContent = 'Обновите страницу внутри Telegram или VK. Платёж для этой записи сейчас недоступен.';
     if (price) price.textContent = '';
     if (link) link.hidden = true;
     setAudioStatus('Доступ к аудиоглаве пока не подтверждён.');
@@ -2564,7 +2574,7 @@ async function initAudioPage() {
     if (document.visibilityState === 'hidden') saveAudioProgress().catch(() => {});
   });
   if (!tgInitData()) {
-    setAudioStatus('Откройте аудио внутри Telegram, чтобы проверить доступ и сохранять позицию.');
+    setAudioStatus('Откройте аудио внутри Telegram или VK, чтобы проверить доступ и сохранять позицию.');
     return;
   }
   try {
@@ -4064,7 +4074,9 @@ async function refreshPremiumPage() {
     const plan = (data.plans || [])[0] || {};
     const sub = data.subscription || {};
     document.getElementById('premiumPlanTitle').textContent = plan.title || 'VoxLyra Premium';
-    document.getElementById('premiumPrice').textContent = voxPlatform() === 'vk' ? 'голоса VK' : Number(plan.price_stars || 0);
+    document.getElementById('premiumPrice').textContent = voxPlatform() === 'vk'
+      ? `${votesForStars(plan.price_stars)} голос.`
+      : Number(plan.price_stars || 0);
     document.getElementById('premiumPlanDescription').textContent = plan.description || '';
     const features = document.getElementById('premiumFeatures');
     if (features) features.innerHTML = (plan.features || []).map((item) => `<article><span>✦</span><b>${escapeHtml(item.title || '')}</b></article>`).join('');
@@ -4192,13 +4204,16 @@ function renderWalletSummary(data) {
     const rate = Math.max(1, Number(economy.points_per_star || 100));
     const usable = Math.floor(Number(wallet.bonus_points || 0) / rate);
     const remainder = Number(wallet.bonus_points || 0) % rate;
-    hint.textContent = `${rate} бонусов = 1 целая Star · доступно ${usable} Stars${remainder ? ` · ещё ${rate - remainder} бонусов до следующей` : ''}`;
+    hint.textContent = voxPlatform() === 'vk'
+      ? `${rate} бонусов = ${votesForStars(1)} голос. скидки · доступно ${votesForStars(usable)} голос.${remainder ? ` · ещё ${rate - remainder} бонусов до следующего шага` : ''}`
+      : `${rate} бонусов = 1 целая Star · доступно ${usable} Stars${remainder ? ` · ещё ${rate - remainder} бонусов до следующей` : ''}`;
   }
   if (buttons) {
     const packages = economy.topup_packages || [];
     buttons.innerHTML = packages.map((amount) => {
       const totalPoints = Math.floor(Number(amount) * Number(economy.bonus_percent || 0) * Number(economy.points_per_star || 100) / 100);
-      return `<button type="button" class="secondary" data-wallet-topup="${Number(amount)}"><strong>${Number(amount)} Stars</strong><small>до +${totalPoints} бонусов</small></button>`;
+      const price = voxPlatform() === 'vk' ? `${votesForStars(amount)} голос.` : `${Number(amount)} Stars`;
+      return `<button type="button" class="secondary" data-wallet-topup="${Number(amount)}"><strong>${price}</strong><small>до +${totalPoints} бонусов</small></button>`;
     }).join('');
     buttons.querySelectorAll('[data-wallet-topup]').forEach((button) => button.addEventListener('click', () => openWalletTopup(button.dataset.walletTopup)));
   }
@@ -4241,7 +4256,7 @@ async function initLibrary() {
     walletTopupButton.textContent = walletTopupPanel.hidden ? 'Пополнить' : 'Скрыть';
   });
   if (!tgInitData()) {
-    if (content) content.innerHTML = emptyStateMarkup('no-books', 'Откройте внутри Telegram', 'Личная библиотека привязана к вашему Telegram-профилю.', '/catalog', 'Смотреть каталог');
+    if (content) content.innerHTML = emptyStateMarkup('no-books', 'Откройте через Telegram или VK', 'Личная библиотека привязана к единому аккаунту VoxLyra.', '/catalog', 'Смотреть каталог');
     return;
   }
   try {
@@ -4383,7 +4398,7 @@ async function shareReaderQuoteCard() {
 
 async function saveReaderAnnotation(annotationType) {
   const chapterId = Number(document.getElementById('readerText')?.dataset.chapterId || 0);
-  if (!chapterId || !tgInitData()) { notify('Откройте главу внутри Telegram'); return; }
+  if (!chapterId || !tgInitData()) { notify('Откройте главу внутри Telegram или VK'); return; }
   const isQuote = annotationType === 'quote';
   const selectedText = String(document.getElementById('readerQuoteText')?.value || '').trim();
   const noteText = isQuote ? '' : String(document.getElementById('readerNoteText')?.value || '').trim();
@@ -5403,8 +5418,8 @@ function initPrivacySettings() {
   if (!tgInitData()) {
     const status = document.getElementById('privacyOverviewStatus');
     const legal = document.getElementById('privacyLegalDocuments');
-    if (status) status.innerHTML = '<p class="muted">Откройте настройки из Telegram, чтобы посмотреть или скачать личные данные.</p>';
-    if (legal) legal.innerHTML = '<p class="muted">Документы доступны для чтения, а принятие и отзыв выполняются только после проверки Telegram-профиля.</p>';
+    if (status) status.innerHTML = '<p class="muted">Откройте настройки через Telegram или VK, чтобы посмотреть или скачать личные данные.</p>';
+    if (legal) legal.innerHTML = '<p class="muted">Документы доступны для чтения, а принятие и отзыв выполняются после проверки аккаунта VoxLyra.</p>';
     ['privacyRefreshButton','privacyExportButton','privacyDeletePreviewButton'].forEach((id) => { const button = document.getElementById(id); if (button) button.disabled = true; });
     return;
   }
@@ -5436,7 +5451,8 @@ function initPrivacySettings() {
 
 function initExternalBrowserMode() {
   if (voxHasPlatformAuth()) {
-    if (voxPlatform() === 'vk') document.querySelectorAll('.telegram-payment-action').forEach((element) => { element.hidden = true; element.setAttribute('aria-hidden', 'true'); });
+    // VK uses the same canonical purchase targets, intercepted below and
+    // converted into VK Votes orders. They must stay visible and actionable.
     return;
   }
   const notice = document.getElementById('externalBrowserNotice');
@@ -5651,8 +5667,17 @@ async function startVKPayment(kind, targetId, options = {}) {
   return { paid: false, pending: true };
 }
 
-function vkPurchaseTargetFromTelegramLink(href) {
+function vkPurchaseTargetFromTelegramLink(href, element = null) {
   if (voxPlatform() !== 'vk') return null;
+  const explicitKind = String(element?.dataset?.vkPurchaseKind || '').trim();
+  const explicitTarget = Number(element?.dataset?.vkPurchaseTarget || 0);
+  if (explicitKind && explicitTarget > 0) {
+    return {
+      kind: explicitKind,
+      targetId: explicitTarget,
+      options: { bookId: Number(element?.dataset?.vkBookId || 0) || null },
+    };
+  }
   let url;
   try { url = new URL(String(href || ''), window.location.href); } catch (_) { return null; }
   if (!/^(t\.me|telegram\.me)$/i.test(url.hostname)) return null;
@@ -5667,12 +5692,12 @@ function bindVKPurchaseInterception() {
   document.addEventListener('click', (event) => {
     const link = event.target.closest?.('a[href]');
     if (!link) return;
-    const target = vkPurchaseTargetFromTelegramLink(link.getAttribute('href'));
+    const target = vkPurchaseTargetFromTelegramLink(link.getAttribute('href'), link);
     if (!target) return;
     event.preventDefault();
     event.stopPropagation();
     link.setAttribute('aria-busy', 'true');
-    startVKPayment(target.kind, target.targetId)
+    startVKPayment(target.kind, target.targetId, target.options || {})
       .then((result) => {
         if (result?.paid) window.setTimeout(() => window.location.reload(), 600);
       })
@@ -5685,6 +5710,11 @@ function bindVKPurchaseInterception() {
     root?.querySelectorAll?.('a[href*="t.me"], a[href*="telegram.me"]').forEach((link) => {
       link.textContent = String(link.textContent || '').replace(/\s*·\s*\d+\s*Stars?/i, '').replace(/Купить/i, 'Купить за голоса');
     });
+  });
+  document.querySelectorAll('.telegram-payment-action').forEach((element) => {
+    element.hidden = false;
+    element.removeAttribute('aria-hidden');
+    element.classList.add('vk-payment-action');
   });
 }
 

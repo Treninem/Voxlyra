@@ -30,17 +30,20 @@ def main() -> None:
         assert payload["inline"] is True
         labels = [button["action"]["label"] for row in payload["buttons"] for button in row]
         assert labels == ["📚 Книги", "🖼 Комиксы", "🎧 Слушать", "⭐ Моё", "✍ Автору", "⚙ Ещё"]
-        for row in payload["buttons"]:
-            for button in row:
-                action = button["action"]
+        actions = [button["action"] for row in payload["buttons"] for button in row]
+        for action in actions[:3]:
                 assert action["type"] == "open_app"
                 assert action["app_id"] == 54713417
                 assert action["owner_id"] == -240755410
-                assert action["hash"] in {"catalog", "comics", "audio", "library", "author", "settings"}
+                assert action["hash"] in {"catalog", "comics", "audio"}
+        for action in actions[3:]:
+            assert action["type"] == "text"
+            assert json.loads(action["payload"])["vox"] in {"my", "author", "more"}
 
     owner = json.loads(build(224402322))
     owner_labels = [button["action"]["label"] for row in owner["buttons"] for button in row]
     assert owner_labels[-1] == "👑 Управление"
+    assert json.loads(owner["buttons"][-1][0]["action"]["payload"])["vox"] == "owner"
     print("VK_MENU_QA_OK scenarios=101")
 
 

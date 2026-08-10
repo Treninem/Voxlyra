@@ -48,7 +48,7 @@
 
     <section class="panel-card author-finance-policy" id="authorFinancePolicy">
       <div class="section-title split-title slim">
-        <div><span class="eyebrow">Прозрачные расчёты</span><h2>Комиссии и выплаты</h2><p>Цена задаётся в Telegram Stars. Продажи и доход от Premium входят в общий баланс автора. Фонд Premium распределяется по реальному чтению только целыми Stars.</p></div>
+        <div><span class="eyebrow">Прозрачные расчёты</span><h2>Комиссии и выплаты</h2><p>VoxLyra хранит единую базовую цену. В Telegram покупатель видит Stars, во VK — рассчитанное без округления вниз количество голосов. Продажи обеих платформ входят в общий баланс автора.</p></div>
         <a class="button-link secondary compact-button" href="/legal/fees_payouts">Правила выплат</a>
       </div>
       <div class="author-finance-breakdown">
@@ -65,7 +65,7 @@
         <label>Цена произведения, Stars<input id="authorDesiredNet" type="number" min="1" step="1" value="10"></label>
         <label>Начисление автору, ₽<input id="authorSuggestedFinal" type="text" value="8,00" readonly></label>
       </div>
-      <p class="muted" id="authorPayoutState">Покупки идут только через Stars. После удержания заявка автора на выплату обрабатывается владельцем вручную.</p>
+      <p class="muted" id="authorPayoutState">Покупки Telegram и VK входят в единый расчёт. После удержания заявка автора на выплату обрабатывается владельцем.</p>
     </section>
 
     <section class="author-payment-grid" id="authorPaymentArea" hidden>
@@ -215,7 +215,7 @@
 
         <div class="panel-card import-panel" id="textImportPanel">
           <h3>Импорт книги</h3>
-          <p class="muted">Крупные файлы загружаются частями, поэтому ограничение Telegram здесь не мешает.</p>
+          <p class="muted">Крупные файлы загружаются частями, поэтому ограничения мессенджеров здесь не мешают.</p>
           <label class="file-drop" for="bookFileInput">
             <input id="bookFileInput" type="file" accept=".txt,.docx,.fb2,.epub,.pdf,.zip">
             <strong>Выбрать TXT, DOCX, FB2, EPUB, PDF или ZIP</strong>
@@ -422,7 +422,18 @@
   <article id="authorError" class="empty-card premium-empty illustrated-empty" data-empty-state="no-books" hidden>
     <img class="empty-state-art" src="/static/img/miniapp/empty/no-books.webp" alt="" aria-hidden="true">
     <h3>Кабинет пока недоступен</h3>
-    <p id="authorErrorText">Откройте этот раздел из Telegram.</p>
+    <p id="authorErrorText">Откройте этот раздел через Telegram или VK.</p>
+    <div id="authorRegistration" hidden>
+      <p class="muted">Если профиль автора уже создан в Telegram, сначала откройте <a href="/settings">привязку аккаунтов</a>. Можно объединить данные либо выбрать основной профиль. Иначе создайте профиль для текущего аккаунта.</p>
+      <form id="authorRegistrationForm" class="stack-form">
+        <label>Псевдоним автора<input id="authorRegisterPenName" minlength="2" maxlength="80" required></label>
+        <label>Короткое описание<textarea id="authorRegisterBio" maxlength="1000"></textarea></label>
+        <label>Страна<input id="authorRegisterCountry" maxlength="80"></label>
+        <label class="check-line"><input id="authorRegisterAdult" type="checkbox"> Мне исполнилось 18 лет</label>
+        <label class="check-line"><input id="authorRegisterTerms" type="checkbox" required> Принимаю лицензионные условия автора и согласие на обработку данных автора VoxLyra</label>
+        <button type="submit">Создать профиль автора</button>
+      </form>
+    </div>
   </article>
 
   <div class="state-dialog" id="moderationSuccess" role="dialog" aria-modal="true" aria-labelledby="moderationSuccessTitle" hidden>

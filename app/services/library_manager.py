@@ -187,7 +187,7 @@ def _ensure_import_memory_headroom(*, operation: str, expected_extra_bytes: int 
     current, limit = _cgroup_memory_snapshot()
     if current <= 0 or limit <= 0:
         return
-    reserve_mb = max(8, int(getattr(settings, "LIBRARY_IMPORT_MEMORY_RESERVE_MB", 12) or 12))
+    reserve_mb = max(4, int(getattr(settings, "LIBRARY_IMPORT_MEMORY_RESERVE_MB", 6) or 6))
     reserve = reserve_mb * 1024 * 1024
     expected = max(0, int(expected_extra_bytes))
     required = reserve + expected
@@ -201,8 +201,8 @@ def _ensure_import_memory_headroom(*, operation: str, expected_extra_bytes: int 
         raise LibraryImportMemoryError(
             f"Недостаточно оперативной памяти для {operation}: свободно около {_format_mb(available)}, "
             f"для безопасного разбора требуется около {_format_mb(required)}. "
-            "Архив и задание сохранены. Закройте тяжёлые операции, отключите одновременное TTS/OCR "
-            "или увеличьте память Bothost, затем повторите задание без новой загрузки."
+            "Архив и задание сохранены. Повторите задание без новой загрузки. Если ошибка повторяется, "
+            "увеличьте память контейнера до 512 МБ: работающий бот и импорт не должны делить последние мегабайты."
         )
 
 
@@ -217,20 +217,25 @@ def _estimate_book_parse_memory(path: Path) -> int:
         try:
             with zipfile.ZipFile(path) as archive:
                 if suffix == ".epub":
-                    unpacked = sum(
+                    text_sizes = [
                         max(0, int(info.file_size or 0))
                         for info in archive.infolist()
                         if not info.is_dir() and Path(info.filename).suffix.lower() in {".xhtml", ".html", ".htm", ".xml", ".opf", ".ncx"}
-                    )
-                    return max(file_size * 2, unpacked * 3)
+                    ]
+                    unpacked = sum(text_sizes)
+                    largest = max(text_sizes, default=0)
+                    # EPUB is parsed document-by-document. Account for the
+                    # retained chapter text plus one current XML document,
+                    # rather than tripling the complete unpacked archive.
+                    return max(file_size * 2, int(unpacked * 1.6) + largest + 4 * 1024 * 1024)
                 unpacked = sum(max(0, int(info.file_size or 0)) for info in archive.infolist() if not info.is_dir())
                 return max(file_size * 2, unpacked * 3)
         except (OSError, zipfile.BadZipFile):
             return file_size * 3
     if suffix in {".fb2", ".txt", ".md"}:
-        return file_size * 4
+        return max(file_size * 3, file_size + 4 * 1024 * 1024)
     if suffix == ".pdf":
-        return file_size * 3
+        return max(file_size * 2, file_size + 8 * 1024 * 1024)
     return file_size * 3
 
 
