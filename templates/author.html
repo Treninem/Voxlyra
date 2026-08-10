@@ -233,15 +233,20 @@
 
       <section class="panel-card graphic-author-panel" id="graphicImportPanel" hidden>
         <div class="section-title split-title slim">
-          <div><span class="eyebrow">Графическая глава</span><h2>Загрузить страницы</h2><p>PDF, CBZ/ZIP, CBR/RAR, 7Z, EPUB fixed-layout или отдельные изображения. Страницы сортируются и сжимаются в WebP.</p></div>
+          <div><span class="eyebrow">Импорт графики</span><h2>Загрузить главу или всё произведение</h2><p>Один PDF, CBZ/ZIP, CBR/RAR, 7Z, EPUB fixed-layout или набор изображений. VoxLyra может сама создать главы и тома.</p></div>
           <span class="graphic-type-badge" id="graphicProjectTypeLabel">Комикс</span>
         </div>
-        <div class="form-grid two">
+        <label class="switch-row"><input id="graphicAutoStructure" type="checkbox" checked><span><b>Автоматически разделить один файл на главы и тома</b><small>Папки «Том N/Глава N» распознаются сами. Плоский PDF или архив делится по лимитам ниже.</small></span></label>
+        <div class="form-grid two" id="graphicAutoStructureLimits">
+          <label>Страниц в главе<input id="graphicPagesPerChapter" type="number" min="1" max="500" value="40"><small>Последняя глава может быть короче.</small></label>
+          <label>Глав в томе<input id="graphicChaptersPerVolume" type="number" min="1" max="1000" value="10"><small>Затем автоматически создаётся новый том.</small></label>
+        </div>
+        <div class="form-grid two" id="graphicManualVolumeFields">
           <label>Том<input id="graphicVolumeNumber" type="number" min="1" max="10000" value="1"></label>
           <label>Название тома<input id="graphicVolumeTitle" maxlength="120" placeholder="Например: Начало пути"></label>
         </div>
         <div class="form-grid two">
-          <label>Название главы<input id="graphicChapterTitle" maxlength="160" placeholder="Глава 1" required></label>
+          <label>Название главы<input id="graphicChapterTitle" maxlength="160" placeholder="Только для загрузки одной главы"><small>В автоматическом режиме названия создаются сами.</small></label>
           <label>Чтение<select id="graphicChapterMode">
             <option value="inherit">Как у произведения</option><option value="ltr">Слева направо</option><option value="rtl">Справа налево</option>
             <option value="vertical">Вертикальная лента</option><option value="single">Одна страница</option><option value="spread">Разворот</option>
@@ -262,11 +267,11 @@
         </label>
         <label class="file-drop graphic-image-picker" id="graphicImagesPicker" for="graphicImagesInput" hidden>
           <input id="graphicImagesInput" type="file" accept="image/jpeg,image/png,image/webp,image/avif,image/gif,image/bmp,image/tiff" multiple>
-          <strong>Выбрать все страницы главы</strong>
+          <strong>Выбрать страницы главы или всего произведения</strong>
           <span id="graphicImagesName">Изображения не выбраны</span>
         </label>
         <label class="switch-row graphic-split-toggle"><input id="graphicSplitLongInput" type="checkbox"><span>Разделять очень длинные страницы вебтуна на лёгкие фрагменты</span></label>
-        <button class="button-link" id="startGraphicUpload" type="button">Загрузить графическую главу</button>
+        <button class="button-link" id="startGraphicUpload" type="button">Загрузить и распределить</button>
         <div class="upload-progress" id="graphicUploadProgress" hidden><i></i><span>0%</span></div>
         <div id="graphicUploadResult" class="import-preview" hidden></div>
       </section>

@@ -2097,11 +2097,15 @@ async def audit_batch_publication(batch_id: int) -> dict[str, Any]:
             """
             SELECT b.id, b.title, b.description, b.source_author_name, b.source_file_name,
                    b.cover_path, b.license_type, b.rights_checked, b.pricing_type, b.price_stars,
-                   b.creator_id, b.rights_holder_id, b.revenue_mode, b.source_language,
+                   b.creator_id, b.rights_holder_id, b.revenue_mode, b.source_language, b.content_type,
                    (SELECT COUNT(*) FROM book_option_values v
                     WHERE v.book_id=b.id AND v.option_group='genres') AS genres_count,
                    (SELECT COUNT(*) FROM chapters c
-                    WHERE c.book_id=b.id AND c.status!='deleted') AS chapters_count
+                    WHERE c.book_id=b.id AND c.status!='deleted') AS chapters_count,
+                   (SELECT COUNT(*) FROM graphic_chapters gc
+                    WHERE gc.book_id=b.id AND gc.status!='deleted') AS graphic_chapters_count,
+                   (SELECT COALESCE(SUM(gc.pages_count),0) FROM graphic_chapters gc
+                    WHERE gc.book_id=b.id AND gc.status!='deleted') AS graphic_pages_count
             FROM books b
             WHERE b.import_batch_id=? AND b.publication_status='draft'
             ORDER BY b.id
@@ -2120,12 +2124,17 @@ async def audit_batch_publication(batch_id: int) -> dict[str, Any]:
     for row in rows:
         reasons: list[str] = []
         warnings: list[str] = []
+        is_graphic = str(row["content_type"] or "book") in {"comic", "manga", "manhwa", "webtoon", "graphic_novel"}
         if not str(row["title"] or "").strip(): reasons.append("не указано название")
         if not str(row["source_author_name"] or "").strip(): reasons.append("не указан автор")
         if not str(row["description"] or "").strip(): reasons.append("нет описания")
         if int(row["genres_count"] or 0) <= 0: reasons.append("не выбран жанр")
-        if int(row["chapters_count"] or 0) <= 0: reasons.append("не найден текст книги")
-        if not Path(str(row["source_file_name"] or "")).is_file(): reasons.append("исходный файл отсутствует")
+        if is_graphic:
+            if int(row["graphic_chapters_count"] or 0) <= 0: reasons.append("не найдены графические главы")
+            if int(row["graphic_pages_count"] or 0) <= 0: reasons.append("в графических главах нет страниц")
+        elif int(row["chapters_count"] or 0) <= 0:
+            reasons.append("не найден текст книги")
+        if not Path(str(row["source_file_name"] or "")).exists(): reasons.append("исходный файл отсутствует")
         if not Path(str(row["cover_path"] or "")).is_file(): reasons.append("обложка отсутствует")
         if str(row["license_type"] or "").strip() not in ALLOWED_LICENSES: reasons.append("неподдерживаемый тип лицензии")
         if not bool(row["rights_checked"]): reasons.append("права не подтверждены")
@@ -2134,7 +2143,10 @@ async def audit_batch_publication(batch_id: int) -> dict[str, Any]:
         if str(row["pricing_type"] or "free") != "free" and int(row["price_stars"] or 0) > 0 and str(row["revenue_mode"] or "none") == "none":
             reasons.append("для платной книги не указан получатель дохода")
 
-        deep_blockers, deep_warnings, evidence, score = await _inspect_book_quality(row, chapter_map.get(int(row["id"]), []))
+        if is_graphic:
+            deep_blockers, deep_warnings, evidence, score = [], [], [], 100
+        else:
+            deep_blockers, deep_warnings, evidence, score = await _inspect_book_quality(row, chapter_map.get(int(row["id"]), []))
         reasons.extend(deep_blockers)
         warnings.extend(deep_warnings)
         item = {
@@ -2176,6 +2188,10 @@ async def publish_batch(batch_id: int) -> dict[str, Any]:
             )
             await db.execute(
                 f"UPDATE chapters SET status='published', updated_at=? WHERE book_id IN ({placeholders}) AND status='draft'",
+                [now, *ready_ids],
+            )
+            await db.execute(
+                f"UPDATE graphic_chapters SET status='published', updated_at=? WHERE book_id IN ({placeholders}) AND status IN ('draft','review')",
                 [now, *ready_ids],
             )
             if bool(cfg.get("channel_auto_post", 1)):

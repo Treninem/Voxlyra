@@ -148,6 +148,12 @@
     if (!items.length) return emptyList(ownerMode ? 'Книги не найдены' : 'Очередь пуста', ownerMode ? 'Проверьте имя автора или попробуйте часть названия.' : 'Новых книг на проверке нет.');
     $('workspaceList').innerHTML = items.map((item) => {
       const status = String(item.publication_status || 'draft');
+      const contentType = String(item.content_type || 'book');
+      const graphic = contentType !== 'book';
+      const typeLabel = ({ comic: 'Комикс', manga: 'Манга', manhwa: 'Манхва', webtoon: 'Вебтун', graphic_novel: 'Графический роман' })[contentType] || 'Книга';
+      const contentSummary = graphic
+        ? `${Number(item.graphic_chapters_count || 0)} графических глав · ${Number(item.graphic_pages_count || 0)} страниц`
+        : `${Number(item.text_chapters_count || 0)} текстовых глав`;
       const preview = item.first_graphic_chapter_id
         ? actionLink('Открыть страницы', `/comic/${Number(item.first_graphic_chapter_id)}?moderation=1`)
         : item.first_chapter_id
@@ -155,11 +161,12 @@
           : status === 'published' ? actionLink('Открыть книгу', `/book/${Number(item.id)}`) : '';
       let actions = preview;
       if (status === 'review') actions += `${actionButton('Проверка и замечания', `book:details:${item.id}`)}${actionButton('Опубликовать', `book:publish:${item.id}`, 'approve')}${actionButton('На доработку', `book:reject:${item.id}`, 'danger')}`;
+      if (ownerMode && ['draft', 'rejected', 'hidden'].includes(status)) actions += actionButton(graphic ? 'Опубликовать комикс' : 'Опубликовать книгу', `book:publish:${item.id}`, 'approve');
       if (ownerMode && status === 'published') actions += actionButton('Выложить в канал', `book:repost:${item.id}`, 'approve');
       if (ownerMode && status === 'blocked') actions += actionButton('Перевести в скрытые', `book:hide:${item.id}`);
       else if (ownerMode) actions += actionButton('Заблокировать', `book:block:${item.id}`, 'danger');
       return `<article class="control-item" data-id="${Number(item.id)}">
-        <div class="control-item-main"><span>Книга #${Number(item.id)} · ${esc(status)}</span><h3>${esc(item.title)}</h3><p>${esc(item.pen_name || item.source_author_name || 'Автор не указан')} · ${esc(item.age_limit || '')}</p><small>${esc((item.description || '').slice(0, 240))}</small></div>
+        <div class="control-item-main"><span>${esc(typeLabel)} #${Number(item.id)} · ${esc(status)}</span><h3>${esc(item.title)}</h3><p>${esc(item.pen_name || item.source_author_name || 'Автор не указан')} · ${esc(item.age_limit || '')}</p><small><b>${esc(contentSummary)}</b>${item.description ? ` · ${esc(String(item.description).slice(0, 200))}` : ''}</small></div>
         <div class="control-actions">${actions}</div>
       </article>`;
     }).join('');

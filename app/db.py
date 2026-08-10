@@ -20382,7 +20382,10 @@ async def search_books(query: str, limit: int = 20) -> list[aiosqlite.Row]:
             f"""
             SELECT b.*, COALESCE(ap.pen_name,b.source_author_name) AS pen_name,
                    (SELECT c.id FROM chapters c WHERE c.book_id=b.id ORDER BY c.number,c.id LIMIT 1) AS first_chapter_id,
-                   (SELECT gc.id FROM graphic_chapters gc WHERE gc.book_id=b.id ORDER BY gc.number,gc.id LIMIT 1) AS first_graphic_chapter_id
+                   (SELECT gc.id FROM graphic_chapters gc WHERE gc.book_id=b.id AND gc.status!='deleted' ORDER BY gc.number,gc.id LIMIT 1) AS first_graphic_chapter_id,
+                   (SELECT COUNT(*) FROM chapters c WHERE c.book_id=b.id AND c.status!='deleted') AS text_chapters_count,
+                   (SELECT COUNT(*) FROM graphic_chapters gc WHERE gc.book_id=b.id AND gc.status!='deleted') AS graphic_chapters_count,
+                   (SELECT COALESCE(SUM(gc.pages_count),0) FROM graphic_chapters gc WHERE gc.book_id=b.id AND gc.status!='deleted') AS graphic_pages_count
             FROM books b LEFT JOIN author_profiles ap ON ap.id=b.author_id
             WHERE b.id IN ({placeholders})
             """,

@@ -12,11 +12,13 @@ from html import escape
 import hmac
 import json
 import os
+import re
 import shutil
 import tempfile
 import time
 import uuid
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -676,6 +678,128 @@ async def _commit_graphic_chapter(
         raise
     chapter = await get_graphic_chapter(chapter_id)
     return _row_to_dict(chapter) if chapter else {"id": chapter_id, "pages_count": len(rows)}
+
+
+_GRAPHIC_VOLUME_RE = re.compile(r"(?:^|[/\\ _.-])(?:том|volume|vol)[ _.-]*(\d+)", re.IGNORECASE)
+_GRAPHIC_CHAPTER_RE = re.compile(r"(?:^|[/\\ _.-])(?:глава|chapter|chap|ch|episode|ep)[ _.-]*(\d+)", re.IGNORECASE)
+
+
+def _split_graphic_work_pages(
+    prepared_pages: list[PreparedGraphicPage],
+    *,
+    start_volume: int,
+    pages_per_chapter: int,
+    chapters_per_volume: int,
+) -> list[dict[str, Any]]:
+    """Recover folder labels or safely paginate one flat work.
+
+    Named archive paths win.  A flat PDF/CBZ has no reliable semantic chapter
+    boundaries, so it uses explicit deterministic limits instead of pretending
+    OCR can guess the author's structure.
+    """
+    if not prepared_pages:
+        raise GraphicImportError("В файле нет страниц для распределения.")
+    one_chapter_limit = max(1, int(settings.MAX_COMIC_PAGES or 500))
+    page_limit = max(1, min(one_chapter_limit, int(pages_per_chapter or 40)))
+    volume_limit = max(1, min(1000, int(chapters_per_volume or 10)))
+    base_volume = max(1, min(10000, int(start_volume or 1)))
+
+    marked: list[tuple[int, int, PreparedGraphicPage]] = []
+    all_marked = True
+    for page in prepared_pages:
+        source = str(page.source_filename or "")
+        chapter_match = _GRAPHIC_CHAPTER_RE.search(source)
+        if not chapter_match:
+            all_marked = False
+            break
+        volume_match = _GRAPHIC_VOLUME_RE.search(source)
+        volume = int(volume_match.group(1)) if volume_match else base_volume
+        marked.append((max(1, volume), max(1, int(chapter_match.group(1))), page))
+
+    groups: list[dict[str, Any]] = []
+    if all_marked and marked:
+        index: dict[tuple[int, int], dict[str, Any]] = {}
+        for volume, chapter, page in marked:
+            key = (volume, chapter)
+            if key not in index:
+                index[key] = {"volume_number": volume, "chapter_number": chapter, "pages": []}
+                groups.append(index[key])
+            index[key]["pages"].append(page)
+    else:
+        for offset in range(0, len(prepared_pages), page_limit):
+            chapter_index = offset // page_limit
+            groups.append({
+                "volume_number": base_volume + chapter_index // volume_limit,
+                "chapter_number": chapter_index + 1,
+                "pages": prepared_pages[offset:offset + page_limit],
+            })
+
+    for group in groups:
+        pages = list(group["pages"])
+        if len(pages) > one_chapter_limit:
+            raise GraphicImportError(
+                f"Глава {group['chapter_number']} содержит {len(pages)} страниц — максимум {one_chapter_limit}."
+            )
+        group["pages"] = [replace(page, number=index) for index, page in enumerate(pages, 1)]
+    return groups
+
+
+async def _commit_graphic_work(
+    *,
+    book_id: int,
+    title: str,
+    reading_mode: str,
+    price_stars: int,
+    source_filename: str,
+    prepared_pages: list[PreparedGraphicPage],
+    volume_number: int,
+    volume_title: str,
+    preview_pages: int,
+    auto_structure: bool,
+    pages_per_chapter: int,
+    chapters_per_volume: int,
+) -> list[dict[str, Any]]:
+    if not auto_structure:
+        return [await _commit_graphic_chapter(
+            book_id=book_id, title=title, reading_mode=reading_mode, price_stars=price_stars,
+            source_filename=source_filename, prepared_pages=prepared_pages,
+            volume_number=volume_number, volume_title=volume_title, preview_pages=preview_pages,
+        )]
+
+    existing = await list_graphic_chapters_for_book(book_id)
+    next_number = max((int(row["number"] or 0) for row in existing), default=0) + 1
+    groups = _split_graphic_work_pages(
+        prepared_pages,
+        start_volume=volume_number,
+        pages_per_chapter=pages_per_chapter,
+        chapters_per_volume=chapters_per_volume,
+    )
+    created: list[dict[str, Any]] = []
+    try:
+        for index, group in enumerate(groups):
+            displayed_number = next_number + index
+            chapter_title = f"Глава {displayed_number}"
+            current_volume = int(group["volume_number"])
+            current_volume_title = volume_title if current_volume == int(volume_number) else f"Том {current_volume}"
+            created.append(await _commit_graphic_chapter(
+                book_id=book_id,
+                title=chapter_title,
+                reading_mode=reading_mode,
+                price_stars=price_stars,
+                source_filename=source_filename,
+                prepared_pages=group["pages"],
+                volume_number=current_volume,
+                volume_title=current_volume_title,
+                preview_pages=preview_pages,
+            ))
+    except Exception:
+        for chapter in created:
+            chapter_id = int(chapter.get("id") or 0)
+            if chapter_id:
+                await set_graphic_chapter_status(chapter_id, "deleted")
+                shutil.rmtree(GRAPHIC_STORAGE_ROOT / str(int(book_id)) / str(chapter_id), ignore_errors=True)
+        raise
+    return created
 
 
 async def _start_published_content_revision(
@@ -7119,9 +7243,12 @@ def create_app() -> FastAPI:
             cleanup_upload(upload_id)
             raise HTTPException(status_code=400, detail="Для загрузки страниц выберите графический тип произведения.")
         title = str(payload.get("title") or "").strip()
-        if len(title) < 2:
+        auto_structure = bool(payload.get("auto_structure"))
+        if len(title) < 2 and not auto_structure:
             cleanup_upload(upload_id)
             raise HTTPException(status_code=400, detail="Введите название главы.")
+        if len(title) < 2:
+            title = "Глава"
         reading_mode = str(payload.get("reading_mode") or "inherit")
         if reading_mode not in GRAPHIC_READING_MODES:
             cleanup_upload(upload_id)
@@ -7130,6 +7257,8 @@ def create_app() -> FastAPI:
         volume_number = max(1, min(10000, int(payload.get("volume_number") or 1)))
         volume_title = str(payload.get("volume_title") or "").strip()[:120]
         preview_pages = max(0, min(50, int(payload.get("preview_pages") or 0)))
+        pages_per_chapter = max(1, min(int(settings.MAX_COMIC_PAGES or 500), int(payload.get("pages_per_chapter") or 40)))
+        chapters_per_volume = max(1, min(1000, int(payload.get("chapters_per_volume") or 10)))
         total_chunks = int(payload.get("total_chunks") or 0)
         try:
             path, meta = assemble_upload(
@@ -7154,7 +7283,7 @@ def create_app() -> FastAPI:
                 reason="Добавлена новая графическая глава. Проверяется только новое содержимое.",
                 source="miniapp_graphic_content_change",
             )
-            chapter = await _commit_graphic_chapter(
+            chapters = await _commit_graphic_work(
                 book_id=book_id,
                 title=title,
                 reading_mode=reading_mode,
@@ -7164,14 +7293,20 @@ def create_app() -> FastAPI:
                 volume_number=volume_number,
                 volume_title=volume_title,
                 preview_pages=preview_pages,
+                auto_structure=auto_structure,
+                pages_per_chapter=pages_per_chapter,
+                chapters_per_volume=chapters_per_volume,
             )
+            chapter = chapters[0]
+            report["chapters_count"] = len(chapters)
+            report["volumes_count"] = len({int(item.get("volume_number") or 1) for item in chapters})
             await add_audit(
                 user.app_user_id,
                 "graphic_chapter_imported_web",
                 "graphic_chapter",
                 str(chapter["id"]),
                 None,
-                f"{report['pages_count']} pages",
+                f"{report['pages_count']} pages; {len(chapters)} chapters",
             )
             workflow = None
             if settings.BOT_TOKEN:
@@ -7196,7 +7331,7 @@ def create_app() -> FastAPI:
                     await delivery_bot.session.close()
             # Approved new-content notifications are emitted once by the
             # unified publication service after moderation succeeds.
-            return {"ok": True, "chapter": chapter, "report": report, "workflow": workflow, "notification": None}
+            return {"ok": True, "chapter": chapter, "chapters": chapters, "report": report, "workflow": workflow, "notification": None}
         except (ChunkedUploadError, GraphicImportError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
@@ -7214,6 +7349,9 @@ def create_app() -> FastAPI:
         volume_title: str = Form(""),
         preview_pages: int = Form(3),
         split_long_pages: bool = Form(False),
+        auto_structure: bool = Form(False),
+        pages_per_chapter: int = Form(40),
+        chapters_per_volume: int = Form(10),
         files: list[UploadFile] = File(...),
         x_telegram_init_data: str | None = Header(default=None),
     ):
@@ -7224,15 +7362,19 @@ def create_app() -> FastAPI:
         if not book or str(book["content_type"] or "book") not in GRAPHIC_CONTENT_TYPES:
             raise HTTPException(status_code=400, detail="Для загрузки страниц выберите графический тип произведения.")
         clean_title = str(title or "").strip()
-        if len(clean_title) < 2:
+        if len(clean_title) < 2 and not auto_structure:
             raise HTTPException(status_code=400, detail="Введите название главы.")
+        if len(clean_title) < 2:
+            clean_title = "Глава"
         if reading_mode not in GRAPHIC_READING_MODES:
             raise HTTPException(status_code=400, detail="Выберите режим чтения из списка.")
         if not files:
             raise HTTPException(status_code=400, detail="Выберите изображения страниц.")
-        max_pages = max(1, int(settings.MAX_COMIC_PAGES or 500))
+        max_pages = max(1, int(
+            settings.MAX_COMIC_WORK_PAGES if auto_structure else settings.MAX_COMIC_PAGES
+        ))
         if len(files) > max_pages:
-            raise HTTPException(status_code=400, detail=f"В одной главе можно загрузить не больше {max_pages} страниц.")
+            raise HTTPException(status_code=400, detail=f"За одну загрузку можно добавить не больше {max_pages} страниц.")
 
         temp_dir = GRAPHIC_TEMP_ROOT / uuid.uuid4().hex
         source_dir = temp_dir / "uploads"
@@ -7271,7 +7413,7 @@ def create_app() -> FastAPI:
                 reason="Добавлена новая графическая глава. Проверяется только новое содержимое.",
                 source="miniapp_graphic_content_change",
             )
-            chapter = await _commit_graphic_chapter(
+            chapters = await _commit_graphic_work(
                 book_id=book_id,
                 title=clean_title,
                 reading_mode=reading_mode,
@@ -7281,14 +7423,20 @@ def create_app() -> FastAPI:
                 volume_number=max(1, min(10000, int(volume_number or 1))),
                 volume_title=str(volume_title or "").strip()[:120],
                 preview_pages=max(0, min(50, int(preview_pages or 0))),
+                auto_structure=bool(auto_structure),
+                pages_per_chapter=max(1, min(int(settings.MAX_COMIC_PAGES or 500), int(pages_per_chapter or 40))),
+                chapters_per_volume=max(1, min(1000, int(chapters_per_volume or 10))),
             )
+            chapter = chapters[0]
+            report["chapters_count"] = len(chapters)
+            report["volumes_count"] = len({int(item.get("volume_number") or 1) for item in chapters})
             await add_audit(
                 user.app_user_id,
                 "graphic_images_imported_web",
                 "graphic_chapter",
                 str(chapter["id"]),
                 None,
-                f"{report['pages_count']} pages",
+                f"{report['pages_count']} pages; {len(chapters)} chapters",
             )
             workflow = None
             if settings.BOT_TOKEN:
@@ -7313,7 +7461,7 @@ def create_app() -> FastAPI:
                     await delivery_bot.session.close()
             # Approved new-content notifications are emitted once by the
             # unified publication service after moderation succeeds.
-            return {"ok": True, "chapter": chapter, "report": report, "workflow": workflow, "notification": None}
+            return {"ok": True, "chapter": chapter, "chapters": chapters, "report": report, "workflow": workflow, "notification": None}
         except GraphicImportError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         finally:
@@ -8096,7 +8244,12 @@ def create_app() -> FastAPI:
             return {"ok": True, "status": "blocked" if blocked else "hidden"}
 
         pending_content = await has_pending_book_content(book_id)
-        if book["publication_status"] != "review" and not (published_before_action and pending_content):
+        owner_draft_publish = bool(
+            is_owner
+            and action == "publish"
+            and str(book["publication_status"] or "") in {"draft", "rejected", "hidden"}
+        )
+        if book["publication_status"] != "review" and not (published_before_action and pending_content) and not owner_draft_publish:
             raise HTTPException(status_code=409, detail="Книга уже обработана или не находится на проверке.")
         chapters_count = await count_chapters_for_book(book_id)
         if action == "publish" and chapters_count < 1:

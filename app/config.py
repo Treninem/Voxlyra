@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     VK_PAYMENT_TEST_MODE: bool = False
     PROJECT_NAME: str = "Вокслира"
     PUBLIC_VERSION_VISIBLE: bool = False
-    PROJECT_VERSION: str = "v1.15.5"
+    PROJECT_VERSION: str = "v1.15.6"
     MAX_BOOK_UPLOAD_MB: int = 0
     MAX_BOOK_UNPACKED_MB: int = 2048
     # Прямая загрузка больших библиотечных ZIP идёт частями. Это аварийный
@@ -75,6 +75,9 @@ class Settings(BaseSettings):
     MAX_COMIC_UPLOAD_MB: int = 512
     MAX_COMIC_UNPACKED_MB: int = 1024
     MAX_COMIC_PAGES: int = 500
+    # Лимит одной главы остаётся MAX_COMIC_PAGES; единый файл произведения
+    # можно безопасно разделить на несколько глав и томов.
+    MAX_COMIC_WORK_PAGES: int = 5000
     MAX_COMIC_PAGE_MB: int = 30
     COMIC_IMAGE_MAX_WIDTH: int = 1920
     COMIC_IMAGE_MAX_HEIGHT: int = 12000

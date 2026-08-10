@@ -1237,6 +1237,7 @@ async function confirmBookImport() {
 }
 
 function graphicUploadValues() {
+  const autoStructure = Boolean(document.getElementById('graphicAutoStructure')?.checked);
   return {
     title: document.getElementById('graphicChapterTitle').value.trim(),
     readingMode: document.getElementById('graphicChapterMode').value || 'inherit',
@@ -1245,6 +1246,9 @@ function graphicUploadValues() {
     volumeTitle: String(document.getElementById('graphicVolumeTitle')?.value || '').trim(),
     previewPages: Math.max(0, Math.min(20, Number(document.getElementById('graphicPreviewPages')?.value || 0))),
     splitLongPages: Boolean(document.getElementById('graphicSplitLongInput')?.checked),
+    autoStructure,
+    pagesPerChapter: Math.max(1, Math.min(500, Number(document.getElementById('graphicPagesPerChapter')?.value || 40))),
+    chaptersPerVolume: Math.max(1, Math.min(1000, Number(document.getElementById('graphicChaptersPerVolume')?.value || 10))),
   };
 }
 
@@ -1257,7 +1261,9 @@ function renderGraphicUploadResult(result) {
   if (workflow.status === 'published') statusText = 'Глава сохранена, произведение опубликовано.';
   if (workflow.status === 'review') statusText = 'Глава сохранена, произведение отправлено на проверку.';
   const fragments = Number(report.webtoon_fragments || 0);
-  box.innerHTML = `<h3>Графическая глава готова</h3><div class="import-numbers"><span>${Number(report.pages_count || 0)} страниц</span><span>${(Number(report.optimized_bytes || 0) / 1024 / 1024).toFixed(1)} МБ</span></div>${fragments ? `<p class="muted">Длинные страницы разделены на ${fragments} лёгких фрагментов.</p>` : ''}<p class="success-text">${escapeHtml(statusText)}</p>`;
+  const structure = Number(report.chapters_count || 0) > 1
+    ? `<span>${Number(report.chapters_count)} глав · ${Number(report.volumes_count || 1)} томов</span>` : '';
+  box.innerHTML = `<h3>${Number(report.chapters_count || 0) > 1 ? 'Произведение распределено' : 'Графическая глава готова'}</h3><div class="import-numbers"><span>${Number(report.pages_count || 0)} страниц</span>${structure}<span>${(Number(report.optimized_bytes || 0) / 1024 / 1024).toFixed(1)} МБ</span></div>${fragments ? `<p class="muted">Длинные страницы разделены на ${fragments} лёгких фрагментов.</p>` : ''}<p class="success-text">${escapeHtml(statusText)}</p>`;
   box.hidden = false;
 }
 
@@ -1289,7 +1295,7 @@ async function uploadGraphicFile() {
   const bookId = authorState.book?.book?.id;
   const values = graphicUploadValues();
   if (!bookId) return;
-  if (values.title.length < 2) { notify('Введите название главы'); document.getElementById('graphicChapterTitle').focus(); return; }
+  if (!values.autoStructure && values.title.length < 2) { notify('Введите название главы'); document.getElementById('graphicChapterTitle').focus(); return; }
   if (!file) { notify('Выберите PDF, архив, EPUB или изображение'); return; }
   const resumeKey = graphicUploadResumeKey(bookId, file);
   const resumeUploadId = localStorage.getItem(resumeKey) || '';
@@ -1312,7 +1318,7 @@ async function uploadGraphicFile() {
   setGraphicUploadProgress(88, 'Готовим адаптивные страницы…');
   const result = await apiFetch(`/api/author/book/${bookId}/graphic/upload/${uploadId}/finish`, {
     method: 'POST',
-    body: JSON.stringify({ total_chunks: totalChunks, title: values.title, reading_mode: values.readingMode, price_stars: values.price, volume_number: values.volumeNumber, volume_title: values.volumeTitle, preview_pages: values.previewPages, split_long_pages: values.splitLongPages }),
+    body: JSON.stringify({ total_chunks: totalChunks, title: values.title, reading_mode: values.readingMode, price_stars: values.price, volume_number: values.volumeNumber, volume_title: values.volumeTitle, preview_pages: values.previewPages, split_long_pages: values.splitLongPages, auto_structure: values.autoStructure, pages_per_chapter: values.pagesPerChapter, chapters_per_volume: values.chaptersPerVolume }),
   });
   localStorage.removeItem(resumeKey);
   return result;
@@ -1324,7 +1330,7 @@ async function uploadGraphicImages() {
   const bookId = authorState.book?.book?.id;
   const values = graphicUploadValues();
   if (!bookId) return;
-  if (values.title.length < 2) { notify('Введите название главы'); document.getElementById('graphicChapterTitle').focus(); return; }
+  if (!values.autoStructure && values.title.length < 2) { notify('Введите название главы'); document.getElementById('graphicChapterTitle').focus(); return; }
   if (!files.length) { notify('Выберите изображения страниц'); return; }
   const form = new FormData();
   form.append('title', values.title);
@@ -1334,6 +1340,9 @@ async function uploadGraphicImages() {
   form.append('volume_title', values.volumeTitle);
   form.append('preview_pages', String(values.previewPages));
   form.append('split_long_pages', values.splitLongPages ? 'true' : 'false');
+  form.append('auto_structure', values.autoStructure ? 'true' : 'false');
+  form.append('pages_per_chapter', String(values.pagesPerChapter));
+  form.append('chapters_per_volume', String(values.chaptersPerVolume));
   files.forEach((file) => form.append('files', file, file.name));
   setGraphicUploadProgress(20, `Загружаем ${files.length} страниц…`);
   return apiFetch(`/api/author/book/${bookId}/graphic/images`, { method: 'POST', body: form });
@@ -1364,6 +1373,16 @@ function setGraphicUploadTab(tab) {
   const imagePicker = document.getElementById('graphicImagesPicker');
   if (filePicker) filePicker.hidden = authorState.graphicUploadTab !== 'file';
   if (imagePicker) imagePicker.hidden = authorState.graphicUploadTab !== 'images';
+}
+
+function syncGraphicAutoStructure() {
+  const automatic = Boolean(document.getElementById('graphicAutoStructure')?.checked);
+  const limits = document.getElementById('graphicAutoStructureLimits');
+  const manual = document.getElementById('graphicManualVolumeFields');
+  if (limits) limits.hidden = !automatic;
+  if (manual) manual.hidden = automatic;
+  const title = document.getElementById('graphicChapterTitle');
+  if (title) title.required = !automatic;
 }
 
 function armDelete(button, message, resetText) {
@@ -1803,6 +1822,8 @@ document.addEventListener('DOMContentLoaded', () => {
   bindAuthorEvents();
   document.getElementById('authorAnalyticsPeriod')?.addEventListener('change', (event) => loadAuthorAnalytics(event.target.value));
   setGraphicUploadTab('file');
+  document.getElementById('graphicAutoStructure')?.addEventListener('change', syncGraphicAutoStructure);
+  syncGraphicAutoStructure();
   loadAuthorDashboard();
   const newKind = new URLSearchParams(window.location.search).get('new');
   if (newKind === 'graphic') setTimeout(() => openNewProjectForm('graphic'), 250);

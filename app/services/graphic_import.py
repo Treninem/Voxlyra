@@ -40,7 +40,11 @@ def _safe_member_name(value: str) -> str:
 
 
 def _archive_limits() -> tuple[int, int, int]:
-    max_pages = max(1, int(settings.MAX_COMIC_PAGES or 500))
+    max_pages = max(
+        1,
+        int(settings.MAX_COMIC_PAGES or 500),
+        int(getattr(settings, "MAX_COMIC_WORK_PAGES", 5000) or 5000),
+    )
     max_total = max(1, int(settings.MAX_COMIC_UNPACKED_MB or 1024)) * 1024 * 1024
     max_one = max(1, int(settings.MAX_COMIC_PAGE_MB or 30)) * 1024 * 1024
     return max_pages, max_total, max_one
@@ -95,7 +99,9 @@ def _image_candidates_from_zip(source: Path, extract_dir: Path) -> list[tuple[Pa
                     shutil.copyfileobj(src, dst, length=1024 * 1024)
             except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
                 raise GraphicImportError(f"Не удалось извлечь страницу «{Path(safe_name).name}».") from exc
-            result.append((destination, Path(safe_name).name))
+            # Keep the internal path so automatic import can recognize
+            # "Том 2/Глава 15/001.jpg" instead of flattening the structure.
+            result.append((destination, safe_name))
         return result
 
 
@@ -159,7 +165,7 @@ def _image_candidates_from_libarchive(source: Path, extract_dir: Path) -> list[t
                 if written <= 0:
                     destination.unlink(missing_ok=True)
                     continue
-                extracted.append((destination, Path(safe_name).name))
+                extracted.append((destination, safe_name))
     except GraphicImportError:
         raise
     except Exception as exc:  # pragma: no cover - конкретная ошибка зависит от libarchive
