@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     VK_PAYMENT_TEST_MODE: bool = False
     PROJECT_NAME: str = "Вокслира"
     PUBLIC_VERSION_VISIBLE: bool = False
-    PROJECT_VERSION: str = "v1.15.7"
+    PROJECT_VERSION: str = "v1.15.8"
     MAX_BOOK_UPLOAD_MB: int = 0
     MAX_BOOK_UNPACKED_MB: int = 2048
     # Прямая загрузка больших библиотечных ZIP идёт частями. Это аварийный

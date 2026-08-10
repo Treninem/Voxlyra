@@ -15,6 +15,16 @@ logger = logging.getLogger(__name__)
 _profile_cache: dict[int, tuple[float, dict[str, Any]]] = {}
 
 
+class VKAPIError(RuntimeError):
+    """Structured VK API failure so delivery fallbacks do not parse strings."""
+
+    def __init__(self, method: str, code: int, message: str) -> None:
+        self.method = str(method)
+        self.code = int(code or 0)
+        self.message = str(message or "Unknown VK API error")
+        super().__init__(f"VK API {self.method}: {self.code} {self.message}")
+
+
 def vk_app_url(location: str = "") -> str:
     if int(settings.VK_APP_ID or 0) <= 0:
         return ""
@@ -40,7 +50,7 @@ async def vk_api_call(method: str, params: dict[str, Any] | None = None, *, toke
     data = response.json()
     if data.get("error"):
         error = data["error"]
-        raise RuntimeError(f"VK API {method}: {error.get('error_code')} {error.get('error_msg')}")
+        raise VKAPIError(method, int(error.get("error_code") or 0), str(error.get("error_msg") or ""))
     return data.get("response")
 
 
@@ -116,6 +126,33 @@ async def send_vk_message(vk_user_id: int, text: str, *, keyboard: str | None = 
             params["keyboard"] = keyboard
         await vk_api_call("messages.send", params, token=settings.VK_GROUP_TOKEN)
         return True
+    except VKAPIError as exc:
+        if exc.code == 912 and keyboard:
+            # VK rejects keyboard actions while the community's "Chat bot
+            # feature" switch is off. A plain message is still useful and
+            # prevents the bot from appearing dead until an admin enables it.
+            app_url = vk_app_url()
+            fallback_text = str(text or "")
+            if app_url and app_url not in fallback_text:
+                fallback_text += f"\n\nОткрыть приложение: {app_url}"
+            fallback_params: dict[str, Any] = {
+                "user_id": int(vk_user_id),
+                "random_id": random.randint(1, 2_147_483_647),
+                "message": fallback_text[:4096],
+            }
+            try:
+                await vk_api_call("messages.send", fallback_params, token=settings.VK_GROUP_TOKEN)
+                logger.warning(
+                    "VK Chat bot feature is disabled (API 912); sent user %s a keyboard-free fallback. "
+                    "Enable Community management -> Messages -> Bot settings -> Chat bot feature.",
+                    vk_user_id,
+                )
+                return True
+            except Exception as fallback_exc:
+                logger.warning("VK fallback delivery failed for user %s: %s", vk_user_id, fallback_exc)
+                return False
+        logger.warning("VK message delivery failed for user %s: %s", vk_user_id, exc)
+        return False
     except Exception as exc:
         logger.warning("VK message delivery failed for user %s: %s", vk_user_id, exc)
         return False
