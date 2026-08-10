@@ -1,4 +1,4 @@
-"""Deterministic checks for the v1.15.5 VK menu contract."""
+"""Deterministic checks for the current VK menu contract."""
 from __future__ import annotations
 
 import ast
@@ -33,8 +33,10 @@ def main() -> None:
         for row in payload["buttons"]:
             for button in row:
                 action = button["action"]
-                assert action["type"] == "open_link"
-                assert action["link"].startswith("https://vk.com/app54713417#")
+                assert action["type"] == "open_app"
+                assert action["app_id"] == 54713417
+                assert action["owner_id"] == -240755410
+                assert action["hash"] in {"catalog", "comics", "audio", "library", "author", "settings"}
 
     owner = json.loads(build(224402322))
     owner_labels = [button["action"]["label"] for row in owner["buttons"] for button in row]

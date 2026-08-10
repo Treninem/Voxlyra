@@ -8,6 +8,7 @@
 VK_ENABLED=true
 VK_APP_ID=54713417
 VK_APP_SECRET=
+VK_SECURE_KEY=
 VK_SERVICE_TOKEN=
 VK_GROUP_ID=240755410
 VK_GROUP_TOKEN=
@@ -17,7 +18,7 @@ VK_VOTES_PER_STAR=1.0
 DATABASE_PATH=/app/data/voxlyra.sqlite3
 ```
 
-- `VK_APP_ID` и `VK_APP_SECRET` — приложение VK Mini Apps.
+- `VK_APP_ID` и `VK_APP_SECRET` — приложение VK Mini Apps. Используйте `VK_SECURE_KEY` только как совместимый псевдоним, если переменная в панели уже названа так; достаточно одной из двух.
 - `VK_SERVICE_TOKEN` — необязателен, нужен для серверного получения имени/аватара.
 - `VK_GROUP_ID` и `VK_GROUP_TOKEN` — необязательны для самого Mini App, нужны для бота сообщества и уведомлений.
 - В настройках VK Mini App укажите тот же HTTPS URL, который используется как `WEBAPP_URL` Telegram.

@@ -236,6 +236,13 @@ function voxTelegramLaunchUrl(route = window.location.href) {
     : `https://t.me/${encodeURIComponent(username)}?startapp`;
 }
 
+function voxVKLaunchUrl(route = window.location.href) {
+  const appId = Number(document.querySelector('meta[name="voxlyra-vk-app-id"]')?.content || 0);
+  const startParam = voxStartParamForRoute(route);
+  if (!appId) return '';
+  return `https://vk.com/app${appId}${startParam ? `#${encodeURIComponent(startParam)}` : ''}`;
+}
+
 function voxReadRouteState() {
   try {
     const value = JSON.parse(localStorage.getItem(VOX_ROUTE_STATE_KEY) || '{}');
@@ -298,6 +305,14 @@ function voxRegisterCurrentRoute() {
 
   const query = new URLSearchParams(window.location.search);
   const unsafe = tg?.initDataUnsafe || {};
+  const vkHashRoute = voxHasVKAuth()
+    ? voxRouteFromStartParam(String(window.location.hash || '').replace(/^#/, ''))
+    : '';
+  if (vkHashRoute) {
+    try { sessionStorage.removeItem(VOX_SKIP_RESTORE_KEY); } catch (_) {}
+    window.location.replace(voxRouteWithTelegramLaunchContext(vkHashRoute));
+    return;
+  }
   const explicit = String(query.get('tgWebAppStartParam') || unsafe.start_param || '').trim();
   const explicitRoute = voxRouteFromStartParam(explicit);
   if (explicitRoute) {
@@ -1020,8 +1035,8 @@ async function initReader() {
   updateReaderProgressBar();
   window.addEventListener('scroll', updateReaderProgressBar, { passive: true });
   window.addEventListener('resize', updateReaderProgressBar, { passive: true });
-  if (!tgInitData()) {
-    if (status) status.textContent = 'Откройте главу внутри Telegram, чтобы сохранять место и видеть покупки.';
+  if (!hasPlatformSession()) {
+    if (status) status.textContent = 'Откройте главу внутри Telegram или VK, чтобы сохранять место и видеть покупки.';
     return;
   }
   try {
@@ -1033,7 +1048,7 @@ async function initReader() {
       const freeAccessExpected = data.pricing_mode === 'free' || Boolean(data.chapter?.is_free);
       if (freeAccessExpected) {
         if (status) status.textContent = 'Глава бесплатная. Обновляем доступ…';
-        if (paragraphs) paragraphs.innerHTML = '<section class="empty-card access-card"><div class="empty-icon">✦</div><h3>Глава бесплатная</h3><p>Обновите страницу внутри Telegram. Покупка для этой главы не требуется.</p></section>';
+        if (paragraphs) paragraphs.innerHTML = '<section class="empty-card access-card"><div class="empty-icon">✦</div><h3>Глава бесплатная</h3><p>Обновите страницу внутри Telegram или VK. Покупка для этой главы не требуется.</p></section>';
         return;
       }
       const premiumRequired = Boolean(data.premium_required || data.chapter?.premium_required);
@@ -1132,7 +1147,12 @@ async function initReader() {
     renderComments(data.comments);
     renderChapterReactions(data.reactions);
   } catch (error) {
-    if (status) status.textContent = 'Не удалось открыть главу. Попробуйте ещё раз.';
+    const message = error?.message || 'Не удалось открыть главу. Попробуйте ещё раз.';
+    if (status) status.textContent = message;
+    if (paragraphs && error?.status === 401) {
+      const platform = voxPlatform() === 'vk' ? 'VK' : 'Telegram';
+      paragraphs.innerHTML = `<section class="empty-card access-card"><div class="empty-icon">!</div><h3>Не удалось проверить вход через ${platform}</h3><p>${escapeHtml(message)}</p></section>`;
+    }
   }
 }
 
@@ -5421,8 +5441,12 @@ function initExternalBrowserMode() {
   }
   const notice = document.getElementById('externalBrowserNotice');
   const open = document.getElementById('externalBrowserOpen');
-  const launchUrl = voxTelegramLaunchUrl();
+  const cameFromVK = /(^|\.)vk\.(?:com|ru)$/i.test((() => { try { return new URL(document.referrer).hostname; } catch (_) { return ''; } })());
+  const vkLaunchUrl = voxVKLaunchUrl();
+  const telegramLaunchUrl = voxTelegramLaunchUrl();
+  const launchUrl = cameFromVK && vkLaunchUrl ? vkLaunchUrl : telegramLaunchUrl || vkLaunchUrl;
   if (open && launchUrl) open.href = launchUrl;
+  if (open && cameFromVK && vkLaunchUrl) open.textContent = 'Открыть во VK';
   if (notice && launchUrl && window.location.pathname !== '/') notice.hidden = false;
 
   document.querySelectorAll('.requires-telegram-auth, .telegram-payment-action').forEach((element) => {
@@ -5435,7 +5459,8 @@ function initExternalBrowserMode() {
       if (!card) return;
       card.hidden = false;
       card.classList.add('external-telegram-card');
-      card.innerHTML = '<div class="empty-icon">✦</div><h3>Откройте в Telegram</h3><p>Текст, аудио и страницы защищены. В Telegram VoxLyra безопасно проверит доступ и продолжит с нужного места.</p>'
+      const platformName = cameFromVK && vkLaunchUrl ? 'VK' : 'Telegram или VK';
+      card.innerHTML = `<div class="empty-icon">✦</div><h3>Откройте в ${platformName}</h3><p>Текст, аудио и страницы защищены. VoxLyra проверит доступ через платформу и продолжит с нужного места.</p>`
         + (launchUrl ? `<a class="button-link" href="${launchUrl}">Открыть VoxLyra</a>` : '');
     });
   }

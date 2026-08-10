@@ -92,7 +92,12 @@ def verify_callback_signature(params: Mapping[str, Any]) -> bool:
     received = str(params.get("sig") or "").lower()
     if len(received) != 32 or any(ch not in "0123456789abcdef" for ch in received):
         return False
-    secret = str(getattr(settings, "VK_PAYMENT_SECRET", "") or settings.VK_APP_SECRET or "")
+    secret = str(
+        getattr(settings, "VK_PAYMENT_SECRET", "")
+        or settings.VK_APP_SECRET
+        or getattr(settings, "VK_SECURE_KEY", "")
+        or ""
+    )
     if not secret:
         return False
     pairs = []

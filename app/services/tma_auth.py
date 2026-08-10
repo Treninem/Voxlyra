@@ -112,8 +112,9 @@ async def _authenticate_telegram_init_data(init_data: str) -> TMAUser:
 def _validate_vk_launch_params(raw_query: str) -> dict[str, str]:
     if not settings.VK_ENABLED:
         raise TMAAuthError("Вход через VK сейчас выключен в настройках VoxLyra.")
-    if int(settings.VK_APP_ID or 0) <= 0 or not settings.VK_APP_SECRET:
-        raise TMAAuthError("VK Mini App ещё не подключён на сервере.")
+    signing_secret = str(settings.VK_APP_SECRET or settings.VK_SECURE_KEY or "").strip()
+    if int(settings.VK_APP_ID or 0) <= 0 or not signing_secret:
+        raise TMAAuthError("Не задан защищённый ключ VK. Добавьте VK_APP_SECRET в переменные Bothost и выполните Redeploy.")
     if len(raw_query.encode("utf-8")) > 24 * 1024:
         raise TMAAuthError("Данные запуска VK имеют неверный размер.")
     pairs_list = parse_qsl(raw_query, keep_blank_values=True, strict_parsing=False)
@@ -128,7 +129,7 @@ def _validate_vk_launch_params(raw_query: str) -> dict[str, str]:
     signed.sort(key=lambda row: row[0])
     signing_string = urlencode(signed)
     digest = hmac.new(
-        settings.VK_APP_SECRET.encode("utf-8"),
+        signing_secret.encode("utf-8"),
         signing_string.encode("utf-8"),
         hashlib.sha256,
     ).digest()

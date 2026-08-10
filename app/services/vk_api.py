@@ -70,23 +70,19 @@ async def get_vk_user_profile(vk_user_id: int) -> dict[str, Any] | None:
 
 
 def vk_main_keyboard(vk_user_id: int | None = None) -> str:
-    """Inline VK menu that is visible in desktop and mobile messengers.
-
-    A non-inline ``open_app`` keyboard can be collapsed by the VK messenger and
-    can disappear completely while the Mini App is not yet enabled.  Explicit
-    ``open_link`` buttons stay attached to the bot message, so the user always
-    sees a menu.  The link still opens the same VK Mini App and preserves its
-    signed launch parameters once the launch URL is configured in VK.
-    """
+    """Visible inline menu that launches the signed native VK Mini App."""
     app_id = int(settings.VK_APP_ID or 0)
-    if app_id <= 0:
+    owner_id = -abs(int(settings.VK_GROUP_ID or 0))
+    if app_id <= 0 or owner_id == 0:
         return ""
 
     def app_button(label: str, location: str) -> dict[str, Any]:
         return {
             "action": {
-                "type": "open_link",
-                "link": _vk_section_url(location),
+                "type": "open_app",
+                "app_id": app_id,
+                "owner_id": owner_id,
+                "hash": location,
                 "label": label,
             },
         }

@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     VK_ENABLED: bool = False
     VK_APP_ID: int = 0
     VK_APP_SECRET: str = ""
+    # Совместимость с панелями, где защищённый ключ назван Secure Key.
+    VK_SECURE_KEY: str = ""
     VK_SERVICE_TOKEN: str = ""
     VK_GROUP_ID: int = 0
     VK_GROUP_TOKEN: str = ""
@@ -37,7 +39,7 @@ class Settings(BaseSettings):
     VK_PAYMENT_TEST_MODE: bool = False
     PROJECT_NAME: str = "Вокслира"
     PUBLIC_VERSION_VISIBLE: bool = False
-    PROJECT_VERSION: str = "v1.15.6"
+    PROJECT_VERSION: str = "v1.15.7"
     MAX_BOOK_UPLOAD_MB: int = 0
     MAX_BOOK_UNPACKED_MB: int = 2048
     # Прямая загрузка больших библиотечных ZIP идёт частями. Это аварийный
