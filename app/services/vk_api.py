@@ -22,6 +22,11 @@ def vk_app_url(location: str = "") -> str:
     return f"https://vk.com/app{int(settings.VK_APP_ID)}{suffix}"
 
 
+def _vk_section_url(location: str) -> str:
+    """Return a stable VK Mini App link for a keyboard button."""
+    return vk_app_url(location)
+
+
 async def vk_api_call(method: str, params: dict[str, Any] | None = None, *, token: str = "") -> Any:
     access_token = str(token or settings.VK_GROUP_TOKEN or settings.VK_SERVICE_TOKEN or "").strip()
     if not access_token:
@@ -64,30 +69,40 @@ async def get_vk_user_profile(vk_user_id: int) -> dict[str, Any] | None:
     return row
 
 
-def vk_main_keyboard() -> str:
-    """Permanent VK community keyboard with native Mini App launch buttons."""
+def vk_main_keyboard(vk_user_id: int | None = None) -> str:
+    """Inline VK menu that is visible in desktop and mobile messengers.
+
+    A non-inline ``open_app`` keyboard can be collapsed by the VK messenger and
+    can disappear completely while the Mini App is not yet enabled.  Explicit
+    ``open_link`` buttons stay attached to the bot message, so the user always
+    sees a menu.  The link still opens the same VK Mini App and preserves its
+    signed launch parameters once the launch URL is configured in VK.
+    """
     app_id = int(settings.VK_APP_ID or 0)
-    owner_id = -abs(int(settings.VK_GROUP_ID or 0))
-    if app_id <= 0 or owner_id == 0:
+    if app_id <= 0:
         return ""
 
-    def app_button(label: str, location: str, color: str = "primary") -> dict[str, Any]:
+    def app_button(label: str, location: str) -> dict[str, Any]:
         return {
             "action": {
-                "type": "open_app", "app_id": app_id, "owner_id": owner_id,
-                "hash": location, "label": label,
+                "type": "open_link",
+                "link": _vk_section_url(location),
+                "label": label,
             },
-            "color": color,
         }
 
+    buttons = [
+        [app_button("📚 Книги", "catalog"), app_button("🖼 Комиксы", "comics")],
+        [app_button("🎧 Слушать", "audio")],
+        [app_button("⭐ Моё", "library"), app_button("✍ Автору", "author")],
+        [app_button("⚙ Ещё", "settings")],
+    ]
+    if vk_user_id is not None and int(vk_user_id) in settings.vk_owner_ids:
+        buttons.append([app_button("👑 Управление", "control")])
+
     keyboard = {
-        "one_time": False, "inline": False,
-        "buttons": [
-            [app_button("📚 Читать", "catalog"), app_button("🎧 Слушать", "audio")],
-            [app_button("🖼 Комиксы", "comics"), app_button("✨ Новинки", "new")],
-            [app_button("📖 Моя библиотека", "library", "positive")],
-            [app_button("👤 Моё", "settings"), app_button("✍ Автору", "author")],
-        ],
+        "inline": True,
+        "buttons": buttons,
     }
     return json.dumps(keyboard, ensure_ascii=False, separators=(",", ":"))
 
@@ -121,7 +136,6 @@ async def run_vk_community_bot() -> None:
         return
     group_id = int(settings.VK_GROUP_ID)
     app_url = vk_app_url()
-    keyboard = vk_main_keyboard()
     delay = 2
     while True:
         try:
@@ -143,8 +157,9 @@ async def run_vk_community_bot() -> None:
                         from_id = int(message.get("from_id") or 0)
                         if from_id <= 0:
                             continue
-                        text = "VoxLyra — книги, аудио, комиксы и личная библиотека. Выберите раздел кнопкой ниже."
-                        if app_url:
+                        keyboard = vk_main_keyboard(from_id)
+                        text = "VoxLyra — книги, аудио, комиксы и личная библиотека. Выберите раздел в меню ниже."
+                        if not keyboard and app_url:
                             text += f"\n\nОткрыть приложение: {app_url}"
                         await send_vk_message(from_id, text, keyboard=keyboard)
         except asyncio.CancelledError:

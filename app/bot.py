@@ -9,7 +9,7 @@ from aiogram.client.default import DefaultBotProperties
 from app.config import settings
 from app.db import init_db
 from app.handlers import author, legal, moderation, owner, payments, start, library_manager
-from app.middleware import BlockedUserMiddleware
+from app.middleware import BlockedUserMiddleware, SafeTelegramEditMiddleware
 from app.services.cover_storage import restore_missing_book_covers
 from app.services.moderation_alerts import moderation_reminder_loop
 from app.services.smart_notifications import smart_reader_reminder_loop
@@ -38,6 +38,8 @@ def _dispatcher() -> Dispatcher:
         return _DISPATCHER
     dp = Dispatcher(storage=MemoryStorage())
     blocked_guard = BlockedUserMiddleware()
+    safe_edits = SafeTelegramEditMiddleware()
+    dp.callback_query.outer_middleware(safe_edits)
     dp.message.outer_middleware(blocked_guard)
     dp.callback_query.outer_middleware(blocked_guard)
     dp.pre_checkout_query.outer_middleware(blocked_guard)

@@ -3,10 +3,33 @@ from __future__ import annotations
 from typing import Any, Awaitable, Callable
 
 from aiogram import BaseMiddleware
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, Message, PreCheckoutQuery, TelegramObject
 
 from app.config import settings
 from app.db import upsert_user
+
+
+class SafeTelegramEditMiddleware(BaseMiddleware):
+    """Treat a repeated press on an unchanged inline menu as a successful no-op."""
+
+    async def __call__(
+        self,
+        handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
+        data: dict[str, Any],
+    ) -> Any:
+        try:
+            return await handler(event, data)
+        except TelegramBadRequest as exc:
+            if "message is not modified" not in str(exc).lower():
+                raise
+            if isinstance(event, CallbackQuery):
+                try:
+                    await event.answer()
+                except TelegramBadRequest:
+                    pass
+            return None
 
 
 class BlockedUserMiddleware(BaseMiddleware):
