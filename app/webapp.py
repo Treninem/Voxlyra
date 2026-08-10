@@ -1371,7 +1371,12 @@ def create_app() -> FastAPI:
     templates.env.globals["asset_version"] = OWNER_BUILD_VERSION
 
     def common_context(extra: dict[str, Any] | None = None) -> dict[str, Any]:
-        data = {"project_name": settings.PROJECT_NAME, "bot_username": settings.BOT_USERNAME.strip().lstrip("@")}
+        data = {
+            "project_name": settings.PROJECT_NAME,
+            "bot_username": settings.BOT_USERNAME.strip().lstrip("@"),
+            "vk_app_id": int(settings.VK_APP_ID or 0),
+            "vk_votes_per_star": max(1.0, float(settings.VK_VOTES_PER_STAR or 1.0)),
+        }
         if extra:
             data.update(extra)
         return data
@@ -2288,9 +2293,12 @@ def create_app() -> FastAPI:
             result = await consume_link_code(
                 current_user_id=user.app_user_id, current_platform=user.platform,
                 external_id=user.external_id, code=str((payload or {}).get("code") or ""),
+                strategy=str((payload or {}).get("strategy") or ""),
             )
         except AccountLinkError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if result.get("requires_decision"):
+            return result
         await add_audit(result["canonical_user_id"], "cross_platform_account_linked", "account", str(result["canonical_user_id"]), user.platform, "")
         return {"ok": True, "reload_required": True, **result}
 

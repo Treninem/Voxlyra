@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import random
 import time
@@ -63,19 +64,46 @@ async def get_vk_user_profile(vk_user_id: int) -> dict[str, Any] | None:
     return row
 
 
-async def send_vk_message(vk_user_id: int, text: str) -> bool:
+def vk_main_keyboard() -> str:
+    """Permanent VK community keyboard with native Mini App launch buttons."""
+    app_id = int(settings.VK_APP_ID or 0)
+    owner_id = -abs(int(settings.VK_GROUP_ID or 0))
+    if app_id <= 0 or owner_id == 0:
+        return ""
+
+    def app_button(label: str, location: str, color: str = "primary") -> dict[str, Any]:
+        return {
+            "action": {
+                "type": "open_app", "app_id": app_id, "owner_id": owner_id,
+                "hash": location, "label": label,
+            },
+            "color": color,
+        }
+
+    keyboard = {
+        "one_time": False, "inline": False,
+        "buttons": [
+            [app_button("📚 Читать", "catalog"), app_button("🎧 Слушать", "audio")],
+            [app_button("🖼 Комиксы", "comics"), app_button("✨ Новинки", "new")],
+            [app_button("📖 Моя библиотека", "library", "positive")],
+            [app_button("👤 Моё", "settings"), app_button("✍ Автору", "author")],
+        ],
+    }
+    return json.dumps(keyboard, ensure_ascii=False, separators=(",", ":"))
+
+
+async def send_vk_message(vk_user_id: int, text: str, *, keyboard: str | None = None) -> bool:
     if not settings.VK_GROUP_TOKEN:
         return False
     try:
-        await vk_api_call(
-            "messages.send",
-            {
-                "user_id": int(vk_user_id),
-                "random_id": random.randint(1, 2_147_483_647),
-                "message": str(text or "")[:4096],
-            },
-            token=settings.VK_GROUP_TOKEN,
-        )
+        params: dict[str, Any] = {
+            "user_id": int(vk_user_id),
+            "random_id": random.randint(1, 2_147_483_647),
+            "message": str(text or "")[:4096],
+        }
+        if keyboard:
+            params["keyboard"] = keyboard
+        await vk_api_call("messages.send", params, token=settings.VK_GROUP_TOKEN)
         return True
     except Exception as exc:
         logger.warning("VK message delivery failed for user %s: %s", vk_user_id, exc)
@@ -93,6 +121,7 @@ async def run_vk_community_bot() -> None:
         return
     group_id = int(settings.VK_GROUP_ID)
     app_url = vk_app_url()
+    keyboard = vk_main_keyboard()
     delay = 2
     while True:
         try:
@@ -114,10 +143,10 @@ async def run_vk_community_bot() -> None:
                         from_id = int(message.get("from_id") or 0)
                         if from_id <= 0:
                             continue
-                        text = "VoxLyra — книги, аудио, комиксы и личная библиотека."
+                        text = "VoxLyra — книги, аудио, комиксы и личная библиотека. Выберите раздел кнопкой ниже."
                         if app_url:
                             text += f"\n\nОткрыть приложение: {app_url}"
-                        await send_vk_message(from_id, text)
+                        await send_vk_message(from_id, text, keyboard=keyboard)
         except asyncio.CancelledError:
             raise
         except Exception as exc:

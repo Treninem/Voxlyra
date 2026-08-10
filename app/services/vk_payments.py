@@ -26,7 +26,9 @@ class VKPaymentError(ValueError):
 
 
 def votes_for_stars(stars: int) -> int:
-    ratio = max(0.01, float(getattr(settings, "VK_VOTES_PER_STAR", 1.0) or 1.0))
+    # Never accept a coefficient below 1: the VK representation must not make
+    # canonical content cheaper than the existing Stars economy.
+    ratio = max(1.0, float(getattr(settings, "VK_VOTES_PER_STAR", 1.0) or 1.0))
     return max(1, int(math.ceil(max(1, int(stars)) * ratio)))
 
 

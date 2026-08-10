@@ -77,12 +77,20 @@ function voxHasPlatformAuth() { return voxHasTelegramAuth() || voxHasVKAuth(); }
 function voxPlatform() { return voxHasVKAuth() ? 'vk' : voxHasTelegramAuth() ? 'telegram' : 'web'; }
 
 async function voxInitVKBridge() {
-  if (!voxHasVKAuth() || !window.vkBridge?.send) return;
+  if (!voxHasVKAuth()) return false;
+  if (!window.vkBridge?.send) {
+    document.documentElement.classList.add('vox-vk-bridge-missing');
+    return false;
+  }
   try {
     await window.vkBridge.send('VKWebAppInit');
     const info = await window.vkBridge.send('VKWebAppGetUserInfo').catch(() => null);
     if (info) window.__voxVKUserInfo = info;
-  } catch (_) {}
+    return true;
+  } catch (_) {
+    document.documentElement.classList.add('vox-vk-bridge-error');
+    return false;
+  }
 }
 
 function voxSafeContentAnchor(raw = '') {
@@ -624,6 +632,47 @@ function tgInitData() {
   if (tg) return tg;
   const vk = voxCaptureVKLaunchQuery();
   return vk ? `vk:${vk}` : '';
+}
+
+function platformInitData() { return tgInitData(); }
+function hasPlatformSession() { return Boolean(platformInitData()); }
+
+function votesForStars(stars) {
+  const ratio = Math.max(1, Number(document.querySelector('meta[name="voxlyra-vk-votes-per-star"]')?.content || 1));
+  return Math.max(1, Math.ceil(Math.max(1, Number(stars || 0)) * ratio));
+}
+
+function localizeVKPriceText(value) {
+  if (voxPlatform() !== 'vk') return String(value || '');
+  return String(value || '').replace(/(\d[\d\s]*)\s*(?:Telegram\s+)?Stars?/gi, (_, raw) => {
+    const stars = Number(String(raw).replace(/\s/g, ''));
+    return `${votesForStars(stars)} голос.`;
+  });
+}
+
+function localizeVKPrices(rootNode = document.body) {
+  if (voxPlatform() !== 'vk' || !rootNode) return;
+  const skip = 'SCRIPT,STYLE,TEXTAREA,INPUT,SELECT,OPTION,[data-canonical-stars],[contenteditable="true"]';
+  const walker = document.createTreeWalker(rootNode, NodeFilter.SHOW_TEXT);
+  const rows = [];
+  while (walker.nextNode()) rows.push(walker.currentNode);
+  rows.forEach((node) => {
+    if (!node.parentElement || node.parentElement.closest(skip)) return;
+    const next = localizeVKPriceText(node.nodeValue);
+    if (next !== node.nodeValue) node.nodeValue = next;
+  });
+}
+
+function initVKPlatformUI() {
+  if (voxPlatform() !== 'vk') return;
+  localizeVKPrices();
+  let scheduled = false;
+  const observer = new MutationObserver(() => {
+    if (scheduled) return;
+    scheduled = true;
+    requestAnimationFrame(() => { scheduled = false; localizeVKPrices(); });
+  });
+  observer.observe(document.body, { childList: true, subtree: true });
 }
 
 function voxRequestId() {
@@ -5616,7 +5665,7 @@ function bindVKPurchaseInterception() {
 
 async function refreshCrossPlatformAccount() {
   const panel = document.getElementById('crossPlatformAccountPanel');
-  if (!panel || !tgInitData()) return;
+  if (!panel || !hasPlatformSession()) return;
   const statusNode = document.getElementById('crossPlatformStatus');
   try {
     const data = await apiFetch('/api/account-link/status');
@@ -5653,7 +5702,27 @@ function initCrossPlatformAccount() {
     const code = String(input?.value || '').trim().toUpperCase();
     if (!code) { notify('Введите код привязки'); return; }
     try {
-      await apiFetch('/api/account-link/consume', { method: 'POST', body: JSON.stringify({ code }) });
+      const result = await apiFetch('/api/account-link/consume', { method: 'POST', body: JSON.stringify({ code }) });
+      if (result.requires_decision) {
+        const choice = document.getElementById('crossPlatformMergeChoice');
+        const summary = (data) => `${Number(data?.books || 0)} книг · ${Number(data?.purchases || 0)} покупок · ${Number(data?.reading || 0)} позиций чтения`;
+        if (choice) {
+          choice.hidden = false;
+          choice.innerHTML = `<article class="setting-card"><h3>Найдены два разных профиля</h3><p>Telegram и VK уже использовались отдельно. Выберите, что сделать. Купленные доступы повторно не оплачиваются.</p><p><b>Профиль с кодом:</b> ${escapeHtml(summary(result.source))}<br><b>Текущий профиль:</b> ${escapeHtml(summary(result.current))}</p><div class="segmented"><button type="button" data-account-merge="merge">Объединить всё</button><button type="button" data-account-merge="keep_telegram">Оставить Telegram</button><button type="button" data-account-merge="keep_vk">Оставить VK</button></div></article>`;
+          choice.querySelectorAll('[data-account-merge]').forEach((button) => button.addEventListener('click', async () => {
+            choice.querySelectorAll('button').forEach((item) => { item.disabled = true; });
+            try {
+              await apiFetch('/api/account-link/consume', { method: 'POST', body: JSON.stringify({ code, strategy: button.dataset.accountMerge }) });
+              notify(button.dataset.accountMerge === 'merge' ? 'Данные Telegram и VK объединены' : 'Основной профиль выбран');
+              window.setTimeout(() => window.location.reload(), 900);
+            } catch (error) {
+              notify(error.message || 'Не удалось завершить привязку');
+              choice.querySelectorAll('button').forEach((item) => { item.disabled = false; });
+            }
+          }));
+        }
+        return;
+      }
       notify('Аккаунты связаны. Перезагружаем общую библиотеку…');
       window.setTimeout(() => window.location.reload(), 900);
     } catch (error) { notify(error.message || 'Не удалось привязать аккаунты'); }
@@ -5666,4 +5735,5 @@ function initCrossPlatformAccount() {
 document.addEventListener('DOMContentLoaded', () => {
   bindVKPurchaseInterception();
   initCrossPlatformAccount();
+  initVKPlatformUI();
 });
