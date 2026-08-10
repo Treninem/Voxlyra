@@ -39,8 +39,8 @@
   <button class="upload-back" id="uploadBackButton" type="button">← Вернуться</button>
   <section class="card">
     <div class="mark">📚</div>
-    <h1>Загрузка большого ZIP</h1>
-    <p class="lead">Выберите тот же архив библиотеки. Крупный ZIP загрузится напрямую в VoxLyra частями и автоматически попадёт в фоновую очередь.</p>
+    <h1>Массовая загрузка книг и комиксов</h1>
+    <p class="lead">Один ZIP может содержать Books и Comics. Текстовые книги и графические произведения автоматически попадут в разные разделы и пройдут разные проверки.</p>
 
     <label class="picker" for="archive">
       <strong>Выбрать ZIP-архив</strong>
@@ -54,7 +54,7 @@
       <div class="progress-line"><span id="progressText">0%</span><span id="sizeText"></span></div>
     </div>
     <div class="status" id="status" role="status" aria-live="polite"></div>
-    <p class="note">Эта страница предназначена именно для крупных архивов и принимает ZIP до <strong>{{ large_upload_max_mb }} МБ</strong>. После постановки архива в очередь окно можно закрыть. Незавершённая загрузка хранится до 24 часов и продолжится после повторного открытия; импорт продолжится на сервере, а прогресс появится в сообщении бота.</p>
+    <p class="note">ZIP до <strong>{{ large_upload_max_mb }} МБ</strong>. Структура: Books/&lt;ID&gt;/book.* для текста; Comics/&lt;ID&gt;/metadata.json, cover.*, Chapters/... либо Volumes/&lt;номер&gt;/Chapters/... для комиксов. Незавершённая загрузка хранится до 24 часов.</p>
   </section>
 </main>
 <script>

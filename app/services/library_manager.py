@@ -22,8 +22,13 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable
 
 from app.config import settings
-from app.db import connect, utc_now
+from app.db import (
+    add_graphic_pages, connect, create_graphic_chapter_record,
+    set_graphic_chapter_status, utc_now,
+)
 from app.services.book_parser import BookParseError, parse_book_file
+from app.services.graphic_storage import graphic_storage_root, install_prepared_page
+from app.services.graphic_types import SUPPORTED_GRAPHIC_EXTENSIONS, SUPPORTED_IMAGE_EXTENSIONS, GraphicImportError
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +49,7 @@ STALE_IMPORT_WORK_SECONDS = 2 * 60 * 60
 
 ProgressCallback = Callable[[dict[str, Any]], Awaitable[None]]
 MAX_FILES_PER_BOOK_FOLDER = 12
+MAX_FILES_PER_COMIC_FOLDER = 20000
 MAX_COMPRESSION_RATIO = 250
 RIGHTS_HOLDER_TYPES = {"public_domain", "person", "publisher", "platform", "other"}
 REVENUE_MODES = {"none", "platform", "author_account"}
@@ -593,6 +599,291 @@ def _extract_library_folder(
                 "Незавершённый импорт будет удалён. Освободите место или увеличьте диск."
             ) from exc
         raise
+
+
+def _inspect_comic_archive(zip_path: Path, max_unpacked: int) -> list[dict[str, Any]]:
+    """Inspect Comics/<work> independently from text Books/<work>."""
+    folders: dict[str, dict[str, Any]] = {}
+    total = 0
+    with zipfile.ZipFile(zip_path) as archive:
+        for info in archive.infolist():
+            if not _safe_member(info.filename):
+                raise ValueError("Архив содержит небезопасные пути")
+            if (info.external_attr >> 16) & 0o170000 == 0o120000:
+                raise ValueError("Архив содержит символические ссылки")
+            if info.is_dir():
+                continue
+            if info.flag_bits & 0x1:
+                raise ValueError("Зашифрованные файлы в массовом импорте запрещены")
+            size = max(0, int(info.file_size or 0))
+            compressed = max(1, int(info.compress_size or 0))
+            if size > 10 * 1024 * 1024 and size / compressed > MAX_COMPRESSION_RATIO:
+                raise ValueError("Обнаружено подозрительно сильное сжатие ZIP")
+            total += size
+            parts = PurePosixPath(info.filename.replace("\\", "/")).parts
+            root_index = next((i for i, part in enumerate(parts) if part.casefold() == "comics"), None)
+            if root_index is None or len(parts) <= root_index + 2:
+                continue
+            name = str(parts[root_index + 1]).strip()
+            if not name or name in {".", ".."}:
+                continue
+            entry = folders.setdefault(name, {"name": name, "members": [], "unpacked_size": 0})
+            entry["members"].append(info.filename)
+            entry["unpacked_size"] += size
+        if total > int(max_unpacked):
+            raise ValueError("Архив после распаковки превышает допустимый размер")
+    return sorted(folders.values(), key=lambda item: _natural_import_key(str(item["name"])))
+
+
+def _natural_import_key(value: str) -> list[object]:
+    return [int(part) if part.isdigit() else part.casefold() for part in re.split(r"(\d+)", value)]
+
+
+def _extract_comic_folder(zip_path: Path, member_names: list[str], destination: Path) -> None:
+    destination.mkdir(parents=True, exist_ok=True)
+    root = destination.resolve()
+    with zipfile.ZipFile(zip_path) as archive:
+        for member_name in member_names:
+            info = archive.getinfo(member_name)
+            parts = PurePosixPath(info.filename.replace("\\", "/")).parts
+            root_index = next((i for i, part in enumerate(parts) if part.casefold() == "comics"), None)
+            if root_index is None or len(parts) <= root_index + 2:
+                continue
+            relative = parts[root_index + 2:]
+            target = destination.joinpath(*relative)
+            resolved_parent = target.parent.resolve()
+            if resolved_parent != root and root not in resolved_parent.parents:
+                raise ValueError("Архив содержит небезопасные пути")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with archive.open(info) as source, target.open("wb") as output:
+                shutil.copyfileobj(source, output, length=1024 * 1024)
+
+
+def _comic_chapter_sources(folder: Path) -> list[dict[str, Any]]:
+    """Return chapter folders/files from flat Chapters or Volumes/*/Chapters layouts."""
+    candidates: list[tuple[int, str, Path]] = []
+    chapters_root = next((p for p in folder.iterdir() if p.is_dir() and p.name.casefold() == "chapters"), None)
+    if chapters_root:
+        for child in chapters_root.iterdir():
+            if child.name.startswith(".") or child.name.casefold() == "__macosx" or child.suffix.lower() == ".json":
+                continue
+            candidates.append((1, "", child))
+    volumes_root = next((p for p in folder.iterdir() if p.is_dir() and p.name.casefold() == "volumes"), None)
+    if volumes_root:
+        for volume in volumes_root.iterdir():
+            if not volume.is_dir():
+                continue
+            match = re.search(r"\d+", volume.name)
+            volume_number = max(1, int(match.group()) if match else 1)
+            volume_meta = volume / "volume.json"
+            volume_title = ""
+            if volume_meta.is_file():
+                try:
+                    volume_title = str(json.loads(_read_text(volume_meta)).get("title") or "")[:120]
+                except Exception:
+                    volume_title = ""
+            nested = next((p for p in volume.iterdir() if p.is_dir() and p.name.casefold() == "chapters"), volume)
+            for child in nested.iterdir():
+                if child.name.startswith(".") or child.name.casefold() in {"volume.json", "__macosx"} or child.suffix.lower() == ".json":
+                    continue
+                candidates.append((volume_number, volume_title, child))
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for volume_number, volume_title, source in sorted(candidates, key=lambda row: (row[0], _natural_import_key(row[2].name))):
+        if source.name.casefold() in {"metadata.json", "description.txt"}:
+            continue
+        key = str(source.resolve())
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append({"source": source, "volume_number": volume_number, "volume_title": volume_title})
+    return result
+
+
+async def _commit_bulk_graphic_chapter(
+    *, book_id: int, source: Path, metadata: dict[str, Any], work_dir: Path,
+    volume_number: int, volume_title: str, default_mode: str, content_type: str,
+) -> int:
+    # PyMuPDF/Pillow/BeautifulSoup are intentionally loaded only while a comic
+    # job is running. Eager import costs too much baseline RAM on 256 MB hosts.
+    from app.services.graphic_import import prepare_graphic_file, prepare_graphic_images
+    chapter_meta_path = source / "chapter.json" if source.is_dir() else source.with_suffix(".json")
+    chapter_meta: dict[str, Any] = {}
+    if chapter_meta_path.is_file():
+        parsed = json.loads(await _run_blocking(_read_text, chapter_meta_path))
+        if isinstance(parsed, dict):
+            chapter_meta = parsed
+    title = str(chapter_meta.get("title") or source.stem).strip()[:160]
+    if len(title) < 1:
+        raise GraphicImportError("Не указано название графической главы")
+    reading_mode = str(chapter_meta.get("reading_mode") or default_mode or "inherit").strip().lower()
+    if reading_mode not in {"inherit", "ltr", "rtl", "vertical", "single", "spread"}:
+        raise GraphicImportError(f"Недопустимый режим чтения: {reading_mode}")
+    split_long = bool(chapter_meta.get("split_long_pages")) or reading_mode == "vertical" or content_type in {"webtoon", "manhwa"}
+    if source.is_dir():
+        images = [(path, path.name) for path in source.iterdir() if path.is_file() and path.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS]
+        archives = [path for path in source.iterdir() if path.is_file() and path.suffix.lower() in SUPPORTED_GRAPHIC_EXTENSIONS and path.suffix.lower() not in SUPPORTED_IMAGE_EXTENSIONS]
+        if images and archives:
+            raise GraphicImportError("В главе нельзя одновременно смешивать архив/PDF и отдельные изображения")
+        if len(archives) > 1:
+            raise GraphicImportError("В одной папке главы допускается только один архив/PDF/EPUB")
+        if archives:
+            prepared = await _run_blocking(prepare_graphic_file, archives[0], archives[0].name, work_dir, split_long_pages=split_long)
+            source_name = archives[0].name
+        else:
+            prepared = await _run_blocking(prepare_graphic_images, images, work_dir, split_long_pages=split_long)
+            source_name = f"{len(images)} images"
+    else:
+        if source.suffix.lower() not in SUPPORTED_GRAPHIC_EXTENSIONS:
+            raise GraphicImportError(f"Неподдерживаемый файл главы: {source.name}")
+        prepared = await _run_blocking(prepare_graphic_file, source, source.name, work_dir, split_long_pages=split_long)
+        source_name = source.name
+    price = max(0, min(100000, int(chapter_meta.get("price_stars") or 0)))
+    chapter_id = await create_graphic_chapter_record(
+        book_id, title, reading_mode=reading_mode, is_free=price <= 0, price_stars=price,
+        source_filename=source_name, volume_number=max(1, int(chapter_meta.get("volume_number") or volume_number)),
+        volume_title=str(chapter_meta.get("volume_title") or volume_title)[:120],
+        preview_pages=max(0, min(50, int(chapter_meta.get("preview_pages") or metadata.get("preview_pages") or 3))),
+    )
+    final_dir = graphic_storage_root() / str(book_id) / str(chapter_id)
+    rows: list[dict[str, Any]] = []
+    try:
+        final_dir.mkdir(parents=True, exist_ok=False)
+        for page in prepared:
+            installed = install_prepared_page(page, final_dir / f"page-{int(page.number):05d}.webp")
+            rows.append({"number": int(page.number), "source_filename": page.source_filename, **installed})
+        await add_graphic_pages(chapter_id, rows)
+        return chapter_id
+    except Exception:
+        shutil.rmtree(final_dir, ignore_errors=True)
+        await set_graphic_chapter_status(chapter_id, "deleted")
+        raise
+
+
+async def _import_bulk_comics(
+    *, zip_path: Path, folders: list[dict[str, Any]], batch_id: int,
+    actor_user_id: int, result: ImportResult,
+) -> int:
+    imported = 0
+    content_types = {"comic", "manga", "manhwa", "webtoon", "graphic_novel"}
+    reading_modes = {"ltr", "rtl", "vertical", "single", "spread"}
+    for index, folder_info in enumerate(folders, 1):
+        folder_name = str(folder_info["name"])
+        item = ImportErrorItem(folder=f"Comics/{folder_name}")
+        with tempfile.TemporaryDirectory(prefix=f"comic_{index:05d}_", dir=IMPORT_WORK_ROOT) as temp_name:
+            root = Path(temp_name) / folder_name
+            book_id = 0
+            try:
+                await _run_blocking(_extract_comic_folder, zip_path, list(folder_info.get("members") or []), root)
+                files_count = sum(1 for path in root.rglob("*") if path.is_file())
+                if files_count > MAX_FILES_PER_COMIC_FOLDER:
+                    raise GraphicImportError(f"Слишком много файлов в произведении: {files_count}")
+                metadata_path = root / "metadata.json"
+                if not metadata_path.is_file():
+                    raise GraphicImportError("Нет обязательного metadata.json")
+                metadata = json.loads(await _run_blocking(_read_text, metadata_path))
+                if not isinstance(metadata, dict):
+                    raise GraphicImportError("metadata.json должен содержать объект")
+                title = str(metadata.get("title") or "").strip()
+                item.title = title or "Без названия"
+                author = str(metadata.get("author") or "").strip()
+                content_type = str(metadata.get("content_type") or "").strip().lower()
+                reading_mode = str(metadata.get("reading_mode") or "").strip().lower()
+                license_type = str(metadata.get("license") or "").strip()
+                genres = metadata.get("genre") or []
+                if isinstance(genres, str):
+                    genres = [genres]
+                if not title: item.reasons.append("Не указано название")
+                if not author: item.reasons.append("Не указан автор")
+                if content_type not in content_types: item.reasons.append("content_type должен быть comic/manga/manhwa/webtoon/graphic_novel")
+                if reading_mode not in reading_modes: item.reasons.append("Не указан корректный reading_mode")
+                if license_type not in ALLOWED_LICENSES: item.reasons.append("Недопустимый тип лицензии")
+                if metadata.get("rights_checked") is not True: item.reasons.append("Права не подтверждены")
+                if not genres: item.reasons.append("Не указан жанр")
+                age = _normalize_age_rating(metadata.get("age_rating"))
+                if not age: item.reasons.append("Не указано возрастное ограничение")
+                covers = sorted([p for p in root.iterdir() if p.is_file() and p.stem.casefold().startswith("cover") and p.suffix.lower() in COVER_EXTENSIONS])
+                if not covers: item.reasons.append("Нет обложки cover.jpg/png/webp")
+                chapters = _comic_chapter_sources(root)
+                if not chapters: item.reasons.append("Не найдены главы в Chapters/ или Volumes/*/Chapters/")
+                if item.reasons:
+                    result.errors.append(item)
+                    continue
+                normalized_title = " ".join(title.casefold().replace("ё", "е").split())
+                async with connect() as db:
+                    existing = await (await db.execute(
+                        "SELECT id FROM books WHERE publication_status!='deleted' AND normalized_title=? AND content_type IN ('comic','manga','manhwa','webtoon','graphic_novel') AND lower(COALESCE(source_author_name,''))=lower(?) LIMIT 1",
+                        (normalized_title, author),
+                    )).fetchone()
+                if existing:
+                    result.duplicates += 1
+                    result.errors.append(ImportErrorItem(folder=item.folder, title=title, reasons=[f"Графическое произведение уже существует: ID {int(existing['id'])}"]))
+                    continue
+                cover = covers[0]
+                description_path = root / "description.txt"
+                description = str(metadata.get("description") or "").strip() or (await _run_blocking(_read_text, description_path) if description_path.is_file() else "")
+                archive_fingerprint = hashlib.sha256()
+                archive_fingerprint.update(json.dumps(metadata, ensure_ascii=False, sort_keys=True).encode())
+                for chapter in chapters:
+                    source = Path(chapter["source"])
+                    if source.is_file():
+                        archive_fingerprint.update((await _run_blocking(_sha256, source)).encode())
+                    else:
+                        for page in sorted((p for p in source.iterdir() if p.is_file()), key=lambda p: _natural_import_key(p.name)):
+                            archive_fingerprint.update((await _run_blocking(_sha256, page)).encode())
+                file_hash = archive_fingerprint.hexdigest()
+                price = max(0, min(100000, int(metadata.get("price_stars") or 0)))
+                pricing = str(metadata.get("free_or_paid") or "free").lower()
+                pricing_type = "whole_book" if pricing in {"paid", "whole_book"} and price > 0 else "free"
+                now = utc_now()
+                storage_dir = DEFAULT_STORAGE_ROOT / "comics" / str(batch_id) / folder_name
+                storage_dir.mkdir(parents=True, exist_ok=False)
+                stored_cover = storage_dir / f"cover{cover.suffix.lower()}"
+                shutil.copy2(cover, stored_cover)
+                shutil.copy2(metadata_path, storage_dir / "metadata.json")
+                if description_path.is_file(): shutil.copy2(description_path, storage_dir / "description.txt")
+                async with connect() as db:
+                    source_name = str(metadata.get("source") or "").strip()
+                    creator_id, rights_holder_id, revenue_mode, revenue_author_id = await _ensure_creator_and_rights(
+                        db, author_name=author, metadata=metadata, license_type=license_type,
+                        source_name=source_name, actor_user_id=actor_user_id, now=now,
+                    )
+                    cur = await db.execute(
+                        """INSERT INTO books(author_id,title,description,age_limit,writing_status,publication_status,cover_path,normalized_title,source_file_hash,source_file_name,allow_download,pricing_type,price_stars,content_type,reading_mode,license_type,source_name,rights_checked,import_batch_id,import_file_hash,source_author_name,source_year,source_language,creator_id,rights_holder_id,revenue_mode,created_at,updated_at)
+                           VALUES(NULL,?,?,?,'finished','draft',?,?,?,?,0,?,?,?,?,?,?,1,?,?,?,?,?,?,?,?,?,?)""",
+                        (title, description, age, str(stored_cover), normalized_title, file_hash, str(storage_dir), pricing_type, price,
+                         content_type, reading_mode, license_type, source_name, batch_id, file_hash, author,
+                         str(metadata.get("year") or ""), str(metadata.get("language") or "ru"), creator_id,
+                         rights_holder_id, revenue_mode, now, now),
+                    )
+                    book_id = int(cur.lastrowid)
+                    canonical_cover = await _run_blocking(_mirror_import_cover, book_id, stored_cover)
+                    if canonical_cover:
+                        await db.execute("UPDATE books SET cover_path=? WHERE id=?", (canonical_cover, book_id))
+                    await db.execute(
+                        """INSERT INTO book_rights(book_id,creator_id,rights_holder_id,license_type,revenue_mode,revenue_author_id,imported_by_user_id,source_name,rights_checked,created_at,updated_at)
+                           VALUES(?,?,?,?,?,?,?,?,1,?,?)""",
+                        (book_id, creator_id, rights_holder_id, license_type, revenue_mode, revenue_author_id, actor_user_id, source_name, now, now),
+                    )
+                    await db.commit()
+                for chapter_index, chapter in enumerate(chapters, 1):
+                    await _commit_bulk_graphic_chapter(
+                        book_id=book_id, source=Path(chapter["source"]), metadata=metadata,
+                        work_dir=Path(temp_name) / f"prepared_{chapter_index:05d}",
+                        volume_number=int(chapter["volume_number"]), volume_title=str(chapter["volume_title"]),
+                        default_mode=reading_mode, content_type=content_type,
+                    )
+                result.added += 1
+                result.book_ids.append(book_id)
+                imported += 1
+            except Exception as exc:
+                if book_id:
+                    async with connect() as db:
+                        await db.execute("UPDATE books SET publication_status='deleted',updated_at=? WHERE id=?", (utc_now(), book_id))
+                        await db.commit()
+                    shutil.rmtree(graphic_storage_root() / str(book_id), ignore_errors=True)
+                result.errors.append(ImportErrorItem(folder=item.folder, title=item.title, reasons=[f"Ошибка импорта комикса: {str(exc)[:300]}"]))
+    return imported
 
 
 def _read_text(path: Path) -> str:
@@ -1216,7 +1507,9 @@ async def import_library_zip(
     duplicate_policy = str(import_settings["duplicate_policy"] or "ask")
 
     await _run_blocking(cleanup_stale_import_work)
+    comic_folders: list[dict[str, Any]] = []
     try:
+        comic_folders = await _run_blocking(_inspect_comic_archive, zip_path, max_unpacked)
         folders = await _run_blocking(_inspect_library_archive, zip_path, max_unpacked)
     except (zipfile.BadZipFile, ValueError) as exc:
         result.errors.append(ImportErrorItem(folder="ZIP", reasons=[str(exc)]))
@@ -1230,21 +1523,29 @@ async def import_library_zip(
             ) from exc
         raise
 
-    if not folders:
-        result.errors.append(ImportErrorItem(folder="Books", reasons=["Не найдена папка Books или папки книг"]))
+    if not folders and not comic_folders:
+        result.errors.append(ImportErrorItem(folder="ZIP", reasons=["Не найдены папки Books или Comics с произведениями"]))
         await _finish_batch(batch_id, result, total_found)
         return result
 
-    total_found = len(folders)
+    total_found = len(folders) + len(comic_folders)
     await report(0, phase=1)
-    if max_books > 0 and len(folders) > max_books:
+    if max_books > 0 and total_found > max_books:
         result.errors.append(
             ImportErrorItem(
-                folder="Books",
-                reasons=[f"В архиве {len(folders)} книг; максимум {max_books}"],
+                folder="ZIP",
+                reasons=[f"В архиве {total_found} произведений; максимум {max_books}"],
             )
         )
-        folders = folders[:max_books]
+        comic_limit = min(len(comic_folders), max_books)
+        comic_folders = comic_folders[:comic_limit]
+        folders = folders[:max(0, max_books - comic_limit)]
+
+    if comic_folders:
+        await _import_bulk_comics(
+            zip_path=zip_path, folders=comic_folders, batch_id=batch_id,
+            actor_user_id=actor_user_id, result=result,
+        )
 
     for processed_index, folder_info in enumerate(folders, 1):
         # Drop references retained by the previous iteration before parsing the
@@ -2763,6 +3064,8 @@ async def rollback_batch_drafts(batch_id: int) -> dict[str, int]:
     removed_books = 0
     removed_chapters = 0
     storage_paths: list[Path] = []
+    graphic_paths: list[Path] = []
+    cover_files: list[Path] = []
     async with connect() as db:
         cur = await db.execute(
             """SELECT id, source_file_name, cover_path FROM books
@@ -2776,11 +3079,18 @@ async def rollback_batch_drafts(batch_id: int) -> dict[str, int]:
             cur2 = await db.execute("SELECT COUNT(*) FROM chapters WHERE book_id=?", (book_id,))
             count_row = await cur2.fetchone()
             removed_chapters += int(count_row[0] or 0)
+            cur2 = await db.execute("SELECT COUNT(*) FROM graphic_chapters WHERE book_id=?", (book_id,))
+            graphic_count = await cur2.fetchone()
+            removed_chapters += int(graphic_count[0] or 0)
+            graphic_paths.append(graphic_storage_root() / str(book_id))
             for value in (row["source_file_name"], row["cover_path"]):
                 if value:
                     path = Path(str(value))
                     if path.exists():
-                        storage_paths.append(path.parent)
+                        if path.is_file() and _is_inside_root(path, CANONICAL_COVER_ROOT):
+                            cover_files.append(path)
+                        else:
+                            storage_paths.append(path if path.is_dir() else path.parent)
             await db.execute("DELETE FROM books WHERE id=?", (book_id,))
             removed_books += 1
         await db.execute(
@@ -2791,4 +3101,8 @@ async def rollback_batch_drafts(batch_id: int) -> dict[str, int]:
     for path in sorted(set(storage_paths), key=lambda p: len(str(p)), reverse=True):
         if path.exists() and DEFAULT_STORAGE_ROOT in path.parents:
             shutil.rmtree(path, ignore_errors=True)
+    for path in graphic_paths:
+        shutil.rmtree(path, ignore_errors=True)
+    for path in cover_files:
+        path.unlink(missing_ok=True)
     return {"books": removed_books, "chapters": removed_chapters}

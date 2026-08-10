@@ -98,7 +98,7 @@
     }
     if (can('grant_access')) sections.push(sectionButton('access', 'Выдать доступ', 'Главы и Premium по ID или username', 0));
     if (can('library_bulk_import') || can('library_import_manage')) {
-      sections.push(sectionButton('library_import', 'Импорт библиотеки', 'ZIP, замена версий и автомодерация', 0));
+      sections.push(sectionButton('library_import', 'Импорт библиотеки', 'Книги и комиксы из одного ZIP', 0));
     }
     if (data.role === 'owner') {
       sections.push(sectionButton('tts', 'Озвучивание', 'Движки, голоса и очередь', 0));
@@ -374,7 +374,7 @@
       state.libraryRefreshTimer = null;
     }
     state.libraryBatchId = null;
-    if (!silent) openWorkspace('Импорт библиотеки', 'Загружайте накопительные ZIP прямо из Mini App. Все книги остаются черновиками.', 'Библиотека');
+    if (!silent) openWorkspace('Импорт библиотеки', 'Один ZIP принимает текстовые книги и графические произведения, но проверяет их разными конвейерами. Всё остаётся черновиками.', 'Библиотека');
     $('workspaceTabs').innerHTML = '<button type="button" data-section="library_import">Обновить</button>';
     const data = await apiFetch('/api/control/library-import');
     const settings = data.settings || {};
@@ -426,7 +426,7 @@
       <div class="control-actions">${queueModeActions}</div>
     </article>
     <article class="control-item payment-settings-card">
-      <div class="control-item-main"><span>Массовый импорт</span><h3>Books/001/...</h3><p>Изменённая книга заменяет старую версию автоматически. При занятом ID новая книга получает первый свободный номер.</p><small>Лимит: ${Number(settings.max_books || 0) ? `до ${Number(settings.max_books)} книг` : 'без ограничения по количеству'} · ZIP до ${Number(settings.max_archive_mb || 0)} МБ. Публикация после импорта не выполняется.${queueMode !== 'running' ? ' Архив можно загрузить, но обработка начнётся только после продолжения очереди.' : ''}</small></div>
+      <div class="control-item-main"><span>Массовый импорт</span><h3>Books/… + Comics/…</h3><p>Books обрабатывается как текст. Comics создаёт отдельные графические карточки, тома, главы и страницы для раздела «Комиксы».</p><small>Лимит: ${Number(settings.max_books || 0) ? `до ${Number(settings.max_books)} произведений` : 'без ограничения по количеству'} · ZIP до ${Number(settings.max_archive_mb || 0)} МБ. Публикация после импорта не выполняется.${queueMode !== 'running' ? ' Архив можно загрузить, но обработка начнётся только после продолжения очереди.' : ''}</small></div>
       <div class="control-actions">${importButton}${moderationButton}</div>
     </article>
     <div class="section-title"><div><span class="eyebrow">Сейчас</span><h2>Очередь и прогресс</h2></div></div>${activeHtml}
