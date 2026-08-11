@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+.env
+data/*.sqlite3
+data/*.sqlite3-*
+data/covers/
+data/library_import_queue/
+data/library_storage/
+data/comics/
+data/chunked_uploads/
+storage/library_import_work/
