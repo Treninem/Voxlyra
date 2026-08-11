@@ -33,6 +33,10 @@ from app.services.graphic_types import SUPPORTED_GRAPHIC_EXTENSIONS, SUPPORTED_I
 logger = logging.getLogger(__name__)
 
 ALLOWED_LICENSES = {"public_domain", "creative_commons", "author_permission", "platform_original"}
+ALLOWED_COMMERCIAL_CC_LICENSES = {
+    "cc0", "cc0-1.0", "cc-by", "cc-by-3.0", "cc-by-4.0",
+    "cc-by-sa", "cc-by-sa-3.0", "cc-by-sa-4.0",
+}
 BOOK_EXTENSIONS = {".epub", ".fb2", ".txt", ".docx", ".pdf"}
 COVER_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 LEGACY_STORAGE_ROOT = Path("storage/library")
@@ -802,8 +806,7 @@ async def _import_bulk_comics(
                 if not author: item.reasons.append("Не указан автор")
                 if content_type not in content_types: item.reasons.append("content_type должен быть comic/manga/manhwa/webtoon/graphic_novel")
                 if reading_mode not in reading_modes: item.reasons.append("Не указан корректный reading_mode")
-                if license_type not in ALLOWED_LICENSES: item.reasons.append("Недопустимый тип лицензии")
-                if metadata.get("rights_checked") is not True: item.reasons.append("Права не подтверждены")
+                item.reasons.extend(_validate_import_rights(metadata, root))
                 if not genres: item.reasons.append("Не указан жанр")
                 age = _normalize_age_rating(metadata.get("age_rating"))
                 if not age: item.reasons.append("Не указано возрастное ограничение")
@@ -847,6 +850,10 @@ async def _import_bulk_comics(
                 shutil.copy2(cover, stored_cover)
                 shutil.copy2(metadata_path, storage_dir / "metadata.json")
                 if description_path.is_file(): shutil.copy2(description_path, storage_dir / "description.txt")
+                for evidence_name in ("LICENSE.txt", "SOURCES.txt"):
+                    evidence_path = root / evidence_name
+                    if evidence_path.is_file():
+                        shutil.copy2(evidence_path, storage_dir / evidence_name)
                 async with connect() as db:
                     source_name = str(metadata.get("source") or "").strip()
                     creator_id, rights_holder_id, revenue_mode, revenue_author_id = await _ensure_creator_and_rights(
@@ -980,6 +987,39 @@ def _normalize_age_rating(value: Any) -> str:
         return f"{match.group(1)}+"
     aliases = {"adult": "18+", "mature": "18+", "teen": "12+", "children": "6+", "child": "6+"}
     return aliases.get(text, "")
+
+
+def _validate_import_rights(metadata: dict[str, Any], folder: Path) -> list[str]:
+    """Reject unverifiable or non-commercial licences before data is imported."""
+    license_type = str(metadata.get("license") or "").strip().lower()
+    if license_type not in ALLOWED_LICENSES:
+        return ["Недопустимый тип лицензии"]
+    reasons: list[str] = []
+    if metadata.get("rights_checked") is not True:
+        reasons.append("Права не подтверждены: rights_checked должно быть true")
+    if license_type == "platform_original":
+        return reasons
+
+    source = str(metadata.get("source") or "").strip()
+    if not source:
+        reasons.append("Не указан проверяемый источник произведения и лицензии: поле source")
+    if not (folder / "LICENSE.txt").is_file():
+        reasons.append("Нет обязательного LICENSE.txt с текстом или доказательством лицензии")
+    if not (folder / "SOURCES.txt").is_file():
+        reasons.append("Нет обязательного SOURCES.txt со ссылками на исходник и права")
+
+    if license_type == "creative_commons":
+        code = str(metadata.get("license_code") or "").strip().lower().replace("_", "-")
+        if code not in ALLOWED_COMMERCIAL_CC_LICENSES:
+            reasons.append("Разрешены только CC0, CC BY или CC BY-SA; NC и ND запрещены")
+        if metadata.get("commercial_use") is not True:
+            reasons.append("Для Creative Commons commercial_use должно быть true")
+        if metadata.get("derivatives_allowed") is not True:
+            reasons.append("Для Creative Commons derivatives_allowed должно быть true")
+    elif license_type == "author_permission":
+        if not str(metadata.get("permission_reference") or "").strip():
+            reasons.append("Для разрешения автора требуется поле permission_reference")
+    return reasons
 
 
 def _embedded_book_metadata(path: Path) -> dict[str, Any]:
@@ -1632,10 +1672,7 @@ async def import_library_zip(
                 if not str(metadata.get("age_rating") or "").strip():
                     item.reasons.append("Не указано возрастное ограничение (0+/6+/12+/14+/16+/18+)")
                 license_type = str(metadata.get("license") or "").strip()
-                if license_type not in ALLOWED_LICENSES:
-                    item.reasons.append("Недопустимый тип лицензии")
-                if metadata.get("rights_checked") is not True:
-                    item.reasons.append("Права не подтверждены: rights_checked должно быть true")
+                item.reasons.extend(_validate_import_rights(metadata, folder))
                 if item.reasons:
                     result.errors.append(item)
                     await report(processed_index, phase=2)
@@ -1849,6 +1886,10 @@ async def import_library_zip(
                         json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"
                     )
                     (storage_dir / "description.txt").write_text(description, encoding="utf-8")
+                    for evidence_name in ("LICENSE.txt", "SOURCES.txt"):
+                        evidence_path = folder / evidence_name
+                        if evidence_path.is_file():
+                            shutil.copy2(evidence_path, storage_dir / evidence_name)
 
                 await _run_blocking(store_book_files)
 
