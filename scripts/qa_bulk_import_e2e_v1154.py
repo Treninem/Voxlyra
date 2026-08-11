@@ -4,11 +4,16 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 import tempfile
 import zipfile
 from pathlib import Path
 
 from PIL import Image
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from app.config import settings
 
@@ -31,7 +36,7 @@ async def main() -> None:
         source = root / "source"
         types = ["comic", "manga", "manhwa", "webtoon", "graphic_novel"]
         modes = ["ltr", "rtl", "vertical", "single", "spread"]
-        for index in range(25):
+        for index in range(50):
             folder = source / "Comics" / f"{index + 1:03d}"
             chapter = folder / "Chapters" / "001"
             chapter.mkdir(parents=True)
@@ -50,15 +55,15 @@ async def main() -> None:
                 if path.is_file():
                     archive.write(path, path.relative_to(source))
         result = await import_library_zip(archive_path, archive_path.name, int(user["id"]))
-        assert result.added == 25 and not result.errors
+        assert result.added == 50 and not result.errors
         async with connect() as db:
             books = int((await (await db.execute("SELECT COUNT(*) FROM books WHERE publication_status='draft'")).fetchone())[0])
             chapters = int((await (await db.execute("SELECT COUNT(*) FROM graphic_chapters WHERE status='draft'")).fetchone())[0])
             pages = int((await (await db.execute("SELECT COUNT(*) FROM graphic_pages")).fetchone())[0])
-        assert (books, chapters, pages) == (25, 25, 25)
+        assert (books, chapters, pages) == (50, 50, 50)
         rollback = await rollback_batch_drafts(result.batch_id)
-        assert rollback["books"] == 25 and rollback["chapters"] == 25
-        print("OK: 25 end-to-end graphic works, routing, pages and rollback")
+        assert rollback["books"] == 50 and rollback["chapters"] == 50
+        print("OK: 50 end-to-end graphic works, routing, pages and rollback")
 
 
 if __name__ == "__main__":
