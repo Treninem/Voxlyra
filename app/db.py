@@ -8254,6 +8254,8 @@ async def has_purchase_access(
                         p.book_id=(SELECT book_id FROM chapters WHERE id=?)
                         AND COALESCE(p.purchase_kind, 'content')='content'
                         AND p.graphic_volume_number IS NULL
+                        AND p.chapter_id IS NULL AND p.audio_chapter_id IS NULL
+                        AND p.graphic_chapter_id IS NULL
                     )
                 ) LIMIT 1
                 """,
@@ -8269,6 +8271,8 @@ async def has_purchase_access(
                         p.book_id=(SELECT book_id FROM audio_chapters WHERE id=?)
                         AND COALESCE(p.purchase_kind, 'content')='content'
                         AND p.graphic_volume_number IS NULL
+                        AND p.chapter_id IS NULL AND p.audio_chapter_id IS NULL
+                        AND p.graphic_chapter_id IS NULL
                     )
                 ) LIMIT 1
                 """,
@@ -8284,6 +8288,8 @@ async def has_purchase_access(
                         p.book_id=(SELECT book_id FROM graphic_chapters WHERE id=?)
                         AND COALESCE(p.purchase_kind, 'content')='content'
                         AND p.graphic_volume_number IS NULL
+                        AND p.chapter_id IS NULL AND p.audio_chapter_id IS NULL
+                        AND p.graphic_chapter_id IS NULL
                     ) OR (
                         p.book_id=(SELECT book_id FROM graphic_chapters WHERE id=?)
                         AND p.purchase_kind='graphic_volume'
@@ -8436,7 +8442,8 @@ async def has_graphic_volume_purchase(user_id: int, book_id: int, volume_number:
             """
             SELECT 1 FROM purchases
             WHERE user_id=? AND book_id=? AND status='paid' AND (
-                (COALESCE(purchase_kind, 'content')='content' AND graphic_volume_number IS NULL)
+                (COALESCE(purchase_kind, 'content')='content' AND graphic_volume_number IS NULL
+                 AND chapter_id IS NULL AND audio_chapter_id IS NULL AND graphic_chapter_id IS NULL)
                 OR (purchase_kind='graphic_volume' AND graphic_volume_number=?)
             ) LIMIT 1
             """,
@@ -8697,6 +8704,8 @@ async def redeem_chapter_package_credit(
                     p.graphic_chapter_id=? OR (
                         p.book_id=? AND COALESCE(p.purchase_kind,'content')='content'
                         AND p.graphic_volume_number IS NULL
+                        AND p.chapter_id IS NULL AND p.audio_chapter_id IS NULL
+                        AND p.graphic_chapter_id IS NULL
                     ) OR (
                         p.book_id=? AND p.purchase_kind='graphic_volume'
                         AND p.graphic_volume_number=(SELECT volume_number FROM graphic_chapters WHERE id=?)
@@ -10151,10 +10160,14 @@ def _normalize_text_pricing_mode(price_stars: int, requested_mode: str | None) -
     requested = str(requested_mode or "").strip().lower()
     if requested == "premium":
         return "premium"
+    # ``chapters`` also supports chapter-only sales: the whole book may have
+    # no price while individual text/graphic chapters remain paid.
+    if requested == "chapters":
+        return "chapters"
     price = max(0, int(price_stars or 0))
     if price <= 0:
         return "free"
-    return "chapters" if requested == "chapters" else "whole_book"
+    return "whole_book"
 
 
 async def _sync_book_pricing_type_conn(db: aiosqlite.Connection, book_id: int) -> str:
@@ -19997,6 +20010,10 @@ _previous_create_paid_purchase_v114015 = create_paid_purchase
 
 
 async def create_paid_purchase(*, user_id: int, payload: str, amount_stars: int, telegram_payment_charge_id: str) -> int:
+    if str(payload).startswith("vox:intent:"):
+        intent = await get_payment_intent(str(payload))
+        if intent and str(intent["status"] or "") == "canceled":
+            raise ValueError("Счёт отменён и больше не может быть оплачен")
     purchase_id = await _previous_create_paid_purchase_v114015(
         user_id=int(user_id), payload=str(payload), amount_stars=int(amount_stars),
         telegram_payment_charge_id=str(telegram_payment_charge_id),
