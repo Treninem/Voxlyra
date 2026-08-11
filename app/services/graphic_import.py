@@ -172,6 +172,24 @@ def _image_candidates_from_libarchive(source: Path, extract_dir: Path) -> list[t
 
     if not extracted:
         raise GraphicImportError("В архиве не найдено изображений страниц.")
+    # Some 7Z writers store absolute source paths without the leading slash
+    # (for example ``tmp/build/page1.png``).  Do not expose that machine-local
+    # prefix as a page name.  Strip only the directory prefix shared by every
+    # image; meaningful nested volume/chapter paths below it are preserved.
+    path_parts = [PurePosixPath(name).parts for _, name in extracted]
+    common_count = 0
+    if path_parts:
+        for columns in zip(*path_parts):
+            if len(set(columns)) != 1:
+                break
+            common_count += 1
+    if common_count:
+        normalized: list[tuple[Path, str]] = []
+        for destination, name in extracted:
+            parts = PurePosixPath(name).parts
+            remaining = parts[common_count:]
+            normalized.append((destination, PurePosixPath(*remaining).as_posix() if remaining else Path(name).name))
+        extracted = normalized
     extracted.sort(key=lambda item: _natural_key(item[1]))
     return extracted
 
