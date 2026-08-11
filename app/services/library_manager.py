@@ -877,6 +877,25 @@ async def _import_bulk_comics(
                            VALUES(?,?,?,?,?,?,?,?,1,?,?)""",
                         (book_id, creator_id, rights_holder_id, license_type, revenue_mode, revenue_author_id, actor_user_id, source_name, now, now),
                     )
+                    for genre in genres:
+                        label = str(genre).strip()
+                        if label:
+                            await db.execute(
+                                """INSERT OR IGNORE INTO book_option_values(book_id, option_group, option_code, option_label, created_at)
+                                   VALUES(?, 'genres', ?, ?, ?)""",
+                                (book_id, _slug(label.casefold()), label, now),
+                            )
+                    tags = metadata.get("tags") or []
+                    if isinstance(tags, str):
+                        tags = [tags]
+                    for tag in tags:
+                        label = str(tag).strip()
+                        if label:
+                            await db.execute(
+                                """INSERT OR IGNORE INTO book_option_values(book_id, option_group, option_code, option_label, created_at)
+                                   VALUES(?, 'plot_tags', ?, ?, ?)""",
+                                (book_id, _slug(label.casefold()), label, now),
+                            )
                     await db.commit()
                 for chapter_index, chapter in enumerate(chapters, 1):
                     await _commit_bulk_graphic_chapter(
