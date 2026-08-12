@@ -107,6 +107,85 @@ async def test_zero_bulk_limit_does_not_scan_or_import(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_retry_failed_update_confirms_only_exact_same_revision(monkeypatch):
+    monkeypatch.setattr(gi.settings, "SYSTEM_OWNER_ID", 42)
+    failed_commit = "b" * 40
+    row = {
+        "package_id": "update-1",
+        "version": "2",
+        "commit_sha": failed_commit,
+        "created_at": "2026-08-12T20:00:00+00:00",
+    }
+    current = gi.GitHubPackage(
+        "update-1", "book", "Update", "ru", "2", "now", (), {},
+        "books/update-1", failed_commit, "update", "1",
+    )
+    calls = []
+
+    async def history(*args, **kwargs):
+        return [row]
+
+    async def no_success(package_id):
+        return None
+
+    async def find(identity_id, package_id):
+        return current
+
+    async def do_import(identity_id, package_id, *, allow_update=False):
+        calls.append((package_id, allow_update))
+        return {"status": "success"}
+
+    monkeypatch.setattr(gi, "import_history", history)
+    monkeypatch.setattr(gi, "_last_success", no_success)
+    monkeypatch.setattr(gi, "find_package", find)
+    monkeypatch.setattr(gi, "import_package", do_import)
+
+    result = await gi.retry_failed(42)
+    assert result["success"] == 1
+    assert result["failed"] == 0
+    assert calls == [("update-1", True)]
+    assert gi._DISCOVERY_CONTEXT.get() is None
+
+
+@pytest.mark.asyncio
+async def test_retry_failed_does_not_apply_newer_revision_without_manual_diff(monkeypatch):
+    monkeypatch.setattr(gi.settings, "SYSTEM_OWNER_ID", 42)
+    row = {
+        "package_id": "update-1",
+        "version": "2",
+        "commit_sha": "b" * 40,
+        "created_at": "2026-08-12T20:00:00+00:00",
+    }
+    current = gi.GitHubPackage(
+        "update-1", "book", "Update", "ru", "3", "now", (), {},
+        "books/update-1", "c" * 40, "update", "1",
+    )
+
+    async def history(*args, **kwargs):
+        return [row]
+
+    async def no_success(package_id):
+        return None
+
+    async def find(identity_id, package_id):
+        return current
+
+    async def forbidden_import(*args, **kwargs):
+        raise AssertionError("newer revision must require manual diff confirmation")
+
+    monkeypatch.setattr(gi, "import_history", history)
+    monkeypatch.setattr(gi, "_last_success", no_success)
+    monkeypatch.setattr(gi, "find_package", find)
+    monkeypatch.setattr(gi, "import_package", forbidden_import)
+
+    result = await gi.retry_failed(42)
+    assert result["success"] == 0
+    assert result["failed"] == 1
+    assert "изменился" in result["errors"][0]["error"]
+    assert gi._DISCOVERY_CONTEXT.get() is None
+
+
+@pytest.mark.asyncio
 async def test_non_owner_cannot_bulk_import(monkeypatch):
     monkeypatch.setattr(gi.settings, "SYSTEM_OWNER_ID", 42)
     with pytest.raises(gi.GitHubImportForbidden):
