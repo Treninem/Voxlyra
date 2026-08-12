@@ -54,6 +54,13 @@ class Settings(BaseSettings):
     GITHUB_IMPORT_MAX_PACKAGE_MB: int = 2048
     GITHUB_IMPORT_MIN_FREE_DISK_MB: int = 256
     GITHUB_IMPORT_PAGE_SIZE: int = 50
+    # Необязательный owner-only мост для загрузки готового source ZIP прямо в
+    # тот же репозиторий. Использует отдельный fine-grained token с Contents write.
+    # По умолчанию полностью выключен и не использует read-token импорта.
+    GITHUB_SOURCE_WRITE_ENABLED: bool = False
+    GITHUB_SOURCE_WRITE_TOKEN: str = ""
+    GITHUB_SOURCE_WRITE_MAX_PACKAGE_MB: int = 512
+    GITHUB_SOURCE_WRITE_MAX_FILE_MB: int = 50
 
     MAX_BOOK_UPLOAD_MB: int = 0
     MAX_BOOK_UNPACKED_MB: int = 2048
