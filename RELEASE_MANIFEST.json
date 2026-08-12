@@ -8,7 +8,8 @@
     "database_reset": false,
     "storage_reset": false,
     "github_owner_import_enabled": true,
-    "github_import_all_or_nothing": true,
+    "github_import_per_package_rollback": true,
+    "github_bulk_failure_isolation": true,
     "github_import_retry_cleanup": true,
     "github_import_large_catalog_cap": 5000,
     "github_disabled_legacy_manifests_skipped": true,
@@ -37,7 +38,7 @@
     "live_telegram_flow": false,
     "live_vk_flow": false,
     "production_payment_flow": false,
-    "note": "Repository CI is green for the v1.16.1 contracts and the full maintained regression suite. Live account-dependent checks still require deployment; no production books are fabricated by QA."
+    "note": "Repository CI is green for the v1.16.1 contracts and the full maintained regression suite. Bulk import isolates failures per package: a broken package is rolled back and recorded while independent packages continue. Live account-dependent checks still require deployment; no production books are fabricated by QA."
   },
   "name": "GitHub import and cross-platform release hardening"
 }
