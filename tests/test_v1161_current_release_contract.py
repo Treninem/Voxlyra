@@ -37,6 +37,8 @@ def test_current_build_version_and_readme_are_aligned():
     assert features["github_import_env_ui_kill_switch"] is True
     assert features["github_single_inventory_bulk_discovery"] is True
     assert features["github_public_raw_file_downloads"] is True
+    assert features["github_strict_manifest_checksums"] is True
+    assert features["github_manifest_rights_evidence_required"] is True
     assert features["github_callback_safe_package_ids"] is True
     assert features["github_archive_disk_reserve"] is True
     assert features["github_retry_exact_failed_revision"] is True
@@ -143,6 +145,9 @@ def test_github_import_stays_owner_only_and_uses_existing_pipeline():
     assert "_DISCOVERY_CONTEXT" in service
     assert "raw.githubusercontent.com" in service
     assert "_require_archive_space" in service
+    assert "_REQUIRED_RIGHTS_FILES" in service
+    assert "LICENSE.txt" in service
+    assert "SOURCES.txt" in service
     assert "allow_update=True" in service
     assert "Пакет изменился после неудачной попытки" in service
     assert "serialize_package_import" in service_bootstrap
