@@ -25,6 +25,14 @@ _TYPE_DIRS = {"book": "books", "comics": "comics", "audiobook": "audiobooks"}
 _BULK_TYPES = {"book", "comics"}
 _IMPORT_INDEX = "manifests/import_index.json"
 _REQUIRED_RIGHTS_FILES = {"LICENSE.txt", "SOURCES.txt"}
+_ADMIN_PACKAGE_FILES = _REQUIRED_RIGHTS_FILES | {
+    "metadata.json",
+    "description.txt",
+    "cover.jpg",
+    "cover.jpeg",
+    "cover.png",
+    "cover.webp",
+}
 _MAX_DISCOVERED_PACKAGES = 5000
 _MAX_MANIFEST_FILES = 20_000
 _MAX_VERSION_LENGTH = 128
@@ -209,6 +217,8 @@ def validate_manifest(data: dict[str, Any], *, package_path: str, commit_sha: st
         raise GitHubImportError(
             "Manifest импортируемого пакета должен включать LICENSE.txt и SOURCES.txt"
         )
+    if not any(name not in _ADMIN_PACKAGE_FILES for name in files):
+        raise GitHubImportError("Manifest не содержит файл или страницы самого произведения")
 
     checksums = {
         str(PurePosixPath(str(key))): str(value).lower().strip()
