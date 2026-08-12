@@ -1,29 +1,43 @@
 {
   "project": "VoxLyra",
-  "version": "v1.16.0",
-  "build": "bulk_import_hardening_and_release_sync",
-  "base_version": "v1.15.9",
+  "version": "v1.16.1",
+  "build": "github_import_cross_platform_release_hardening",
+  "base_version": "v1.16.0",
   "owner_only_version": true,
   "features": {
     "database_reset": false,
     "storage_reset": false,
-    "qa_direct_execution_fixed": true,
+    "github_owner_import_enabled": true,
+    "github_import_all_or_nothing": true,
+    "github_import_retry_cleanup": true,
+    "github_import_large_catalog_cap": 5000,
+    "github_disabled_legacy_manifests_skipped": true,
+    "import_replacement_preserves_book_id": true,
     "bulk_graphic_import_e2e_count": 50,
     "safe_7z_page_names": true,
     "commercial_rights_verification": true,
     "chapter_volume_purchase_isolation": true,
     "bulk_import_genres_tags_persisted": true,
+    "telegram_mini_app_deep_links": true,
+    "vk_wall_first_publish": true,
+    "vk_native_votes_pricing": true,
+    "vk_publication_checkout_price_parity": true,
+    "platform_native_legal_payments": true,
+    "canonical_avatar_assets": true,
     "env_example_present": true,
     "existing_books_preserved": true
   },
   "verification": {
     "repository_audited_at": "2026-08-12",
-    "latest_feature_commit": "f000a2b20e99be1fd1cbd25033b7126cf23913d7",
+    "latest_feature_commit": "cd6256ae4092f07910ef5913270d8e7d136093d6",
+    "github_actions_targeted": true,
+    "github_actions_full_suite": true,
+    "github_actions_run_id": 31634997314,
     "live_bothost_redeploy": false,
     "live_telegram_flow": false,
     "live_vk_flow": false,
     "production_payment_flow": false,
-    "note": "Live account-dependent checks remain required after deployment; no production books are fabricated by QA."
+    "note": "Repository CI is green for the v1.16.1 contracts and the full maintained regression suite. Live account-dependent checks still require deployment; no production books are fabricated by QA."
   },
-  "name": "Bulk import hardening and release synchronization"
+  "name": "GitHub import and cross-platform release hardening"
 }
