@@ -34,6 +34,7 @@ def test_current_build_version_and_readme_are_aligned():
     assert features["github_public_raw_file_downloads"] is True
     assert features["github_callback_safe_package_ids"] is True
     assert features["github_archive_disk_reserve"] is True
+    assert features["github_retry_exact_failed_revision"] is True
     assert features["vk_failed_wall_post_retry"] is True
     assert features["vk_historical_post_spam_guard"] is True
 
@@ -117,6 +118,8 @@ def test_github_import_stays_owner_only_and_uses_existing_pipeline():
     assert "_DISCOVERY_CONTEXT" in service
     assert "raw.githubusercontent.com" in service
     assert "_require_archive_space" in service
+    assert "allow_update=True" in service
+    assert "Пакет изменился после неудачной попытки" in service
     assert "ghimp:all" in handler
     assert "ghimp:retry" in handler
     assert "changes" in handler
