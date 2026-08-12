@@ -20,11 +20,19 @@ from app.services.github_import import (
 router = Router()
 
 
+def _system_owner(subject) -> bool:
+    user = getattr(subject, "from_user", None)
+    return bool(user and settings.is_system_owner(user.id))
+
+
 def _allowed(call) -> bool:
-    return bool(call.from_user and settings.is_system_owner(call.from_user.id))
+    return _system_owner(call) and bool(settings.GITHUB_IMPORT_ENABLED)
 
 
 async def _deny(call):
+    if _system_owner(call) and not bool(settings.GITHUB_IMPORT_ENABLED):
+        await call.answer("GitHub Import выключен в настройках", show_alert=True)
+        return
     await call.answer("Недоступно", show_alert=True)
 
 
@@ -47,8 +55,8 @@ def github_import_menu():
 
 def system_owner_tools_menu():
     kb = InlineKeyboardBuilder()
-    state = "✅" if bool(settings.GITHUB_IMPORT_ENABLED) else "▫️"
-    kb.button(text=f"📦 GitHub Import {state}", callback_data="owner:github_import")
+    if bool(settings.GITHUB_IMPORT_ENABLED):
+        kb.button(text="📦 GitHub Import ✅", callback_data="owner:github_import")
     kb.button(text="🩺 Диагностика", callback_data="owner:system:diagnostics")
     kb.button(text="⬅️ Центр управления", callback_data="owner:menu")
     kb.adjust(1)
@@ -69,7 +77,14 @@ def _change_lines(package, limit: int = 8) -> str:
 @router.message(Command("github_import"))
 async def direct_menu(message):
     """Emergency hidden entry for the one non-delegable system owner."""
-    if not message.from_user or not settings.is_system_owner(message.from_user.id):
+    if not _system_owner(message):
+        return
+    if not bool(settings.GITHUB_IMPORT_ENABLED):
+        await message.answer(
+            "<b>📦 GitHub Import выключен</b>\n\n"
+            "Для запуска задайте <code>GITHUB_IMPORT_ENABLED=true</code> и перезапустите приложение.",
+            reply_markup=system_owner_tools_menu(),
+        )
         return
     repository = html.escape(str(settings.GITHUB_IMPORT_REPOSITORY or "не настроен"))
     await message.answer(
@@ -86,7 +101,7 @@ async def direct_menu(message):
 # diagnostics screen without any hint that GitHub Import exists.
 @router.callback_query((F.data == "owner:system") & (F.from_user.id == settings.SYSTEM_OWNER_ID))
 async def system_owner_tools(call):
-    if not _allowed(call):
+    if not _system_owner(call):
         return await _deny(call)
     enabled = "включён" if bool(settings.GITHUB_IMPORT_ENABLED) else "выключен в env"
     await call.message.edit_text(
@@ -100,7 +115,7 @@ async def system_owner_tools(call):
 
 @router.callback_query(F.data == "owner:system:diagnostics")
 async def system_owner_diagnostics(call):
-    if not _allowed(call):
+    if not _system_owner(call):
         return await _deny(call)
     kb = InlineKeyboardBuilder()
     kb.button(text="⬅️ Системные инструменты", callback_data="owner:system")
@@ -115,11 +130,10 @@ async def menu(call):
     if not _allowed(call):
         return await _deny(call)
     repository = html.escape(str(settings.GITHUB_IMPORT_REPOSITORY or "не настроен"))
-    status = "включён" if bool(settings.GITHUB_IMPORT_ENABLED) else "выключен в env"
     await call.message.edit_text(
         "<b>📦 Контент → Импорт → GitHub</b>\n\n"
         f"Источник: <code>{repository}</code>\n"
-        f"Флаг запуска: <b>{status}</b>\n"
+        "Флаг запуска: <b>включён</b>\n"
         "GitHub используется только как источник. После импорта контент хранится по обычной схеме VoxLyra.\n\n"
         "Массово: книги и комиксы. Аудиокниги пока пропускаются.",
         reply_markup=github_import_menu(),
