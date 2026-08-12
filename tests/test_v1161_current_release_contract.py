@@ -32,6 +32,8 @@ def test_current_build_version_and_readme_are_aligned():
     assert manifest["verification"]["github_actions_targeted"] is True
     assert manifest["verification"]["github_actions_full_suite"] is True
     features = manifest["features"]
+    assert features["github_hidden_system_owner_tools"] is True
+    assert features["github_owner_callback_resilience"] is True
     assert features["github_single_inventory_bulk_discovery"] is True
     assert features["github_public_raw_file_downloads"] is True
     assert features["github_callback_safe_package_ids"] is True
@@ -110,6 +112,7 @@ def test_current_legal_model_names_platform_native_payments():
 def test_github_import_stays_owner_only_and_uses_existing_pipeline():
     service = (ROOT / "app" / "services" / "github_import.py").read_text(encoding="utf-8")
     handler = (ROOT / "app" / "handlers" / "github_import.py").read_text(encoding="utf-8")
+    bot = (ROOT / "app" / "bot.py").read_text(encoding="utf-8")
     assert "is_system_owner" in service
     assert "import_library_zip" in service
     assert "restore_import_replacement_backups" in service
@@ -122,9 +125,14 @@ def test_github_import_stays_owner_only_and_uses_existing_pipeline():
     assert "_require_archive_space" in service
     assert "allow_update=True" in service
     assert "Пакет изменился после неудачной попытки" in service
+    assert "owner:system:diagnostics" in handler
+    assert "owner:github_import" in handler
+    assert 'Command("github_import")' in handler
+    assert "F.from_user.id == settings.SYSTEM_OWNER_ID" in handler
     assert "ghimp:all" in handler
     assert "ghimp:retry" in handler
     assert "changes" in handler
+    assert bot.index("dp.include_router(github_import.router)") < bot.index("dp.include_router(owner.router)")
 
 
 def test_import_replacement_keeps_permanent_book_id_and_relationship_tables():
