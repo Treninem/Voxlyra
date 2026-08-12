@@ -8,6 +8,17 @@ GitHub используется только как дополнительный
 
 Источник по умолчанию: `Treninem/bookvoxlyra`, ветка `main`. Репозиторий, ветка и корневой путь задаются через env.
 
+## Интерфейс системного владельца
+
+GitHub Import не добавляется в общее административное меню и не раскрывается другим владельцам/администраторам.
+
+- `github_import.router` регистрируется раньше `owner.router`;
+- только callback `owner:system` от `SYSTEM_OWNER_ID` перехватывается отдельным экраном «🧩 Системные инструменты»;
+- на этом экране доступны `📦 GitHub Import`, `🩺 Диагностика` и возврат в центр управления;
+- все остальные владельцы продолжают попадать в обычный `owner:system` из `owner.py` и видят только штатную диагностику;
+- команда `/github_import` служит скрытым аварийным входом и не отвечает non-system-owner пользователям;
+- неожиданные HTTP/TLS/network ошибки scan/import/retry преобразуются в понятный ответ внутри Telegram, чтобы callback не зависал.
+
 ## Безопасность
 
 - доступ только непередаваемому `SYSTEM_OWNER_ID`;
@@ -103,11 +114,15 @@ VK-публичная цена и VK checkout используют один `vot
 - `tests/test_v1160_import_rights.py`;
 - `tests/test_v1160_cross_platform_publication.py`;
 - `tests/test_v1161_github_import_hardening.py`;
+- `tests/test_v1161_github_import_handler.py`;
 - `tests/test_v1161_current_release_contract.py`.
 
 Hardening `v1.16.1` проверяет:
 
 - owner/non-owner access;
+- hidden system-owner tools и silent `/github_import` для остальных;
+- router order, который сохраняет обычный `owner:system` для других владельцев;
+- handler resilience при неожиданных network errors;
 - strict manifest/checksum/path validation;
 - Telegram callback-safe `package_id`;
 - 20k file limit;
@@ -123,7 +138,7 @@ Hardening `v1.16.1` проверяет:
 - сохранение постоянного `book_id`;
 - VK native pricing и безопасный retry неудавшейся wall-публикации.
 
-GitHub Actions run `31637903158` успешно прошёл целевой набор `v1.16.1` и полный maintained regression suite после exact-revision retry. Run `31637170402` до него подтвердил безопасный VK retry, а `31636870533` — масштабированный GitHub inventory/bulk-import.
+GitHub Actions run `31639127073` успешно прошёл целевой набор `v1.16.1` и полный maintained regression suite после hidden system-owner menu. Run `31637903158` подтвердил exact-revision retry, `31637170402` — безопасный VK retry, `31636870533` — масштабированный GitHub inventory/bulk-import.
 
 `RELEASE_MANIFEST.json` закреплён текущим release-contract и не должен расходиться с `app/build_info.py`/`settings.PROJECT_VERSION`.
 
