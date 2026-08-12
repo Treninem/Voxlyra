@@ -26,6 +26,8 @@ def test_current_build_version_and_readme_are_aligned():
     assert expected in readme
     env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
     assert f"PROJECT_VERSION={expected}" in env_example
+    assert "GITHUB_SOURCE_WRITE_ENABLED=false" in env_example
+    assert "GITHUB_SOURCE_WRITE_TOKEN=" in env_example
     manifest = json.loads((ROOT / "RELEASE_MANIFEST.json").read_text(encoding="utf-8"))
     assert manifest["project"] == "VoxLyra"
     assert manifest["version"] == expected
@@ -45,6 +47,11 @@ def test_current_build_version_and_readme_are_aligned():
     assert features["github_retry_exact_failed_revision"] is True
     assert features["github_same_package_serialization"] is True
     assert features["github_history_refresh_after_package_lock"] is True
+    assert features["github_source_write_bridge"] is True
+    assert features["github_source_write_separate_token"] is True
+    assert features["github_source_write_atomic_commit"] is True
+    assert features["github_source_write_owner_only"] is True
+    assert features["github_source_write_zip_validation"] is True
     assert features["vk_failed_wall_post_retry"] is True
     assert features["vk_historical_post_spam_guard"] is True
     assert features["vk_publication_single_canonical_service"] is True
@@ -135,6 +142,8 @@ def test_github_import_stays_owner_only_and_uses_existing_pipeline():
     service = (ROOT / "app" / "services" / "github_import.py").read_text(encoding="utf-8")
     service_bootstrap = (ROOT / "app" / "services" / "__init__.py").read_text(encoding="utf-8")
     handler = (ROOT / "app" / "handlers" / "github_import.py").read_text(encoding="utf-8")
+    source_service = (ROOT / "app" / "services" / "github_source_publish.py").read_text(encoding="utf-8")
+    source_handler = (ROOT / "app" / "handlers" / "github_source_publish.py").read_text(encoding="utf-8")
     bot = (ROOT / "app" / "bot.py").read_text(encoding="utf-8")
     assert "is_system_owner" in service
     assert "import_library_zip" in service
@@ -159,13 +168,23 @@ def test_github_import_stays_owner_only_and_uses_existing_pipeline():
     assert "_voxlyra_package_history_fresh" in service_bootstrap
     assert "owner:system:diagnostics" in handler
     assert "owner:github_import" in handler
+    assert "owner:github_source_publish" in handler
     assert 'Command("github_import")' in handler
     assert "F.from_user.id == settings.SYSTEM_OWNER_ID" in handler
     assert "GITHUB_IMPORT_ENABLED" in handler
+    assert "GITHUB_SOURCE_WRITE_ENABLED" in handler
     assert "GitHub Import выключен в настройках" in handler
     assert "ghimp:all" in handler
     assert "ghimp:retry" in handler
     assert "changes" in handler
+    assert "GITHUB_SOURCE_WRITE_TOKEN" in source_service
+    assert '"force": False' in source_service
+    assert "build_enabled_import_index" in source_service
+    assert "inspect_source_package_zip" in source_service
+    assert "existing_paths - incoming_paths" in source_service
+    assert 'Command("github_source_publish")' in source_handler
+    assert "owner:github_source_publish" in source_handler
+    assert bot.index("dp.include_router(github_source_publish.router)") < bot.index("dp.include_router(owner.router)")
     assert bot.index("dp.include_router(github_import.router)") < bot.index("dp.include_router(owner.router)")
 
 
