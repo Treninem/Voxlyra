@@ -27,7 +27,12 @@ _DISPATCHER: Dispatcher | None = None
 
 
 def _dispatcher() -> Dispatcher:
-    """Build the aiogram router tree once per process."""
+    """Build the aiogram router tree once per process.
+
+    Aiogram routers keep their parent reference. Recreating Dispatcher after a
+    transient Telegram failure raises `Router is already attached`, so retries
+    must reuse the original tree.
+    """
     global _DISPATCHER
     if _DISPATCHER is not None:
         return _DISPATCHER
@@ -42,15 +47,16 @@ def _dispatcher() -> Dispatcher:
     dp.include_router(legal.router)
     dp.include_router(start.router)
     dp.include_router(author.router)
-    # The GitHub import router has its own non-delegable SYSTEM_OWNER_ID guard.
-    # Register it before the broad owner router so protected callbacks cannot be
-    # accidentally consumed by ordinary delegated administration handlers.
+    # GitHub import has a separate non-delegable SYSTEM_OWNER_ID guard and is
+    # registered before the broad owner router so its callbacks stay protected.
     dp.include_router(github_import.router)
     dp.include_router(owner.router)
     dp.include_router(library_manager.router)
     dp.include_router(moderation.router)
     _DISPATCHER = dp
     return dp
+
+
 
 
 async def _supervise_library_import_worker(bot: Bot) -> None:
@@ -67,7 +73,6 @@ async def _supervise_library_import_worker(bot: Bot) -> None:
             await asyncio.sleep(delay)
             delay = min(30, max(2, delay * 2))
 
-
 async def run_bot() -> None:
     mark_bot_starting()
     if not settings.BOT_TOKEN:
@@ -76,7 +81,10 @@ async def run_bot() -> None:
     await init_db()
     await ensure_author_channel_queue_schema()
 
-    bot = Bot(token=settings.BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    bot = Bot(
+        token=settings.BOT_TOKEN,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    )
     background_tasks: list[asyncio.Task] = []
     try:
         try:
@@ -84,15 +92,24 @@ async def run_bot() -> None:
             if identity.username:
                 settings.BOT_USERNAME = identity.username
         except Exception as exc:
+            # Username discovery is optional. Polling may still recover if Telegram
+            # had a short network interruption during deployment.
             logger.warning("Could not resolve bot username: %s", exc)
 
         dp = _dispatcher()
+
+        # If this network call fails, main.supervise_bot retries the entire bot
+        # without terminating the Mini App HTTP server.
         await bot.delete_webhook(drop_pending_updates=False)
         mark_bot_connected()
 
         restored_covers, failed_covers = await restore_missing_book_covers(bot)
         if restored_covers or failed_covers:
-            logger.info("Cover recovery completed: restored=%s failed=%s", restored_covers, failed_covers)
+            logger.info(
+                "Cover recovery completed: restored=%s failed=%s",
+                restored_covers,
+                failed_covers,
+            )
         logger.info("Bot started")
 
         background_tasks = [
