@@ -14,8 +14,8 @@ GitHub используется только как источник. Прове
 - для системного владельца обычная кнопка `🧩 Система` открывает отдельные системные инструменты с `📦 GitHub Import` и диагностикой;
 - другие владельцы и администраторы продолжают видеть прежнюю системную диагностику и не получают даже пункта GitHub Import;
 - аварийный вход `/github_import` отвечает только системному владельцу и молчит для остальных;
+- `GITHUB_IMPORT_ENABLED=false` скрывает вход и блокирует crafted GitHub callbacks до discovery/import;
 - сетевые/TLS/HTTP ошибки owner-callback отображаются в самом боте вместо зависшего Telegram spinner;
-- серверный запрет доступа остальным пользователям и администраторам;
 - строгая проверка manifest, SHA-256 и safe-path;
 - `checksums` обязан точно соответствовать `files`;
 - `package_id` ограничен безопасной длиной для Telegram `callback_data`;
@@ -24,6 +24,9 @@ GitHub используется только как источник. Прове
 - публичный `bookvoxlyra` скачивается по commit-pinned `raw.githubusercontent.com`, без одного Contents API запроса на каждую страницу комикса;
 - при приватном источнике с токеном сохраняется совместимый Contents API путь;
 - массовый импорт и retry используют один task-local снимок inventory вместо повторного сканирования репозитория для каждой книги;
+- одинаковый `package_id` сериализуется одним package-lock на полный import/rollback/cleanup поток;
+- после ожидания этого lock повторно применяется актуальная локальная история импорта, поэтому второй overlapping bulk-run не импортирует уже завершившийся пакет повторно;
+- разные `package_id` не блокируют друг друга и остаются параллельно обрабатываемыми;
 - лимит `max_packages` соблюдается точно, а `0` не делает сетевых запросов;
 - GitHub rate-limit превращается в понятную ошибку импорта;
 - проверяется свободное место не только перед загрузкой, но и перед созданием второй временной копии в `.voxlyra.zip`;
@@ -48,7 +51,9 @@ GitHub используется только как источник. Прове
 - первая публикация книги сходится в общий workflow независимо от источника загрузки;
 - успешный VK wall post идемпотентен и не дублируется;
 - если первая попытка VK wall реально завершилась ошибкой, следующая публикационная обработка повторит именно этот неудачный пост;
-- исторические книги без VK audit-состояния автоматически задним числом не публикуются — это защищает сообщество от массового спама старым каталогом.
+- исторические книги без VK audit-состояния автоматически задним числом не публикуются — это защищает сообщество от массового спама старым каталогом;
+- вся VK publication/retry/pricing логика канонически находится в `cross_platform_publication.py`;
+- старый `vk_publication.py` оставлен только как полный compatibility re-export и больше не может незаметно разойтись со второй копией бизнес-логики.
 
 ### Regression hardening v1.16.1
 
@@ -58,30 +63,32 @@ GitHub используется только как источник. Прове
 
 - синхронизацию `app/build_info.py`, `settings.PROJECT_VERSION`, `.env.example` и `RELEASE_MANIFEST.json`;
 - canonical assets;
-- Telegram/VK launch routes;
-- платформенную коммерцию;
-- owner-only GitHub Import и порядок router-ов, необходимый для скрытого system-owner меню;
-- handler resilience и отсутствие доступа у non-owner;
+- Telegram/VK launch routes и платформенную коммерцию;
+- owner-only GitHub Import, router order, UI kill switch и handler resilience;
 - callback-safe manifests и resource limits;
-- один inventory на bulk/retry;
+- один remote inventory на bulk/retry;
+- сериализацию одинакового package ID, fresh-history после lock и параллельность разных пакетов;
 - raw public downloads и GitHub rate-limit handling;
 - low disk, missing file, interrupted stream, cleanup, rollback/finalize;
 - exact-revision retry после ошибки;
 - постоянный `book_id` при replacement;
 - VK checkout/publication price parity;
+- единственный canonical VK publication service и compatibility shim без forked logic;
 - безопасный retry неудавшейся VK wall публикации без back-post исторического каталога.
 
 ### CI
 
-GitHub Actions run `31639127073` успешно прошёл целевой набор `v1.16.1` и полный maintained regression suite после добавления скрытого system-owner GitHub Import меню и его тестов. Ранее `31637903158` подтвердил exact-revision retry, `31637170402` — безопасный VK retry, `31636870533` — масштабированный GitHub discovery/bulk import.
+GitHub Actions run `31642789845` успешно прошёл расширенный целевой набор `v1.16.1` и полный maintained regression suite после hardening конкурентного GitHub Import и выравнивания VK compatibility surface.
+
+В `Treninem/bookvoxlyra` отдельный source-side validator также требует для каждого включённого пакета реальный payload, корректные SHA-256, непустые UTF-8 `LICENSE.txt` и `SOURCES.txt`; его fixture-тесты после этого изменения также зелёные. Наличие файлов само по себе не создаёт права — сведения в них должны быть настоящими.
 
 Каждый следующий commit в `main` снова запускает тот же CI. `RELEASE_MANIFEST.json` дополнительно проверяется текущим release-contract.
 
 ### До полного production-ready
 
-В коде и автоматике закрыты owner security, rollback/cleanup, resource limits, большие inventory, API-amplification, update confirmation/diff, сохранение пользовательских связей, Telegram/VK deep links, безопасный retry публикации и скрытый системный интерфейс импорта.
+В коде и автоматике закрыты owner security, rollback/cleanup, resource limits, большие inventory, API-amplification, update confirmation/diff, сохранение пользовательских связей, конкурентный same-package import, Telegram/VK deep links, безопасный retry публикации и скрытый системный интерфейс импорта.
 
-Остаются только проверки, которым нужны реальные внешние данные/аккаунты:
+Остаются проверки, которым нужны реальные внешние данные/аккаунты:
 
 1. добавить настоящий импортируемый payload в `Treninem/bookvoxlyra` — текущие известные пакеты в `manifests/import_index.json` отключены, потому что `payload_present=false`;
 2. проверить обновление реального комикса с добавлением/заменой главы и фактический diff перед подтверждением;
@@ -124,4 +131,4 @@ GITHUB_IMPORT_PAGE_SIZE=50
 - `data/` — постоянные runtime-данные; реальные пользовательские данные не коммитятся.
 - `storage/` — runtime/legal ресурсы согласно конфигурации.
 
-Последнее обновление README: 2026-08-12 — GitHub Import вынесен в скрытые system-owner инструменты, добавлен аварийный `/github_import`, handler resilience, exact-revision retry, масштабирование public raw downloads и подтверждён зелёный полный CI.
+Последнее обновление README: 2026-08-13 — закрыта гонка overlapping same-package imports, VK publication сведена к одному canonical сервису, source-package validator усилен проверками rights provenance и подтверждён зелёный полный CI `31642789845`.
