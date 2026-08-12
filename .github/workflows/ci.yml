@@ -13,6 +13,8 @@ jobs:
   tests:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      PYTHONUNBUFFERED: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -26,7 +28,14 @@ jobs:
           pip install pytest pytest-asyncio
       - name: Compile application
         run: python -m compileall -q app
-      - name: GitHub import tests
-        run: pytest -q tests/test_v1160_github_import_security.py tests/test_v1160_github_bulk_import.py tests/test_v1160_import_rights.py tests/test_v1160_cross_platform_publication.py
-      - name: Full regression suite
+      - name: GitHub import and v1.16.1 contracts
+        run: >-
+          pytest -q
+          tests/test_v1160_github_import_security.py
+          tests/test_v1160_github_bulk_import.py
+          tests/test_v1160_import_rights.py
+          tests/test_v1160_cross_platform_publication.py
+          tests/test_v1161_github_import_hardening.py
+          tests/test_v1161_current_release_contract.py
+      - name: Full maintained regression suite
         run: pytest -q
