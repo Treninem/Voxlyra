@@ -40,8 +40,12 @@ def test_current_build_version_and_readme_are_aligned():
     assert features["github_callback_safe_package_ids"] is True
     assert features["github_archive_disk_reserve"] is True
     assert features["github_retry_exact_failed_revision"] is True
+    assert features["github_same_package_serialization"] is True
+    assert features["github_history_refresh_after_package_lock"] is True
     assert features["vk_failed_wall_post_retry"] is True
     assert features["vk_historical_post_spam_guard"] is True
+    assert features["vk_publication_single_canonical_service"] is True
+    assert features["vk_publication_compatibility_shim_complete"] is True
 
 
 def test_canonical_avatar_assets_only_live_under_static():
@@ -89,6 +93,20 @@ def test_vk_wall_publication_is_wired_into_shared_first_publish_and_safe_retry_f
     assert "publish_book_content" in source
 
 
+def test_vk_publication_uses_one_canonical_service_with_complete_compatibility_surface():
+    from app.services import cross_platform_publication as canonical
+    from app.services import vk_publication as compat
+
+    for name in (
+        "build_vk_book_post",
+        "post_book_to_vk_wall",
+        "should_retry_vk_wall_post",
+        "vk_book_url",
+        "vk_votes_from_stars",
+    ):
+        assert getattr(compat, name) is getattr(canonical, name)
+
+
 def test_cross_platform_commerce_contract_is_explicit():
     app_js = (ROOT / "static" / "js" / "app.js").read_text(encoding="utf-8")
     config = (ROOT / "app" / "config.py").read_text(encoding="utf-8")
@@ -112,6 +130,7 @@ def test_current_legal_model_names_platform_native_payments():
 
 def test_github_import_stays_owner_only_and_uses_existing_pipeline():
     service = (ROOT / "app" / "services" / "github_import.py").read_text(encoding="utf-8")
+    service_bootstrap = (ROOT / "app" / "services" / "__init__.py").read_text(encoding="utf-8")
     handler = (ROOT / "app" / "handlers" / "github_import.py").read_text(encoding="utf-8")
     bot = (ROOT / "app" / "bot.py").read_text(encoding="utf-8")
     assert "is_system_owner" in service
@@ -126,6 +145,10 @@ def test_github_import_stays_owner_only_and_uses_existing_pipeline():
     assert "_require_archive_space" in service
     assert "allow_update=True" in service
     assert "Пакет изменился после неудачной попытки" in service
+    assert "serialize_package_import" in service_bootstrap
+    assert "asyncio.Lock" in service_bootstrap
+    assert "_RESOLVED_PACKAGES.set(None)" in service_bootstrap
+    assert "_voxlyra_package_history_fresh" in service_bootstrap
     assert "owner:system:diagnostics" in handler
     assert "owner:github_import" in handler
     assert 'Command("github_import")' in handler
