@@ -3,9 +3,11 @@ from __future__ import annotations
 import html
 
 from aiogram import F, Router
+from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.config import settings
+from app.services.diagnostics import format_diagnostics_for_owner
 from app.services.github_import import (
     discover_packages,
     import_all_new,
@@ -36,9 +38,19 @@ def github_import_menu():
         ("⚠️ Ошибки", "ghimp:errors"),
         ("🔁 Повторить неудачные", "ghimp:retry"),
         ("⚙️ Настройки GitHub", "ghimp:settings"),
-        ("⬅️ Назад", "owner:menu"),
+        ("⬅️ Системные инструменты", "owner:system"),
     ):
         kb.button(text=text, callback_data=data)
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def system_owner_tools_menu():
+    kb = InlineKeyboardBuilder()
+    state = "✅" if bool(settings.GITHUB_IMPORT_ENABLED) else "▫️"
+    kb.button(text=f"📦 GitHub Import {state}", callback_data="owner:github_import")
+    kb.button(text="🩺 Диагностика", callback_data="owner:system:diagnostics")
+    kb.button(text="⬅️ Центр управления", callback_data="owner:menu")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -54,14 +66,60 @@ def _change_lines(package, limit: int = 8) -> str:
     return result
 
 
+@router.message(Command("github_import"))
+async def direct_menu(message):
+    """Emergency hidden entry for the one non-delegable system owner."""
+    if not message.from_user or not settings.is_system_owner(message.from_user.id):
+        return
+    repository = html.escape(str(settings.GITHUB_IMPORT_REPOSITORY or "не настроен"))
+    await message.answer(
+        "<b>📦 GitHub Import</b>\n\n"
+        f"Источник: <code>{repository}</code>\n"
+        "Доступ принадлежит только системному владельцу.",
+        reply_markup=github_import_menu(),
+    )
+
+
+# github_import.router is registered before owner.router. This filter is bound to
+# the configured SYSTEM_OWNER_ID, so only that one account receives the extended
+# system screen; other regular owners continue into owner.py and see the original
+# diagnostics screen without any hint that GitHub Import exists.
+@router.callback_query((F.data == "owner:system") & (F.from_user.id == settings.SYSTEM_OWNER_ID))
+async def system_owner_tools(call):
+    if not _allowed(call):
+        return await _deny(call)
+    enabled = "включён" if bool(settings.GITHUB_IMPORT_ENABLED) else "выключен в env"
+    await call.message.edit_text(
+        "<b>🧩 Системные инструменты</b>\n\n"
+        f"GitHub Import: <b>{enabled}</b>\n"
+        "Раздел виден только системному владельцу. Обычные владельцы и администраторы его не видят.",
+        reply_markup=system_owner_tools_menu(),
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data == "owner:system:diagnostics")
+async def system_owner_diagnostics(call):
+    if not _allowed(call):
+        return await _deny(call)
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ Системные инструменты", callback_data="owner:system")
+    kb.button(text="🏠 Центр управления", callback_data="owner:menu")
+    kb.adjust(1)
+    await call.message.edit_text(format_diagnostics_for_owner(), reply_markup=kb.as_markup())
+    await call.answer()
+
+
 @router.callback_query(F.data == "owner:github_import")
 async def menu(call):
     if not _allowed(call):
         return await _deny(call)
     repository = html.escape(str(settings.GITHUB_IMPORT_REPOSITORY or "не настроен"))
+    status = "включён" if bool(settings.GITHUB_IMPORT_ENABLED) else "выключен в env"
     await call.message.edit_text(
         "<b>📦 Контент → Импорт → GitHub</b>\n\n"
         f"Источник: <code>{repository}</code>\n"
+        f"Флаг запуска: <b>{status}</b>\n"
         "GitHub используется только как источник. После импорта контент хранится по обычной схеме VoxLyra.\n\n"
         "Массово: книги и комиксы. Аудиокниги пока пропускаются.",
         reply_markup=github_import_menu(),
