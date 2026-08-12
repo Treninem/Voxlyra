@@ -17,6 +17,7 @@ GitHub Import не добавляется в общее администрати
 - на этом экране доступны `📦 GitHub Import`, `🩺 Диагностика` и возврат в центр управления;
 - все остальные владельцы продолжают попадать в обычный `owner:system` из `owner.py` и видят только штатную диагностику;
 - команда `/github_import` служит скрытым аварийным входом и не отвечает non-system-owner пользователям;
+- `GITHUB_IMPORT_ENABLED=false` скрывает GitHub Import и отклоняет прямые GitHub callbacks до сетевого обращения;
 - неожиданные HTTP/TLS/network ошибки scan/import/retry преобразуются в понятный ответ внутри Telegram, чтобы callback не зависал.
 
 ## Безопасность
@@ -33,6 +34,8 @@ GitHub Import не добавляется в общее администрати
 - перед созданием `.voxlyra.zip` отдельно резервируется место для второй временной копии плюс минимальный disk reserve;
 - временные файлы очищаются и при успехе, и при ошибке;
 - replacement использует существующие backup/restore/finalize механизмы VoxLyra.
+
+Дополнительный source-side validator в `Treninem/bookvoxlyra` не позволяет включить пакет без настоящего payload, SHA-256, непустых UTF-8 `LICENSE.txt` и `SOURCES.txt`. Эти файлы должны содержать реальные сведения: validator проверяет структуру и целостность, но не выдумывает и не создаёт юридические права.
 
 ## Поддерживаемый поток
 
@@ -51,6 +54,20 @@ GitHub Import не добавляется в общее администрати
 Bulk/retry используют task-local `ContextVar` inventory. Один запуск сканирует удалённый каталог один раз; переключение страниц и последующие `import_package()` внутри этого запуска не пересканируют весь репозиторий. После завершения контекст обязательно сбрасывается, поэтому параллельные async-запросы не получают чужой inventory.
 
 История для страницы пакетов применяется через одну DB connection вместо открытия отдельного SQLite connection для каждой карточки.
+
+### Конкурентные импорты одного пакета
+
+Удалённый inventory можно безопасно кэшировать в пределах одного bulk-run, но статус `new/imported/update` зависит от локальной SQLite-истории и может измениться, пока другой import уже работает.
+
+Поэтому VoxLyra сериализует **только одинаковый `package_id`**:
+
+1. import получает package-level `asyncio.Lock`;
+2. весь download → ZIP → import → rollback/finalize → record → cleanup остаётся внутри этого lock;
+3. если второй запрос ждал первый, после получения lock он очищает только task-local `_RESOLVED_PACKAGES`;
+4. `find_package()` повторно применяет актуальную SQLite history к уже закэшированному remote inventory;
+5. если первый запрос уже успешно импортировал ту же version+commit, второй получает `already_imported`, а не запускает второй физический импорт.
+
+Разные package ID используют разные locks и могут выполняться параллельно. Так устраняется duplicate/race риск без глобальной блокировки всей библиотеки.
 
 ### Public vs private downloads
 
@@ -105,6 +122,8 @@ GitHub Import не публикует книгу отдельным обходн
 
 VK-публичная цена и VK checkout используют один `votes_for_stars`; Telegram продолжает использовать Telegram Stars.
 
+Каноническая VK publication/retry/pricing реализация находится в `app/services/cross_platform_publication.py`. `app/services/vk_publication.py` сохранён только как compatibility re-export всех публичных функций. Отдельной второй реализации там нет, что исключает постепенное расхождение wall-post/retry/pricing поведения между двумя модулями.
+
 ## Тестирование
 
 Канонические тесты:
@@ -115,36 +134,37 @@ VK-публичная цена и VK checkout используют один `vot
 - `tests/test_v1160_cross_platform_publication.py`;
 - `tests/test_v1161_github_import_hardening.py`;
 - `tests/test_v1161_github_import_handler.py`;
+- `tests/test_v1161_github_import_freshness.py`;
+- `tests/test_v1161_vk_publication_compat.py`;
 - `tests/test_v1161_current_release_contract.py`.
 
 Hardening `v1.16.1` проверяет:
 
 - owner/non-owner access;
 - hidden system-owner tools и silent `/github_import` для остальных;
-- router order, который сохраняет обычный `owner:system` для других владельцев;
+- router order и GitHub Import kill switch;
 - handler resilience при неожиданных network errors;
 - strict manifest/checksum/path validation;
-- Telegram callback-safe `package_id`;
-- 20k file limit;
+- Telegram callback-safe `package_id` и 20k file limit;
 - exact bulk limit и zero-limit no-op;
 - один inventory на bulk/pages и cleanup task-local context;
+- serialization одинакового package ID и параллельность разных пакетов;
+- повторное применение свежей import history после ожидания same-package lock;
 - commit-pinned raw public download без Contents API metadata request на файл;
-- GitHub rate-limit error;
-- low disk до сети и disk reserve перед ZIP;
-- missing remote file и interrupted stream;
-- explicit update confirmation и manifest diff;
-- exact-revision retry и запрет silent retry более нового commit;
-- rollback/finalize/cleanup;
-- сохранение постоянного `book_id`;
-- VK native pricing и безопасный retry неудавшейся wall-публикации.
+- GitHub rate-limit error, low disk, missing remote file и interrupted stream;
+- explicit update confirmation, manifest diff и exact-revision retry;
+- rollback/finalize/cleanup и сохранение постоянного `book_id`;
+- VK native pricing, безопасный retry неудавшейся wall-публикации и отсутствие forked compatibility logic.
 
-GitHub Actions run `31639127073` успешно прошёл целевой набор `v1.16.1` и полный maintained regression suite после hidden system-owner menu. Run `31637903158` подтвердил exact-revision retry, `31637170402` — безопасный VK retry, `31636870533` — масштабированный GitHub inventory/bulk-import.
+GitHub Actions run `31642789845` успешно прошёл расширенный целевой набор `v1.16.1` и полный maintained regression suite после concurrency/fresh-history hardening и полного VK compatibility re-export.
 
 `RELEASE_MANIFEST.json` закреплён текущим release-contract и не должен расходиться с `app/build_info.py`/`settings.PROJECT_VERSION`.
 
 ## Состояние `Treninem/bookvoxlyra`
 
-`manifests/import_index.json` уже существует. На 2026-08-12 известные записи в нём отключены (`enabled=false`) по причине `payload_present=false`. Поэтому код импорта готов и CI-зелёный, но реальный GitHub → VoxLyra E2E для этих пакетов невозможно считать пройденным, пока в source repo не появится настоящий payload с корректным manifest/checksums/правами.
+`manifests/import_index.json` уже существует. На 2026-08-13 известные записи в нём отключены (`enabled=false`) по причине `payload_present=false`. Поэтому код импорта готов и CI-зелёный, но реальный GitHub → VoxLyra E2E для этих пакетов невозможно считать пройденным, пока в source repo не появится настоящий payload с корректным manifest/checksums/правами.
+
+Source repo дополнительно запускает fixture-тесты своего validator-а. Они подтверждают, что corrupt SHA, строковый `enabled`, missing/blank `LICENSE.txt`/`SOURCES.txt` и undeclared payload отклоняются до включения пакета.
 
 ## Остаток production-проверки
 
