@@ -69,6 +69,28 @@ def test_manifest_requires_license_and_sources_before_download():
             validate_manifest(data, package_path="books/000001", commit_sha="a" * 40)
 
 
+def test_manifest_rejects_metadata_only_package_without_work_payload():
+    files = ["metadata.json", "description.txt", "cover.jpg", "LICENSE.txt", "SOURCES.txt"]
+    checksums = {name: hashlib.sha256(name.encode("utf-8")).hexdigest() for name in files}
+    with pytest.raises(GitHubImportError, match="самого произведения"):
+        validate_manifest(
+            manifest(files=files, checksums=checksums),
+            package_path="books/000001",
+            commit_sha="a" * 40,
+        )
+
+
+def test_nested_comic_page_counts_as_real_work_payload():
+    files = ["metadata.json", "LICENSE.txt", "SOURCES.txt", "Chapters/001/page001.webp"]
+    checksums = {name: hashlib.sha256(name.encode("utf-8")).hexdigest() for name in files}
+    package = validate_manifest(
+        manifest(content_type="comics", files=files, checksums=checksums),
+        package_path="comics/000001",
+        commit_sha="a" * 40,
+    )
+    assert "Chapters/001/page001.webp" in package.files
+
+
 def test_manifest_rejects_missing_checksum():
     data = manifest(checksums={"metadata.json": "a" * 64})
     with pytest.raises(GitHubImportError):
