@@ -60,24 +60,18 @@ class PublicationResult:
 
 
 def _book_link(book_id: int) -> str:
-    """Возвращает единственную рабочую точку входа в книгу из канала.
+    """Return the platform-native Telegram Mini App link for a book.
 
-    При подключённом Mini App Telegram сразу открывает нужную книгу. Если
-    веб-приложение отключено, та же кнопка открывает бота с параметром книги,
-    вместо неработающего ``startapp``. Прямая веб-ссылка используется только
-    как запасной вариант, когда username бота не задан.
+    Telegram publications must always open the Mini App when the bot username is
+    configured. WEBAPP_URL is not a prerequisite for a t.me ``startapp`` link;
+    Telegram resolves the Main Mini App configured for the bot. A direct web
+    route is only the fallback when the bot username itself is unavailable.
     """
     book_id = int(book_id)
     username = settings.BOT_USERNAME.strip().lstrip("@")
     web_url = settings.WEBAPP_URL.strip().rstrip("/")
-    if username and web_url:
-        # The channel contains one clean target button. Direct Mini App links
-        # pass the book identifier as start_param.
-        return f"https://t.me/{username}?startapp=book_{book_id}"
     if username:
-        # If the Main Mini App is not configured, open the bot. The general
-        # /start handler now receives this payload after the payment router skips it.
-        return f"https://t.me/{username}?start=book_{book_id}"
+        return f"https://t.me/{username}?startapp=book_{book_id}"
     if web_url:
         return f"{web_url}/book/{book_id}"
     return ""
@@ -531,4 +525,3 @@ async def finish_book_content_workflow(
         workflow_status="review",
         duplicate_text="\n".join(check.reasons),
     )
-
