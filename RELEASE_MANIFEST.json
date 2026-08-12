@@ -21,6 +21,7 @@
     "github_single_inventory_bulk_discovery": true,
     "github_public_raw_file_downloads": true,
     "github_strict_manifest_checksums": true,
+    "github_manifest_rights_evidence_required": true,
     "github_callback_safe_package_ids": true,
     "github_archive_disk_reserve": true,
     "github_rate_limit_errors": true,
@@ -47,15 +48,15 @@
   },
   "verification": {
     "repository_audited_at": "2026-08-13",
-    "latest_feature_commit": "615ca61c0ac86ec569affd845d51170c4bea2ad7",
+    "latest_feature_commit": "fa5e6745c20c90f15439bab29e3f7e351b173088",
     "github_actions_targeted": true,
     "github_actions_full_suite": true,
-    "github_actions_run_id": 31642789845,
+    "github_actions_run_id": 31643454510,
     "live_bothost_redeploy": false,
     "live_telegram_flow": false,
     "live_vk_flow": false,
     "production_payment_flow": false,
-    "note": "GitHub Actions run 31642789845 is green for both the expanded v1.16.1 targeted contracts and the full maintained regression suite. Same-package GitHub imports are serialized for the complete critical section; once a waiter acquires the package lock it discards only stale resolved-status cache and re-applies current SQLite import history while reusing the task-local remote inventory. This prevents an overlapping bulk run from importing a package a second time after waiting. Different package IDs remain parallel-capable. VK publication business logic is canonical in cross_platform_publication.py; vk_publication.py is now only a complete compatibility re-export, preventing a second fork of VK post/retry/pricing behavior. Existing owner-only security, exact-revision retry, rollback/cleanup, raw public downloads, resource limits and update confirmation remain covered. The source repository has separate rights-provenance CI, but live Bothost/Telegram/VK/payment checks still require deployment and real payloads."
+    "note": "GitHub Actions run 31643454510 is green for both the expanded v1.16.1 targeted contracts and the full maintained regression suite after runtime rights-evidence preflight. GitHub manifest validation now rejects an enabled/importable package before payload download unless root LICENSE.txt and SOURCES.txt are explicitly declared and covered by SHA-256 checksums; the existing library importer still performs the deeper metadata/license/commercial/derivative-rights validation after download. Same-package imports remain serialized for the complete critical section and refresh local import history after lock acquisition while reusing task-local remote inventory, preventing duplicate overlapping imports without globally blocking different packages. VK publication business logic remains canonical in cross_platform_publication.py with vk_publication.py as a complete compatibility re-export. Live Bothost/Telegram/VK/payment checks still require deployment and real payloads."
   },
   "name": "GitHub import and cross-platform release hardening"
 }
