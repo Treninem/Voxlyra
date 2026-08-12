@@ -39,6 +39,34 @@ async def test_bulk_import_continues_after_one_failure(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_bulk_import_reuses_already_discovered_packages(monkeypatch):
+    monkeypatch.setattr(gi.settings, "SYSTEM_OWNER_ID", 42)
+    packages = [
+        gi.GitHubPackage(x, "book", x, "ru", "1", "now", (), {}, f"books/{x}", "a"*40, "new")
+        for x in ("one", "two", "three")
+    ]
+    discovery_calls = 0
+
+    async def discover(*args, **kwargs):
+        nonlocal discovery_calls
+        discovery_calls += 1
+        return {"items": packages, "page": 1, "page_size": 100, "total": len(packages)}
+
+    async def import_using_public_lookup(identity_id, package_id, **kwargs):
+        resolved = await gi.find_package(identity_id, package_id)
+        assert resolved.package_id == package_id
+        return {"status": "success"}
+
+    monkeypatch.setattr(gi, "discover_packages", discover)
+    monkeypatch.setattr(gi, "import_package", import_using_public_lookup)
+
+    result = await gi.import_all_new(42)
+    assert result["success"] == 3
+    assert discovery_calls == 1
+    assert gi._RESOLVED_PACKAGES.get() is None
+
+
+@pytest.mark.asyncio
 async def test_non_owner_cannot_bulk_import(monkeypatch):
     monkeypatch.setattr(gi.settings, "SYSTEM_OWNER_ID", 42)
     with pytest.raises(gi.GitHubImportForbidden):
