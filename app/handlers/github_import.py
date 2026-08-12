@@ -7,7 +7,6 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.config import settings
 from app.services.github_import import (
-    GitHubImportError,
     discover_packages,
     import_all_new,
     import_history,
@@ -124,7 +123,10 @@ async def scan(call):
         kb.button(text="⬅️ Меню импорта", callback_data="owner:github_import")
         kb.adjust(1)
         await call.message.edit_text("\n".join(lines)[:3900], reply_markup=kb.as_markup())
-    except GitHubImportError as exc:
+    except Exception as exc:
+        # Network/TLS/HTTP errors are not always GitHubImportError. The owner
+        # callback must still finish with a readable message instead of leaving
+        # Telegram's loading spinner active and emitting only a framework log.
         await call.message.edit_text(
             f"<b>❌ Ошибка GitHub</b>\n\n{html.escape(str(exc)[:500])}",
             reply_markup=github_import_menu(),
@@ -210,7 +212,7 @@ async def retry(call):
             "<b>🔁 Повтор завершён</b>\n\n"
             f"К повтору: {result['total']}\n"
             f"Успешно: {result['success']}\n"
-            f"Снова с ошибкой: {result['failed']}"
+            f"Не выполнено/ошибка: {result['failed']}"
         )
         if result["errors"]:
             text += "\n\n" + "\n".join(
