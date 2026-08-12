@@ -9,7 +9,7 @@ import httpx
 from app.config import settings
 from app.db import connect, utc_now
 
-_PACKAGE_RE=re.compile(r"^[A-Za-z0-9._-]{1,128}$"); _ALLOWED_TYPES={"book","comics","audiobook"}; _TYPE_DIRS={"book":"books","comics":"comics","audiobook":"audiobooks"}
+_PACKAGE_RE=re.compile(r"^[A-Za-z0-9._-]{1,128}$"); _ALLOWED_TYPES={"book","comics","audiobook"}; _TYPE_DIRS={"book":"books","comics":"comics","audiobook":"audiobooks"}; _BULK_TYPES={"book","comics"}
 class GitHubImportError(RuntimeError): pass
 class GitHubImportForbidden(GitHubImportError): pass
 @dataclass(slots=True)
@@ -120,8 +120,7 @@ async def record_import(p:GitHubPackage,*,status:str,book_id:int|None=None,bytes
     async with connect() as db: await db.execute("""INSERT OR REPLACE INTO github_import_history(package_id,content_type,title,version,commit_sha,status,file_count,bytes_total,book_id,error,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",(p.package_id,p.content_type,p.title,p.version,p.commit_sha,status,len(p.files),int(bytes_total),book_id,safe,utc_now())); await db.commit()
 
 def _build_import_zip(package:GitHubPackage,source:Path)->Path:
-    """Adapt a verified package to the existing VoxLyra bulk-import contract."""
-    if package.content_type=="audiobook": raise GitHubImportError("Аудиопакет требует существующий книжный исходник; аудио-адаптер ещё не активирован")
+    if package.content_type=="audiobook": raise GitHubImportError("Массовый импорт аудиокниг пока отключён")
     archive=source.parent/f"{source.name}.voxlyra.zip"; prefix="Comics" if package.content_type=="comics" else "Books"
     with zipfile.ZipFile(archive,"w",compression=zipfile.ZIP_DEFLATED,compresslevel=6) as z:
         for name in package.files:
@@ -131,8 +130,8 @@ def _build_import_zip(package:GitHubPackage,source:Path)->Path:
     return archive
 
 async def import_package(identity_id:int,package_id:str,*,allow_update:bool=False)->dict[str,Any]:
-    """Download, verify and hand one package to the existing importer; always clean temp data."""
     require_system_owner(identity_id); package=await find_package(identity_id,package_id)
+    if package.content_type not in _BULK_TYPES: return {"status":"unsupported_bulk","package":package,"book_ids":[]}
     if package.status=="imported": return {"status":"already_imported","package":package,"book_ids":[]}
     if package.status=="update" and not allow_update: return {"status":"update_available","package":package,"book_ids":[]}
     work=None; archive=None
@@ -150,3 +149,42 @@ async def import_package(identity_id:int,package_id:str,*,allow_update:bool=Fals
     finally:
         if archive: archive.unlink(missing_ok=True)
         if work: cleanup_package(work)
+
+async def import_all_new(identity_id:int,*,max_packages:int=1000)->dict[str,Any]:
+    """Import all new book/comic packages in bounded pages. Updates require explicit owner action."""
+    require_system_owner(identity_id); page=1; selected=[]; updates=[]; audio=[]
+    while len(selected)<max_packages:
+        result=await discover_packages(identity_id,page=page,page_size=100)
+        for p in result["items"]:
+            if p.content_type not in _BULK_TYPES: audio.append(p.package_id)
+            elif p.status=="new": selected.append(p.package_id)
+            elif p.status=="update": updates.append(p.package_id)
+        if page*result["page_size"]>=result["total"]: break
+        page+=1
+    summary={"total":len(selected),"success":0,"failed":0,"already":0,"updates":updates,"audio_skipped":audio,"errors":[]}
+    for pid in selected[:max_packages]:
+        try:
+            outcome=await import_package(identity_id,pid)
+            if outcome["status"]=="success": summary["success"]+=1
+            else: summary["already"]+=1
+        except Exception as exc:
+            summary["failed"]+=1; summary["errors"].append({"package_id":pid,"error":str(exc)[:500]})
+    return summary
+
+async def retry_failed(identity_id:int,*,max_packages:int=100)->dict[str,Any]:
+    """Retry only latest failed packages that have not subsequently succeeded."""
+    require_system_owner(identity_id); rows=await import_history(identity_id,status="failed",limit=max_packages); seen=set(); ids=[]
+    for row in rows:
+        pid=str(row["package_id"])
+        if pid in seen: continue
+        seen.add(pid); latest=await _last_success(pid)
+        if latest and str(latest["created_at"])>=str(row["created_at"]): continue
+        ids.append(pid)
+    summary={"total":len(ids),"success":0,"failed":0,"errors":[]}
+    for pid in ids:
+        try:
+            outcome=await import_package(identity_id,pid)
+            if outcome["status"] in {"success","already_imported"}: summary["success"]+=1
+        except Exception as exc:
+            summary["failed"]+=1; summary["errors"].append({"package_id":pid,"error":str(exc)[:500]})
+    return summary
