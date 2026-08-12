@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 from pathlib import Path
 import struct
 
@@ -18,10 +19,16 @@ def test_current_build_version_and_readme_are_aligned():
     from app.build_info import OWNER_BUILD_VERSION
     from app.config import settings
 
-    assert OWNER_BUILD_VERSION == "v1.16.1"
-    assert settings.PROJECT_VERSION == "v1.16.1"
+    expected = "v1.16.1"
+    assert OWNER_BUILD_VERSION == expected
+    assert settings.PROJECT_VERSION == expected
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    assert "v1.16.1" in readme
+    assert expected in readme
+    manifest = json.loads((ROOT / "RELEASE_MANIFEST.json").read_text(encoding="utf-8"))
+    assert manifest["project"] == "VoxLyra"
+    assert manifest["version"] == expected
+    assert manifest["verification"]["github_actions_targeted"] is True
+    assert manifest["verification"]["github_actions_full_suite"] is True
 
 
 def test_canonical_avatar_assets_only_live_under_static():
