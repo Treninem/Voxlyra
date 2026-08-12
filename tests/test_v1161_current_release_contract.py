@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 import struct
 
@@ -57,6 +58,15 @@ def test_telegram_publication_and_notifications_use_mini_app_deep_links(monkeypa
     assert markup.inline_keyboard[0][0].url == "https://t.me/VoxlyraBot?startapp=book_42"
 
 
+def test_vk_wall_publication_is_wired_into_shared_first_publish_flow():
+    from app.services import publication
+
+    source = inspect.getsource(publication.publish_book_and_channel)
+    assert "post_book_to_vk_wall" in source
+    assert "if not published_before" in source
+    assert "publish_book_content" in source
+
+
 def test_cross_platform_commerce_contract_is_explicit():
     app_js = (ROOT / "static" / "js" / "app.js").read_text(encoding="utf-8")
     config = (ROOT / "app" / "config.py").read_text(encoding="utf-8")
@@ -90,3 +100,17 @@ def test_github_import_stays_owner_only_and_uses_existing_pipeline():
     assert "ghimp:all" in handler
     assert "ghimp:retry" in handler
     assert "changes" in handler
+
+
+def test_import_replacement_keeps_permanent_book_id_and_relationship_tables():
+    from app.services import library_manager
+
+    replace_source = inspect.getsource(library_manager._replace_book_from_candidate)
+    restore_source = inspect.getsource(library_manager.restore_import_replacement_backups)
+    assert "UPDATE books" in replace_source
+    assert "WHERE id=?" in replace_source
+    assert "DELETE FROM books" not in replace_source
+    for protected_table in ("purchases", "reading_progress", "bookmarks", "reviews"):
+        assert f"DELETE FROM {protected_table}" not in replace_source
+        assert f"DELETE FROM {protected_table}" not in restore_source
+    assert "UPDATE books" in restore_source
