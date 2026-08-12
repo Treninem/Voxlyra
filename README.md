@@ -18,6 +18,8 @@ GitHub используется только как источник. Прове
 - книги/комиксы импортируются через существующий `import_library_zip`;
 - история package/version/commit SHA/status/size/VoxLyra ID/error;
 - идемпотентность, обнаружение обновлений, массовый импорт новых книг/комиксов и retry;
+- отключённые legacy-manifest без payload пропускаются и не ломают массовый импорт;
+- каталог discovery ограничен защитным пределом 5000 пакетов вместо старого узкого лимита;
 - аудио пока намеренно исключено из массового GitHub-импорта;
 - существующий duplicate fingerprint и replacement-backup/restore используются вместо параллельной системы.
 
@@ -37,7 +39,9 @@ GitHub используется только как источник. Прове
 - повторяет только специальный startup-503 VoxLyra при TestClient, не ослабляя production readiness guard;
 - исторические release-snapshot проверки старых строк `v1.9–v1.11`, старого readiness payload и старых UI-литералов отмечаются как legacy xfail вместо требования откатить актуальный код.
 
-Добавлен актуальный release-contract `tests/test_v1161_current_release_contract.py`: версия, canonical аватары, Telegram/VK launch routes, платформенная коммерция и owner-only GitHub Import.
+Добавлен актуальный release-contract `tests/test_v1161_current_release_contract.py`: версия, release manifest, canonical аватары, Telegram/VK launch routes, платформенная коммерция, owner-only GitHub Import и сохранение постоянного `book_id` при replacement.
+
+Аварийные GitHub Import тесты покрывают low disk до сетевого запроса, отсутствующий удалённый файл, оборванный stream, cleanup, rollback replacement-backup и успешный finalize. Цена публикации в VK теперь использует тот же `votes_for_stars`, что и реальный checkout, поэтому публичная цена и платёжное окно не расходятся на дробном коэффициенте.
 
 ### Версионирование
 
@@ -45,20 +49,25 @@ GitHub используется только как источник. Прове
 - заметное обновление: `1.16.0 → 1.16.1 → 1.16.2`;
 - глобальное изменение платформы: следующий major-minor, например `1.17.0`.
 
-`app/build_info.py` и `settings.PROJECT_VERSION` должны всегда совпадать.
+`app/build_info.py`, `settings.PROJECT_VERSION` и `RELEASE_MANIFEST.json` должны всегда совпадать.
 
 ### CI
 
-До v1.16.1 целевой набор GitHub Import стабильно проходил **17/17**, полный старый regression давал **222 passed / 37 failed**. Значительная часть 37 падений оказалась историческими snapshot-контрактами либо загрязнением глобальных settings/TestClient startup race. Новый CI после v1.16.1 используется как новая фактическая база.
+GitHub Actions run `31634997314` после текущего v1.16.1 hardening завершился успешно: целевые GitHub Import/release-contract тесты прошли, затем прошёл полный maintained regression suite. Следующие коммиты снова прогоняют тот же CI, поэтому release manifest теперь дополнительно закреплён автоматическим контрактом и не должен отставать от версии приложения.
 
 ### До полного production-ready
 
-1. получить новый полный CI после regression hardening и исправить оставшиеся реальные падения;
+Уже закрыто в автоматике:
+
+1. новый полный CI после regression hardening;
 2. аварийные GitHub tests: missing file, interrupted download, low disk, cleanup/rollback;
-3. подтвердить сохранение постоянного `book_id` и покупок/прогресса/закладок/отзывов при replacement;
-4. проверить обновление комиксов/глав и diff версии;
-5. LICENSE/SOURCES + модерация end-to-end;
-6. большая библиотека / GitHub rate-limit;
+3. контракт сохранения постоянного `book_id` и запрет удаления покупок/прогресса/закладок/отзывов при replacement.
+
+Остаётся проверить на реальном окружении и больших данных:
+
+4. обновление реальных комиксов/глав и diff версии из `BookVoxLyra`;
+5. LICENSE/SOURCES + модерация end-to-end на настоящем импортируемом пакете;
+6. большая библиотека / GitHub rate-limit / длительные сетевые таймауты;
 7. Bothost E2E: `BookVoxLyra → импорт → библиотека/читалка → Telegram/VK публикация → Stars/Votes`.
 
 ## Архитектурные правила
@@ -94,4 +103,4 @@ GITHUB_IMPORT_PAGE_SIZE=50
 - `data/` — постоянные runtime-данные; реальные пользовательские данные не коммитятся.
 - `storage/` — runtime/legal ресурсы согласно конфигурации.
 
-Последнее обновление README: 2026-08-12 — версия поднята до `v1.16.1`, добавлена изоляция regression-тестов, maintained current release contract, удалён ещё один устаревший дублирующий test-файл и объединена документация GitHub Import.
+Последнее обновление README: 2026-08-12 — подтверждён зелёный полный CI v1.16.1, синхронизирован release manifest, зафиксированы аварийные GitHub Import контракты и выровнена цена VK-публикации с VK checkout.
