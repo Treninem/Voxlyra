@@ -6,13 +6,17 @@ older module path. It must not contain its own publication logic.
 """
 
 from app.services.cross_platform_publication import (
+    build_vk_book_post,
     post_book_to_vk_wall,
     should_retry_vk_wall_post,
     vk_book_url,
+    vk_votes_from_stars,
 )
 
 __all__ = [
+    "build_vk_book_post",
     "post_book_to_vk_wall",
     "should_retry_vk_wall_post",
     "vk_book_url",
+    "vk_votes_from_stars",
 ]
