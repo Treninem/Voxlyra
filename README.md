@@ -18,6 +18,8 @@ GitHub используется только как источник. Прове
 - сетевые/TLS/HTTP ошибки owner-callback отображаются в самом боте вместо зависшего Telegram spinner;
 - строгая проверка manifest, SHA-256 и safe-path;
 - `checksums` обязан точно соответствовать `files`;
+- manifest отклоняется ещё до скачивания payload, если в корне пакета не заявлены `LICENSE.txt` и `SOURCES.txt` с SHA-256;
+- после скачивания существующий библиотечный импортёр дополнительно проверяет metadata/лицензию, коммерческое использование, производные работы и фактическое наличие evidence-файлов;
 - `package_id` ограничен безопасной длиной для Telegram `callback_data`;
 - до 20 000 файлов на пакет и до 5000 обнаруженных пакетов как защитные пределы;
 - скачиваются только файлы выбранного пакета, без clone репозитория;
@@ -65,7 +67,7 @@ GitHub используется только как источник. Прове
 - canonical assets;
 - Telegram/VK launch routes и платформенную коммерцию;
 - owner-only GitHub Import, router order, UI kill switch и handler resilience;
-- callback-safe manifests и resource limits;
+- callback-safe manifests, mandatory rights evidence и resource limits;
 - один remote inventory на bulk/retry;
 - сериализацию одинакового package ID, fresh-history после lock и параллельность разных пакетов;
 - raw public downloads и GitHub rate-limit handling;
@@ -78,7 +80,7 @@ GitHub используется только как источник. Прове
 
 ### CI
 
-GitHub Actions run `31642789845` успешно прошёл расширенный целевой набор `v1.16.1` и полный maintained regression suite после hardening конкурентного GitHub Import и выравнивания VK compatibility surface.
+GitHub Actions run `31643454510` успешно прошёл расширенный целевой набор `v1.16.1` и полный maintained regression suite после добавления runtime preflight для `LICENSE.txt`/`SOURCES.txt`, а также включает ранее закрытые concurrency/fresh-history и VK compatibility контракты.
 
 В `Treninem/bookvoxlyra` отдельный source-side validator также требует для каждого включённого пакета реальный payload, корректные SHA-256, непустые UTF-8 `LICENSE.txt` и `SOURCES.txt`; его fixture-тесты после этого изменения также зелёные. Наличие файлов само по себе не создаёт права — сведения в них должны быть настоящими.
 
@@ -86,7 +88,7 @@ GitHub Actions run `31642789845` успешно прошёл расширенн�
 
 ### До полного production-ready
 
-В коде и автоматике закрыты owner security, rollback/cleanup, resource limits, большие inventory, API-amplification, update confirmation/diff, сохранение пользовательских связей, конкурентный same-package import, Telegram/VK deep links, безопасный retry публикации и скрытый системный интерфейс импорта.
+В коде и автоматике закрыты owner security, rollback/cleanup, resource limits, большие inventory, API-amplification, rights-evidence preflight, update confirmation/diff, сохранение пользовательских связей, конкурентный same-package import, Telegram/VK deep links, безопасный retry публикации и скрытый системный интерфейс импорта.
 
 Остаются проверки, которым нужны реальные внешние данные/аккаунты:
 
@@ -131,4 +133,4 @@ GITHUB_IMPORT_PAGE_SIZE=50
 - `data/` — постоянные runtime-данные; реальные пользовательские данные не коммитятся.
 - `storage/` — runtime/legal ресурсы согласно конфигурации.
 
-Последнее обновление README: 2026-08-13 — закрыта гонка overlapping same-package imports, VK publication сведена к одному canonical сервису, source-package validator усилен проверками rights provenance и подтверждён зелёный полный CI `31642789845`.
+Последнее обновление README: 2026-08-13 — GitHub Import теперь отклоняет manifest без rights evidence до скачивания payload; same-package race и VK publication fork ранее закрыты, полный CI `31643454510` зелёный.
