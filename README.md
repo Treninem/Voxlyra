@@ -4,79 +4,93 @@ VoxLyra — единая платформа для книг, комиксов/м
 
 ## Текущая версия — v1.16.1
 
-`v1.16.1` — крупный hardening-релиз после внедрения GitHub Import: чистка репозитория, стабилизация regression-тестов, актуализация контрактов Telegram/VK и подготовка к финальному Bothost E2E.
+`v1.16.1` — hardening-релиз GitHub Import и кроссплатформенного контура Telegram/VK. Основная задача релиза — не создавать вторую библиотеку или вторую бизнес-логику, а безопасно подключить дополнительный источник контента к существующей VoxLyra.
 
-GitHub используется только как источник. Проверенный пакет передаётся существующему импортёру VoxLyra и использует существующие БД, хранилище, читалку, публикацию и пользовательские связи. Источник по умолчанию: `Treninem/bookvoxlyra`.
+GitHub используется только как источник. Проверенный пакет передаётся существующему импортёру VoxLyra и использует существующие БД, хранилище, читалку, публикацию, модерацию, покупки и пользовательские связи. Источник по умолчанию: `Treninem/bookvoxlyra`.
 
 ### GitHub Import
 
 - непередаваемый `SYSTEM_OWNER_ID` и скрытый owner-only раздел;
-- серверный запрет доступа остальным;
-- manifest / SHA-256 / safe-path validation;
-- потоковая загрузка выбранного пакета без clone;
-- лимиты размера и свободного диска + гарантированный cleanup;
+- серверный запрет доступа остальным пользователям и администраторам;
+- строгая проверка manifest, SHA-256 и safe-path;
+- `checksums` обязан точно соответствовать `files`;
+- `package_id` ограничен безопасной длиной для Telegram `callback_data`;
+- до 20 000 файлов на пакет и до 5000 обнаруженных пакетов как защитные пределы;
+- скачиваются только файлы выбранного пакета, без clone репозитория;
+- публичный `bookvoxlyra` скачивается по commit-pinned `raw.githubusercontent.com`, без одного Contents API запроса на каждую страницу комикса;
+- при приватном источнике с токеном сохраняется совместимый Contents API путь;
+- массовый импорт и retry используют один task-local снимок inventory вместо повторного сканирования репозитория для каждой книги;
+- лимит `max_packages` соблюдается точно, а `0` не делает сетевых запросов;
+- GitHub rate-limit превращается в понятную ошибку импорта;
+- проверяется свободное место не только перед загрузкой, но и перед созданием второй временной копии в `.voxlyra.zip`;
+- временные каталоги и ZIP очищаются при успехе, ошибке и оборванной загрузке;
 - книги/комиксы импортируются через существующий `import_library_zip`;
-- история package/version/commit SHA/status/size/VoxLyra ID/error;
-- идемпотентность, обнаружение обновлений, массовый импорт новых книг/комиксов и retry;
-- отключённые legacy-manifest без payload пропускаются и не ломают массовый импорт;
-- каталог discovery ограничен защитным пределом 5000 пакетов вместо старого узкого лимита;
-- аудио пока намеренно исключено из массового GitHub-импорта;
-- существующий duplicate fingerprint и replacement-backup/restore используются вместо параллельной системы.
+- история хранит package/version/commit SHA/status/size/VoxLyra ID/error и снимок manifest;
+- обновление требует явного подтверждения владельца и показывает diff файлов;
+- replacement обновляет существующую книгу с сохранением постоянного `book_id`;
+- покупки, прогресс, закладки и отзывы не удаляются replacement-потоком;
+- повреждённый пакет откатывается отдельно, независимые успешно импортированные пакеты не отменяются;
+- аудиокниги пока намеренно исключены из массового GitHub-импорта.
 
-Актуальная документация объединена в `docs/GITHUB_IMPORT.md`; старый versioned progress-файл удалён.
+Актуальная техническая документация: `docs/GITHUB_IMPORT.md`.
 
-### Чистка репозитория
+### Telegram + VK
 
-Из `main` уже удалено более 100 устаревших, повреждённых и дублирующих файлов: старые STATUS/RELEASE_CHECK/FINAL_TEST_REPORT, chat-memory/transfer документы, дубли тестов из корня, повреждённые файлы с неверными расширениями и mojibake-именами, старые update/deploy артефакты. Канонический runtime-код, юридические документы и реальные ресурсы сохранены.
-
-В `v1.16.1` дополнительно удалён устаревший `tests/test_release_assets.py`, который требовал дублировать аватары в корне. Проверка реальных canonical assets перенесена в поддерживаемый `tests/test_v1161_current_release_contract.py`.
+- Telegram-публикация открывает Telegram Mini App;
+- VK-публикация открывает VK Mini App;
+- цена VK-поста использует тот же `votes_for_stars`, что и реальный VK checkout;
+- Telegram Stars и VK Votes остаются платформенными способами оплаты поверх общего внутреннего доступа VoxLyra;
+- первая публикация книги сходится в общий workflow независимо от источника загрузки;
+- успешный VK wall post идемпотентен и не дублируется;
+- если первая попытка VK wall реально завершилась ошибкой, следующая публикационная обработка повторит именно этот неудачный пост;
+- исторические книги без VK audit-состояния автоматически задним числом не публикуются — это защищает сообщество от массового спама старым каталогом.
 
 ### Regression hardening v1.16.1
 
-Добавлен `tests/conftest.py`:
+`tests/conftest.py` изолирует изменяемые settings между тестами и не позволяет старым release-snapshot тестам требовать откат актуального runtime.
 
-- изолирует изменяемые `settings` между тестами, чтобы один тест не загрязнял БД/env следующего;
-- повторяет только специальный startup-503 VoxLyra при TestClient, не ослабляя production readiness guard;
-- исторические release-snapshot проверки старых строк `v1.9–v1.11`, старого readiness payload и старых UI-литералов отмечаются как legacy xfail вместо требования откатить актуальный код.
+Актуальные контракты проверяют:
 
-Добавлен актуальный release-contract `tests/test_v1161_current_release_contract.py`: версия, release manifest, canonical аватары, Telegram/VK launch routes, платформенная коммерция, owner-only GitHub Import и сохранение постоянного `book_id` при replacement.
-
-Аварийные GitHub Import тесты покрывают low disk до сетевого запроса, отсутствующий удалённый файл, оборванный stream, cleanup, rollback replacement-backup и успешный finalize. Цена публикации в VK теперь использует тот же `votes_for_stars`, что и реальный checkout, поэтому публичная цена и платёжное окно не расходятся на дробном коэффициенте.
-
-### Версионирование
-
-- мелкий фикс: `1.16.0 → 1.16.0.1 → 1.16.0.2`;
-- заметное обновление: `1.16.0 → 1.16.1 → 1.16.2`;
-- глобальное изменение платформы: следующий major-minor, например `1.17.0`.
-
-`app/build_info.py`, `settings.PROJECT_VERSION` и `RELEASE_MANIFEST.json` должны всегда совпадать.
+- синхронизацию `app/build_info.py`, `settings.PROJECT_VERSION` и `RELEASE_MANIFEST.json`;
+- canonical assets;
+- Telegram/VK launch routes;
+- платформенную коммерцию;
+- owner-only GitHub Import;
+- callback-safe manifests и resource limits;
+- один inventory на bulk/retry;
+- raw public downloads и GitHub rate-limit handling;
+- low disk, missing file, interrupted stream, cleanup, rollback/finalize;
+- постоянный `book_id` при replacement;
+- VK checkout/publication price parity;
+- безопасный retry неудавшейся VK wall публикации без back-post исторического каталога.
 
 ### CI
 
-GitHub Actions run `31634997314` после текущего v1.16.1 hardening завершился успешно: целевые GitHub Import/release-contract тесты прошли, затем прошёл полный maintained regression suite. Следующие коммиты снова прогоняют тот же CI, поэтому release manifest теперь дополнительно закреплён автоматическим контрактом и не должен отставать от версии приложения.
+GitHub Actions run `31637170402` успешно прошёл целевой набор `v1.16.1` и полный maintained regression suite после внедрения безопасного VK retry. Перед этим run `31636870533` отдельно подтвердил масштабирование GitHub discovery/bulk import и полный regression suite.
+
+Каждый следующий commit в `main` снова запускает тот же CI. `RELEASE_MANIFEST.json` дополнительно проверяется текущим release-contract.
 
 ### До полного production-ready
 
-Уже закрыто в автоматике:
+В коде и автоматике закрыты owner security, rollback/cleanup, resource limits, большие inventory, API-amplification, update confirmation/diff, сохранение пользовательских связей, Telegram/VK deep links и retry логика публикации.
 
-1. новый полный CI после regression hardening;
-2. аварийные GitHub tests: missing file, interrupted download, low disk, cleanup/rollback;
-3. контракт сохранения постоянного `book_id` и запрет удаления покупок/прогресса/закладок/отзывов при replacement.
+Остаются только проверки, которым нужны реальные внешние данные/аккаунты:
 
-Остаётся проверить на реальном окружении и больших данных:
+1. добавить настоящий импортируемый payload в `Treninem/bookvoxlyra` — текущие известные пакеты в `manifests/import_index.json` отключены, потому что `payload_present=false`;
+2. проверить обновление реального комикса с добавлением/заменой главы и фактический diff перед подтверждением;
+3. проверить `LICENSE.txt`/`SOURCES.txt` + модерацию end-to-end на настоящем импортируемом пакете;
+4. проверить большую реальную библиотеку, сетевые таймауты и фактический GitHub rate-limit;
+5. Bothost E2E: `BookVoxLyra → импорт → библиотека/читалка → Telegram/VK публикация → Stars/Votes`.
 
-4. обновление реальных комиксов/глав и diff версии из `BookVoxLyra`;
-5. LICENSE/SOURCES + модерация end-to-end на настоящем импортируемом пакете;
-6. большая библиотека / GitHub rate-limit / длительные сетевые таймауты;
-7. Bothost E2E: `BookVoxLyra → импорт → библиотека/читалка → Telegram/VK публикация → Stars/Votes`.
+До этих проверок `RELEASE_MANIFEST.json` намеренно оставляет `live_bothost_redeploy`, `live_telegram_flow`, `live_vk_flow` и `production_payment_flow` равными `false`.
 
 ## Архитектурные правила
 
 - Не переносить текущую SQLite БД и существующую библиотеку с Bothost в рамках этой задачи.
-- Не создавать отдельное постоянное GitHub-хранилище.
+- Не создавать отдельное постоянное GitHub-хранилище runtime-данных.
 - Не заменять существующие EPUB/FB2/TXT/PDF/CBZ/CBR/7Z/изображения и массовый импорт.
 - Не хранить GitHub token в коде, UI, логах или traceback.
-- Telegram и VK используют общую библиотеку, но Telegram Stars и VK Votes разделены по платформе.
+- Telegram и VK используют общую библиотеку, но платформенные платежные интерфейсы разделены.
 - Публикация использует Telegram Mini App ссылку в Telegram и VK Mini App ссылку в VK.
 
 ## GitHub Import env
@@ -103,4 +117,4 @@ GITHUB_IMPORT_PAGE_SIZE=50
 - `data/` — постоянные runtime-данные; реальные пользовательские данные не коммитятся.
 - `storage/` — runtime/legal ресурсы согласно конфигурации.
 
-Последнее обновление README: 2026-08-12 — подтверждён зелёный полный CI v1.16.1, синхронизирован release manifest, зафиксированы аварийные GitHub Import контракты и выровнена цена VK-публикации с VK checkout.
+Последнее обновление README: 2026-08-12 — масштабирован GitHub Import, устранена API amplification на публичных пакетах, добавлена защита диска/manifest/callback, безопасный VK retry и подтверждён зелёный полный CI.
