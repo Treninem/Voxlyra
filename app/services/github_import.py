@@ -19,6 +19,7 @@ _PACKAGE_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 _ALLOWED_TYPES = {"book", "comics", "audiobook"}
 _TYPE_DIRS = {"book": "books", "comics": "comics", "audiobook": "audiobooks"}
 _BULK_TYPES = {"book", "comics"}
+_IMPORT_INDEX = "manifests/import_index.json"
 
 
 class GitHubImportError(RuntimeError):
@@ -76,6 +77,12 @@ def _root_path(*parts: str) -> str:
     root = str(settings.GITHUB_IMPORT_ROOT or "").strip().strip("/")
     clean = [str(PurePosixPath(p)).strip("/") for p in parts if str(p).strip("/")]
     return "/".join(([root] if root else []) + clean)
+
+
+def _manifest_disabled(data: object) -> bool:
+    if not isinstance(data, dict):
+        return False
+    return data.get("import_enabled") is False or data.get("payload_present") is False
 
 
 def _manifest_snapshot(package: GitHubPackage) -> dict[str, Any]:
@@ -206,6 +213,19 @@ async def _last_success(package_id: str):
         return await cur.fetchone()
 
 
+async def _apply_history(package: GitHubPackage) -> GitHubPackage:
+    previous = await _last_success(package.package_id)
+    if not previous:
+        return package
+    package.current_version = str(previous["version"])
+    same_version = package.current_version == package.version
+    same_commit = str(previous["commit_sha"] or "") == package.commit_sha
+    package.status = "imported" if same_version and same_commit else "update"
+    if package.status == "update":
+        package.changes = _diff_manifest(previous["manifest_json"], package)
+    return package
+
+
 async def import_history(identity_id: int, *, status: str = "", limit: int = 30) -> list[dict[str, Any]]:
     require_system_owner(identity_id)
     await ensure_github_import_schema()
@@ -229,6 +249,23 @@ async def _get_json(client, url: str, params=None):
     return response.json()
 
 
+async def _raw_json(client: httpx.AsyncClient, owner: str, repo: str, ref: str, path: str) -> dict[str, Any] | None:
+    raw_url = (
+        f"https://raw.githubusercontent.com/{quote(owner)}/{quote(repo)}/"
+        f"{quote(ref, safe='')}/{quote(path, safe='/')}"
+    )
+    response = await client.get(raw_url, headers=_headers())
+    if response.status_code == 404:
+        return None
+    if response.status_code >= 400:
+        return None
+    try:
+        data = response.json()
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 async def repository_status(identity_id: int) -> dict[str, Any]:
     require_system_owner(identity_id)
     owner, repo = _repo()
@@ -248,47 +285,109 @@ async def repository_status(identity_id: int) -> dict[str, Any]:
     }
 
 
+async def _discover_from_index(
+    client: httpx.AsyncClient,
+    *,
+    owner: str,
+    repo: str,
+    commit_sha: str,
+) -> list[GitHubPackage] | None:
+    index_path = _root_path(_IMPORT_INDEX)
+    index = await _raw_json(client, owner, repo, commit_sha, index_path)
+    if index is None:
+        return None
+    entries = index.get("packages")
+    if not isinstance(entries, list):
+        raise GitHubImportError("Повреждён manifests/import_index.json: packages должен быть списком")
+    found: list[GitHubPackage] = []
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.get("enabled") is False:
+            continue
+        package_path = str(entry.get("path") or "").strip().strip("/")
+        manifest_path = str(entry.get("manifest_path") or "").strip().strip("/")
+        if not package_path and manifest_path.endswith("/manifest.json"):
+            package_path = manifest_path[: -len("/manifest.json")]
+        if not package_path:
+            raise GitHubImportError("Повреждён import index: у включённого пакета отсутствует path")
+        if not manifest_path:
+            manifest_path = f"{package_path}/manifest.json"
+        embedded = entry.get("manifest")
+        data = embedded if isinstance(embedded, dict) else await _raw_json(client, owner, repo, commit_sha, _root_path(manifest_path))
+        if data is None:
+            raise GitHubImportError(f"Manifest из import index не найден: {manifest_path}")
+        if _manifest_disabled(data):
+            continue
+        package = validate_manifest(data, package_path=_root_path(package_path), commit_sha=commit_sha)
+        expected_folder = _TYPE_DIRS[package.content_type]
+        normalized = str(PurePosixPath(package_path))
+        if not normalized.startswith(f"{expected_folder}/"):
+            raise GitHubImportError(f"Тип пакета {package.package_id} не соответствует каталогу")
+        found.append(await _apply_history(package))
+    return found
+
+
+async def _discover_legacy_layout(
+    client: httpx.AsyncClient,
+    *,
+    owner: str,
+    repo: str,
+    branch: str,
+    commit_sha: str,
+) -> list[GitHubPackage]:
+    """Backward-compatible discovery when repository-level index is absent.
+
+    Directory listings use only three GitHub API calls. Individual manifests are
+    downloaded from raw.githubusercontent.com, avoiding one API metadata request
+    per package. Repositories with 1000+ packages should maintain import_index.
+    """
+    found: list[GitHubPackage] = []
+    for kind, folder in _TYPE_DIRS.items():
+        entries = await _get_json(
+            client,
+            f"https://api.github.com/repos/{quote(owner)}/{quote(repo)}/contents/{quote(_root_path(folder), safe='/')}",
+            {"ref": branch},
+        )
+        if not entries:
+            continue
+        for entry in entries:
+            if entry.get("type") != "dir":
+                continue
+            package_path = str(entry["path"])
+            data = await _raw_json(client, owner, repo, commit_sha, f"{package_path}/manifest.json")
+            if data is None:
+                continue
+            # Old BookVoxLyra staging manifests explicitly say that their
+            # archives are not present. They are provenance records, not broken
+            # import packages, and must not make the entire scan fail.
+            if _manifest_disabled(data):
+                continue
+            package = validate_manifest(data, package_path=package_path, commit_sha=commit_sha)
+            if package.content_type != kind:
+                raise GitHubImportError(f"Тип пакета {package.package_id} не соответствует каталогу")
+            found.append(await _apply_history(package))
+    return found
+
+
 async def discover_packages(identity_id: int, *, page: int = 1, page_size: int | None = None) -> dict[str, Any]:
     require_system_owner(identity_id)
     status = await repository_status(identity_id)
     owner, repo = _repo()
     branch, commit_sha = status["branch"], status["commit_sha"]
     size = max(1, min(100, int(page_size or settings.GITHUB_IMPORT_PAGE_SIZE or 50)))
-    found: list[GitHubPackage] = []
     async with httpx.AsyncClient(timeout=20.0, follow_redirects=False) as client:
-        for kind, folder in _TYPE_DIRS.items():
-            entries = await _get_json(
-                client,
-                f"https://api.github.com/repos/{quote(owner)}/{quote(repo)}/contents/{quote(_root_path(folder), safe='/')}",
-                {"ref": branch},
-            )
-            if not entries:
-                continue
-            for entry in entries:
-                if entry.get("type") != "dir":
-                    continue
-                package_path = str(entry["path"])
-                manifest_meta = await _get_json(
-                    client,
-                    f"https://api.github.com/repos/{quote(owner)}/{quote(repo)}/contents/{quote(package_path + '/manifest.json', safe='/')}",
-                    {"ref": commit_sha},
-                )
-                if not manifest_meta or manifest_meta.get("type") != "file":
-                    continue
-                raw = await client.get(manifest_meta["download_url"], headers=_headers())
-                raw.raise_for_status()
-                package = validate_manifest(raw.json(), package_path=package_path, commit_sha=commit_sha)
-                if package.content_type != kind:
-                    raise GitHubImportError(f"Тип пакета {package.package_id} не соответствует каталогу")
-                previous = await _last_success(package.package_id)
-                if previous:
-                    package.current_version = str(previous["version"])
-                    same_version = package.current_version == package.version
-                    same_commit = str(previous["commit_sha"] or "") == package.commit_sha
-                    package.status = "imported" if same_version and same_commit else "update"
-                    if package.status == "update":
-                        package.changes = _diff_manifest(previous["manifest_json"], package)
-                found.append(package)
+        indexed = await _discover_from_index(
+            client,
+            owner=owner,
+            repo=repo,
+            commit_sha=commit_sha,
+        )
+        found = indexed if indexed is not None else await _discover_legacy_layout(
+            client,
+            owner=owner,
+            repo=repo,
+            branch=branch,
+            commit_sha=commit_sha,
+        )
     found.sort(key=lambda item: (item.content_type, item.package_id))
     current_page = max(1, int(page))
     start = max(0, (current_page - 1) * size)
@@ -298,6 +397,7 @@ async def discover_packages(identity_id: int, *, page: int = 1, page_size: int |
         "page_size": size,
         "total": len(found),
         "commit_sha": commit_sha,
+        "discovery": "index" if indexed is not None else "legacy",
     }
 
 
