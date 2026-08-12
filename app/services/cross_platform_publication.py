@@ -69,19 +69,38 @@ def build_vk_book_post(
     return "\n".join(lines)[:15000]
 
 
-async def _was_vk_wall_post_sent(book_id: int) -> bool:
-    """Use the same audit table as Telegram publication for idempotency."""
+async def _vk_wall_post_state(book_id: int) -> str:
+    """Return the latest terminal VK wall state recorded for one book."""
     async with connect() as db:
         cur = await db.execute(
             """
-            SELECT 1
+            SELECT action
             FROM audit_logs
-            WHERE action='vk_wall_post_sent' AND target_type='book' AND target_id=?
+            WHERE target_type='book' AND target_id=?
+              AND action IN ('vk_wall_post_sent','vk_wall_post_failed')
+            ORDER BY id DESC
             LIMIT 1
             """,
             (str(int(book_id)),),
         )
-        return await cur.fetchone() is not None
+        row = await cur.fetchone()
+    return str(row["action"] if row else "")
+
+
+async def _was_vk_wall_post_sent(book_id: int) -> bool:
+    """Use the same audit table as Telegram publication for idempotency."""
+    return await _vk_wall_post_state(book_id) == "vk_wall_post_sent"
+
+
+async def should_retry_vk_wall_post(book_id: int) -> bool:
+    """Retry only a known failed first-publication attempt.
+
+    Existing books that predate VK integration have no VK audit state and are
+    intentionally left untouched, preventing a later edit from flooding the VK
+    wall with the entire historical catalogue. A book whose first VK post really
+    failed gets one new attempt when it next passes through publication workflow.
+    """
+    return await _vk_wall_post_state(book_id) == "vk_wall_post_failed"
 
 
 async def _vk_upload_wall_cover(path: Path) -> str:
@@ -126,9 +145,9 @@ async def post_book_to_vk_wall(
 ) -> str:
     """Publish a catalogue book on the VK community wall with VK-native link/currency.
 
-    The caller is the shared first-publication workflow, so the upload origin does
-    not matter: Telegram, VK, owner import, Library Manager and GitHub converge on
-    this function. Failures are audited but never roll back an approved book.
+    The caller is the shared publication workflow, so the upload origin does not
+    matter: Telegram, VK, owner import, Library Manager and GitHub converge here.
+    Failures are audited but never roll back an approved book.
     """
     book_id = int(book_id)
     if (
