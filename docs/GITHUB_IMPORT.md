@@ -27,6 +27,8 @@ GitHub Import не добавляется в общее администрати
 - GitHub token только в env и никогда не выводится в UI/историю;
 - обязательные поля manifest, безопасные пути и SHA-256 проверяются до передачи импортёру;
 - `checksums` должен точно соответствовать набору `files`, лишние и отсутствующие записи запрещены;
+- каждый импортируемый manifest обязан объявлять корневые `LICENSE.txt` и `SOURCES.txt`, причём они тоже должны иметь SHA-256 в `checksums`; пакет без них отклоняется **до скачивания payload**;
+- после скачивания существующий `library_manager` выполняет более глубокую проверку metadata, кода лицензии, разрешения коммерческого использования/производных работ и наличия evidence-файлов;
 - `package_id` ASCII-only и ограничен 51 символом, чтобы самый длинный owner callback `ghimp:update:<package_id>` гарантированно помещался в Telegram `callback_data` 64 bytes;
 - защитный предел одного manifest — 20 000 файлов;
 - скачиваются только файлы выбранного пакета, без clone;
@@ -35,11 +37,11 @@ GitHub Import не добавляется в общее администрати
 - временные файлы очищаются и при успехе, и при ошибке;
 - replacement использует существующие backup/restore/finalize механизмы VoxLyra.
 
-Дополнительный source-side validator в `Treninem/bookvoxlyra` не позволяет включить пакет без настоящего payload, SHA-256, непустых UTF-8 `LICENSE.txt` и `SOURCES.txt`. Эти файлы должны содержать реальные сведения: validator проверяет структуру и целостность, но не выдумывает и не создаёт юридические права.
+Source-side validator в `Treninem/bookvoxlyra` дополнительно не позволяет включить пакет без настоящего payload, корректных SHA-256 и непустых UTF-8 `LICENSE.txt`/`SOURCES.txt`. Два уровня проверки дополняют друг друга: source CI ловит ошибку до публикации пакета, runtime VoxLyra повторно проверяет обязательность evidence до сети/импорта. Содержимое evidence должно быть реальным — validator не выдумывает и не создаёт юридические права.
 
 ## Поддерживаемый поток
 
-`GitHub → inventory → пакет → manifest → SHA-256 → временная директория → временный .voxlyra.zip → существующий import_library_zip → существующее хранилище/БД → cleanup`.
+`GitHub → inventory → manifest preflight → rights evidence → SHA-256 → пакет → временная директория → временный .voxlyra.zip → существующий import_library_zip → существующее хранилище/БД → cleanup`.
 
 Поддержан одиночный и массовый импорт книг/комиксов. Аудиокниги пока намеренно исключены из массового GitHub-импорта.
 
@@ -144,7 +146,7 @@ Hardening `v1.16.1` проверяет:
 - hidden system-owner tools и silent `/github_import` для остальных;
 - router order и GitHub Import kill switch;
 - handler resilience при неожиданных network errors;
-- strict manifest/checksum/path validation;
+- strict manifest/checksum/path validation и обязательные `LICENSE.txt`/`SOURCES.txt` до download;
 - Telegram callback-safe `package_id` и 20k file limit;
 - exact bulk limit и zero-limit no-op;
 - один inventory на bulk/pages и cleanup task-local context;
@@ -156,7 +158,7 @@ Hardening `v1.16.1` проверяет:
 - rollback/finalize/cleanup и сохранение постоянного `book_id`;
 - VK native pricing, безопасный retry неудавшейся wall-публикации и отсутствие forked compatibility logic.
 
-GitHub Actions run `31642789845` успешно прошёл расширенный целевой набор `v1.16.1` и полный maintained regression suite после concurrency/fresh-history hardening и полного VK compatibility re-export.
+GitHub Actions run `31643454510` успешно прошёл расширенный целевой набор `v1.16.1` и полный maintained regression suite после runtime rights-evidence preflight. Run `31642789845` до него подтвердил concurrency/fresh-history hardening и полный VK compatibility re-export.
 
 `RELEASE_MANIFEST.json` закреплён текущим release-contract и не должен расходиться с `app/build_info.py`/`settings.PROJECT_VERSION`.
 
