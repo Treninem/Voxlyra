@@ -5,6 +5,7 @@ import json
 import re
 import shutil
 import zipfile
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -20,6 +21,8 @@ _ALLOWED_TYPES = {"book", "comics", "audiobook"}
 _TYPE_DIRS = {"book": "books", "comics": "comics", "audiobook": "audiobooks"}
 _BULK_TYPES = {"book", "comics"}
 _IMPORT_INDEX = "manifests/import_index.json"
+_MAX_MANIFEST_FILES = 20_000
+_MAX_VERSION_LENGTH = 128
 
 
 class GitHubImportError(RuntimeError):
@@ -45,6 +48,17 @@ class GitHubPackage:
     status: str = "new"
     current_version: str = ""
     changes: tuple[str, ...] = field(default_factory=tuple)
+
+
+# During one owner bulk-import we already know the exact package objects and the
+# commit SHA they came from. Keeping them in task-local context prevents every
+# public import_package() call from rediscovering the whole repository. ContextVar
+# makes the optimisation safe for concurrent async tasks and automatically keeps
+# unrelated single-package requests isolated.
+_RESOLVED_PACKAGES: ContextVar[dict[str, GitHubPackage] | None] = ContextVar(
+    "github_import_resolved_packages",
+    default=None,
+)
 
 
 def require_system_owner(identity_id: int) -> None:
@@ -141,10 +155,17 @@ def validate_manifest(data: dict[str, Any], *, package_path: str, commit_sha: st
         raise GitHubImportError("Повреждён manifest: отсутствует " + ", ".join(missing))
     package_id = str(data["package_id"]).strip()
     kind = str(data["content_type"]).strip().lower()
+    version = str(data["version"]).strip()
     if not _PACKAGE_RE.fullmatch(package_id):
         raise GitHubImportError("Некорректный package_id")
     if kind not in _ALLOWED_TYPES:
         raise GitHubImportError("Неподдерживаемый content_type")
+    if not version or len(version) > _MAX_VERSION_LENGTH:
+        raise GitHubImportError("Некорректная версия пакета")
+    if not isinstance(data["files"], (list, tuple)):
+        raise GitHubImportError("Manifest должен содержать список files")
+    if len(data["files"]) > _MAX_MANIFEST_FILES:
+        raise GitHubImportError("Manifest содержит слишком много файлов")
     files = tuple(str(PurePosixPath(str(item))) for item in data["files"])
     if not files or len(files) != len(set(files)):
         raise GitHubImportError("Manifest должен содержать уникальный непустой список files")
@@ -164,7 +185,7 @@ def validate_manifest(data: dict[str, Any], *, package_path: str, commit_sha: st
         content_type=kind,
         title=str(data["title"]).strip(),
         language=str(data["language"]).strip(),
-        version=str(data["version"]).strip(),
+        version=version,
         created_at=str(data["created_at"]).strip(),
         files=files,
         checksums=checksums,
@@ -299,6 +320,8 @@ async def _discover_from_index(
     entries = index.get("packages")
     if not isinstance(entries, list):
         raise GitHubImportError("Повреждён manifests/import_index.json: packages должен быть списком")
+    if len(entries) > 5000:
+        raise GitHubImportError("Import index превышает защитный предел 5000 пакетов")
     found: list[GitHubPackage] = []
     for entry in entries:
         if not isinstance(entry, dict) or entry.get("enabled") is False:
@@ -372,6 +395,8 @@ async def _discover_legacy_layout(
             if package.content_type != kind:
                 raise GitHubImportError(f"Тип пакета {package.package_id} не соответствует каталогу")
             found.append(package)
+            if len(found) > 5000:
+                raise GitHubImportError("Legacy discovery превышает защитный предел 5000 пакетов")
     return found
 
 
@@ -416,15 +441,34 @@ async def find_package(identity_id: int, package_id: str) -> GitHubPackage:
     wanted = str(package_id).strip()
     if not _PACKAGE_RE.fullmatch(wanted):
         raise GitHubImportError("Некорректный package_id")
-    page = 1
-    while True:
-        result = await discover_packages(identity_id, page=page, page_size=100)
-        for package in result["items"]:
-            if package.package_id == wanted:
-                return package
-        if page * result["page_size"] >= result["total"]:
-            break
-        page += 1
+
+    resolved = _RESOLVED_PACKAGES.get()
+    if resolved is not None and wanted in resolved:
+        return resolved[wanted]
+
+    # A single-package lookup must not page through discover_packages(), because
+    # every page would otherwise redownload the same repository inventory. Load
+    # the inventory once, locate the package, then apply only its local history.
+    status = await repository_status(identity_id)
+    owner, repo = _repo()
+    branch, commit_sha = status["branch"], status["commit_sha"]
+    async with httpx.AsyncClient(timeout=20.0, follow_redirects=False) as client:
+        indexed = await _discover_from_index(
+            client,
+            owner=owner,
+            repo=repo,
+            commit_sha=commit_sha,
+        )
+        found = indexed if indexed is not None else await _discover_legacy_layout(
+            client,
+            owner=owner,
+            repo=repo,
+            branch=branch,
+            commit_sha=commit_sha,
+        )
+    for package in found:
+        if package.package_id == wanted:
+            return await _apply_history(package)
     raise GitHubImportError("Пакет не найден")
 
 
@@ -586,9 +630,11 @@ async def import_all_new(identity_id: int, *, max_packages: int = 1000) -> dict[
     selected: list[str] = []
     updates: list[str] = []
     audio: list[str] = []
+    resolved: dict[str, GitHubPackage] = {}
     while len(selected) < max_packages:
         result = await discover_packages(identity_id, page=page, page_size=100)
         for package in result["items"]:
+            resolved[package.package_id] = package
             if package.content_type not in _BULK_TYPES:
                 audio.append(package.package_id)
             elif package.status == "new":
@@ -607,16 +653,20 @@ async def import_all_new(identity_id: int, *, max_packages: int = 1000) -> dict[
         "audio_skipped": audio,
         "errors": [],
     }
-    for package_id in selected[:max_packages]:
-        try:
-            outcome = await import_package(identity_id, package_id)
-            if outcome["status"] == "success":
-                summary["success"] += 1
-            else:
-                summary["already"] += 1
-        except Exception as exc:
-            summary["failed"] += 1
-            summary["errors"].append({"package_id": package_id, "error": str(exc)[:500]})
+    context_token = _RESOLVED_PACKAGES.set(resolved)
+    try:
+        for package_id in selected[:max_packages]:
+            try:
+                outcome = await import_package(identity_id, package_id)
+                if outcome["status"] == "success":
+                    summary["success"] += 1
+                else:
+                    summary["already"] += 1
+            except Exception as exc:
+                summary["failed"] += 1
+                summary["errors"].append({"package_id": package_id, "error": str(exc)[:500]})
+    finally:
+        _RESOLVED_PACKAGES.reset(context_token)
     return summary
 
 
