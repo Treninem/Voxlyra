@@ -24,6 +24,8 @@ def test_current_build_version_and_readme_are_aligned():
     assert settings.PROJECT_VERSION == expected
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert expected in readme
+    env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
+    assert f"PROJECT_VERSION={expected}" in env_example
     manifest = json.loads((ROOT / "RELEASE_MANIFEST.json").read_text(encoding="utf-8"))
     assert manifest["project"] == "VoxLyra"
     assert manifest["version"] == expected
