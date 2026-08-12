@@ -36,6 +36,7 @@ from app.services.moderation_revisions import (
 )
 from app.services.moderation_alerts import notify_book_needs_moderation
 from app.services.notifications import new_chapter_message, notify_book_followers
+from app.services.vk_publication import post_book_to_vk_wall
 
 
 @dataclass(slots=True)
@@ -135,8 +136,6 @@ async def post_book_to_channel(
     cover_errors: list[str] = []
     sent_with_cover = False
 
-    # Сначала используем Telegram file_id. Это самый надёжный путь после Redeploy:
-    # изображение не зависит от локальной папки storage и не требует повторной загрузки.
     cover_file_id = str(book["cover_file_id"] or "").strip()
     if cover_file_id:
         try:
@@ -151,8 +150,6 @@ async def post_book_to_channel(
         except Exception as exc:
             cover_errors.append(f"file_id {type(exc).__name__}: {exc}")
 
-    # Если Telegram file_id устарел или недоступен, восстанавливаем локальный файл
-    # и повторяем отправку уже как загружаемое изображение.
     if not sent_with_cover:
         try:
             cover_path = await ensure_book_cover_file(
@@ -175,8 +172,6 @@ async def post_book_to_channel(
 
     try:
         if not sent_with_cover:
-            # Книга всё равно не теряется из канала. Причина отсутствия обложки
-            # сохраняется только в закрытом журнале владельца.
             await bot.send_message(
                 channel_id,
                 post,
@@ -199,7 +194,7 @@ async def post_book_to_channel(
             error_text if not sent_with_cover else "",
             workflow_status="published",
         )
-    except Exception as exc:  # Telegram returns several exception classes here.
+    except Exception as exc:
         errors = cover_errors + [f"post {type(exc).__name__}: {exc}"]
         error = " | ".join(errors)[:1000]
         await add_audit(
@@ -220,12 +215,6 @@ async def _notify_restored_new_chapters(
     content_result: dict,
     actor_user_id: int | None,
 ) -> None:
-    """Notify only genuinely new approved content, never ordinary edits.
-
-    All event keys are stable, so retries, repeated moderator clicks and process
-    restarts cannot send the same notification twice.  The same rule is used
-    for text, graphic and audio chapters.
-    """
     for chapter_id in content_result.get("new_chapter_ids") or []:
         chapter = await get_chapter(int(chapter_id))
         if not chapter or str(chapter["status"] or "") != "published":
@@ -310,14 +299,10 @@ async def publish_book_and_channel(
     force_channel: bool = False,
     bypass_duplicate_guard: bool = False,
 ) -> PublicationResult:
-    """Единая публикация: проверка копий, статус книги, содержимое, затем пост в канал."""
+    """Единая публикация: каталог + VK wall + Telegram channel/queue."""
     book = await get_book(book_id)
     if not book:
         return PublicationResult(False, "failed", "Книга не найдена")
-    # Legacy installations may not have an old ``book_published`` audit row.
-    # The current published status is therefore also authoritative; otherwise
-    # restoring approved content could create a duplicate channel post and a
-    # second “new book” notification.
     published_before = (
         str(book["publication_status"] or "") == "published"
         or await was_book_ever_published(book_id)
@@ -354,11 +339,18 @@ async def publish_book_and_channel(
         None,
         f"published;new_chapters={len(content_result.get('new_chapter_ids') or [])};edited_chapters={len(content_result.get('edited_chapter_ids') or [])}",
     )
+
+    # Every first publication converges here regardless of where the book was
+    # uploaded (Telegram, VK, Library Manager or GitHub). VK wall failures are
+    # audited but never roll back the already-approved book or block Telegram.
+    if not published_before:
+        await post_book_to_vk_wall(
+            int(book_id),
+            actor_user_id=actor_user_id,
+            force=False,
+        )
+
     if published_before and not force_channel:
-        # Restoration or approval of new/edited content for an existing book.
-        # The book keeps its old channel announcement and followers never
-        # receive a fake "new book" event.  Only genuinely new chapters are
-        # announced, with an idempotency key that survives retries.
         await _notify_restored_new_chapters(
             bot,
             book_id=int(book_id),
@@ -366,8 +358,7 @@ async def publish_book_and_channel(
             actor_user_id=actor_user_id,
         )
         return PublicationResult(True, "restored", workflow_status="published")
-    # Импортированные книги ставит в очередь Library Manager. Обычные авторские
-    # книги идут в отдельную справедливую очередь, чтобы сотни публикаций не спамили канал.
+
     fresh = await get_book(book_id)
     if fresh and fresh["author_id"] is not None:
         from app.services.notifications import new_book_message, notify_author_followers
@@ -407,12 +398,7 @@ async def finish_book_content_workflow(
     actor_telegram_id: int,
     source: str,
 ) -> PublicationResult:
-    """Завершает любой путь загрузки одной безопасной логикой публикации.
-
-    После возврата на доработку используется сохранённый снимок книги: повторная
-    автомодерация проверяет только реально изменённые метаданные и главы, но не
-    забывает замечания к неизменённым частям.
-    """
+    """Завершает любой путь загрузки одной безопасной логикой публикации."""
     book = await get_book(book_id)
     if not book:
         return PublicationResult(False, "failed", "Книга не найдена", workflow_status="failed")
@@ -425,9 +411,6 @@ async def finish_book_content_workflow(
             book_id, actor_telegram_id=actor_telegram_id, revision_mode=True
         )
         if check.auto_publish or not check.reasons:
-            # One publication path for first publication, restoration and
-            # approval of pending chapters.  The helper knows whether the book
-            # was published before and suppresses repeated book announcements.
             result = await publish_book_and_channel(
                 bot,
                 book_id,
@@ -451,9 +434,6 @@ async def finish_book_content_workflow(
 
         previously_published = await was_book_ever_published(book_id)
         if previously_published or book["publication_status"] == "published":
-            # A content edit must never remove an established book from the
-            # catalogue.  Pending chapters stay draft/review until approval;
-            # the published book and all unaffected chapters remain available.
             if book["publication_status"] != "published":
                 await set_book_publication_status(book_id, "published")
         elif book["publication_status"] != "review":
