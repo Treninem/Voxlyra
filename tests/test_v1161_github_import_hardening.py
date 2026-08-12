@@ -59,7 +59,10 @@ def test_manifest_diff_reports_added_removed_and_changed_files():
 
 def test_manifest_diff_handles_history_created_before_snapshot_support():
     package = _package("legacy-history")
-    assert gi._diff_manifest("{}", package) == ("~ пакет изменён; предыдущий manifest не сохранён",)
+    changes = gi._diff_manifest("{}", package)
+    # Old rows had no snapshot, therefore every currently declared file is
+    # conservatively shown as new rather than pretending an exact old diff.
+    assert changes == ("+ metadata.json",)
 
 
 @pytest.mark.asyncio
