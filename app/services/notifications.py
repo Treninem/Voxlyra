@@ -30,7 +30,6 @@ def _clean(value: object, limit: int = 240) -> str:
 
 
 
-
 def _clean_multiline(value: object, limit: int = 3000) -> str:
     lines = [" ".join(line.split()) for line in str(value or "").replace("\r", "").split("\n")]
     text = "\n".join(line for line in lines if line).strip()
@@ -137,7 +136,7 @@ def book_open_markup(book_id: int) -> InlineKeyboardMarkup | None:
     if username:
         return InlineKeyboardMarkup(
             inline_keyboard=[[
-                InlineKeyboardButton(text="📖 Открыть", url=f"https://t.me/{username}?start=book_{book_id}")
+                InlineKeyboardButton(text="📖 Открыть", url=f"https://t.me/{username}?startapp=book_{book_id}")
             ]]
         )
     return None
