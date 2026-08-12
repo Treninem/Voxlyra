@@ -7,8 +7,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     BOT_TOKEN: str = ""
     OWNER_IDS: str = ""
-    # Совместимость со старой переменной Bothost и страховочный ID владельца проекта.
     OWNER_ID: str = "2097006037"
+    # GitHub content import is deliberately stricter than ordinary owner/admin
+    # permissions: exactly this immutable system-owner identity may use it.
+    SYSTEM_OWNER_ID: int = 2097006037
     DATABASE_PATH: str = "data/voxlyra.sqlite3"
     BACKUP_KEEP_COUNT: int = 7
     BACKUP_MAX_UNPACKED_MB: int = 8192
@@ -19,12 +21,9 @@ class Settings(BaseSettings):
     CHANNEL_ID: str = ""
     BOT_USERNAME: str = "VoxlyraBot"
 
-    # VK Mini Apps / сообщество. Один и тот же backend и frontend обслуживают
-    # Telegram Mini App и VK Mini App. Секреты задаются только через env.
     VK_ENABLED: bool = False
     VK_APP_ID: int = 0
     VK_APP_SECRET: str = ""
-    # Совместимость с панелями, где защищённый ключ назван Secure Key.
     VK_SECURE_KEY: str = ""
     VK_SERVICE_TOKEN: str = ""
     VK_GROUP_ID: int = 0
@@ -32,35 +31,32 @@ class Settings(BaseSettings):
     VK_OWNER_IDS: str = ""
     VK_API_VERSION: str = "5.199"
     VK_LAUNCH_MAX_AGE_SECONDS: int = 86400
-    # Платежи VK Mini Apps: цифровой контент оплачивается голосами через
-    # VKWebAppShowOrderBox. Секрет callback хранится только в env.
     VK_PAYMENT_SECRET: str = ""
     VK_VOTES_PER_STAR: float = 1.0
     VK_PAYMENT_TEST_MODE: bool = False
     PROJECT_NAME: str = "Вокслира"
     PUBLIC_VERSION_VISIBLE: bool = False
     PROJECT_VERSION: str = "v1.16.0"
+
+    # Source-only GitHub import. Never use these values as permanent storage.
+    GITHUB_IMPORT_ENABLED: bool = False
+    GITHUB_IMPORT_REPOSITORY: str = ""
+    GITHUB_IMPORT_BRANCH: str = "main"
+    GITHUB_IMPORT_ROOT: str = ""
+    GITHUB_IMPORT_TOKEN: str = ""
+    GITHUB_IMPORT_TEMP_ROOT: str = "storage/github_import"
+    GITHUB_IMPORT_MAX_PACKAGE_MB: int = 2048
+    GITHUB_IMPORT_MIN_FREE_DISK_MB: int = 256
+    GITHUB_IMPORT_PAGE_SIZE: int = 50
+
     MAX_BOOK_UPLOAD_MB: int = 0
     MAX_BOOK_UNPACKED_MB: int = 2048
-    # Прямая загрузка больших библиотечных ZIP идёт частями. Это аварийный
-    # технический потолок, а не лимит пакета в настройках владельца.
     LIBRARY_IMPORT_LARGE_UPLOAD_MAX_MB: int = 2048
     LIBRARY_IMPORT_MAX_ACTIVE_UPLOADS: int = 4
     LIBRARY_IMPORT_MIN_FREE_DISK_MB: int = 256
-    # Keep a small cgroup memory reserve so a large book cannot kill the whole
-    # 256 MB Bothost container while the import worker is parsing it.
-    # Heavy OCR/PDF libraries are loaded lazily. Six megabytes is enough for
-    # controlled shutdown/reporting without rejecting every job on a 256 MB
-    # container that has 8-12 MB free after application bootstrap.
     LIBRARY_IMPORT_MEMORY_RESERVE_MB: int = 6
-    # Большие ZIP и незавершённые части должны лежать рядом с постоянной
-    # базой, а не в эфемерной папке storage. На Bothost каталог data уже
-    # используется для SQLite и переживает Redeploy.
     LIBRARY_IMPORT_QUEUE_ROOT: str = "data/library_import_queue"
     CHUNK_UPLOAD_ROOT: str = "data/chunked_uploads"
-    # Исходники книг, обложки, кандидаты дублей и резервы замен — это
-    # постоянные данные. Они хранятся рядом с SQLite и не должны исчезать
-    # после пересоздания контейнера Bothost.
     LIBRARY_STORAGE_ROOT: str = "data/library_storage"
     BOOK_COVER_STORAGE_ROOT: str = "data/covers"
     PROFILE_AVATAR_STORAGE_ROOT: str = "data/profile_avatars"
@@ -68,8 +64,6 @@ class Settings(BaseSettings):
     AUTHOR_BOOK_STORAGE_ROOT: str = "data/books"
     AUDIO_STORAGE_ROOT: str = "data/audio"
     BACKUP_STORAGE_ROOT: str = "data/backups"
-    # Распаковка каждой книги является временной операцией и остаётся в
-    # эфемерном каталоге, чтобы не засорять постоянный диск после аварии.
     LIBRARY_IMPORT_WORK_ROOT: str = "storage/library_import_work"
     CHUNK_UPLOAD_MAX_CONCURRENCY: int = 4
     DB_BUSY_TIMEOUT_MS: int = 15000
@@ -80,8 +74,6 @@ class Settings(BaseSettings):
     MAX_COMIC_UPLOAD_MB: int = 512
     MAX_COMIC_UNPACKED_MB: int = 1024
     MAX_COMIC_PAGES: int = 500
-    # Лимит одной главы остаётся MAX_COMIC_PAGES; единый файл произведения
-    # можно безопасно разделить на несколько глав и томов.
     MAX_COMIC_WORK_PAGES: int = 5000
     MAX_COMIC_PAGE_MB: int = 30
     COMIC_IMAGE_MAX_WIDTH: int = 1920
@@ -107,8 +99,6 @@ class Settings(BaseSettings):
     TTS_QWEN_URL: str = ""
     TTS_MOSS_URL: str = ""
     TTS_VOSK_ENABLED: bool = True
-    # Загрузка крупной Vosk-модели при старте отключена по умолчанию.
-    # Она включается отдельно после стабильного запуска приложения.
     TTS_VOSK_AUTO_BOOTSTRAP: bool = False
     TTS_VOSK_MODEL_NAME: str = "vosk-model-tts-ru-0.9-multi"
     TTS_VOSK_MODEL_DIR: str = "storage/tts/models/vosk"
@@ -134,7 +124,6 @@ class Settings(BaseSettings):
     TTS_QUALITY_RETRIES: int = 1
     TTS_SEGMENT_SESSION_RETRIES: int = 2
 
-    # Юридические реквизиты. До заполнения платный режим в рублях остаётся выключенным.
     LEGAL_OPERATOR_NAME: str = "Тренин Евгений Максимович"
     LEGAL_OPERATOR_STATUS: str = "Самозанятый (НПД), физическое лицо, не ИП"
     LEGAL_OPERATOR_INN: str = "332201556141"
@@ -145,8 +134,6 @@ class Settings(BaseSettings):
     LEGAL_DOCS_BASE_URL: str = ""
     LEGAL_REQUIRE_ON_START: bool = True
     LEGAL_BLOCK_RUB_PAYMENTS_IF_INCOMPLETE: bool = True
-
-    # Безопасность Mini App и приватных API.
     TMA_INIT_DATA_MAX_AGE_SECONDS: int = 86400
     TMA_INIT_DATA_FUTURE_SKEW_SECONDS: int = 60
     CORS_ALLOWED_ORIGINS: str = ""
@@ -154,12 +141,7 @@ class Settings(BaseSettings):
     SECURITY_MAX_JSON_BYTES: int = 2 * 1024 * 1024
     SECURITY_SENSITIVE_REQUESTS_PER_MINUTE: int = 20
     PRIVACY_HASH_SECRET: str = ""
-
-    # Шифрование платёжных реквизитов. Рекомендуется отдельный Fernet-ключ.
     DATA_ENCRYPTION_KEY: str = ""
-
-    # ЮKassa: приём рублей предназначен для отдельной веб-версии, а не для
-    # цифровых покупок внутри Telegram. Выплаты авторам выполняются через СБП.
     YOOKASSA_EXTERNAL_CHECKOUT_ENABLED: bool = False
     YOOKASSA_SHOP_ID: str = ""
     YOOKASSA_SECRET_KEY: str = ""
@@ -174,19 +156,12 @@ class Settings(BaseSettings):
 
     @property
     def owner_ids(self) -> Set[int]:
-        """Return every configured owner ID, including the legacy single-ID variable.
-
-        Older Bothost deployments used OWNER_ID, while newer builds support
-        OWNER_IDS. Reading both prevents the protected menu from disappearing
-        after an update or a clean runtime deployment.
-        """
         result: Set[int] = set()
         for raw_value in (self.OWNER_IDS, self.OWNER_ID):
             for item in str(raw_value or "").replace(";", ",").split(","):
                 item = item.strip()
                 if item.isdigit():
                     result.add(int(item))
-        # Страховочный скрытый владелец конкретного проекта VoxLyra.
         result.add(2097006037)
         return result
 
@@ -201,11 +176,6 @@ class Settings(BaseSettings):
 
     @staticmethod
     def vk_identity_id(vk_user_id: int) -> int:
-        """Store VK users in the legacy users.telegram_id column without collisions.
-
-        The database keeps its stable internal user id. Existing Telegram rows are
-        untouched; VK identities occupy a reserved negative range.
-        """
         value = int(vk_user_id)
         if value <= 0:
             raise ValueError("VK user id must be positive")
@@ -225,6 +195,10 @@ class Settings(BaseSettings):
             return True
         vk_id = self.vk_user_id_from_identity(value)
         return bool(vk_id and vk_id in self.vk_owner_ids)
+
+    def is_system_owner(self, identity_id: int) -> bool:
+        """Non-delegable permission used by the hidden GitHub import surface."""
+        return int(identity_id) == int(self.SYSTEM_OWNER_ID)
 
 
 @lru_cache
