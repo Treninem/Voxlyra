@@ -64,6 +64,46 @@ async def test_bulk_import_reuses_already_discovered_packages(monkeypatch):
     assert result["success"] == 3
     assert discovery_calls == 1
     assert gi._RESOLVED_PACKAGES.get() is None
+    assert gi._DISCOVERY_CONTEXT.get() is None
+
+
+@pytest.mark.asyncio
+async def test_bulk_max_packages_is_exact_not_page_sized(monkeypatch):
+    monkeypatch.setattr(gi.settings, "SYSTEM_OWNER_ID", 42)
+    packages = [
+        gi.GitHubPackage(x, "book", x, "ru", "1", "now", (), {}, f"books/{x}", "a"*40, "new")
+        for x in ("one", "two", "three")
+    ]
+    calls = []
+
+    async def discover(*args, **kwargs):
+        return {"items": packages, "page": 1, "page_size": 100, "total": 3}
+
+    async def do_import(identity_id, package_id, **kwargs):
+        calls.append(package_id)
+        return {"status": "success"}
+
+    monkeypatch.setattr(gi, "discover_packages", discover)
+    monkeypatch.setattr(gi, "import_package", do_import)
+
+    result = await gi.import_all_new(42, max_packages=1)
+    assert result["total"] == 1
+    assert result["success"] == 1
+    assert calls == ["one"]
+
+
+@pytest.mark.asyncio
+async def test_zero_bulk_limit_does_not_scan_or_import(monkeypatch):
+    monkeypatch.setattr(gi.settings, "SYSTEM_OWNER_ID", 42)
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("zero limit must not touch GitHub")
+
+    monkeypatch.setattr(gi, "discover_packages", forbidden)
+    monkeypatch.setattr(gi, "import_package", forbidden)
+    result = await gi.import_all_new(42, max_packages=0)
+    assert result["total"] == 0
+    assert result["success"] == 0
 
 
 @pytest.mark.asyncio
