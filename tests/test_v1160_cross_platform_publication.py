@@ -46,6 +46,25 @@ def test_vk_chapter_pricing_is_vk_only(monkeypatch):
     assert "Stars" not in text
 
 
+@pytest.mark.asyncio
+async def test_vk_retry_only_follows_latest_failed_terminal_state(monkeypatch):
+    async def failed(book_id):
+        return "vk_wall_post_failed"
+
+    async def sent(book_id):
+        return "vk_wall_post_sent"
+
+    async def absent(book_id):
+        return ""
+
+    monkeypatch.setattr(cpp, "_vk_wall_post_state", failed)
+    assert await cpp.should_retry_vk_wall_post(77) is True
+    monkeypatch.setattr(cpp, "_vk_wall_post_state", sent)
+    assert await cpp.should_retry_vk_wall_post(77) is False
+    monkeypatch.setattr(cpp, "_vk_wall_post_state", absent)
+    assert await cpp.should_retry_vk_wall_post(77) is False
+
+
 def _published_book():
     return {
         "title": "VK Test Book",
