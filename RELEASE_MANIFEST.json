@@ -28,6 +28,11 @@
     "github_rate_limit_errors": true,
     "github_same_package_serialization": true,
     "github_history_refresh_after_package_lock": true,
+    "github_source_write_bridge": true,
+    "github_source_write_separate_token": true,
+    "github_source_write_atomic_commit": true,
+    "github_source_write_owner_only": true,
+    "github_source_write_zip_validation": true,
     "import_replacement_preserves_book_id": true,
     "bulk_graphic_import_e2e_count": 50,
     "safe_7z_page_names": true,
@@ -49,15 +54,15 @@
   },
   "verification": {
     "repository_audited_at": "2026-08-13",
-    "latest_feature_commit": "68907489222696fb6f9266b88db5534c6db9b312",
+    "latest_feature_commit": "b1cae6c94ee0d820591724b403097e9c060fd2f7",
     "github_actions_targeted": true,
     "github_actions_full_suite": true,
-    "github_actions_run_id": 31644062887,
+    "github_actions_run_id": 31646010085,
     "live_bothost_redeploy": false,
     "live_telegram_flow": false,
     "live_vk_flow": false,
     "production_payment_flow": false,
-    "note": "GitHub Actions run 31644062887 is green for both the expanded v1.16.1 targeted contracts and the full maintained regression suite. Runtime manifest validation rejects importable packages before payload download unless root LICENSE.txt and SOURCES.txt are declared with checksums, and also rejects metadata/description/cover/rights-only packages that contain no actual book file or graphic chapter/page payload. The existing library importer still performs deeper rights and content validation after download. Same-package imports remain serialized and refresh local import history after lock acquisition while reusing task-local remote inventory. VK publication remains canonical in cross_platform_publication.py with vk_publication.py as a compatibility-only re-export. Two real final book archives were also located in the project owner's file library and are being normalized for source-repository import; live Bothost/Telegram/VK/payment checks remain pending deployment."
+    "note": "GitHub Actions run 31646010085 is green for the targeted v1.16.1 contracts and full maintained regression suite. VoxLyra now contains a disabled-by-default, non-delegable SYSTEM_OWNER_ID source-write bridge for prepared source ZIP packages. It uses a separate GITHUB_SOURCE_WRITE_TOKEN, validates package structure, manifest, SHA-256, LICENSE.txt/SOURCES.txt and actual content before write, creates Git blobs first, atomically replaces the canonical package tree and import_index entry in one commit, removes stale package files, and fast-forwards the configured source branch without force. Partial blob creation cannot expose an enabled half-package because the branch ref moves only after the complete tree/commit exists. Telegram exposes the bridge only in hidden system-owner tools when enabled and also provides /github_source_publish; current Telegram Bot API flow accepts source ZIPs up to 20 MB. Runtime GitHub import security, same-package serialization/fresh-history and canonical VK publication remain covered. Live Bothost/Telegram/VK/payment checks still require deployment; the write token remains intentionally absent from source control."
   },
   "name": "GitHub import and cross-platform release hardening"
 }
