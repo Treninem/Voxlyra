@@ -17,10 +17,12 @@ def manifest(**overrides):
         "title": "Test",
         "language": "ru",
         "version": "1.0",
-        "files": ["metadata.json", "book.epub"],
+        "files": ["metadata.json", "book.epub", "LICENSE.txt", "SOURCES.txt"],
         "checksums": {
             "metadata.json": hashlib.sha256(b"meta").hexdigest(),
             "book.epub": hashlib.sha256(b"book").hexdigest(),
+            "LICENSE.txt": hashlib.sha256(b"license evidence").hexdigest(),
+            "SOURCES.txt": hashlib.sha256(b"source provenance").hexdigest(),
         },
         "created_at": "2026-08-12T00:00:00Z",
     }
@@ -48,6 +50,7 @@ def test_valid_manifest():
     package = validate_manifest(manifest(), package_path="books/000001", commit_sha="a" * 40)
     assert package.package_id == "000001"
     assert package.content_type == "book"
+    assert {"LICENSE.txt", "SOURCES.txt"}.issubset(package.files)
 
 
 def test_manifest_requires_fields():
@@ -55,6 +58,15 @@ def test_manifest_requires_fields():
     del data["checksums"]
     with pytest.raises(GitHubImportError):
         validate_manifest(data, package_path="books/000001", commit_sha="a" * 40)
+
+
+def test_manifest_requires_license_and_sources_before_download():
+    for missing in ("LICENSE.txt", "SOURCES.txt"):
+        data = manifest()
+        data["files"] = [name for name in data["files"] if name != missing]
+        data["checksums"].pop(missing)
+        with pytest.raises(GitHubImportError, match="LICENSE.txt и SOURCES.txt"):
+            validate_manifest(data, package_path="books/000001", commit_sha="a" * 40)
 
 
 def test_manifest_rejects_missing_checksum():
