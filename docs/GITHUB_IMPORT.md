@@ -63,7 +63,16 @@ GitHub `429` и явный `403` с `X-RateLimit-Remaining: 0` преобраз�
 - `- file` — файл удалён;
 - `~ file` — SHA-256 файла изменён.
 
-Diff выводится в скрытом owner-only GitHub Import перед ручным обновлением. Обновление не скачивается до явного подтверждения владельца.
+Diff выводится в скрытом owner-only GitHub Import перед ручным обновлением. Первое обновление не скачивается до явного подтверждения владельца.
+
+### Повтор неудачного импорта
+
+Кнопка «Повторить неудачные» считается явным подтверждением только **той же самой неудачной ревизии**. Перед повтором сервис сравнивает текущие `version` и `commit_sha` с записью ошибки:
+
+- если они совпадают — тот же пакет повторяется с `allow_update=True`, поэтому ранее подтверждённое обновление действительно может восстановиться после временной сетевой/дисковой ошибки;
+- если source repo уже изменился — новый commit/version автоматически не применяется; запись попадает в результат как требующая ручной проверки текущего diff и нового подтверждения.
+
+Это устраняет две противоположные ошибки: failed update больше не «зависает» в `update_available`, но кнопка retry не превращается в скрытое согласие на более новую ревизию, появившуюся после сбоя.
 
 Исторические записи, созданные до manifest snapshot, сравниваются консервативно: текущие файлы показываются как новые, без выдумывания старого состояния.
 
@@ -109,11 +118,12 @@ Hardening `v1.16.1` проверяет:
 - low disk до сети и disk reserve перед ZIP;
 - missing remote file и interrupted stream;
 - explicit update confirmation и manifest diff;
+- exact-revision retry и запрет silent retry более нового commit;
 - rollback/finalize/cleanup;
 - сохранение постоянного `book_id`;
 - VK native pricing и безопасный retry неудавшейся wall-публикации.
 
-GitHub Actions run `31637170402` успешно прошёл целевой набор `v1.16.1` и полный maintained regression suite после VK retry. Run `31636870533` до него успешно подтвердил масштабированный GitHub inventory/bulk-import.
+GitHub Actions run `31637903158` успешно прошёл целевой набор `v1.16.1` и полный maintained regression suite после exact-revision retry. Run `31637170402` до него подтвердил безопасный VK retry, а `31636870533` — масштабированный GitHub inventory/bulk-import.
 
 `RELEASE_MANIFEST.json` закреплён текущим release-contract и не должен расходиться с `app/build_info.py`/`settings.PROJECT_VERSION`.
 
