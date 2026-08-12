@@ -63,6 +63,13 @@ def test_manifest_rejects_missing_checksum():
         validate_manifest(data, package_path="books/000001", commit_sha="a" * 40)
 
 
+def test_manifest_rejects_extra_checksum_entries():
+    data = manifest()
+    data["checksums"]["unused.bin"] = "a" * 64
+    with pytest.raises(GitHubImportError, match="точно соответствовать"):
+        validate_manifest(data, package_path="books/000001", commit_sha="a" * 40)
+
+
 def test_manifest_rejects_path_traversal():
     data = manifest(files=["../secret", "book.epub"], checksums={"../secret": "a" * 64, "book.epub": "b" * 64})
     with pytest.raises(GitHubImportError):
@@ -73,6 +80,22 @@ def test_supported_content_types():
     for kind in ("book", "comics", "audiobook"):
         package = validate_manifest(manifest(content_type=kind), package_path="x", commit_sha="a" * 40)
         assert package.content_type == kind
+
+
+def test_package_id_fits_longest_telegram_owner_callback():
+    package_id = "x" * 51
+    package = validate_manifest(
+        manifest(package_id=package_id),
+        package_path=f"books/{package_id}",
+        commit_sha="a" * 40,
+    )
+    assert len(f"ghimp:update:{package.package_id}".encode("utf-8")) == 64
+    with pytest.raises(GitHubImportError, match="package_id"):
+        validate_manifest(
+            manifest(package_id="x" * 52),
+            package_path="books/too-long",
+            commit_sha="a" * 40,
+        )
 
 
 def test_manifest_rejects_oversized_file_inventory():
