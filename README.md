@@ -11,6 +11,10 @@ GitHub используется только как источник. Прове
 ### GitHub Import
 
 - непередаваемый `SYSTEM_OWNER_ID` и скрытый owner-only раздел;
+- для системного владельца обычная кнопка `🧩 Система` открывает отдельные системные инструменты с `📦 GitHub Import` и диагностикой;
+- другие владельцы и администраторы продолжают видеть прежнюю системную диагностику и не получают даже пункта GitHub Import;
+- аварийный вход `/github_import` отвечает только системному владельцу и молчит для остальных;
+- сетевые/TLS/HTTP ошибки owner-callback отображаются в самом боте вместо зависшего Telegram spinner;
 - серверный запрет доступа остальным пользователям и администраторам;
 - строгая проверка manifest, SHA-256 и safe-path;
 - `checksums` обязан точно соответствовать `files`;
@@ -27,6 +31,7 @@ GitHub используется только как источник. Прове
 - книги/комиксы импортируются через существующий `import_library_zip`;
 - история хранит package/version/commit SHA/status/size/VoxLyra ID/error и снимок manifest;
 - обновление требует явного подтверждения владельца и показывает diff файлов;
+- `Повторить неудачные` автоматически повторяет только ту же неудачную version+commit; более новый source revision снова требует ручного diff/подтверждения;
 - replacement обновляет существующую книгу с сохранением постоянного `book_id`;
 - покупки, прогресс, закладки и отзывы не удаляются replacement-потоком;
 - повреждённый пакет откатывается отдельно, независимые успешно импортированные пакеты не отменяются;
@@ -51,28 +56,30 @@ GitHub используется только как источник. Прове
 
 Актуальные контракты проверяют:
 
-- синхронизацию `app/build_info.py`, `settings.PROJECT_VERSION` и `RELEASE_MANIFEST.json`;
+- синхронизацию `app/build_info.py`, `settings.PROJECT_VERSION`, `.env.example` и `RELEASE_MANIFEST.json`;
 - canonical assets;
 - Telegram/VK launch routes;
 - платформенную коммерцию;
-- owner-only GitHub Import;
+- owner-only GitHub Import и порядок router-ов, необходимый для скрытого system-owner меню;
+- handler resilience и отсутствие доступа у non-owner;
 - callback-safe manifests и resource limits;
 - один inventory на bulk/retry;
 - raw public downloads и GitHub rate-limit handling;
 - low disk, missing file, interrupted stream, cleanup, rollback/finalize;
+- exact-revision retry после ошибки;
 - постоянный `book_id` при replacement;
 - VK checkout/publication price parity;
 - безопасный retry неудавшейся VK wall публикации без back-post исторического каталога.
 
 ### CI
 
-GitHub Actions run `31637170402` успешно прошёл целевой набор `v1.16.1` и полный maintained regression suite после внедрения безопасного VK retry. Перед этим run `31636870533` отдельно подтвердил масштабирование GitHub discovery/bulk import и полный regression suite.
+GitHub Actions run `31639127073` успешно прошёл целевой набор `v1.16.1` и полный maintained regression suite после добавления скрытого system-owner GitHub Import меню и его тестов. Ранее `31637903158` подтвердил exact-revision retry, `31637170402` — безопасный VK retry, `31636870533` — масштабированный GitHub discovery/bulk import.
 
 Каждый следующий commit в `main` снова запускает тот же CI. `RELEASE_MANIFEST.json` дополнительно проверяется текущим release-contract.
 
 ### До полного production-ready
 
-В коде и автоматике закрыты owner security, rollback/cleanup, resource limits, большие inventory, API-amplification, update confirmation/diff, сохранение пользовательских связей, Telegram/VK deep links и retry логика публикации.
+В коде и автоматике закрыты owner security, rollback/cleanup, resource limits, большие inventory, API-amplification, update confirmation/diff, сохранение пользовательских связей, Telegram/VK deep links, безопасный retry публикации и скрытый системный интерфейс импорта.
 
 Остаются только проверки, которым нужны реальные внешние данные/аккаунты:
 
@@ -117,4 +124,4 @@ GITHUB_IMPORT_PAGE_SIZE=50
 - `data/` — постоянные runtime-данные; реальные пользовательские данные не коммитятся.
 - `storage/` — runtime/legal ресурсы согласно конфигурации.
 
-Последнее обновление README: 2026-08-12 — масштабирован GitHub Import, устранена API amplification на публичных пакетах, добавлена защита диска/manifest/callback, безопасный VK retry и подтверждён зелёный полный CI.
+Последнее обновление README: 2026-08-12 — GitHub Import вынесен в скрытые system-owner инструменты, добавлен аварийный `/github_import`, handler resilience, exact-revision retry, масштабирование public raw downloads и подтверждён зелёный полный CI.
