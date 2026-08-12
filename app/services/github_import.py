@@ -24,6 +24,7 @@ _ALLOWED_TYPES = {"book", "comics", "audiobook"}
 _TYPE_DIRS = {"book": "books", "comics": "comics", "audiobook": "audiobooks"}
 _BULK_TYPES = {"book", "comics"}
 _IMPORT_INDEX = "manifests/import_index.json"
+_REQUIRED_RIGHTS_FILES = {"LICENSE.txt", "SOURCES.txt"}
 _MAX_DISCOVERED_PACKAGES = 5000
 _MAX_MANIFEST_FILES = 20_000
 _MAX_VERSION_LENGTH = 128
@@ -203,6 +204,11 @@ def validate_manifest(data: dict[str, Any], *, package_path: str, commit_sha: st
         path = PurePosixPath(name)
         if path.is_absolute() or ".." in path.parts or str(path) in {".", ""}:
             raise GitHubImportError("Небезопасный путь в manifest")
+    missing_rights = sorted(_REQUIRED_RIGHTS_FILES - set(files))
+    if missing_rights:
+        raise GitHubImportError(
+            "Manifest импортируемого пакета должен включать LICENSE.txt и SOURCES.txt"
+        )
 
     checksums = {
         str(PurePosixPath(str(key))): str(value).lower().strip()
