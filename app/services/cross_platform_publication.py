@@ -7,6 +7,7 @@ from app.config import settings
 from app.db import add_audit, connect, count_chapters_for_book, get_book, get_book_options
 from app.services.cover_storage import ensure_book_cover_file
 from app.services.vk_api import vk_api_call, vk_app_url
+from app.services.vk_payments import votes_for_stars
 
 
 def vk_book_url(book_id: int) -> str:
@@ -18,12 +19,9 @@ def vk_book_url(book_id: int) -> str:
 
 
 def vk_votes_from_stars(stars: int) -> int:
-    """Convert the canonical catalogue price for VK presentation only."""
+    """Use the exact checkout conversion for VK-facing publication prices."""
     stars = max(0, int(stars or 0))
-    if not stars:
-        return 0
-    rate = max(0.01, float(settings.VK_VOTES_PER_STAR or 1.0))
-    return max(1, int(round(stars * rate)))
+    return votes_for_stars(stars) if stars else 0
 
 
 def build_vk_book_post(
