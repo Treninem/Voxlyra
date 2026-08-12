@@ -34,6 +34,7 @@ def test_current_build_version_and_readme_are_aligned():
     features = manifest["features"]
     assert features["github_hidden_system_owner_tools"] is True
     assert features["github_owner_callback_resilience"] is True
+    assert features["github_import_env_ui_kill_switch"] is True
     assert features["github_single_inventory_bulk_discovery"] is True
     assert features["github_public_raw_file_downloads"] is True
     assert features["github_callback_safe_package_ids"] is True
@@ -129,6 +130,8 @@ def test_github_import_stays_owner_only_and_uses_existing_pipeline():
     assert "owner:github_import" in handler
     assert 'Command("github_import")' in handler
     assert "F.from_user.id == settings.SYSTEM_OWNER_ID" in handler
+    assert "GITHUB_IMPORT_ENABLED" in handler
+    assert "GitHub Import выключен в настройках" in handler
     assert "ghimp:all" in handler
     assert "ghimp:retry" in handler
     assert "changes" in handler
