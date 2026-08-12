@@ -22,6 +22,7 @@
     "github_public_raw_file_downloads": true,
     "github_strict_manifest_checksums": true,
     "github_manifest_rights_evidence_required": true,
+    "github_manifest_content_payload_required": true,
     "github_callback_safe_package_ids": true,
     "github_archive_disk_reserve": true,
     "github_rate_limit_errors": true,
@@ -48,15 +49,15 @@
   },
   "verification": {
     "repository_audited_at": "2026-08-13",
-    "latest_feature_commit": "fa5e6745c20c90f15439bab29e3f7e351b173088",
+    "latest_feature_commit": "68907489222696fb6f9266b88db5534c6db9b312",
     "github_actions_targeted": true,
     "github_actions_full_suite": true,
-    "github_actions_run_id": 31643454510,
+    "github_actions_run_id": 31644062887,
     "live_bothost_redeploy": false,
     "live_telegram_flow": false,
     "live_vk_flow": false,
     "production_payment_flow": false,
-    "note": "GitHub Actions run 31643454510 is green for both the expanded v1.16.1 targeted contracts and the full maintained regression suite after runtime rights-evidence preflight. GitHub manifest validation now rejects an enabled/importable package before payload download unless root LICENSE.txt and SOURCES.txt are explicitly declared and covered by SHA-256 checksums; the existing library importer still performs the deeper metadata/license/commercial/derivative-rights validation after download. Same-package imports remain serialized for the complete critical section and refresh local import history after lock acquisition while reusing task-local remote inventory, preventing duplicate overlapping imports without globally blocking different packages. VK publication business logic remains canonical in cross_platform_publication.py with vk_publication.py as a complete compatibility re-export. Live Bothost/Telegram/VK/payment checks still require deployment and real payloads."
+    "note": "GitHub Actions run 31644062887 is green for both the expanded v1.16.1 targeted contracts and the full maintained regression suite. Runtime manifest validation rejects importable packages before payload download unless root LICENSE.txt and SOURCES.txt are declared with checksums, and also rejects metadata/description/cover/rights-only packages that contain no actual book file or graphic chapter/page payload. The existing library importer still performs deeper rights and content validation after download. Same-package imports remain serialized and refresh local import history after lock acquisition while reusing task-local remote inventory. VK publication remains canonical in cross_platform_publication.py with vk_publication.py as a compatibility-only re-export. Two real final book archives were also located in the project owner's file library and are being normalized for source-repository import; live Bothost/Telegram/VK/payment checks remain pending deployment."
   },
   "name": "GitHub import and cross-platform release hardening"
 }
