@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     VK_PAYMENT_TEST_MODE: bool = False
     PROJECT_NAME: str = "Вокслира"
     PUBLIC_VERSION_VISIBLE: bool = False
-    PROJECT_VERSION: str = "v1.16.0"
+    PROJECT_VERSION: str = "v1.16.1"
 
     # GitHub используется только как источник импорта. Репозиторий, ветка и
     # корневой путь переопределяются env; токен никогда не должен попадать в UI.
