@@ -10,6 +10,7 @@
     "github_owner_import_enabled": true,
     "github_hidden_system_owner_tools": true,
     "github_owner_callback_resilience": true,
+    "github_import_env_ui_kill_switch": true,
     "github_import_per_package_rollback": true,
     "github_bulk_failure_isolation": true,
     "github_import_retry_cleanup": true,
@@ -42,15 +43,15 @@
   },
   "verification": {
     "repository_audited_at": "2026-08-12",
-    "latest_feature_commit": "bf85fd9a7b33870c815449e39416d30623781ba1",
+    "latest_feature_commit": "e5ca44478fd15887ff3ac2c4b9e6b5a71c2e409f",
     "github_actions_targeted": true,
     "github_actions_full_suite": true,
-    "github_actions_run_id": 31639127073,
+    "github_actions_run_id": 31639924934,
     "live_bothost_redeploy": false,
     "live_telegram_flow": false,
     "live_vk_flow": false,
     "production_payment_flow": false,
-    "note": "GitHub Actions run 31639127073 is green for the v1.16.1 targeted contracts and full maintained regression suite. GitHub Import is now reachable from a hidden system-owner-only tools screen while ordinary owners and administrators keep the original system diagnostics and receive no GitHub Import entry. An emergency /github_import command is also silent for every non-system-owner account. Network failures in owner GitHub callbacks are rendered back into the bot instead of leaving the Telegram spinner active. Retry Failed retries only the exact failed version+commit; newer source revisions require a fresh manual diff/confirmation. GitHub import reuses task-local discovery, validates callback-safe manifests, avoids per-file Contents API calls for public packages, reserves disk for the temporary ZIP, and reports explicit rate-limit failures. VK first-publication failures are retryable without back-posting historical books. Live account-dependent checks still require deployment; no production books are fabricated by QA."
+    "note": "GitHub Actions run 31639924934 is green for the v1.16.1 targeted contracts and full maintained regression suite. GITHUB_IMPORT_ENABLED now acts as an owner-UI kill switch: when false, the GitHub Import entry is omitted from system-owner tools, direct /github_import explains how to enable it, and crafted GitHub callbacks are rejected before discovery/import. System-owner diagnostics remain available while the feature is disabled. GitHub Import stays hidden from all other owners and administrators. Network failures in owner callbacks are rendered back into the bot. Retry Failed retries only the exact failed version+commit; newer source revisions require a fresh manual diff/confirmation. GitHub import reuses task-local discovery, validates callback-safe manifests, avoids per-file Contents API calls for public packages, reserves disk for the temporary ZIP, and reports explicit rate-limit failures. VK first-publication failures are retryable without back-posting historical books. Live account-dependent checks still require deployment; no production books are fabricated by QA."
   },
   "name": "GitHub import and cross-platform release hardening"
 }
