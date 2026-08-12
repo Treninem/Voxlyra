@@ -9,6 +9,8 @@ class Settings(BaseSettings):
     OWNER_IDS: str = ""
     # Совместимость со старой переменной Bothost и страховочный ID владельца проекта.
     OWNER_ID: str = "2097006037"
+    # GitHub-импорт имеет отдельное, непередаваемое право системного владельца.
+    SYSTEM_OWNER_ID: int = 2097006037
     DATABASE_PATH: str = "data/voxlyra.sqlite3"
     BACKUP_KEEP_COUNT: int = 7
     BACKUP_MAX_UNPACKED_MB: int = 8192
@@ -40,6 +42,19 @@ class Settings(BaseSettings):
     PROJECT_NAME: str = "Вокслира"
     PUBLIC_VERSION_VISIBLE: bool = False
     PROJECT_VERSION: str = "v1.16.0"
+
+    # GitHub используется только как источник импорта. Репозиторий, ветка и
+    # корневой путь переопределяются env; токен никогда не должен попадать в UI.
+    GITHUB_IMPORT_ENABLED: bool = False
+    GITHUB_IMPORT_REPOSITORY: str = "Treninem/bookvoxlyra"
+    GITHUB_IMPORT_BRANCH: str = "main"
+    GITHUB_IMPORT_ROOT: str = ""
+    GITHUB_IMPORT_TOKEN: str = ""
+    GITHUB_IMPORT_TEMP_ROOT: str = "storage/github_import"
+    GITHUB_IMPORT_MAX_PACKAGE_MB: int = 2048
+    GITHUB_IMPORT_MIN_FREE_DISK_MB: int = 256
+    GITHUB_IMPORT_PAGE_SIZE: int = 50
+
     MAX_BOOK_UPLOAD_MB: int = 0
     MAX_BOOK_UNPACKED_MB: int = 2048
     # Прямая загрузка больших библиотечных ZIP идёт частями. Это аварийный
@@ -225,6 +240,10 @@ class Settings(BaseSettings):
             return True
         vk_id = self.vk_user_id_from_identity(value)
         return bool(vk_id and vk_id in self.vk_owner_ids)
+
+    def is_system_owner(self, identity_id: int) -> bool:
+        """Non-delegable permission used by the hidden GitHub import surface."""
+        return int(identity_id) == int(self.SYSTEM_OWNER_ID)
 
 
 @lru_cache

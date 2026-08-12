@@ -8,7 +8,7 @@ from aiogram.client.default import DefaultBotProperties
 
 from app.config import settings
 from app.db import init_db
-from app.handlers import author, legal, moderation, owner, payments, start, library_manager
+from app.handlers import author, legal, moderation, owner, payments, start, library_manager, github_import
 from app.middleware import BlockedUserMiddleware, SafeTelegramEditMiddleware
 from app.services.cover_storage import restore_missing_book_covers
 from app.services.moderation_alerts import moderation_reminder_loop
@@ -47,6 +47,9 @@ def _dispatcher() -> Dispatcher:
     dp.include_router(legal.router)
     dp.include_router(start.router)
     dp.include_router(author.router)
+    # GitHub import has a separate non-delegable SYSTEM_OWNER_ID guard and is
+    # registered before the broad owner router so its callbacks stay protected.
+    dp.include_router(github_import.router)
     dp.include_router(owner.router)
     dp.include_router(library_manager.router)
     dp.include_router(moderation.router)
