@@ -38,9 +38,10 @@ class Settings(BaseSettings):
     PUBLIC_VERSION_VISIBLE: bool = False
     PROJECT_VERSION: str = "v1.16.0"
 
-    # Source-only GitHub import. Never use these values as permanent storage.
+    # Source-only GitHub import. BookVoxLyra is the default source repository,
+    # while env settings still allow the system owner to switch repo/branch/root.
     GITHUB_IMPORT_ENABLED: bool = False
-    GITHUB_IMPORT_REPOSITORY: str = ""
+    GITHUB_IMPORT_REPOSITORY: str = "Treninem/bookvoxlyra"
     GITHUB_IMPORT_BRANCH: str = "main"
     GITHUB_IMPORT_ROOT: str = ""
     GITHUB_IMPORT_TOKEN: str = ""
