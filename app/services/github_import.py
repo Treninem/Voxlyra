@@ -312,17 +312,27 @@ async def _discover_from_index(
         if not manifest_path:
             manifest_path = f"{package_path}/manifest.json"
         embedded = entry.get("manifest")
-        data = embedded if isinstance(embedded, dict) else await _raw_json(client, owner, repo, commit_sha, _root_path(manifest_path))
+        data = embedded if isinstance(embedded, dict) else await _raw_json(
+            client,
+            owner,
+            repo,
+            commit_sha,
+            _root_path(manifest_path),
+        )
         if data is None:
             raise GitHubImportError(f"Manifest из import index не найден: {manifest_path}")
         if _manifest_disabled(data):
             continue
-        package = validate_manifest(data, package_path=_root_path(package_path), commit_sha=commit_sha)
+        package = validate_manifest(
+            data,
+            package_path=_root_path(package_path),
+            commit_sha=commit_sha,
+        )
         expected_folder = _TYPE_DIRS[package.content_type]
         normalized = str(PurePosixPath(package_path))
         if not normalized.startswith(f"{expected_folder}/"):
             raise GitHubImportError(f"Тип пакета {package.package_id} не соответствует каталогу")
-        found.append(await _apply_history(package))
+        found.append(package)
     return found
 
 
@@ -356,15 +366,12 @@ async def _discover_legacy_layout(
             data = await _raw_json(client, owner, repo, commit_sha, f"{package_path}/manifest.json")
             if data is None:
                 continue
-            # Old BookVoxLyra staging manifests explicitly say that their
-            # archives are not present. They are provenance records, not broken
-            # import packages, and must not make the entire scan fail.
             if _manifest_disabled(data):
                 continue
             package = validate_manifest(data, package_path=package_path, commit_sha=commit_sha)
             if package.content_type != kind:
                 raise GitHubImportError(f"Тип пакета {package.package_id} не соответствует каталогу")
-            found.append(await _apply_history(package))
+            found.append(package)
     return found
 
 
@@ -391,8 +398,11 @@ async def discover_packages(identity_id: int, *, page: int = 1, page_size: int |
     found.sort(key=lambda item: (item.content_type, item.package_id))
     current_page = max(1, int(page))
     start = max(0, (current_page - 1) * size)
+    page_items: list[GitHubPackage] = []
+    for package in found[start : start + size]:
+        page_items.append(await _apply_history(package))
     return {
-        "items": found[start : start + size],
+        "items": page_items,
         "page": current_page,
         "page_size": size,
         "total": len(found),
