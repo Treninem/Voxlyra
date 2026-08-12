@@ -44,6 +44,19 @@ def test_platform_launch_routes_are_current_and_not_old_literal_snapshots():
     assert "unsafe.start_param" in app_js
 
 
+def test_telegram_publication_and_notifications_use_mini_app_deep_links(monkeypatch):
+    from app.config import settings
+    from app.services import publication
+    from app.services.notifications import book_open_markup
+
+    monkeypatch.setattr(settings, "BOT_USERNAME", "VoxlyraBot")
+    monkeypatch.setattr(settings, "WEBAPP_URL", "")
+    assert publication._book_link(42) == "https://t.me/VoxlyraBot?startapp=book_42"
+    markup = book_open_markup(42)
+    assert markup is not None
+    assert markup.inline_keyboard[0][0].url == "https://t.me/VoxlyraBot?startapp=book_42"
+
+
 def test_cross_platform_commerce_contract_is_explicit():
     app_js = (ROOT / "static" / "js" / "app.js").read_text(encoding="utf-8")
     config = (ROOT / "app" / "config.py").read_text(encoding="utf-8")
@@ -53,6 +66,18 @@ def test_cross_platform_commerce_contract_is_explicit():
     assert "LabeledPrice" in (ROOT / "app" / "webapp.py").read_text(encoding="utf-8")
 
 
+def test_current_legal_model_names_platform_native_payments():
+    from app.legal_texts import LEGAL_DOCS
+
+    terms = LEGAL_DOCS["terms"]
+    author = LEGAL_DOCS["author_license"]
+    combined = f"{terms.title}\n{terms.body}\n{author.title}\n{author.body}"
+    assert "Telegram Stars" in combined
+    assert "голос" in combined.lower()
+    assert "VK" in combined
+    assert LEGAL_DOCS["fees_payouts"] is LEGAL_DOCS["author_license"]
+
+
 def test_github_import_stays_owner_only_and_uses_existing_pipeline():
     service = (ROOT / "app" / "services" / "github_import.py").read_text(encoding="utf-8")
     handler = (ROOT / "app" / "handlers" / "github_import.py").read_text(encoding="utf-8")
@@ -60,5 +85,8 @@ def test_github_import_stays_owner_only_and_uses_existing_pipeline():
     assert "import_library_zip" in service
     assert "restore_import_replacement_backups" in service
     assert "finalize_import_replacement_backups" in service
+    assert "manifest_json" in service
+    assert "_diff_manifest" in service
     assert "ghimp:all" in handler
     assert "ghimp:retry" in handler
+    assert "changes" in handler
