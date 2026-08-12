@@ -814,9 +814,10 @@ async def retry_failed(identity_id: int, *, max_packages: int = 100) -> dict[str
     limit = max(0, min(100, int(max_packages)))
     if limit == 0:
         return {"total": 0, "success": 0, "failed": 0, "errors": []}
+
     rows = await import_history(identity_id, status="failed", limit=limit)
     seen: set[str] = set()
-    package_ids: list[str] = []
+    failed_revisions: list[dict[str, str]] = []
     for row in rows:
         package_id = str(row["package_id"])
         if package_id in seen:
@@ -825,16 +826,45 @@ async def retry_failed(identity_id: int, *, max_packages: int = 100) -> dict[str
         latest = await _last_success(package_id)
         if latest and str(latest["created_at"]) >= str(row["created_at"]):
             continue
-        package_ids.append(package_id)
+        failed_revisions.append(
+            {
+                "package_id": package_id,
+                "version": str(row["version"] or ""),
+                "commit_sha": str(row["commit_sha"] or ""),
+            }
+        )
 
-    summary = {"total": len(package_ids), "success": 0, "failed": 0, "errors": []}
+    summary = {"total": len(failed_revisions), "success": 0, "failed": 0, "errors": []}
     discovery_token = _DISCOVERY_CONTEXT.set({})
     try:
-        for package_id in package_ids:
+        for failed in failed_revisions:
+            package_id = failed["package_id"]
             try:
-                outcome = await import_package(identity_id, package_id)
+                current = await find_package(identity_id, package_id)
+                if current.version != failed["version"] or current.commit_sha != failed["commit_sha"]:
+                    summary["failed"] += 1
+                    summary["errors"].append(
+                        {
+                            "package_id": package_id,
+                            "error": "Пакет изменился после неудачной попытки; проверьте текущий diff и подтвердите обновление вручную",
+                        }
+                    )
+                    continue
+
+                # The owner explicitly pressed "retry failed". If the failed
+                # revision was an update, this action is a safe confirmation to
+                # retry that exact same version+commit, never a newer revision.
+                outcome = await import_package(identity_id, package_id, allow_update=True)
                 if outcome["status"] in {"success", "already_imported"}:
                     summary["success"] += 1
+                else:
+                    summary["failed"] += 1
+                    summary["errors"].append(
+                        {
+                            "package_id": package_id,
+                            "error": f"Повтор не выполнен: {outcome['status']}",
+                        }
+                    )
             except Exception as exc:
                 summary["failed"] += 1
                 summary["errors"].append({"package_id": package_id, "error": str(exc)[:500]})
