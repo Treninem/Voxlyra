@@ -63,6 +63,21 @@ async def test_system_owner_system_screen_exposes_github_import_and_diagnostics(
 
 
 @pytest.mark.asyncio
+async def test_disabled_import_is_hidden_but_system_diagnostics_stay_available(monkeypatch):
+    monkeypatch.setattr(handler.settings, "SYSTEM_OWNER_ID", 42)
+    monkeypatch.setattr(handler.settings, "GITHUB_IMPORT_ENABLED", False)
+    call = FakeCall(42, "owner:system")
+
+    await handler.system_owner_tools(call)
+
+    assert "выключен в env" in call.message.text
+    callbacks = _callback_data(call.message.reply_markup)
+    assert "owner:github_import" not in callbacks
+    assert "owner:system:diagnostics" in callbacks
+    assert "owner:menu" in callbacks
+
+
+@pytest.mark.asyncio
 async def test_system_owner_diagnostics_has_back_route(monkeypatch):
     monkeypatch.setattr(handler.settings, "SYSTEM_OWNER_ID", 42)
     monkeypatch.setattr(handler, "format_diagnostics_for_owner", lambda: "DIAGNOSTICS")
@@ -78,6 +93,7 @@ async def test_system_owner_diagnostics_has_back_route(monkeypatch):
 @pytest.mark.asyncio
 async def test_direct_github_import_command_is_silent_for_non_system_owner(monkeypatch):
     monkeypatch.setattr(handler.settings, "SYSTEM_OWNER_ID", 42)
+    monkeypatch.setattr(handler.settings, "GITHUB_IMPORT_ENABLED", True)
     allowed = FakeDirectMessage(42)
     denied = FakeDirectMessage(43)
 
@@ -91,8 +107,41 @@ async def test_direct_github_import_command_is_silent_for_non_system_owner(monke
 
 
 @pytest.mark.asyncio
+async def test_disabled_direct_command_explains_how_to_enable_without_import_buttons(monkeypatch):
+    monkeypatch.setattr(handler.settings, "SYSTEM_OWNER_ID", 42)
+    monkeypatch.setattr(handler.settings, "GITHUB_IMPORT_ENABLED", False)
+    message = FakeDirectMessage(42)
+
+    await handler.direct_menu(message)
+
+    assert len(message.answers) == 1
+    text, markup = message.answers[0]
+    assert "GitHub Import выключен" in text
+    assert "GITHUB_IMPORT_ENABLED=true" in text
+    assert "owner:github_import" not in _callback_data(markup)
+
+
+@pytest.mark.asyncio
+async def test_disabled_callback_is_rejected_before_github_access(monkeypatch):
+    monkeypatch.setattr(handler.settings, "SYSTEM_OWNER_ID", 42)
+    monkeypatch.setattr(handler.settings, "GITHUB_IMPORT_ENABLED", False)
+
+    async def forbidden_discovery(*args, **kwargs):
+        raise AssertionError("disabled GitHub Import must not reach discovery")
+
+    monkeypatch.setattr(handler, "discover_packages", forbidden_discovery)
+    call = FakeCall(42)
+
+    await handler.scan(call)
+
+    assert call.message.text == ""
+    assert call.answers == [("GitHub Import выключен в настройках", True)]
+
+
+@pytest.mark.asyncio
 async def test_system_owner_tools_denies_direct_function_call_for_non_owner(monkeypatch):
     monkeypatch.setattr(handler.settings, "SYSTEM_OWNER_ID", 42)
+    monkeypatch.setattr(handler.settings, "GITHUB_IMPORT_ENABLED", True)
     call = FakeCall(43, "owner:system")
 
     await handler.system_owner_tools(call)
@@ -104,6 +153,7 @@ async def test_system_owner_tools_denies_direct_function_call_for_non_owner(monk
 @pytest.mark.asyncio
 async def test_scan_turns_unexpected_network_failure_into_owner_message(monkeypatch):
     monkeypatch.setattr(handler.settings, "SYSTEM_OWNER_ID", 42)
+    monkeypatch.setattr(handler.settings, "GITHUB_IMPORT_ENABLED", True)
 
     async def broken_discovery(*args, **kwargs):
         raise RuntimeError("network connection interrupted")
@@ -121,6 +171,7 @@ async def test_scan_turns_unexpected_network_failure_into_owner_message(monkeypa
 @pytest.mark.asyncio
 async def test_non_owner_scan_is_denied_before_github_access(monkeypatch):
     monkeypatch.setattr(handler.settings, "SYSTEM_OWNER_ID", 42)
+    monkeypatch.setattr(handler.settings, "GITHUB_IMPORT_ENABLED", True)
 
     async def forbidden_discovery(*args, **kwargs):
         raise AssertionError("non-owner must never reach GitHub discovery")
