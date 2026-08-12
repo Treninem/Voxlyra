@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -31,6 +32,34 @@ def test_cleanup_package_is_idempotent(tmp_path):
     gi.cleanup_package(target)
     gi.cleanup_package(target)
     assert not target.exists()
+
+
+def test_manifest_diff_reports_added_removed_and_changed_files():
+    package = _package("diff")
+    package.version = "1.1"
+    package.commit_sha = "b" * 40
+    package.files = ("metadata.json", "Chapters/012/page.webp")
+    package.checksums = {
+        "metadata.json": "1" * 64,
+        "Chapters/012/page.webp": "2" * 64,
+    }
+    previous = json.dumps(
+        {
+            "version": "1.0",
+            "commit_sha": "a" * 40,
+            "files": ["metadata.json", "cover.jpg"],
+            "checksums": {"metadata.json": "0" * 64, "cover.jpg": "3" * 64},
+        }
+    )
+    changes = gi._diff_manifest(previous, package)
+    assert "+ Chapters/012/page.webp" in changes
+    assert "- cover.jpg" in changes
+    assert "~ metadata.json" in changes
+
+
+def test_manifest_diff_handles_history_created_before_snapshot_support():
+    package = _package("legacy-history")
+    assert gi._diff_manifest("{}", package) == ("~ пакет изменён; предыдущий manifest не сохранён",)
 
 
 @pytest.mark.asyncio
