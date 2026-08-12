@@ -77,6 +77,82 @@ async def test_download_rejects_low_disk_before_network(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_missing_remote_file_removes_partial_package(monkeypatch, tmp_path):
+    monkeypatch.setattr(gi.settings, "SYSTEM_OWNER_ID", 42)
+    monkeypatch.setattr(gi.settings, "GITHUB_IMPORT_TEMP_ROOT", str(tmp_path / "github"))
+    monkeypatch.setattr(gi.settings, "GITHUB_IMPORT_MIN_FREE_DISK_MB", 0)
+
+    async def missing(*args, **kwargs):
+        return None
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(gi, "_get_json", missing)
+    monkeypatch.setattr(gi.httpx, "AsyncClient", FakeClient)
+
+    package = _package("missing")
+    with pytest.raises(gi.GitHubImportError, match="Отсутствует файл: metadata.json"):
+        await gi.download_package(42, package)
+    root = tmp_path / "github"
+    assert not root.exists() or not any(root.iterdir())
+
+
+@pytest.mark.asyncio
+async def test_interrupted_stream_removes_partial_file_and_directory(monkeypatch, tmp_path):
+    monkeypatch.setattr(gi.settings, "SYSTEM_OWNER_ID", 42)
+    monkeypatch.setattr(gi.settings, "GITHUB_IMPORT_TEMP_ROOT", str(tmp_path / "github"))
+    monkeypatch.setattr(gi.settings, "GITHUB_IMPORT_MIN_FREE_DISK_MB", 0)
+
+    async def remote_meta(*args, **kwargs):
+        return {"type": "file", "download_url": "https://download.invalid/metadata.json"}
+
+    class InterruptedResponse:
+        def raise_for_status(self):
+            return None
+
+        async def aiter_bytes(self, chunk_size):
+            yield b"partial-data"
+            raise RuntimeError("network connection interrupted")
+
+    class StreamContext:
+        async def __aenter__(self):
+            return InterruptedResponse()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def stream(self, *args, **kwargs):
+            return StreamContext()
+
+    monkeypatch.setattr(gi, "_get_json", remote_meta)
+    monkeypatch.setattr(gi.httpx, "AsyncClient", FakeClient)
+
+    package = _package("interrupted")
+    with pytest.raises(RuntimeError, match="interrupted"):
+        await gi.download_package(42, package)
+    root = tmp_path / "github"
+    assert not root.exists() or not any(root.iterdir())
+
+
+@pytest.mark.asyncio
 async def test_update_requires_explicit_owner_confirmation(monkeypatch):
     monkeypatch.setattr(gi.settings, "SYSTEM_OWNER_ID", 42)
     package = _package()
