@@ -24,6 +24,8 @@
     "github_callback_safe_package_ids": true,
     "github_archive_disk_reserve": true,
     "github_rate_limit_errors": true,
+    "github_same_package_serialization": true,
+    "github_history_refresh_after_package_lock": true,
     "import_replacement_preserves_book_id": true,
     "bulk_graphic_import_e2e_count": 50,
     "safe_7z_page_names": true,
@@ -36,22 +38,24 @@
     "vk_historical_post_spam_guard": true,
     "vk_native_votes_pricing": true,
     "vk_publication_checkout_price_parity": true,
+    "vk_publication_single_canonical_service": true,
+    "vk_publication_compatibility_shim_complete": true,
     "platform_native_legal_payments": true,
     "canonical_avatar_assets": true,
     "env_example_present": true,
     "existing_books_preserved": true
   },
   "verification": {
-    "repository_audited_at": "2026-08-12",
-    "latest_feature_commit": "e5ca44478fd15887ff3ac2c4b9e6b5a71c2e409f",
+    "repository_audited_at": "2026-08-13",
+    "latest_feature_commit": "615ca61c0ac86ec569affd845d51170c4bea2ad7",
     "github_actions_targeted": true,
     "github_actions_full_suite": true,
-    "github_actions_run_id": 31639924934,
+    "github_actions_run_id": 31642789845,
     "live_bothost_redeploy": false,
     "live_telegram_flow": false,
     "live_vk_flow": false,
     "production_payment_flow": false,
-    "note": "GitHub Actions run 31639924934 is green for the v1.16.1 targeted contracts and full maintained regression suite. GITHUB_IMPORT_ENABLED now acts as an owner-UI kill switch: when false, the GitHub Import entry is omitted from system-owner tools, direct /github_import explains how to enable it, and crafted GitHub callbacks are rejected before discovery/import. System-owner diagnostics remain available while the feature is disabled. GitHub Import stays hidden from all other owners and administrators. Network failures in owner callbacks are rendered back into the bot. Retry Failed retries only the exact failed version+commit; newer source revisions require a fresh manual diff/confirmation. GitHub import reuses task-local discovery, validates callback-safe manifests, avoids per-file Contents API calls for public packages, reserves disk for the temporary ZIP, and reports explicit rate-limit failures. VK first-publication failures are retryable without back-posting historical books. Live account-dependent checks still require deployment; no production books are fabricated by QA."
+    "note": "GitHub Actions run 31642789845 is green for both the expanded v1.16.1 targeted contracts and the full maintained regression suite. Same-package GitHub imports are serialized for the complete critical section; once a waiter acquires the package lock it discards only stale resolved-status cache and re-applies current SQLite import history while reusing the task-local remote inventory. This prevents an overlapping bulk run from importing a package a second time after waiting. Different package IDs remain parallel-capable. VK publication business logic is canonical in cross_platform_publication.py; vk_publication.py is now only a complete compatibility re-export, preventing a second fork of VK post/retry/pricing behavior. Existing owner-only security, exact-revision retry, rollback/cleanup, raw public downloads, resource limits and update confirmation remain covered. The source repository has separate rights-provenance CI, but live Bothost/Telegram/VK/payment checks still require deployment and real payloads."
   },
   "name": "GitHub import and cross-platform release hardening"
 }
