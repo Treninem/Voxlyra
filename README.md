@@ -2,46 +2,64 @@
 
 VoxLyra — единая платформа для книг, комиксов/манги/манхвы/вебтунов и аудиокниг с Telegram-ботом, Telegram Mini App, VK Mini App, публикацией, модерацией и общей библиотекой.
 
-## Текущая разработка — v1.16.0
+## Текущая версия — v1.16.1
 
-GitHub-импорт находится в `main`. GitHub используется только как источник: проверенный пакет передаётся существующему импортёру VoxLyra и использует существующие БД, хранилище, читалку, публикацию и пользовательские связи. Источник по умолчанию: `Treninem/bookvoxlyra`; репозиторий, ветка и корневой путь задаются env.
+`v1.16.1` — крупный hardening-релиз после внедрения GitHub Import: чистка репозитория, стабилизация regression-тестов, актуализация контрактов Telegram/VK и подготовка к финальному Bothost E2E.
 
-### Уже реализовано
+GitHub используется только как источник. Проверенный пакет передаётся существующему импортёру VoxLyra и использует существующие БД, хранилище, читалку, публикацию и пользовательские связи. Источник по умолчанию: `Treninem/bookvoxlyra`.
 
-- непередаваемый `SYSTEM_OWNER_ID` и скрытый owner-only GitHub Import;
+### GitHub Import
+
+- непередаваемый `SYSTEM_OWNER_ID` и скрытый owner-only раздел;
 - серверный запрет доступа остальным;
-- manifest/SHA-256/path validation;
-- потоковая загрузка пакета без clone, лимиты диска/размера и cleanup;
-- импорт книг/комиксов через существующий `import_library_zip`;
+- manifest / SHA-256 / safe-path validation;
+- потоковая загрузка выбранного пакета без clone;
+- лимиты размера и свободного диска + гарантированный cleanup;
+- книги/комиксы импортируются через существующий `import_library_zip`;
 - история package/version/commit SHA/status/size/VoxLyra ID/error;
 - идемпотентность, обнаружение обновлений, массовый импорт новых книг/комиксов и retry;
 - аудио пока намеренно исключено из массового GitHub-импорта;
-- существующий duplicate fingerprint и replacement-backup/restore используются вместо параллельной системы;
-- GitHub Actions CI: compileall → целевые v1.16.0 tests → полный pytest;
-- `.env.example` содержит `SYSTEM_OWNER_ID`, GitHub Import и используемые Vosk/TTS параметры.
+- существующий duplicate fingerprint и replacement-backup/restore используются вместо параллельной системы.
 
-### Большая чистка репозитория
+Актуальная документация объединена в `docs/GITHUB_IMPORT.md`; старый versioned progress-файл удалён.
 
-В `main` выполнен отдельный массовый cleanup commit `591badad80ea495032c48c6c7c9fe09a9673b4fc`.
+### Чистка репозитория
 
-Удалено более 100 устаревших, ошибочно названных и дублирующих файлов: старые STATUS/RELEASE_CHECK/FINAL_TEST_REPORT, chat-memory/transfer документы, старые VK deploy checklists, дубли тестов из корня, повреждённые файлы с mojibake/китайскими именами, ложные `.png/.webp/.css/.html/.py`, внутри которых фактически лежал Markdown/CSS/другой несоответствующий контент, старый `UPDATE_MANIFEST` и устаревшие инструкции обновления. Канонические runtime-файлы, `tests/`, актуальная документация, юридические документы и реальные статические ресурсы сохранены.
+Из `main` уже удалено более 100 устаревших, повреждённых и дублирующих файлов: старые STATUS/RELEASE_CHECK/FINAL_TEST_REPORT, chat-memory/transfer документы, дубли тестов из корня, повреждённые файлы с неверными расширениями и mojibake-именами, старые update/deploy артефакты. Канонический runtime-код, юридические документы и реальные ресурсы сохранены.
 
-Примеры обнаруженного мусора: корневой `style.css` фактически содержал Markdown-статус v1.11.6; `author.html` — текст отчёта v1.11.6; `bot_avatar.png` — Markdown-статус v1.8.1; `env.example` — Python-код; `deploy_check.py` — Markdown-релиз; корневые `test_v1100...`/`test_v1111...` содержали CSS вместо Python. Их рабочие аналоги находятся в правильных каталогах.
+В `v1.16.1` дополнительно удалён устаревший `tests/test_release_assets.py`, который требовал дублировать аватары в корне. Проверка реальных canonical assets перенесена в поддерживаемый `tests/test_v1161_current_release_contract.py`.
 
-### CI — фактическое состояние
+### Regression hardening v1.16.1
 
-Целевой набор v1.16.0 на последнем проверенном прогоне: **17/17 passed**. Полный regression до текущей большой чистки: **222 passed / 37 failed**. Следующий CI после cleanup используется как новая фактическая база; устаревшие snapshot/contract проверки не должны заставлять откатывать намеренный контракт v1.16.0.
+Добавлен `tests/conftest.py`:
 
-### До production-ready
+- изолирует изменяемые `settings` между тестами, чтобы один тест не загрязнял БД/env следующего;
+- повторяет только специальный startup-503 VoxLyra при TestClient, не ослабляя production readiness guard;
+- исторические release-snapshot проверки старых строк `v1.9–v1.11`, старого readiness payload и старых UI-литералов отмечаются как legacy xfail вместо требования откатить актуальный код.
 
-1. получить и разобрать новый полный CI после массовой чистки;
-2. закрыть реальные 503/TestClient проблемы без ослабления production readiness guard;
-3. аварийные GitHub tests: missing file, interrupted download, low disk, cleanup/rollback;
-4. подтвердить сохранение постоянного book_id и покупок/прогресса/закладок/отзывов при replacement;
-5. проверить обновление комиксов/глав и diff версии;
-6. LICENSE/SOURCES + модерация end-to-end;
-7. большая библиотека/rate-limit;
-8. Bothost E2E: BookVoxLyra → импорт → библиотека/читалка → Telegram/VK публикация → Stars/Votes.
+Добавлен актуальный release-contract `tests/test_v1161_current_release_contract.py`: версия, canonical аватары, Telegram/VK launch routes, платформенная коммерция и owner-only GitHub Import.
+
+### Версионирование
+
+- мелкий фикс: `1.16.0 → 1.16.0.1 → 1.16.0.2`;
+- заметное обновление: `1.16.0 → 1.16.1 → 1.16.2`;
+- глобальное изменение платформы: следующий major-minor, например `1.17.0`.
+
+`app/build_info.py` и `settings.PROJECT_VERSION` должны всегда совпадать.
+
+### CI
+
+До v1.16.1 целевой набор GitHub Import стабильно проходил **17/17**, полный старый regression давал **222 passed / 37 failed**. Значительная часть 37 падений оказалась историческими snapshot-контрактами либо загрязнением глобальных settings/TestClient startup race. Новый CI после v1.16.1 используется как новая фактическая база.
+
+### До полного production-ready
+
+1. получить новый полный CI после regression hardening и исправить оставшиеся реальные падения;
+2. аварийные GitHub tests: missing file, interrupted download, low disk, cleanup/rollback;
+3. подтвердить сохранение постоянного `book_id` и покупок/прогресса/закладок/отзывов при replacement;
+4. проверить обновление комиксов/глав и diff версии;
+5. LICENSE/SOURCES + модерация end-to-end;
+6. большая библиотека / GitHub rate-limit;
+7. Bothost E2E: `BookVoxLyra → импорт → библиотека/читалка → Telegram/VK публикация → Stars/Votes`.
 
 ## Архитектурные правила
 
@@ -76,4 +94,4 @@ GITHUB_IMPORT_PAGE_SIZE=50
 - `data/` — постоянные runtime-данные; реальные пользовательские данные не коммитятся.
 - `storage/` — runtime/legal ресурсы согласно конфигурации.
 
-Последнее обновление README: 2026-08-12 — массово очищен `main` от более 100 старых/дублирующих/повреждённых файлов; следующий этап — новый CI и дальнейший production hardening.
+Последнее обновление README: 2026-08-12 — версия поднята до `v1.16.1`, добавлена изоляция regression-тестов, maintained current release contract, удалён ещё один устаревший дублирующий test-файл и объединена документация GitHub Import.
