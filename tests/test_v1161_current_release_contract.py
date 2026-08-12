@@ -29,6 +29,13 @@ def test_current_build_version_and_readme_are_aligned():
     assert manifest["version"] == expected
     assert manifest["verification"]["github_actions_targeted"] is True
     assert manifest["verification"]["github_actions_full_suite"] is True
+    features = manifest["features"]
+    assert features["github_single_inventory_bulk_discovery"] is True
+    assert features["github_public_raw_file_downloads"] is True
+    assert features["github_callback_safe_package_ids"] is True
+    assert features["github_archive_disk_reserve"] is True
+    assert features["vk_failed_wall_post_retry"] is True
+    assert features["vk_historical_post_spam_guard"] is True
 
 
 def test_canonical_avatar_assets_only_live_under_static():
@@ -65,12 +72,14 @@ def test_telegram_publication_and_notifications_use_mini_app_deep_links(monkeypa
     assert markup.inline_keyboard[0][0].url == "https://t.me/VoxlyraBot?startapp=book_42"
 
 
-def test_vk_wall_publication_is_wired_into_shared_first_publish_flow():
+def test_vk_wall_publication_is_wired_into_shared_first_publish_and_safe_retry_flow():
     from app.services import publication
 
     source = inspect.getsource(publication.publish_book_and_channel)
     assert "post_book_to_vk_wall" in source
-    assert "if not published_before" in source
+    assert "should_retry_vk_wall_post" in source
+    assert "retry_vk = published_before" in source
+    assert "if not published_before or retry_vk" in source
     assert "publish_book_content" in source
 
 
@@ -104,6 +113,10 @@ def test_github_import_stays_owner_only_and_uses_existing_pipeline():
     assert "finalize_import_replacement_backups" in service
     assert "manifest_json" in service
     assert "_diff_manifest" in service
+    assert "ContextVar" in service
+    assert "_DISCOVERY_CONTEXT" in service
+    assert "raw.githubusercontent.com" in service
+    assert "_require_archive_space" in service
     assert "ghimp:all" in handler
     assert "ghimp:retry" in handler
     assert "changes" in handler
