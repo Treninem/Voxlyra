@@ -23,6 +23,16 @@ def test_vk_post_uses_votes_and_never_mentions_stars(monkeypatch):
     assert "https://vk.com/app123#book_1" in text
 
 
+def test_vk_publication_price_matches_checkout_rounding(monkeypatch):
+    monkeypatch.setattr(cpp.settings, "VK_VOTES_PER_STAR", 1.5)
+    assert cpp.vk_votes_from_stars(3) == 5
+
+
+def test_vk_publication_never_undercuts_checkout(monkeypatch):
+    monkeypatch.setattr(cpp.settings, "VK_VOTES_PER_STAR", 0.5)
+    assert cpp.vk_votes_from_stars(10) == 10
+
+
 def test_vk_chapter_pricing_is_vk_only(monkeypatch):
     monkeypatch.setattr(cpp.settings, "VK_VOTES_PER_STAR", 2.0)
     text = cpp.build_vk_book_post(
