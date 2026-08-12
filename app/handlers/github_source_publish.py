@@ -8,7 +8,7 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from app.config import settings
 from app.services.github_source_publish import GitHubSourcePublishError, publish_source_package_zip
@@ -22,8 +22,9 @@ class GitHubSourcePublishFlow(StatesGroup):
     waiting_zip = State()
 
 
-def _is_system_owner(message: Message) -> bool:
-    return bool(message.from_user and settings.is_system_owner(message.from_user.id))
+def _is_system_owner(subject) -> bool:
+    user = getattr(subject, "from_user", None)
+    return bool(user and settings.is_system_owner(user.id))
 
 
 def _back_keyboard() -> InlineKeyboardMarkup:
@@ -34,33 +35,26 @@ def _back_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-@router.message(Command("github_source_publish"))
-async def source_publish_start(message: Message, state: FSMContext) -> None:
-    """Hidden non-delegable binary bridge from Telegram to BookVoxLyra."""
-    if not _is_system_owner(message):
-        return
+def _setup_error() -> str:
     if not bool(settings.GITHUB_SOURCE_WRITE_ENABLED):
-        await state.clear()
-        await message.answer(
+        return (
             "<b>⬆️ Source ZIP → GitHub выключен</b>\n\n"
             "Чтобы включить этот закрытый системный мост, задайте "
             "<code>GITHUB_SOURCE_WRITE_ENABLED=true</code> и отдельный "
             "<code>GITHUB_SOURCE_WRITE_TOKEN</code> с Contents: Read and write "
-            "только для source-репозитория.",
-            reply_markup=_back_keyboard(),
+            "только для source-репозитория."
         )
-        return
     if not str(settings.GITHUB_SOURCE_WRITE_TOKEN or "").strip():
-        await state.clear()
-        await message.answer(
+        return (
             "<b>❌ Source-write token не настроен</b>\n\n"
             "Добавьте <code>GITHUB_SOURCE_WRITE_TOKEN</code> в секретные env. "
-            "Сам токен бот никогда не показывает.",
-            reply_markup=_back_keyboard(),
+            "Сам токен бот никогда не показывает."
         )
-        return
-    await state.set_state(GitHubSourcePublishFlow.waiting_zip)
-    await message.answer(
+    return ""
+
+
+def _instructions() -> str:
+    return (
         "<b>⬆️ Source ZIP → GitHub</b>\n\n"
         f"Репозиторий: <code>{html.escape(settings.GITHUB_IMPORT_REPOSITORY)}</code>\n"
         f"Ветка: <code>{html.escape(settings.GITHUB_IMPORT_BRANCH)}</code>\n\n"
@@ -68,9 +62,38 @@ async def source_publish_start(message: Message, state: FSMContext) -> None:
         "LICENSE.txt/SOURCES.txt, наличие реального произведения и структуру пакета. "
         "После этого пакет и переключение <code>enabled=true</code> попадут в GitHub "
         "одним атомарным commit.\n\n"
-        "Через Telegram поддерживаются ZIP до 20 МБ.",
-        reply_markup=_back_keyboard(),
+        "Через Telegram поддерживаются ZIP до 20 МБ."
     )
+
+
+@router.message(Command("github_source_publish"))
+async def source_publish_start(message: Message, state: FSMContext) -> None:
+    """Hidden non-delegable binary bridge from Telegram to BookVoxLyra."""
+    if not _is_system_owner(message):
+        return
+    error = _setup_error()
+    if error:
+        await state.clear()
+        await message.answer(error, reply_markup=_back_keyboard())
+        return
+    await state.set_state(GitHubSourcePublishFlow.waiting_zip)
+    await message.answer(_instructions(), reply_markup=_back_keyboard())
+
+
+@router.callback_query(F.data == "owner:github_source_publish")
+async def source_publish_from_system_tools(call: CallbackQuery, state: FSMContext) -> None:
+    if not _is_system_owner(call):
+        await call.answer("Недоступно", show_alert=True)
+        return
+    error = _setup_error()
+    if error:
+        await state.clear()
+        await call.message.edit_text(error, reply_markup=_back_keyboard())
+        await call.answer()
+        return
+    await state.set_state(GitHubSourcePublishFlow.waiting_zip)
+    await call.message.edit_text(_instructions(), reply_markup=_back_keyboard())
+    await call.answer()
 
 
 @router.message(GitHubSourcePublishFlow.waiting_zip, F.document)
