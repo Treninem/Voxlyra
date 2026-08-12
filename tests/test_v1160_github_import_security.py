@@ -73,3 +73,24 @@ def test_supported_content_types():
     for kind in ("book", "comics", "audiobook"):
         package = validate_manifest(manifest(content_type=kind), package_path="x", commit_sha="a" * 40)
         assert package.content_type == kind
+
+
+def test_manifest_rejects_oversized_file_inventory():
+    files = [f"pages/{index:05d}.webp" for index in range(20_001)]
+    checksums = {name: "a" * 64 for name in files}
+    with pytest.raises(GitHubImportError, match="слишком много файлов"):
+        validate_manifest(
+            manifest(files=files, checksums=checksums),
+            package_path="books/000001",
+            commit_sha="a" * 40,
+        )
+
+
+def test_manifest_rejects_empty_or_unbounded_version():
+    for version in ("", "v" * 129):
+        with pytest.raises(GitHubImportError, match="версия"):
+            validate_manifest(
+                manifest(version=version),
+                package_path="books/000001",
+                commit_sha="a" * 40,
+            )
