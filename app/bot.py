@@ -8,7 +8,17 @@ from aiogram.client.default import DefaultBotProperties
 
 from app.config import settings
 from app.db import init_db
-from app.handlers import author, legal, moderation, owner, payments, start, library_manager, github_import
+from app.handlers import (
+    author,
+    github_import,
+    github_source_publish,
+    legal,
+    library_manager,
+    moderation,
+    owner,
+    payments,
+    start,
+)
 from app.middleware import BlockedUserMiddleware, SafeTelegramEditMiddleware
 from app.services.cover_storage import restore_missing_book_covers
 from app.services.moderation_alerts import moderation_reminder_loop
@@ -47,16 +57,15 @@ def _dispatcher() -> Dispatcher:
     dp.include_router(legal.router)
     dp.include_router(start.router)
     dp.include_router(author.router)
-    # GitHub import has a separate non-delegable SYSTEM_OWNER_ID guard and is
-    # registered before the broad owner router so its callbacks stay protected.
+    # Source publishing and GitHub import are guarded by the same non-delegable
+    # SYSTEM_OWNER_ID principle and must be registered before the broad owner router.
+    dp.include_router(github_source_publish.router)
     dp.include_router(github_import.router)
     dp.include_router(owner.router)
     dp.include_router(library_manager.router)
     dp.include_router(moderation.router)
     _DISPATCHER = dp
     return dp
-
-
 
 
 async def _supervise_library_import_worker(bot: Bot) -> None:
@@ -72,6 +81,7 @@ async def _supervise_library_import_worker(bot: Bot) -> None:
             logger.exception("Library import worker crashed; restarting in %s seconds", delay)
             await asyncio.sleep(delay)
             delay = min(30, max(2, delay * 2))
+
 
 async def run_bot() -> None:
     mark_bot_starting()
