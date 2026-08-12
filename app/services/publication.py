@@ -36,7 +36,7 @@ from app.services.moderation_revisions import (
 )
 from app.services.moderation_alerts import notify_book_needs_moderation
 from app.services.notifications import new_chapter_message, notify_book_followers
-from app.services.vk_publication import post_book_to_vk_wall
+from app.services.cross_platform_publication import post_book_to_vk_wall, should_retry_vk_wall_post
 
 
 @dataclass(slots=True)
@@ -341,9 +341,10 @@ async def publish_book_and_channel(
     )
 
     # Every first publication converges here regardless of where the book was
-    # uploaded (Telegram, VK, Library Manager or GitHub). VK wall failures are
-    # audited but never roll back the already-approved book or block Telegram.
-    if not published_before:
+    # uploaded. A transient VK wall failure is retried on the next publication
+    # workflow, while historical pre-VK books with no VK audit remain untouched.
+    retry_vk = published_before and await should_retry_vk_wall_post(int(book_id))
+    if not published_before or retry_vk:
         await post_book_to_vk_wall(
             int(book_id),
             actor_user_id=actor_user_id,
