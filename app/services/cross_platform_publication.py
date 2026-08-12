@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import html
 import json
+import mimetypes
 from pathlib import Path
 
 from aiogram import Bot
@@ -18,7 +18,7 @@ def vk_book_url(book_id: int) -> str:
 
 
 def vk_votes_from_stars(stars: int) -> int:
-    """Platform presentation conversion; VK users never see Telegram Stars."""
+    """Convert the canonical catalogue price for VK presentation only."""
     stars = max(0, int(stars or 0))
     if not stars:
         return 0
@@ -59,9 +59,10 @@ async def _vk_upload_wall_cover(path: Path) -> str:
     group_id = int(settings.VK_GROUP_ID or 0)
     upload = await vk_api_call("photos.getWallUploadServer", {"group_id": group_id}, token=settings.VK_GROUP_TOKEN)
     import httpx
+    content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
     async with httpx.AsyncClient(timeout=30.0) as client:
         with path.open("rb") as fh:
-            response = await client.post(str(upload["upload_url"]), files={"photo": (path.name, fh, "image/jpeg")})
+            response = await client.post(str(upload["upload_url"]), files={"photo": (path.name, fh, content_type)})
         response.raise_for_status()
         payload = response.json()
     saved = await vk_api_call("photos.saveWallPhoto", {
@@ -74,13 +75,12 @@ async def _vk_upload_wall_cover(path: Path) -> str:
 
 
 async def post_book_to_vk_wall(book_id: int, *, actor_user_id: int | None, force: bool = False) -> str:
-    """Publish a catalogue book on the VK community wall with a VK-native link/currency."""
+    """Publish a catalogue book on the VK community wall with VK-native link/currency."""
     if not settings.VK_ENABLED or not settings.VK_GROUP_TOKEN or int(settings.VK_GROUP_ID or 0) <= 0:
         return "not_configured"
     book = await get_book(int(book_id))
     if not book or str(book["publication_status"] or "") != "published":
         return "failed"
-    # Separate idempotency from Telegram channel publication.
     from app.db import connect
     async with connect() as db:
         cur = await db.execute(
