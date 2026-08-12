@@ -12,7 +12,14 @@
     "github_bulk_failure_isolation": true,
     "github_import_retry_cleanup": true,
     "github_import_large_catalog_cap": 5000,
+    "github_manifest_file_cap": 20000,
     "github_disabled_legacy_manifests_skipped": true,
+    "github_single_inventory_bulk_discovery": true,
+    "github_public_raw_file_downloads": true,
+    "github_strict_manifest_checksums": true,
+    "github_callback_safe_package_ids": true,
+    "github_archive_disk_reserve": true,
+    "github_rate_limit_errors": true,
     "import_replacement_preserves_book_id": true,
     "bulk_graphic_import_e2e_count": 50,
     "safe_7z_page_names": true,
@@ -21,6 +28,8 @@
     "bulk_import_genres_tags_persisted": true,
     "telegram_mini_app_deep_links": true,
     "vk_wall_first_publish": true,
+    "vk_failed_wall_post_retry": true,
+    "vk_historical_post_spam_guard": true,
     "vk_native_votes_pricing": true,
     "vk_publication_checkout_price_parity": true,
     "platform_native_legal_payments": true,
@@ -30,15 +39,15 @@
   },
   "verification": {
     "repository_audited_at": "2026-08-12",
-    "latest_feature_commit": "cd6256ae4092f07910ef5913270d8e7d136093d6",
+    "latest_feature_commit": "97f2c89fd21b7c07e3d09cdd5071cd19fc70b9dc",
     "github_actions_targeted": true,
     "github_actions_full_suite": true,
-    "github_actions_run_id": 31634997314,
+    "github_actions_run_id": 31637170402,
     "live_bothost_redeploy": false,
     "live_telegram_flow": false,
     "live_vk_flow": false,
     "production_payment_flow": false,
-    "note": "Repository CI is green for the v1.16.1 contracts and the full maintained regression suite. Bulk import isolates failures per package: a broken package is rolled back and recorded while independent packages continue. Live account-dependent checks still require deployment; no production books are fabricated by QA."
+    "note": "GitHub Actions run 31637170402 is green for the v1.16.1 targeted contracts and full maintained regression suite. GitHub import now reuses task-local discovery, validates callback-safe manifests, avoids per-file Contents API calls for public packages, reserves disk for the temporary ZIP, and reports explicit rate-limit failures. VK first-publication failures are retryable without back-posting historical books that have no VK audit state. Bulk import isolates failures per package: a broken package is rolled back and recorded while independent packages continue. Live account-dependent checks still require deployment; no production books are fabricated by QA."
   },
   "name": "GitHub import and cross-platform release hardening"
 }
