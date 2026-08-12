@@ -57,6 +57,8 @@ def system_owner_tools_menu():
     kb = InlineKeyboardBuilder()
     if bool(settings.GITHUB_IMPORT_ENABLED):
         kb.button(text="📦 GitHub Import ✅", callback_data="owner:github_import")
+    if bool(settings.GITHUB_SOURCE_WRITE_ENABLED):
+        kb.button(text="⬆️ Source ZIP → GitHub ✅", callback_data="owner:github_source_publish")
     kb.button(text="🩺 Диагностика", callback_data="owner:system:diagnostics")
     kb.button(text="⬅️ Центр управления", callback_data="owner:menu")
     kb.adjust(1)
@@ -104,9 +106,11 @@ async def system_owner_tools(call):
     if not _system_owner(call):
         return await _deny(call)
     enabled = "включён" if bool(settings.GITHUB_IMPORT_ENABLED) else "выключен в env"
+    source_write = "включён" if bool(settings.GITHUB_SOURCE_WRITE_ENABLED) else "выключен в env"
     await call.message.edit_text(
         "<b>🧩 Системные инструменты</b>\n\n"
         f"GitHub Import: <b>{enabled}</b>\n"
+        f"Source ZIP → GitHub: <b>{source_write}</b>\n"
         "Раздел виден только системному владельцу. Обычные владельцы и администраторы его не видят.",
         reply_markup=system_owner_tools_menu(),
     )
@@ -334,15 +338,19 @@ async def settings_screen(call):
     if not _allowed(call):
         return await _deny(call)
     token_state = "задан" if settings.GITHUB_IMPORT_TOKEN else "не задан (для публичного репозитория допустимо)"
+    source_write_state = "включён" if bool(settings.GITHUB_SOURCE_WRITE_ENABLED) else "выключен"
+    source_token_state = "задан" if settings.GITHUB_SOURCE_WRITE_TOKEN else "не задан"
     await call.message.edit_text(
         "<b>⚙️ Настройки GitHub</b>\n\n"
         f"Репозиторий: <code>{html.escape(settings.GITHUB_IMPORT_REPOSITORY)}</code>\n"
         f"Ветка: <code>{html.escape(settings.GITHUB_IMPORT_BRANCH)}</code>\n"
         f"Корневой путь: <code>{html.escape(settings.GITHUB_IMPORT_ROOT or '/')}</code>\n"
-        f"Токен: <b>{token_state}</b>\n"
+        f"Read token: <b>{token_state}</b>\n"
+        f"Source write bridge: <b>{source_write_state}</b>\n"
+        f"Source write token: <b>{source_token_state}</b>\n"
         f"Лимит пакета: {int(settings.GITHUB_IMPORT_MAX_PACKAGE_MB)} МБ\n"
         f"Минимум свободного диска: {int(settings.GITHUB_IMPORT_MIN_FREE_DISK_MB)} МБ\n\n"
-        "Секрет токена никогда не выводится.",
+        "Секреты токенов никогда не выводятся.",
         reply_markup=github_import_menu(),
     )
     await call.answer()
