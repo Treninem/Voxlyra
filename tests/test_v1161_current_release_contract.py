@@ -107,10 +107,14 @@ def test_import_replacement_keeps_permanent_book_id_and_relationship_tables():
 
     replace_source = inspect.getsource(library_manager._replace_book_from_candidate)
     restore_source = inspect.getsource(library_manager.restore_import_replacement_backups)
+    restore_row_source = inspect.getsource(library_manager._restore_table_row)
     assert "UPDATE books" in replace_source
     assert "WHERE id=?" in replace_source
     assert "DELETE FROM books" not in replace_source
+    assert "DELETE FROM books" not in restore_source
     for protected_table in ("purchases", "reading_progress", "bookmarks", "reviews"):
         assert f"DELETE FROM {protected_table}" not in replace_source
         assert f"DELETE FROM {protected_table}" not in restore_source
-    assert "UPDATE books" in restore_source
+    assert "_restore_table_row(db, \"books\", book)" in restore_source
+    assert "UPDATE {table}" in restore_row_source
+    assert "WHERE {primary_key}=?" in restore_row_source
