@@ -16,13 +16,19 @@ import httpx
 from app.config import settings
 from app.db import connect, utc_now
 
-_PACKAGE_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+# Telegram callback_data is limited to 64 bytes. The longest owner callback
+# prefix is ``ghimp:update:`` (13 ASCII bytes), therefore package_id must fit in
+# the remaining 51 bytes. package_id itself is ASCII-only by this regex.
+_PACKAGE_RE = re.compile(r"^[A-Za-z0-9._-]{1,51}$")
 _ALLOWED_TYPES = {"book", "comics", "audiobook"}
 _TYPE_DIRS = {"book": "books", "comics": "comics", "audiobook": "audiobooks"}
 _BULK_TYPES = {"book", "comics"}
 _IMPORT_INDEX = "manifests/import_index.json"
+_MAX_DISCOVERED_PACKAGES = 5000
 _MAX_MANIFEST_FILES = 20_000
 _MAX_VERSION_LENGTH = 128
+_MAX_TITLE_LENGTH = 500
+_MAX_LANGUAGE_LENGTH = 32
 
 
 class GitHubImportError(RuntimeError):
@@ -50,11 +56,13 @@ class GitHubPackage:
     changes: tuple[str, ...] = field(default_factory=tuple)
 
 
-# During one owner bulk-import we already know the exact package objects and the
-# commit SHA they came from. Keeping them in task-local context prevents every
-# public import_package() call from rediscovering the whole repository. ContextVar
-# makes the optimisation safe for concurrent async tasks and automatically keeps
-# unrelated single-package requests isolated.
+# One owner bulk operation should resolve the GitHub inventory only once. These
+# contexts are task-local, so concurrent async requests cannot leak package
+# objects or stale inventory into each other.
+_DISCOVERY_CONTEXT: ContextVar[dict[str, Any] | None] = ContextVar(
+    "github_import_discovery_context",
+    default=None,
+)
 _RESOLVED_PACKAGES: ContextVar[dict[str, GitHubPackage] | None] = ContextVar(
     "github_import_resolved_packages",
     default=None,
@@ -91,6 +99,14 @@ def _root_path(*parts: str) -> str:
     root = str(settings.GITHUB_IMPORT_ROOT or "").strip().strip("/")
     clean = [str(PurePosixPath(p)).strip("/") for p in parts if str(p).strip("/")]
     return "/".join(([root] if root else []) + clean)
+
+
+def _safe_repo_path(value: object, *, label: str) -> str:
+    raw = str(value or "").strip().strip("/")
+    path = PurePosixPath(raw)
+    if not raw or path.is_absolute() or ".." in path.parts or str(path) in {".", ""}:
+        raise GitHubImportError(f"Небезопасный {label}")
+    return str(path)
 
 
 def _manifest_disabled(data: object) -> bool:
@@ -153,19 +169,33 @@ def validate_manifest(data: dict[str, Any], *, package_path: str, commit_sha: st
     missing = [name for name in required if name not in data]
     if missing:
         raise GitHubImportError("Повреждён manifest: отсутствует " + ", ".join(missing))
+
     package_id = str(data["package_id"]).strip()
     kind = str(data["content_type"]).strip().lower()
+    title = str(data["title"]).strip()
+    language = str(data["language"]).strip()
     version = str(data["version"]).strip()
+    created_at = str(data["created_at"]).strip()
+
     if not _PACKAGE_RE.fullmatch(package_id):
         raise GitHubImportError("Некорректный package_id")
     if kind not in _ALLOWED_TYPES:
         raise GitHubImportError("Неподдерживаемый content_type")
+    if not title or len(title) > _MAX_TITLE_LENGTH:
+        raise GitHubImportError("Некорректное название пакета")
+    if not language or len(language) > _MAX_LANGUAGE_LENGTH:
+        raise GitHubImportError("Некорректный язык пакета")
     if not version or len(version) > _MAX_VERSION_LENGTH:
         raise GitHubImportError("Некорректная версия пакета")
+    if not created_at or len(created_at) > 128:
+        raise GitHubImportError("Некорректная дата пакета")
     if not isinstance(data["files"], (list, tuple)):
         raise GitHubImportError("Manifest должен содержать список files")
+    if not isinstance(data["checksums"], dict):
+        raise GitHubImportError("Manifest должен содержать объект checksums")
     if len(data["files"]) > _MAX_MANIFEST_FILES:
         raise GitHubImportError("Manifest содержит слишком много файлов")
+
     files = tuple(str(PurePosixPath(str(item))) for item in data["files"])
     if not files or len(files) != len(set(files)):
         raise GitHubImportError("Manifest должен содержать уникальный непустой список files")
@@ -173,20 +203,24 @@ def validate_manifest(data: dict[str, Any], *, package_path: str, commit_sha: st
         path = PurePosixPath(name)
         if path.is_absolute() or ".." in path.parts or str(path) in {".", ""}:
             raise GitHubImportError("Небезопасный путь в manifest")
+
     checksums = {
         str(PurePosixPath(str(key))): str(value).lower().strip()
-        for key, value in dict(data["checksums"]).items()
+        for key, value in data["checksums"].items()
     }
+    if set(checksums) != set(files):
+        raise GitHubImportError("checksums должен точно соответствовать files")
     for name in files:
         if not re.fullmatch(r"[0-9a-f]{64}", checksums.get(name, "")):
             raise GitHubImportError(f"Нет корректного SHA-256 для {name}")
+
     return GitHubPackage(
         package_id=package_id,
         content_type=kind,
-        title=str(data["title"]).strip(),
-        language=str(data["language"]).strip(),
+        title=title,
+        language=language,
         version=version,
-        created_at=str(data["created_at"]).strip(),
+        created_at=created_at,
         files=files,
         checksums=checksums,
         path=package_path,
@@ -224,6 +258,18 @@ async def ensure_github_import_schema() -> None:
         await db.commit()
 
 
+def _merge_history(package: GitHubPackage, previous) -> GitHubPackage:
+    if not previous:
+        return package
+    package.current_version = str(previous["version"])
+    same_version = package.current_version == package.version
+    same_commit = str(previous["commit_sha"] or "") == package.commit_sha
+    package.status = "imported" if same_version and same_commit else "update"
+    if package.status == "update":
+        package.changes = _diff_manifest(previous["manifest_json"], package)
+    return package
+
+
 async def _last_success(package_id: str):
     await ensure_github_import_schema()
     async with connect() as db:
@@ -235,16 +281,22 @@ async def _last_success(package_id: str):
 
 
 async def _apply_history(package: GitHubPackage) -> GitHubPackage:
-    previous = await _last_success(package.package_id)
-    if not previous:
-        return package
-    package.current_version = str(previous["version"])
-    same_version = package.current_version == package.version
-    same_commit = str(previous["commit_sha"] or "") == package.commit_sha
-    package.status = "imported" if same_version and same_commit else "update"
-    if package.status == "update":
-        package.changes = _diff_manifest(previous["manifest_json"], package)
-    return package
+    return _merge_history(package, await _last_success(package.package_id))
+
+
+async def _apply_history_many(packages: list[GitHubPackage]) -> list[GitHubPackage]:
+    if not packages:
+        return []
+    await ensure_github_import_schema()
+    result: list[GitHubPackage] = []
+    async with connect() as db:
+        for package in packages:
+            cur = await db.execute(
+                "SELECT * FROM github_import_history WHERE package_id=? AND status='success' ORDER BY id DESC LIMIT 1",
+                (package.package_id,),
+            )
+            result.append(_merge_history(package, await cur.fetchone()))
+    return result
 
 
 async def import_history(identity_id: int, *, status: str = "", limit: int = 30) -> list[dict[str, Any]]:
@@ -262,8 +314,19 @@ async def import_history(identity_id: int, *, status: str = "", limit: int = 30)
         return [dict(row) for row in await cur.fetchall()]
 
 
+def _raise_rate_limit(response) -> None:
+    status = int(getattr(response, "status_code", 0) or 0)
+    headers = getattr(response, "headers", {}) or {}
+    remaining = str(headers.get("X-RateLimit-Remaining", ""))
+    if status == 429 or (status == 403 and remaining == "0"):
+        reset = str(headers.get("X-RateLimit-Reset", "")).strip()
+        suffix = f" (reset {reset})" if reset else ""
+        raise GitHubImportError("Лимит запросов GitHub исчерпан" + suffix)
+
+
 async def _get_json(client, url: str, params=None):
     response = await client.get(url, headers=_headers(), params=params)
+    _raise_rate_limit(response)
     if response.status_code == 404:
         return None
     response.raise_for_status()
@@ -276,6 +339,7 @@ async def _raw_json(client: httpx.AsyncClient, owner: str, repo: str, ref: str, 
         f"{quote(ref, safe='')}/{quote(path, safe='/')}"
     )
     response = await client.get(raw_url, headers=_headers())
+    _raise_rate_limit(response)
     if response.status_code == 404:
         return None
     if response.status_code >= 400:
@@ -320,9 +384,11 @@ async def _discover_from_index(
     entries = index.get("packages")
     if not isinstance(entries, list):
         raise GitHubImportError("Повреждён manifests/import_index.json: packages должен быть списком")
-    if len(entries) > 5000:
+    if len(entries) > _MAX_DISCOVERED_PACKAGES:
         raise GitHubImportError("Import index превышает защитный предел 5000 пакетов")
+
     found: list[GitHubPackage] = []
+    seen_ids: set[str] = set()
     for entry in entries:
         if not isinstance(entry, dict) or entry.get("enabled") is False:
             continue
@@ -330,10 +396,11 @@ async def _discover_from_index(
         manifest_path = str(entry.get("manifest_path") or "").strip().strip("/")
         if not package_path and manifest_path.endswith("/manifest.json"):
             package_path = manifest_path[: -len("/manifest.json")]
-        if not package_path:
-            raise GitHubImportError("Повреждён import index: у включённого пакета отсутствует path")
+        package_path = _safe_repo_path(package_path, label="path пакета")
         if not manifest_path:
             manifest_path = f"{package_path}/manifest.json"
+        manifest_path = _safe_repo_path(manifest_path, label="manifest_path")
+
         embedded = entry.get("manifest")
         data = embedded if isinstance(embedded, dict) else await _raw_json(
             client,
@@ -355,6 +422,9 @@ async def _discover_from_index(
         normalized = str(PurePosixPath(package_path))
         if not normalized.startswith(f"{expected_folder}/"):
             raise GitHubImportError(f"Тип пакета {package.package_id} не соответствует каталогу")
+        if package.package_id in seen_ids:
+            raise GitHubImportError(f"Дублирующий package_id в import index: {package.package_id}")
+        seen_ids.add(package.package_id)
         found.append(package)
     return found
 
@@ -374,6 +444,7 @@ async def _discover_legacy_layout(
     per package. Repositories with 1000+ packages should maintain import_index.
     """
     found: list[GitHubPackage] = []
+    seen_ids: set[str] = set()
     for kind, folder in _TYPE_DIRS.items():
         entries = await _get_json(
             client,
@@ -387,25 +458,25 @@ async def _discover_legacy_layout(
                 continue
             package_path = str(entry["path"])
             data = await _raw_json(client, owner, repo, commit_sha, f"{package_path}/manifest.json")
-            if data is None:
-                continue
-            if _manifest_disabled(data):
+            if data is None or _manifest_disabled(data):
                 continue
             package = validate_manifest(data, package_path=package_path, commit_sha=commit_sha)
             if package.content_type != kind:
                 raise GitHubImportError(f"Тип пакета {package.package_id} не соответствует каталогу")
+            if package.package_id in seen_ids:
+                raise GitHubImportError(f"Дублирующий package_id: {package.package_id}")
+            seen_ids.add(package.package_id)
             found.append(package)
-            if len(found) > 5000:
+            if len(found) > _MAX_DISCOVERED_PACKAGES:
                 raise GitHubImportError("Legacy discovery превышает защитный предел 5000 пакетов")
     return found
 
 
-async def discover_packages(identity_id: int, *, page: int = 1, page_size: int | None = None) -> dict[str, Any]:
+async def _load_inventory(identity_id: int) -> dict[str, Any]:
     require_system_owner(identity_id)
     status = await repository_status(identity_id)
     owner, repo = _repo()
     branch, commit_sha = status["branch"], status["commit_sha"]
-    size = max(1, min(100, int(page_size or settings.GITHUB_IMPORT_PAGE_SIZE or 50)))
     async with httpx.AsyncClient(timeout=20.0, follow_redirects=False) as client:
         indexed = await _discover_from_index(
             client,
@@ -421,18 +492,44 @@ async def discover_packages(identity_id: int, *, page: int = 1, page_size: int |
             commit_sha=commit_sha,
         )
     found.sort(key=lambda item: (item.content_type, item.package_id))
+    return {
+        "items": found,
+        "commit_sha": commit_sha,
+        "discovery": "index" if indexed is not None else "legacy",
+    }
+
+
+async def _inventory(identity_id: int) -> dict[str, Any]:
+    context = _DISCOVERY_CONTEXT.get()
+    identity = int(identity_id)
+    if context is not None:
+        if context.get("identity_id") not in {None, identity}:
+            raise GitHubImportForbidden("Контекст GitHub-импорта принадлежит другому пользователю")
+        cached = context.get("inventory")
+        if isinstance(cached, dict):
+            return cached
+    inventory = await _load_inventory(identity)
+    if context is not None:
+        context["identity_id"] = identity
+        context["inventory"] = inventory
+    return inventory
+
+
+async def discover_packages(identity_id: int, *, page: int = 1, page_size: int | None = None) -> dict[str, Any]:
+    require_system_owner(identity_id)
+    inventory = await _inventory(identity_id)
+    found: list[GitHubPackage] = inventory["items"]
+    size = max(1, min(100, int(page_size or settings.GITHUB_IMPORT_PAGE_SIZE or 50)))
     current_page = max(1, int(page))
     start = max(0, (current_page - 1) * size)
-    page_items: list[GitHubPackage] = []
-    for package in found[start : start + size]:
-        page_items.append(await _apply_history(package))
+    page_items = await _apply_history_many(found[start : start + size])
     return {
         "items": page_items,
         "page": current_page,
         "page_size": size,
         "total": len(found),
-        "commit_sha": commit_sha,
-        "discovery": "index" if indexed is not None else "legacy",
+        "commit_sha": inventory["commit_sha"],
+        "discovery": inventory["discovery"],
     }
 
 
@@ -446,30 +543,43 @@ async def find_package(identity_id: int, package_id: str) -> GitHubPackage:
     if resolved is not None and wanted in resolved:
         return resolved[wanted]
 
-    # A single-package lookup must not page through discover_packages(), because
-    # every page would otherwise redownload the same repository inventory. Load
-    # the inventory once, locate the package, then apply only its local history.
-    status = await repository_status(identity_id)
-    owner, repo = _repo()
-    branch, commit_sha = status["branch"], status["commit_sha"]
-    async with httpx.AsyncClient(timeout=20.0, follow_redirects=False) as client:
-        indexed = await _discover_from_index(
-            client,
-            owner=owner,
-            repo=repo,
-            commit_sha=commit_sha,
-        )
-        found = indexed if indexed is not None else await _discover_legacy_layout(
-            client,
-            owner=owner,
-            repo=repo,
-            branch=branch,
-            commit_sha=commit_sha,
-        )
-    for package in found:
+    inventory = await _inventory(identity_id)
+    for package in inventory["items"]:
         if package.package_id == wanted:
             return await _apply_history(package)
     raise GitHubImportError("Пакет не найден")
+
+
+def _raw_file_url(owner: str, repo: str, commit_sha: str, path: str) -> str:
+    return (
+        f"https://raw.githubusercontent.com/{quote(owner)}/{quote(repo)}/"
+        f"{quote(commit_sha, safe='')}/{quote(path, safe='/')}"
+    )
+
+
+async def _package_file_url(
+    client: httpx.AsyncClient,
+    *,
+    owner: str,
+    repo: str,
+    package: GitHubPackage,
+    name: str,
+) -> str:
+    full_path = f"{package.path}/{name}"
+    # Public source repositories need no per-file Contents API metadata call.
+    # This avoids exhausting the unauthenticated GitHub API limit on comics with
+    # hundreds/thousands of pages. When a token is configured we keep the API
+    # metadata path for compatibility with private repositories.
+    if not str(settings.GITHUB_IMPORT_TOKEN or "").strip():
+        return _raw_file_url(owner, repo, package.commit_sha, full_path)
+    meta = await _get_json(
+        client,
+        f"https://api.github.com/repos/{quote(owner)}/{quote(repo)}/contents/{quote(full_path, safe='/')}",
+        {"ref": package.commit_sha},
+    )
+    if not meta or meta.get("type") != "file" or not meta.get("download_url"):
+        raise GitHubImportError(f"Отсутствует файл: {name}")
+    return str(meta["download_url"])
 
 
 async def download_package(identity_id: int, package: GitHubPackage) -> Path:
@@ -487,17 +597,20 @@ async def download_package(identity_id: int, package: GitHubPackage) -> Path:
     try:
         async with httpx.AsyncClient(timeout=None, follow_redirects=False) as client:
             for name in package.files:
-                meta = await _get_json(
+                download_url = await _package_file_url(
                     client,
-                    f"https://api.github.com/repos/{quote(owner)}/{quote(repo)}/contents/{quote(package.path + '/' + name, safe='/')}",
-                    {"ref": package.commit_sha},
+                    owner=owner,
+                    repo=repo,
+                    package=package,
+                    name=name,
                 )
-                if not meta or meta.get("type") != "file" or not meta.get("download_url"):
-                    raise GitHubImportError(f"Отсутствует файл: {name}")
                 destination = target.joinpath(*PurePosixPath(name).parts)
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 digest = hashlib.sha256()
-                async with client.stream("GET", meta["download_url"], headers=_headers()) as response:
+                async with client.stream("GET", download_url, headers=_headers()) as response:
+                    _raise_rate_limit(response)
+                    if response.status_code == 404:
+                        raise GitHubImportError(f"Отсутствует файл: {name}")
                     response.raise_for_status()
                     with destination.open("wb") as output:
                         async for chunk in response.aiter_bytes(1024 * 1024):
@@ -570,6 +683,14 @@ def _build_import_zip(package: GitHubPackage, source: Path) -> Path:
     return archive
 
 
+def _require_archive_space(source: Path, *, bytes_total: int, file_count: int) -> None:
+    free = shutil.disk_usage(source.parent).free
+    reserve = max(0, int(settings.GITHUB_IMPORT_MIN_FREE_DISK_MB)) * 1024 * 1024
+    zip_overhead = max(16 * 1024 * 1024, max(1, int(file_count)) * 1024)
+    if free < int(bytes_total) + reserve + zip_overhead:
+        raise GitHubImportError("Недостаточно свободного места для создания временного ZIP")
+
+
 async def import_package(identity_id: int, package_id: str, *, allow_update: bool = False) -> dict[str, Any]:
     require_system_owner(identity_id)
     package = await find_package(identity_id, package_id)
@@ -584,6 +705,7 @@ async def import_package(identity_id: int, package_id: str, *, allow_update: boo
     try:
         work = await download_package(identity_id, package)
         bytes_total = sum(path.stat().st_size for path in work.rglob("*") if path.is_file())
+        _require_archive_space(work, bytes_total=bytes_total, file_count=len(package.files))
         archive = _build_import_zip(package, work)
         from app.services.library_manager import (
             finalize_import_replacement_backups,
@@ -626,53 +748,73 @@ async def import_package(identity_id: int, package_id: str, *, allow_update: boo
 
 async def import_all_new(identity_id: int, *, max_packages: int = 1000) -> dict[str, Any]:
     require_system_owner(identity_id)
+    limit = max(0, min(_MAX_DISCOVERED_PACKAGES, int(max_packages)))
+    if limit == 0:
+        return {
+            "total": 0,
+            "success": 0,
+            "failed": 0,
+            "already": 0,
+            "updates": [],
+            "audio_skipped": [],
+            "errors": [],
+        }
+
     page = 1
     selected: list[str] = []
     updates: list[str] = []
     audio: list[str] = []
     resolved: dict[str, GitHubPackage] = {}
-    while len(selected) < max_packages:
-        result = await discover_packages(identity_id, page=page, page_size=100)
-        for package in result["items"]:
-            resolved[package.package_id] = package
-            if package.content_type not in _BULK_TYPES:
-                audio.append(package.package_id)
-            elif package.status == "new":
-                selected.append(package.package_id)
-            elif package.status == "update":
-                updates.append(package.package_id)
-        if page * result["page_size"] >= result["total"]:
-            break
-        page += 1
-    summary = {
-        "total": len(selected),
-        "success": 0,
-        "failed": 0,
-        "already": 0,
-        "updates": updates,
-        "audio_skipped": audio,
-        "errors": [],
-    }
-    context_token = _RESOLVED_PACKAGES.set(resolved)
+    discovery_token = _DISCOVERY_CONTEXT.set({})
     try:
-        for package_id in selected[:max_packages]:
-            try:
-                outcome = await import_package(identity_id, package_id)
-                if outcome["status"] == "success":
-                    summary["success"] += 1
-                else:
-                    summary["already"] += 1
-            except Exception as exc:
-                summary["failed"] += 1
-                summary["errors"].append({"package_id": package_id, "error": str(exc)[:500]})
+        while len(selected) < limit:
+            result = await discover_packages(identity_id, page=page, page_size=100)
+            for package in result["items"]:
+                resolved[package.package_id] = package
+                if package.content_type not in _BULK_TYPES:
+                    audio.append(package.package_id)
+                elif package.status == "new" and len(selected) < limit:
+                    selected.append(package.package_id)
+                elif package.status == "update":
+                    updates.append(package.package_id)
+            if page * result["page_size"] >= result["total"]:
+                break
+            page += 1
+
+        summary = {
+            "total": len(selected),
+            "success": 0,
+            "failed": 0,
+            "already": 0,
+            "updates": updates,
+            "audio_skipped": audio,
+            "errors": [],
+        }
+        resolved_token = _RESOLVED_PACKAGES.set(resolved)
+        try:
+            for package_id in selected:
+                try:
+                    outcome = await import_package(identity_id, package_id)
+                    if outcome["status"] == "success":
+                        summary["success"] += 1
+                    else:
+                        summary["already"] += 1
+                except Exception as exc:
+                    summary["failed"] += 1
+                    summary["errors"].append({"package_id": package_id, "error": str(exc)[:500]})
+        finally:
+            _RESOLVED_PACKAGES.reset(resolved_token)
+        return summary
     finally:
-        _RESOLVED_PACKAGES.reset(context_token)
-    return summary
+        _DISCOVERY_CONTEXT.reset(discovery_token)
 
 
 async def retry_failed(identity_id: int, *, max_packages: int = 100) -> dict[str, Any]:
     require_system_owner(identity_id)
-    rows = await import_history(identity_id, status="failed", limit=max_packages)
+    limit = max(0, min(100, int(max_packages)))
+    if limit == 0:
+        return {"total": 0, "success": 0, "failed": 0, "errors": []}
+    rows = await import_history(identity_id, status="failed", limit=limit)
     seen: set[str] = set()
     package_ids: list[str] = []
     for row in rows:
@@ -684,13 +826,18 @@ async def retry_failed(identity_id: int, *, max_packages: int = 100) -> dict[str
         if latest and str(latest["created_at"]) >= str(row["created_at"]):
             continue
         package_ids.append(package_id)
+
     summary = {"total": len(package_ids), "success": 0, "failed": 0, "errors": []}
-    for package_id in package_ids:
-        try:
-            outcome = await import_package(identity_id, package_id)
-            if outcome["status"] in {"success", "already_imported"}:
-                summary["success"] += 1
-        except Exception as exc:
-            summary["failed"] += 1
-            summary["errors"].append({"package_id": package_id, "error": str(exc)[:500]})
-    return summary
+    discovery_token = _DISCOVERY_CONTEXT.set({})
+    try:
+        for package_id in package_ids:
+            try:
+                outcome = await import_package(identity_id, package_id)
+                if outcome["status"] in {"success", "already_imported"}:
+                    summary["success"] += 1
+            except Exception as exc:
+                summary["failed"] += 1
+                summary["errors"].append({"package_id": package_id, "error": str(exc)[:500]})
+        return summary
+    finally:
+        _DISCOVERY_CONTEXT.reset(discovery_token)
