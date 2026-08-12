@@ -38,6 +38,7 @@ jobs:
           tests/test_v1161_github_import_hardening.py
           tests/test_v1161_github_import_handler.py
           tests/test_v1161_github_import_freshness.py
+          tests/test_v1161_github_source_publish.py
           tests/test_v1161_vk_publication_compat.py
           tests/test_v1161_current_release_contract.py
       - name: Full maintained regression suite
