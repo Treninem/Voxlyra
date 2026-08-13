@@ -11,6 +11,7 @@ from typing import Any
 from app.config import settings
 from app.db import connect
 from app.services.chunked_upload import UPLOAD_ROOT, active_upload_count, cleanup_stale_uploads
+from app.services.github_source_upload import cleanup_stale_github_source_uploads
 from app.services.library_manager import DEFAULT_STORAGE_ROOT, cleanup_stale_import_work
 from app.services.reader_tts import cleanup_tts_cache
 from app.services.runtime_state import bot_runtime_snapshot
@@ -149,6 +150,7 @@ async def runtime_readiness() -> dict[str, Any]:
 async def runtime_maintenance_once() -> dict[str, int]:
     """Bounded cleanup/checkpoint pass suitable for periodic execution."""
     stale_uploads = await asyncio.to_thread(cleanup_stale_uploads)
+    stale_source_uploads = await asyncio.to_thread(cleanup_stale_github_source_uploads)
     stale_import_work = await asyncio.to_thread(cleanup_stale_import_work)
     await asyncio.to_thread(cleanup_tts_cache)
     try:
@@ -160,6 +162,7 @@ async def runtime_maintenance_once() -> dict[str, int]:
         logger.warning("SQLite maintenance pass failed: %s", exc)
     return {
         "stale_uploads_removed": int(stale_uploads),
+        "stale_source_uploads_removed": int(stale_source_uploads),
         "stale_import_work_removed": int(stale_import_work),
     }
 
@@ -171,7 +174,7 @@ async def runtime_maintenance_loop(interval_seconds: int = 30 * 60) -> None:
         try:
             result = await runtime_maintenance_once()
             report = await runtime_performance_report(deep_check=False)
-            if result["stale_uploads_removed"] or result["stale_import_work_removed"]:
+            if any(result.values()):
                 logger.info("Runtime maintenance cleanup: %s", result)
             if not report.get("ok"):
                 logger.warning("Runtime readiness degraded: database=%s disk=%s", report.get("database"), report.get("disk"))
