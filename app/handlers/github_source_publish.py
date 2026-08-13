@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import uuid
 from pathlib import Path
+from urllib.parse import quote
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -12,6 +13,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 
 from app.config import settings
 from app.services.github_source_publish import GitHubSourcePublishError, publish_source_package_zip
+from app.services.github_source_upload import GitHubSourceUploadError, create_github_source_upload_token
 
 router = Router()
 
@@ -27,12 +29,24 @@ def _is_system_owner(subject) -> bool:
     return bool(user and settings.is_system_owner(user.id))
 
 
-def _back_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Системные инструменты", callback_data="owner:system")]
-        ]
-    )
+def _direct_upload_url(*, telegram_id: int, chat_id: int) -> str:
+    base = str(settings.WEBAPP_URL or "").strip().rstrip("/")
+    if not base:
+        return ""
+    try:
+        token = create_github_source_upload_token(telegram_id=telegram_id, chat_id=chat_id)
+    except GitHubSourceUploadError:
+        return ""
+    return f"{base}/github-source-upload?token={quote(token, safe='')}"
+
+
+def _source_keyboard(*, telegram_id: int, chat_id: int) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    direct_url = _direct_upload_url(telegram_id=telegram_id, chat_id=chat_id)
+    if direct_url:
+        rows.append([InlineKeyboardButton(text="🌐 Загрузить ZIP напрямую", url=direct_url)])
+    rows.append([InlineKeyboardButton(text="⬅️ Системные инструменты", callback_data="owner:system")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _setup_error() -> str:
@@ -54,30 +68,41 @@ def _setup_error() -> str:
 
 
 def _instructions() -> str:
+    direct = bool(str(settings.WEBAPP_URL or "").strip())
     return (
         "<b>⬆️ Source ZIP → GitHub</b>\n\n"
         f"Репозиторий: <code>{html.escape(settings.GITHUB_IMPORT_REPOSITORY)}</code>\n"
         f"Ветка: <code>{html.escape(settings.GITHUB_IMPORT_BRANCH)}</code>\n\n"
-        "Отправьте один готовый source ZIP. Бот проверит manifest, SHA-256, "
-        "LICENSE.txt/SOURCES.txt, наличие реального произведения и структуру пакета. "
-        "После этого пакет и переключение <code>enabled=true</code> попадут в GitHub "
-        "одним атомарным commit.\n\n"
-        "Через Telegram поддерживаются ZIP до 20 МБ."
+        "Бот проверяет manifest, SHA-256, LICENSE.txt/SOURCES.txt, наличие реального "
+        "произведения и структуру пакета. Пакет и <code>enabled=true</code> появляются "
+        "в GitHub одним атомарным commit.\n\n"
+        "📎 ZIP до 20 МБ можно отправить сообщением прямо сюда.\n"
+        + (
+            f"🌐 Для ZIP до {int(settings.GITHUB_SOURCE_WRITE_MAX_PACKAGE_MB)} МБ используйте кнопку прямой загрузки — лимит Telegram 20 МБ на неё не действует."
+            if direct
+            else "🌐 Прямая загрузка станет доступна после настройки WEBAPP_URL."
+        )
     )
 
 
 @router.message(Command("github_source_publish"))
 async def source_publish_start(message: Message, state: FSMContext) -> None:
-    """Hidden non-delegable binary bridge from Telegram to BookVoxLyra."""
+    """Hidden non-delegable binary bridge from Telegram/web to BookVoxLyra."""
     if not _is_system_owner(message):
         return
     error = _setup_error()
     if error:
         await state.clear()
-        await message.answer(error, reply_markup=_back_keyboard())
+        await message.answer(
+            error,
+            reply_markup=_source_keyboard(telegram_id=message.from_user.id, chat_id=message.chat.id),
+        )
         return
     await state.set_state(GitHubSourcePublishFlow.waiting_zip)
-    await message.answer(_instructions(), reply_markup=_back_keyboard())
+    await message.answer(
+        _instructions(),
+        reply_markup=_source_keyboard(telegram_id=message.from_user.id, chat_id=message.chat.id),
+    )
 
 
 @router.callback_query(F.data == "owner:github_source_publish")
@@ -86,13 +111,14 @@ async def source_publish_from_system_tools(call: CallbackQuery, state: FSMContex
         await call.answer("Недоступно", show_alert=True)
         return
     error = _setup_error()
+    markup = _source_keyboard(telegram_id=call.from_user.id, chat_id=call.message.chat.id)
     if error:
         await state.clear()
-        await call.message.edit_text(error, reply_markup=_back_keyboard())
+        await call.message.edit_text(error, reply_markup=markup)
         await call.answer()
         return
     await state.set_state(GitHubSourcePublishFlow.waiting_zip)
-    await call.message.edit_text(_instructions(), reply_markup=_back_keyboard())
+    await call.message.edit_text(_instructions(), reply_markup=markup)
     await call.answer()
 
 
@@ -101,10 +127,11 @@ async def source_publish_receive(message: Message, state: FSMContext) -> None:
     if not _is_system_owner(message):
         await state.clear()
         return
+    markup = _source_keyboard(telegram_id=message.from_user.id, chat_id=message.chat.id)
     document = message.document
     filename = str(document.file_name or "source.zip")
     if not filename.lower().endswith(".zip"):
-        await message.answer("Нужен ZIP-файл source-ready пакета.", reply_markup=_back_keyboard())
+        await message.answer("Нужен ZIP-файл source-ready пакета.", reply_markup=markup)
         return
     file_size = int(document.file_size or 0)
     configured_limit = max(1, int(settings.GITHUB_SOURCE_WRITE_MAX_PACKAGE_MB)) * 1024 * 1024
@@ -112,24 +139,21 @@ async def source_publish_receive(message: Message, state: FSMContext) -> None:
         await state.clear()
         await message.answer(
             f"ZIP превышает source-write лимит {int(settings.GITHUB_SOURCE_WRITE_MAX_PACKAGE_MB)} МБ.",
-            reply_markup=_back_keyboard(),
+            reply_markup=markup,
         )
         return
     if file_size > TELEGRAM_CLOUD_DOWNLOAD_LIMIT_BYTES:
-        await state.clear()
         await message.answer(
-            "Этот ZIP больше 20 МБ и Telegram Bot API не отдаст его боту напрямую. "
-            "Пакет не изменён и не включён. Для больших source-пакетов нужен прямой upload bridge.",
-            reply_markup=_back_keyboard(),
+            "Этот ZIP больше 20 МБ. Telegram Bot API не отдаст его боту напрямую, "
+            "поэтому откройте защищённую прямую загрузку кнопкой ниже. Пакет пока не изменён.",
+            reply_markup=markup,
         )
         return
 
     temp_root = Path(str(settings.GITHUB_IMPORT_TEMP_ROOT or "storage/github_import")) / "source_uploads"
     temp_root.mkdir(parents=True, exist_ok=True)
     temp_path = temp_root / f"{uuid.uuid4().hex}.zip"
-    progress = await message.answer(
-        "<b>⏳ Проверяю source ZIP и готовлю атомарный GitHub commit…</b>"
-    )
+    progress = await message.answer("<b>⏳ Проверяю source ZIP и готовлю атомарный GitHub commit…</b>")
     try:
         await message.bot.download(document, destination=temp_path)
         result = await publish_source_package_zip(message.from_user.id, temp_path)
@@ -142,8 +166,8 @@ async def source_publish_receive(message: Message, state: FSMContext) -> None:
             f"Ветка: <code>{html.escape(result['branch'])}</code>\n"
             f"Commit: <code>{html.escape(result['commit_sha'][:12])}</code>\n"
             "Import index: <b>enabled=true</b>\n\n"
-            "Теперь пакет может быть обнаружен обычным owner-only GitHub Import.",
-            reply_markup=_back_keyboard(),
+            "Теперь пакет обнаруживается обычным owner-only GitHub Import.",
+            reply_markup=markup,
         )
     except GitHubSourcePublishError as exc:
         await state.clear()
@@ -151,7 +175,7 @@ async def source_publish_receive(message: Message, state: FSMContext) -> None:
             "<b>❌ Source-пакет не опубликован</b>\n\n"
             f"{html.escape(str(exc)[:1500])}\n\n"
             "Ветка и import index не переключались на частично загруженный пакет.",
-            reply_markup=_back_keyboard(),
+            reply_markup=markup,
         )
     except Exception as exc:
         await state.clear()
@@ -160,7 +184,7 @@ async def source_publish_receive(message: Message, state: FSMContext) -> None:
         await progress.edit_text(
             "<b>❌ Неожиданная ошибка source-публикации</b>\n\n"
             f"{html.escape(safe[:1200])}",
-            reply_markup=_back_keyboard(),
+            reply_markup=markup,
         )
     finally:
         temp_path.unlink(missing_ok=True)
@@ -169,4 +193,7 @@ async def source_publish_receive(message: Message, state: FSMContext) -> None:
 @router.message(GitHubSourcePublishFlow.waiting_zip)
 async def source_publish_non_document(message: Message) -> None:
     if _is_system_owner(message):
-        await message.answer("Отправьте ZIP-файл source-ready пакета.", reply_markup=_back_keyboard())
+        await message.answer(
+            "Отправьте source-ready ZIP или используйте прямую загрузку.",
+            reply_markup=_source_keyboard(telegram_id=message.from_user.id, chat_id=message.chat.id),
+        )
