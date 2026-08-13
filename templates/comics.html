@@ -28,7 +28,7 @@
   <button type="button" class="button-link secondary catalog-load-more" id="catalogLoadMore"{% if not catalog_has_more %} hidden{% endif %}>Показать ещё</button>
 </div>
 {% else %}
-{{ empty_state('no-books', 'Графических произведений пока нет', 'Раздел уже работает. Первый автор может добавить комикс, мангу, манхву, вебтун или графический роман.', '/author?new=graphic', 'Добавить графическое произведение', heading='h2', extra_class='comics-empty-state') }}
+{{ empty_state('no-books', 'Опубликованных графических произведений пока нет', 'Черновики и произведения на проверке здесь не показываются. Автор может добавить комикс, мангу, манхву, вебтун или графический роман, а владелец — проверить импорт в управлении библиотекой.', '/author?new=graphic', 'Добавить графическое произведение', heading='h2', extra_class='comics-empty-state') }}
 {% endif %}
 <section class="panel-card comics-author-guide">
   <div class="section-title slim"><span class="eyebrow">Авторам</span><h2>Как добавить</h2></div>

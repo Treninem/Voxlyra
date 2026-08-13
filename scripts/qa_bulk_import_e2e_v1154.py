@@ -60,7 +60,10 @@ async def main() -> None:
             books = int((await (await db.execute("SELECT COUNT(*) FROM books WHERE publication_status='draft'")).fetchone())[0])
             chapters = int((await (await db.execute("SELECT COUNT(*) FROM graphic_chapters WHERE status='draft'")).fetchone())[0])
             pages = int((await (await db.execute("SELECT COUNT(*) FROM graphic_pages")).fetchone())[0])
-        assert (books, chapters, pages) == (50, 50, 50)
+            genres = int((await (await db.execute(
+                "SELECT COUNT(*) FROM book_option_values WHERE option_group='genres' AND option_label='QA'"
+            )).fetchone())[0])
+        assert (books, chapters, pages, genres) == (50, 50, 50, 50)
         rollback = await rollback_batch_drafts(result.batch_id)
         assert rollback["books"] == 50 and rollback["chapters"] == 50
         print("OK: 50 end-to-end graphic works, routing, pages and rollback")
