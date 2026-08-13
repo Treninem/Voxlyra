@@ -112,7 +112,7 @@ _LEGACY_CONTRACT_TESTS = {
 
 def pytest_collection_modifyitems(items):
     marker = pytest.mark.xfail(
-        reason="legacy release snapshot superseded by maintained v1.16.1 contracts",
+        reason="legacy release snapshot superseded by maintained v1.16.2 contracts",
         strict=False,
     )
     for item in items:
