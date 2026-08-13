@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#080a16">
+  <title>Source ZIP → GitHub · {{ project_name }}</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    :root{color-scheme:dark;font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+    *{box-sizing:border-box}body{margin:0;min-height:100vh;color:#f7f7ff;background:radial-gradient(circle at 18% 0,#262968 0,transparent 38%),radial-gradient(circle at 100% 45%,#351d5e 0,transparent 37%),#070913}
+    main{width:min(680px,100%);margin:auto;padding:max(28px,env(safe-area-inset-top)) 18px max(36px,env(safe-area-inset-bottom))}
+    .card{padding:24px;border:1px solid #ffffff1c;border-radius:26px;background:linear-gradient(145deg,#1b1e43f5,#0d0f24f7);box-shadow:0 24px 70px #0007}
+    .mark{display:grid;place-items:center;width:60px;height:60px;border-radius:19px;font-size:31px;background:linear-gradient(145deg,#7c3aed,#4338ca);box-shadow:0 14px 34px #6347c85c}
+    h1{margin:18px 0 8px;font-size:27px;line-height:1.15}.lead,.note{color:#bdc0d8;line-height:1.55}.repo{margin:18px 0;padding:13px 15px;border-radius:15px;background:#ffffff0d;color:#d8daf0;font-size:14px;overflow-wrap:anywhere}
+    .picker{display:block;margin-top:18px;padding:19px;border:1px dashed #a99cf58c;border-radius:19px;background:#6c52d51a;cursor:pointer}.picker strong,.picker span{display:block}.picker span{margin-top:7px;color:#aeb1c9;font-size:14px;overflow-wrap:anywhere}
+    input{position:absolute;opacity:0;pointer-events:none}button{width:100%;margin-top:16px;padding:15px 18px;border:0;border-radius:17px;color:#fff;font-size:16px;font-weight:760;background:linear-gradient(135deg,#7c3aed,#4f46e5);box-shadow:0 13px 32px #4e46dc52;cursor:pointer}button:disabled{opacity:.46;box-shadow:none;cursor:default}
+    .progress{display:none;margin-top:20px}.track{height:13px;overflow:hidden;border-radius:999px;background:#ffffff17}.bar{width:0;height:100%;border-radius:inherit;background:linear-gradient(90deg,#8b5cf6,#22d3ee);transition:width .15s ease}.progress-line{display:flex;justify-content:space-between;gap:12px;margin-top:9px;color:#c7c9dd;font-size:14px}.status{min-height:24px;margin-top:17px;line-height:1.45;color:#d7d9eb}.status.error{color:#ffb4bd}.status.success{color:#9ff0c8}.note{margin:20px 0 0;padding-top:18px;border-top:1px solid #ffffff17;font-size:13px}
+  </style>
+</head>
+<body>
+<main><section class="card">
+  <div class="mark">⬆️</div>
+  <h1>Source ZIP → GitHub</h1>
+  <p class="lead">Закрытая загрузка для системного владельца. ZIP отправляется напрямую в VoxLyra частями, поэтому лимит Telegram Bot API 20 МБ здесь не действует. После загрузки пакет проходит полную проверку и публикуется атомарно.</p>
+  <div class="repo">{{ repository }} · {{ branch }} · максимум {{ max_package_mb }} МБ</div>
+  <label class="picker" for="archive"><strong>Выбрать source-ready ZIP</strong><span id="fileName">Файл ещё не выбран</span></label>
+  <input id="archive" type="file" accept=".zip,application/zip">
+  <button id="uploadButton" type="button" disabled>Загрузить и опубликовать</button>
+  <div class="progress" id="progress"><div class="track"><div class="bar" id="bar"></div></div><div class="progress-line"><span id="progressText">0%</span><span id="sizeText"></span></div></div>
+  <div class="status" id="status" role="status" aria-live="polite"></div>
+  <p class="note">Ссылка подписана, ограничена по времени и привязана к SYSTEM_OWNER_ID. Незавершённые части автоматически очищаются. GitHub write-token в браузер не передаётся.</p>
+</section></main>
+<script>
+(() => {
+  const tg=window.Telegram?.WebApp;if(tg){tg.ready();tg.expand();}
+  const token={{ upload_token|tojson }};const maxMb=Number({{ max_package_mb|tojson }}||0);const maxBytes=maxMb*1024*1024;
+  const input=document.getElementById('archive'),button=document.getElementById('uploadButton'),fileName=document.getElementById('fileName'),progress=document.getElementById('progress'),bar=document.getElementById('bar'),progressText=document.getElementById('progressText'),sizeText=document.getElementById('sizeText'),status=document.getElementById('status');
+  const key='voxlyra:github-source-upload:'+token.slice(0,24);
+  const fmt=n=>`${(Number(n||0)/1024/1024).toFixed(Number(n||0)>=10*1024*1024?1:2)} МБ`;
+  const setProgress=(done,total)=>{const pct=total?Math.min(100,Math.round(done*100/total)):0;bar.style.width=`${pct}%`;progressText.textContent=`${pct}%`;sizeText.textContent=`${fmt(done)} из ${fmt(total)}`;};
+  const headers=(extra={})=>({'Accept':'application/json','X-Vox-Source-Token':token,...extra});
+  const parse=async response=>{let data={};try{data=await response.json();}catch(_){}if(!response.ok)throw new Error(String(data.detail||`HTTP ${response.status}`));return data;};
+  const retry=async(fn,label,attempts=8)=>{let last;for(let i=1;i<=attempts;i++){try{return await fn();}catch(e){last=e;if(i===attempts)throw e;status.className='status';status.textContent=`${label}: повтор ${i}…`;await new Promise(r=>setTimeout(r,Math.min(12000,700*(2**Math.min(i-1,4)))));}}throw last;};
+  const session=()=>{try{return JSON.parse(sessionStorage.getItem(key)||'null');}catch(_){return null;}};const save=v=>{try{sessionStorage.setItem(key,JSON.stringify(v));}catch(_){}};const clear=()=>{try{sessionStorage.removeItem(key);}catch(_){}};
+  input.addEventListener('change',()=>{const file=input.files?.[0];status.className='status';status.textContent='';if(!file){fileName.textContent='Файл ещё не выбран';button.disabled=true;return;}fileName.textContent=`${file.name} · ${fmt(file.size)}`;const zip=file.name.toLowerCase().endsWith('.zip'),tooLarge=maxBytes>0&&file.size>maxBytes;button.disabled=!zip||tooLarge;if(!zip){status.className='status error';status.textContent='Нужен .zip source-ready пакет.';}else if(tooLarge){status.className='status error';status.textContent=`ZIP больше лимита ${maxMb} МБ.`;}else if(file.size>20*1024*1024){status.textContent='Большой ZIP будет передан напрямую частями без лимита Telegram 20 МБ.';}setProgress(0,file.size);});
+  button.addEventListener('click',async()=>{const file=input.files?.[0];if(!file||button.disabled)return;button.disabled=true;progress.style.display='block';status.className='status';status.textContent='Подготавливаю защищённую загрузку…';try{
+    let meta=null;const saved=session();if(saved?.upload_id&&saved?.name===file.name&&saved?.size===file.size){try{meta=await parse(await fetch(`/api/github-source-upload/${encodeURIComponent(saved.upload_id)}`,{headers:headers()}));}catch(_){clear();}}
+    if(!meta){meta=await retry(()=>fetch('/api/github-source-upload/start',{method:'POST',headers:headers({'Content-Type':'application/json'}),body:JSON.stringify({filename:file.name,total_size:file.size})}).then(parse),'Создание загрузки');save({upload_id:meta.upload_id,name:file.name,size:file.size});}
+    const chunkSize=Number(meta.chunk_size||1024*1024);const received=new Set((meta.received||[]).map(Number));const chunks=Math.ceil(file.size/chunkSize);let done=0;for(let i=0;i<chunks;i++){const start=i*chunkSize,end=Math.min(file.size,start+chunkSize),len=end-start;if(received.has(i)){done+=len;setProgress(done,file.size);continue;}const blob=file.slice(start,end);status.textContent=`Загрузка части ${i+1} из ${chunks}…`;await retry(()=>fetch(`/api/github-source-upload/${encodeURIComponent(meta.upload_id)}/chunk/${i}`,{method:'POST',headers:headers({'Content-Type':'application/octet-stream'}),body:blob}).then(parse),`Часть ${i+1}`);done+=len;setProgress(done,file.size);}
+    status.textContent='Проверяю ZIP, SHA-256 и публикую атомарный GitHub commit…';const result=await retry(()=>fetch(`/api/github-source-upload/${encodeURIComponent(meta.upload_id)}/finish`,{method:'POST',headers:headers()}).then(parse),'Публикация',4);clear();setProgress(file.size,file.size);status.className='status success';status.textContent=`Готово: ${result.package_id} · commit ${String(result.commit_sha||'').slice(0,12)} · enabled=true`;button.textContent='Опубликовано';if(tg?.HapticFeedback)tg.HapticFeedback.notificationOccurred('success');
+  }catch(e){status.className='status error';status.textContent=String(e?.message||e||'Ошибка source-загрузки');button.disabled=false;if(tg?.HapticFeedback)tg.HapticFeedback.notificationOccurred('error');}});
+})();
+</script>
+</body>
+</html>
