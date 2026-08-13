@@ -122,6 +122,37 @@ def test_direct_web_routes_upload_and_publish_without_telegram_20mb_path(monkeyp
     assert finish.json()["package_id"] == "sample-book"
 
 
+def test_second_finish_cannot_release_first_finish_lock(monkeypatch, tmp_path):
+    _configure(monkeypatch, tmp_path)
+    from app import github_source_upload_web as web
+
+    token_text = upload.create_github_source_upload_token(telegram_id=42, chat_id=42)
+    token = upload.verify_github_source_upload_token(token_text)
+    meta = upload.create_github_source_upload(token=token, filename="sample.zip", total_size=8)
+    upload.save_github_source_chunk(meta["upload_id"], token=token, index=0, data=b"12345678")
+    assert upload.claim_github_source_finish(meta["upload_id"], token=token) is True
+
+    app = FastAPI()
+    app.include_router(web.router)
+    client = TestClient(app)
+    response = client.post(
+        f"/api/github-source-upload/{meta['upload_id']}/finish",
+        headers={"X-Vox-Source-Token": token_text},
+    )
+    assert response.status_code == 409
+    # The second request did not acquire the lock, so it must not remove the
+    # lock owned by the first request.
+    assert upload.claim_github_source_finish(meta["upload_id"], token=token) is False
+    upload.release_github_source_finish(meta["upload_id"])
+
+
+def test_runtime_maintenance_cleans_stale_source_uploads():
+    root = Path(__file__).resolve().parents[1]
+    runtime = (root / "app" / "services" / "runtime_performance.py").read_text(encoding="utf-8")
+    assert "cleanup_stale_github_source_uploads" in runtime
+    assert '"stale_source_uploads_removed"' in runtime
+
+
 def test_bot_and_runtime_mount_direct_source_upload_contract():
     root = Path(__file__).resolve().parents[1]
     handler = (root / "app" / "handlers" / "github_source_publish.py").read_text(encoding="utf-8")
@@ -133,3 +164,4 @@ def test_bot_and_runtime_mount_direct_source_upload_contract():
     assert "application.include_router(github_source_upload_web_router)" in main
     assert 'router.post("/api/github-source-upload/{upload_id}/finish"' in web
     assert "publish_source_package_zip" in web
+    assert "if claimed:" in web
