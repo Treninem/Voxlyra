@@ -29,6 +29,7 @@ from app.services.library_import_queue import library_import_worker_loop
 from app.services.author_channel_queue import author_channel_scheduler_loop, ensure_author_channel_queue_schema
 from app.services.runtime_performance import runtime_maintenance_loop
 from app.services.runtime_state import mark_bot_connected, mark_bot_starting, mark_bot_stopped
+from app.services.canonical_source_sync import sync_canonical_owner_sources
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +84,17 @@ async def _supervise_library_import_worker(bot: Bot) -> None:
             delay = min(30, max(2, delay * 2))
 
 
+async def _sync_canonical_sources_once() -> None:
+    try:
+        result = await sync_canonical_owner_sources()
+        if result:
+            logger.info("Canonical GitHub source sync: %s", result)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("Canonical GitHub source sync crashed")
+
+
 async def run_bot() -> None:
     mark_bot_starting()
     if not settings.BOT_TOKEN:
@@ -123,6 +135,7 @@ async def run_bot() -> None:
         logger.info("Bot started")
 
         background_tasks = [
+            asyncio.create_task(_sync_canonical_sources_once(), name="canonical-source-sync"),
             asyncio.create_task(moderation_reminder_loop(bot), name="moderation-reminders"),
             asyncio.create_task(smart_reader_reminder_loop(bot), name="reader-reminders"),
             asyncio.create_task(premium_author_settlement_loop(), name="premium-settlements"),
