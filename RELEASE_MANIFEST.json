@@ -58,15 +58,15 @@
   },
   "verification": {
     "repository_audited_at": "2026-08-13",
-    "latest_feature_commit": "7970a668ad21fd43fded267e05d44a633acab960",
+    "latest_feature_commit": "622a326645e7fa3a2f9d10b2d297a203c93e01d5",
     "github_actions_targeted": true,
     "github_actions_full_suite": true,
-    "github_actions_run_id": 31677059856,
+    "github_actions_run_id": 31677828286,
     "live_bothost_redeploy": false,
     "live_telegram_flow": false,
     "live_vk_flow": false,
     "production_payment_flow": false,
-    "note": "VoxLyra v1.16.2 adds a signed SYSTEM_OWNER_ID-only direct source upload path for source-ready ZIP archives. Telegram documents up to 20 MB continue to use the bot path; larger packages can be uploaded to the same runtime in resumable 1 MiB chunks through a short-lived HMAC-signed URL without exposing the GitHub write token. Upload sessions are nonce-bound, size/disk constrained, finish-locked, cleaned after staleness, and converge on the existing atomic publish_source_package_zip service so the source package and enabled=true index transition are still one Git commit. A concurrency guard prevents a second finish request from releasing another request's publish lock. GitHub Actions run 31677059856 was green for the direct-upload implementation before release metadata was bumped; a final v1.16.2 run is required and will replace this run id. Live Bothost/Telegram/VK/payment checks remain pending deployment."
+    "note": "GitHub Actions run 31677828286 is green for the targeted v1.16.2 contracts and the full maintained regression suite. v1.16.2 adds a signed SYSTEM_OWNER_ID-only direct source upload path for source-ready ZIP archives. Telegram documents up to 20 MB continue to use the bot path; larger packages can be uploaded to the same runtime in resumable 1 MiB chunks through a short-lived HMAC-signed URL without exposing the GitHub write token. Upload sessions are nonce-bound, size/disk constrained, finish-locked, periodically cleaned after staleness, and converge on the existing atomic publish_source_package_zip service. A second finish request cannot release another request's lock, and stale cleanup skips active finish locks. Live Bothost/Telegram/VK/payment checks remain pending deployment."
   },
   "name": "Direct source upload and bot completion"
 }
