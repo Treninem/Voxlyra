@@ -1,8 +1,8 @@
 {
   "project": "VoxLyra",
-  "version": "v1.16.1",
-  "build": "github_import_cross_platform_release_hardening",
-  "base_version": "v1.16.0",
+  "version": "v1.16.2",
+  "build": "direct_source_upload_and_bot_completion",
+  "base_version": "v1.16.1",
   "owner_only_version": true,
   "features": {
     "database_reset": false,
@@ -33,6 +33,10 @@
     "github_source_write_atomic_commit": true,
     "github_source_write_owner_only": true,
     "github_source_write_zip_validation": true,
+    "github_source_direct_upload": true,
+    "github_source_upload_signed_token": true,
+    "github_source_upload_resumable_chunks": true,
+    "github_source_upload_telegram_limit_bypass": true,
     "import_replacement_preserves_book_id": true,
     "bulk_graphic_import_e2e_count": 50,
     "safe_7z_page_names": true,
@@ -54,15 +58,15 @@
   },
   "verification": {
     "repository_audited_at": "2026-08-13",
-    "latest_feature_commit": "b1cae6c94ee0d820591724b403097e9c060fd2f7",
+    "latest_feature_commit": "7970a668ad21fd43fded267e05d44a633acab960",
     "github_actions_targeted": true,
     "github_actions_full_suite": true,
-    "github_actions_run_id": 31646010085,
+    "github_actions_run_id": 31677059856,
     "live_bothost_redeploy": false,
     "live_telegram_flow": false,
     "live_vk_flow": false,
     "production_payment_flow": false,
-    "note": "GitHub Actions run 31646010085 is green for the targeted v1.16.1 contracts and full maintained regression suite. VoxLyra now contains a disabled-by-default, non-delegable SYSTEM_OWNER_ID source-write bridge for prepared source ZIP packages. It uses a separate GITHUB_SOURCE_WRITE_TOKEN, validates package structure, manifest, SHA-256, LICENSE.txt/SOURCES.txt and actual content before write, creates Git blobs first, atomically replaces the canonical package tree and import_index entry in one commit, removes stale package files, and fast-forwards the configured source branch without force. Partial blob creation cannot expose an enabled half-package because the branch ref moves only after the complete tree/commit exists. Telegram exposes the bridge only in hidden system-owner tools when enabled and also provides /github_source_publish; current Telegram Bot API flow accepts source ZIPs up to 20 MB. Runtime GitHub import security, same-package serialization/fresh-history and canonical VK publication remain covered. Live Bothost/Telegram/VK/payment checks still require deployment; the write token remains intentionally absent from source control."
+    "note": "VoxLyra v1.16.2 adds a signed SYSTEM_OWNER_ID-only direct source upload path for source-ready ZIP archives. Telegram documents up to 20 MB continue to use the bot path; larger packages can be uploaded to the same runtime in resumable 1 MiB chunks through a short-lived HMAC-signed URL without exposing the GitHub write token. Upload sessions are nonce-bound, size/disk constrained, finish-locked, cleaned after staleness, and converge on the existing atomic publish_source_package_zip service so the source package and enabled=true index transition are still one Git commit. A concurrency guard prevents a second finish request from releasing another request's publish lock. GitHub Actions run 31677059856 was green for the direct-upload implementation before release metadata was bumped; a final v1.16.2 run is required and will replace this run id. Live Bothost/Telegram/VK/payment checks remain pending deployment."
   },
-  "name": "GitHub import and cross-platform release hardening"
+  "name": "Direct source upload and bot completion"
 }
