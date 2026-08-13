@@ -28,7 +28,7 @@ jobs:
           pip install pytest pytest-asyncio
       - name: Compile application
         run: python -m compileall -q app
-      - name: GitHub import and v1.16.1 contracts
+      - name: GitHub import and v1.16.2 contracts
         run: >-
           pytest -q
           tests/test_v1160_github_import_security.py
@@ -40,6 +40,7 @@ jobs:
           tests/test_v1161_github_import_freshness.py
           tests/test_v1161_github_source_publish.py
           tests/test_v1161_vk_publication_compat.py
-          tests/test_v1161_current_release_contract.py
+          tests/test_v1162_github_source_upload.py
+          tests/test_v1162_current_release_contract.py
       - name: Full maintained regression suite
         run: pytest -q
