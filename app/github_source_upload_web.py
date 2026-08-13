@@ -185,6 +185,7 @@ async def github_source_upload_finish(
     x_vox_source_token: str | None = Header(default=None),
 ):
     token = _verify(_token_header(x_vox_source_token))
+    claimed = False
     try:
         claimed = await asyncio.to_thread(claim_github_source_finish, upload_id, token=token)
         if not claimed:
@@ -201,7 +202,8 @@ async def github_source_upload_finish(
         logger.exception("Direct source ZIP publication failed")
         raise _fail(f"Неожиданная ошибка source-публикации: {safe[:900]}", 500) from exc
     finally:
-        await asyncio.to_thread(release_github_source_finish, upload_id)
+        if claimed:
+            await asyncio.to_thread(release_github_source_finish, upload_id)
 
     await asyncio.to_thread(cleanup_github_source_upload, upload_id)
     asyncio.create_task(
