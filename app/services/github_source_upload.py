@@ -19,6 +19,7 @@ from app.config import settings
 SOURCE_UPLOAD_CHUNK_SIZE_BYTES = 1024 * 1024
 SOURCE_UPLOAD_TTL_SECONDS = 2 * 60 * 60
 SOURCE_UPLOAD_STALE_SECONDS = 24 * 60 * 60
+SOURCE_FINISH_LOCK_STALE_SECONDS = 15 * 60
 _SOURCE_UPLOAD_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 
 
@@ -160,6 +161,13 @@ def cleanup_stale_github_source_uploads(*, max_age_seconds: int = SOURCE_UPLOAD_
         if not folder.is_dir():
             continue
         try:
+            lock = folder / "finish.lock"
+            if lock.is_file():
+                lock_age = now - lock.stat().st_mtime
+                # An active atomic publish owns the session. Only an abandoned
+                # finish lock may be removed by stale-session maintenance.
+                if lock_age <= SOURCE_FINISH_LOCK_STALE_SECONDS:
+                    continue
             age = now - folder.stat().st_mtime
             meta = folder / "meta.json"
             if meta.is_file():
@@ -327,7 +335,7 @@ def claim_github_source_finish(upload_id: str, *, token: GitHubSourceUploadToken
         descriptor = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     except FileExistsError:
         try:
-            if time.time() - lock.stat().st_mtime > 15 * 60:
+            if time.time() - lock.stat().st_mtime > SOURCE_FINISH_LOCK_STALE_SECONDS:
                 lock.unlink(missing_ok=True)
                 descriptor = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
             else:
