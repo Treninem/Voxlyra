@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import time
 from pathlib import Path
 
 import pytest
@@ -22,6 +24,12 @@ def _configure(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(settings, "GITHUB_IMPORT_BRANCH", "main")
 
 
+def _token() -> upload.GitHubSourceUploadToken:
+    return upload.verify_github_source_upload_token(
+        upload.create_github_source_upload_token(telegram_id=42, chat_id=42)
+    )
+
+
 def test_source_upload_token_is_owner_only_signed_and_purpose_bound(monkeypatch, tmp_path):
     _configure(monkeypatch, tmp_path)
     with pytest.raises(upload.GitHubSourceUploadError, match="системному владельцу"):
@@ -37,8 +45,7 @@ def test_source_upload_token_is_owner_only_signed_and_purpose_bound(monkeypatch,
 
 def test_source_upload_chunks_are_bound_to_nonce_and_reassemble_exact_bytes(monkeypatch, tmp_path):
     _configure(monkeypatch, tmp_path)
-    token_text = upload.create_github_source_upload_token(telegram_id=42, chat_id=42)
-    token = upload.verify_github_source_upload_token(token_text)
+    token = _token()
     payload = (b"VoxLyra-source-payload-" * 100_000)[: 2 * 1024 * 1024 + 117]
     meta = upload.create_github_source_upload(token=token, filename="source-ready.zip", total_size=len(payload))
     chunk = int(meta["chunk_size"])
@@ -49,18 +56,14 @@ def test_source_upload_chunks_are_bound_to_nonce_and_reassemble_exact_bytes(monk
     assembled = upload.assemble_github_source_upload(meta["upload_id"], token=token)
     assert assembled.read_bytes() == payload
 
-    other_token = upload.verify_github_source_upload_token(
-        upload.create_github_source_upload_token(telegram_id=42, chat_id=42)
-    )
+    other_token = _token()
     with pytest.raises(upload.GitHubSourceUploadError, match="недоступна"):
         upload.load_github_source_upload(meta["upload_id"], token=other_token)
 
 
 def test_source_upload_rejects_wrong_chunk_size_and_cleans_session(monkeypatch, tmp_path):
     _configure(monkeypatch, tmp_path)
-    token = upload.verify_github_source_upload_token(
-        upload.create_github_source_upload_token(telegram_id=42, chat_id=42)
-    )
+    token = _token()
     meta = upload.create_github_source_upload(
         token=token, filename="source.zip", total_size=upload.SOURCE_UPLOAD_CHUNK_SIZE_BYTES + 10
     )
@@ -69,6 +72,37 @@ def test_source_upload_rejects_wrong_chunk_size_and_cleans_session(monkeypatch, 
     upload.cleanup_github_source_upload(meta["upload_id"])
     with pytest.raises(upload.GitHubSourceUploadError, match="не найдена"):
         upload.load_github_source_upload(meta["upload_id"], token=token)
+
+
+def test_stale_cleanup_keeps_active_finish_and_removes_abandoned_session(monkeypatch, tmp_path):
+    _configure(monkeypatch, tmp_path)
+    token = _token()
+
+    active = upload.create_github_source_upload(token=token, filename="active.zip", total_size=8)
+    assert upload.claim_github_source_finish(active["upload_id"], token=token) is True
+    active_folder = Path(settings.GITHUB_IMPORT_TEMP_ROOT) / "source_web_uploads" / active["upload_id"]
+    old = time.time() - 48 * 60 * 60
+    os.utime(active_folder / "meta.json", (old, old))
+    meta = active_folder / "meta.json"
+    data = meta.read_text(encoding="utf-8").replace(
+        str(upload.load_github_source_upload(active["upload_id"], token=token)["updated_at"]),
+        "2000-01-01T00:00:00+00:00",
+    )
+    meta.write_text(data, encoding="utf-8")
+
+    abandoned = upload.create_github_source_upload(token=token, filename="old.zip", total_size=8)
+    abandoned_folder = Path(settings.GITHUB_IMPORT_TEMP_ROOT) / "source_web_uploads" / abandoned["upload_id"]
+    old_meta = abandoned_folder / "meta.json"
+    old_data = old_meta.read_text(encoding="utf-8")
+    current_updated = upload.load_github_source_upload(abandoned["upload_id"], token=token)["updated_at"]
+    old_meta.write_text(old_data.replace(str(current_updated), "2000-01-01T00:00:00+00:00"), encoding="utf-8")
+
+    removed = upload.cleanup_stale_github_source_uploads(max_age_seconds=300)
+    assert removed == 1
+    assert active_folder.is_dir()
+    assert not abandoned_folder.exists()
+    upload.release_github_source_finish(active["upload_id"])
+    upload.cleanup_github_source_upload(active["upload_id"])
 
 
 def test_direct_web_routes_upload_and_publish_without_telegram_20mb_path(monkeypatch, tmp_path):
@@ -140,8 +174,6 @@ def test_second_finish_cannot_release_first_finish_lock(monkeypatch, tmp_path):
         headers={"X-Vox-Source-Token": token_text},
     )
     assert response.status_code == 409
-    # The second request did not acquire the lock, so it must not remove the
-    # lock owned by the first request.
     assert upload.claim_github_source_finish(meta["upload_id"], token=token) is False
     upload.release_github_source_finish(meta["upload_id"])
 
