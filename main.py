@@ -151,7 +151,6 @@ class DeferredVoxLyraApplication:
             await asyncio.sleep(delay)
             delay = min(60, max(3, delay * 2))
 
-
     async def _supervise_vk_bot(self) -> None:
         from app.services.vk_api import run_vk_community_bot
         delay = 3
@@ -193,8 +192,10 @@ class DeferredVoxLyraApplication:
             self.stage = "application"
             logger.info("Deferred bootstrap: loading full FastAPI application")
             from app.webapp import create_app
+            from app.github_source_upload_web import router as github_source_upload_web_router
 
             application = create_app()
+            application.include_router(github_source_upload_web_router)
             lifespan = application.router.lifespan_context(application)
             await lifespan.__aenter__()
             self.target_lifespan = lifespan
