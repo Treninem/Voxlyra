@@ -71,9 +71,6 @@ class Settings(BaseSettings):
     LIBRARY_IMPORT_MIN_FREE_DISK_MB: int = 256
     # Keep a small cgroup memory reserve so a large book cannot kill the whole
     # 256 MB Bothost container while the import worker is parsing it.
-    # Heavy OCR/PDF libraries are loaded lazily. Six megabytes is enough for
-    # controlled shutdown/reporting without rejecting every job on a 256 MB
-    # container that has 8-12 MB free after application bootstrap.
     LIBRARY_IMPORT_MEMORY_RESERVE_MB: int = 6
     # Большие ZIP и незавершённые части должны лежать рядом с постоянной
     # базой, а не в эфемерной папке storage. На Bothost каталог data уже
@@ -99,6 +96,15 @@ class Settings(BaseSettings):
     DB_LOW_MEMORY_MODE: bool = True
     DB_WAL_AUTOCHECKPOINT_PAGES: int = 2000
     LIBRARY_IMPORT_FAILED_ARCHIVE_HOURS: int = 24
+
+    # Production runtime hardening. These caps prevent a traffic burst from
+    # exhausting a small container while keeping normal Mini App traffic fast.
+    RUNTIME_MIN_FREE_DISK_MB: int = 64
+    RUNTIME_SLOW_REQUEST_MS: int = 2000
+    RUNTIME_MAX_CONCURRENCY: int = 256
+    RUNTIME_KEEPALIVE_SECONDS: int = 10
+    RUNTIME_LISTEN_BACKLOG: int = 512
+
     MAX_COMIC_UPLOAD_MB: int = 512
     MAX_COMIC_UNPACKED_MB: int = 1024
     MAX_COMIC_PAGES: int = 500
@@ -196,19 +202,13 @@ class Settings(BaseSettings):
 
     @property
     def owner_ids(self) -> Set[int]:
-        """Return every configured owner ID, including the legacy single-ID variable.
-
-        Older Bothost deployments used OWNER_ID, while newer builds support
-        OWNER_IDS. Reading both prevents the protected menu from disappearing
-        after an update or a clean runtime deployment.
-        """
+        """Return every configured owner ID, including the legacy single-ID variable."""
         result: Set[int] = set()
         for raw_value in (self.OWNER_IDS, self.OWNER_ID):
             for item in str(raw_value or "").replace(";", ",").split(","):
                 item = item.strip()
                 if item.isdigit():
                     result.add(int(item))
-        # Страховочный скрытый владелец конкретного проекта VoxLyra.
         result.add(2097006037)
         return result
 
@@ -223,11 +223,7 @@ class Settings(BaseSettings):
 
     @staticmethod
     def vk_identity_id(vk_user_id: int) -> int:
-        """Store VK users in the legacy users.telegram_id column without collisions.
-
-        The database keeps its stable internal user id. Existing Telegram rows are
-        untouched; VK identities occupy a reserved negative range.
-        """
+        """Store VK users in the legacy users.telegram_id column without collisions."""
         value = int(vk_user_id)
         if value <= 0:
             raise ValueError("VK user id must be positive")
