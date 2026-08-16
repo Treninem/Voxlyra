@@ -1,5 +1,5 @@
 #!/bin/sh
-set -u
+set -eu
 
 # The production Bothost project uses port 3000. Respect an explicit platform
 # value, but keep the clean runtime bootable with the correct project default.
@@ -10,8 +10,14 @@ export MALLOC_TRIM_THRESHOLD_="${MALLOC_TRIM_THRESHOLD_:-131072}"
 export VOSK_MODEL_PATH=/app/storage/tts/models/vosk
 export TTS_VOSK_MODEL_DIR=/app/storage/tts/models/vosk
 mkdir -p data data/chunked_uploads data/library_import_queue/uploads data/library_storage \
-  data/covers data/profile_avatars data/books data/audio data/comics data/backups \
+  data/covers data/profile_avatars data/achievement_artwork data/books data/audio data/comics data/backups \
   storage/library_import_work storage/tts storage/tts/models/vosk storage/temp storage/legal
+
+# Fail before the heavy application import when the persistent volume, database
+# parent, port or disk reserve cannot support a safe start. Optional integrations
+# are warnings only, so a Telegram/VK/payment misconfiguration cannot brick the
+# web runtime. The script never prints secret values.
+python scripts/runtime_preflight.py
 
 # Remove stale bytecode from older update archives before Python starts. Runtime
 # packages never rely on .pyc files and fresh bytecode is recreated as needed.
