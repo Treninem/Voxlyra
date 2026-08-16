@@ -68,15 +68,15 @@
   },
   "verification": {
     "repository_audited_at": "2026-08-16",
-    "latest_feature_commit": "822bc75d27440a8ed6b0e2b00b79373fa9ab5e4c",
+    "latest_feature_commit": "a43d8a02f06c3c430de34470c26628f565b370a2",
     "github_actions_targeted": true,
     "github_actions_full_suite": true,
-    "github_actions_run_id": 31677828286,
+    "github_actions_run_id": 31941794418,
     "live_bothost_redeploy": false,
     "live_telegram_flow": false,
     "live_vk_flow": false,
     "production_payment_flow": false,
-    "note": "The previously green full v1.16.2 regression suite remains the compatibility baseline. This hardening update adds strict readiness/liveness semantics, a component runtime registry, secret-redacted diagnostics, request correlation, startup preflight checks, Uvicorn safety limits, a reusable Docker healthcheck and a build-time syntax gate without resetting SQLite or runtime storage. A new pull-request CI run is required before merge; live Bothost/Telegram/VK/payment checks remain pending deployment."
+    "note": "GitHub Actions pull-request run 31941794418 completed successfully on 2026-08-16: dependency installation, compileall, targeted v1.16.2/runtime-hardening contracts and the full maintained regression suite all passed. The update adds strict readiness/liveness semantics, component runtime state, secret-redacted diagnostics, request correlation, startup preflight checks, Uvicorn safety limits, a reusable Docker healthcheck and a build-time syntax gate without resetting SQLite or runtime storage. Live Bothost/Telegram/VK/payment checks remain pending deployment."
   },
   "name": "Runtime hardening and resilient startup"
 }
