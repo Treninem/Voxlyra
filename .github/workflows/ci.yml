@@ -26,9 +26,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pytest pytest-asyncio
-      - name: Compile application
-        run: python -m compileall -q app
-      - name: GitHub import and v1.16.2 contracts
+      - name: Compile application and operational scripts
+        run: python -m compileall -q app scripts main.py
+      - name: GitHub import, v1.16.2 and runtime hardening contracts
         run: >-
           pytest -q
           tests/test_v1160_github_import_security.py
@@ -42,5 +42,6 @@ jobs:
           tests/test_v1161_vk_publication_compat.py
           tests/test_v1162_github_source_upload.py
           tests/test_v1162_current_release_contract.py
+          tests/test_runtime_hardening.py
       - name: Full maintained regression suite
         run: pytest -q
