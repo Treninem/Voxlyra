@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from pathlib import PurePosixPath
@@ -51,8 +50,6 @@ class _ConnectionProxy:
         if _OWNER_IMPORT.get() and "from library_import_batches" in text and "where archive_hash=?" in text:
             hide = True
         if _OWNER_COMIC_IMPORT.get() and "from books" in text and "normalized_title=?" in text:
-            # Only the exact comic duplicate probe is hidden. Other book queries
-            # remain untouched so the existing importer keeps its safety checks.
             hide = "select id from books where publication_status!='deleted' and normalized_title=?" in text
         cursor = await self._db.execute(sql, parameters) if parameters is not None else await self._db.execute(sql)
         return _CursorProxy(cursor, hide_row=hide)
@@ -72,11 +69,7 @@ def _metadata_from_zip(zip_path, folder_info: dict[str, Any]) -> dict[str, Any]:
 
     members = list(folder_info.get("members") or [])
     candidate = next(
-        (
-            name
-            for name in members
-            if PurePosixPath(str(name).replace("\\", "/")).name.casefold() == "metadata.json"
-        ),
+        (name for name in members if PurePosixPath(str(name).replace("\\", "/")).name.casefold() == "metadata.json"),
         "",
     )
     if not candidate:
@@ -149,7 +142,6 @@ async def _merge_user_book_rows(db: Any, old_id: int, new_id: int) -> None:
                 if existing is None:
                     await db.execute(f'UPDATE "{table}" SET book_id=? WHERE rowid=?', (new_id, rowid))
                     continue
-                # Preserve the furthest known reading/listening position.
                 for progress_col in ("position_percent", "position_seconds", "progress_percent", "progress"):
                     if progress_col in columns:
                         old_value = int(row[progress_col] or 0)
@@ -162,14 +154,12 @@ async def _merge_user_book_rows(db: Any, old_id: int, new_id: int) -> None:
                         break
                 await db.execute(f'DELETE FROM "{table}" WHERE rowid=?', (rowid,))
         else:
-            if table in {"library_channel_queue"}:
+            if table == "library_channel_queue":
                 await db.execute(f'DELETE FROM "{table}" WHERE book_id=?', (old_id,))
-            else:
+            elif table not in {"graphic_chapters", "audio_chapters", "chapters"}:
                 try:
                     await db.execute(f'UPDATE "{table}" SET book_id=? WHERE book_id=?', (new_id, old_id))
                 except Exception:
-                    # A secondary uniqueness conflict must not make an otherwise
-                    # successful owner replacement fail.
                     logger.warning("Could not merge table %s for comic %s -> %s", table, old_id, new_id)
 
 
@@ -203,9 +193,6 @@ async def _merge_replaced_comics(batch_id: int, replacements: list[tuple[int, st
             if new_id == old_id:
                 continue
             await _merge_user_book_rows(db, old_id, new_id)
-            # Keep the old record as a hidden rollback/history record instead of
-            # deleting it. Reader progress and purchase history therefore remain
-            # recoverable even if a future replacement has a problem.
             await db.execute(
                 "UPDATE books SET publication_status='deleted', updated_at=? WHERE id=?",
                 (utc_now(), old_id),
@@ -247,18 +234,6 @@ async def _publish_owner_batch(batch_id: int) -> None:
         await db.commit()
 
 
-async def _owner_import_wrapper(original, zip_path, archive_name, actor_user_id, progress_callback=None):
-    owner = settings.is_system_owner(int(actor_user_id))
-    if not owner:
-        return await original(zip_path, archive_name, actor_user_id, progress_callback)
-
-    token = _OWNER_IMPORT.set(True)
-    try:
-        return await original(zip_path, archive_name, actor_user_id, progress_callback)
-    finally:
-        _OWNER_IMPORT.reset(token)
-
-
 async def install_owner_import_overrides() -> None:
     global _INSTALLED
     if _INSTALLED:
@@ -296,6 +271,9 @@ async def install_owner_import_overrides() -> None:
         return imported
 
     lm._import_bulk_comics = owner_comics
+    # The importer keeps a module-local reference to connect(), so patching the
+    # manager connection is what makes the duplicate checks task-local and safe.
+    lm.connect = _owner_connect
 
     async def import_wrapper(zip_path, archive_name, actor_user_id, progress_callback=None):
         owner = settings.is_system_owner(int(actor_user_id))
@@ -308,9 +286,7 @@ async def install_owner_import_overrides() -> None:
         finally:
             _OWNER_IMPORT.reset(token)
 
-    # Both references are patched: the queue imported the function directly,
-    # while other services call it through library_manager.
     lm.import_library_zip = import_wrapper
     queue.import_library_zip = import_wrapper
     _INSTALLED = True
-    logger.info("Owner import override installed: license bypass, repeat import and owner auto-publish enabled")
+    logger.info("Owner import override installed: trusted licence bypass, repeat import and owner auto-publish enabled")
