@@ -12,8 +12,9 @@ from app.db import (
     get_platform_finance_summary,
     search_users,
     upsert_user,
+    utc_now,
 )
-from app.keyboards import owner_menu, owner_search_menu
+from app.keyboards import owner_menu as build_owner_menu, owner_search_menu
 
 router = Router()
 
@@ -23,7 +24,7 @@ def _is_owner(user_id: int) -> bool:
 
 
 def _owner_menu_with_catalog() -> InlineKeyboardMarkup:
-    base = owner_menu()
+    base = build_owner_menu()
     rows = [list(row) for row in base.inline_keyboard]
     rows.append([InlineKeyboardButton(text="📦 Добавить в каталог", callback_data="owner:catalog_recovery")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -102,7 +103,7 @@ async def owner_command(message: Message) -> None:
 
 
 @router.callback_query(F.data == "owner:menu")
-async def owner_menu(call: CallbackQuery) -> None:
+async def owner_menu_handler(call: CallbackQuery) -> None:
     if not _is_owner(call.from_user.id):
         await call.answer("Недоступно", show_alert=True)
         return
@@ -146,7 +147,6 @@ async def catalog_add(call: CallbackQuery) -> None:
         if status == "deleted":
             await call.answer("Произведение удалено", show_alert=True)
             return
-        from app.db import utc_now
         now = utc_now()
         await db.execute("UPDATE books SET publication_status='published', rights_checked=1, updated_at=? WHERE id=?", (now, book_id))
         await db.execute("UPDATE chapters SET status='published', updated_at=? WHERE book_id=? AND status!='deleted'", (now, book_id))
