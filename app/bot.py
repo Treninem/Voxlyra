@@ -16,6 +16,7 @@ from app.handlers import (
     library_manager,
     moderation,
     owner,
+    owner_catalog_recovery,
     payments,
     start,
 )
@@ -30,6 +31,7 @@ from app.services.author_channel_queue import author_channel_scheduler_loop, ens
 from app.services.runtime_performance import runtime_maintenance_loop
 from app.services.runtime_state import mark_bot_connected, mark_bot_starting, mark_bot_stopped
 from app.services.canonical_source_sync import sync_canonical_owner_sources
+from app.services.owner_import_override import install_owner_import_overrides
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +64,9 @@ def _dispatcher() -> Dispatcher:
     # SYSTEM_OWNER_ID principle and must be registered before the broad owner router.
     dp.include_router(github_source_publish.router)
     dp.include_router(github_import.router)
+    # These owner-only recovery/card handlers must run before the broad owner
+    # router, otherwise the generic owner callbacks would consume them first.
+    dp.include_router(owner_catalog_recovery.router)
     dp.include_router(owner.router)
     dp.include_router(library_manager.router)
     dp.include_router(moderation.router)
@@ -102,6 +107,10 @@ async def run_bot() -> None:
 
     await init_db()
     await ensure_author_channel_queue_schema()
+    # Owner imports are a separate trusted path: normal users keep the existing
+    # legal/moderation rules, while the system owner can re-import and publish
+    # their prepared packages without a false licence rejection.
+    await install_owner_import_overrides()
 
     bot = Bot(
         token=settings.BOT_TOKEN,
