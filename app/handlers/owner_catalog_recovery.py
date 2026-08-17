@@ -10,9 +10,6 @@ from app.db import (
     connect,
     get_owner_today_stats,
     get_platform_finance_summary,
-    get_user_by_telegram_id,
-    get_user_by_username,
-    owner_user_search_rows,
     search_users,
     upsert_user,
 )
@@ -23,10 +20,6 @@ router = Router()
 
 def _is_owner(user_id: int) -> bool:
     return settings.is_system_owner(int(user_id))
-
-
-def _deny(call: CallbackQuery) -> bool:
-    return False
 
 
 def _owner_menu_with_catalog() -> InlineKeyboardMarkup:
@@ -94,12 +87,7 @@ async def _show_catalog(call: CallbackQuery, *, notice: str = "") -> None:
         label = str(row["title"] or "Без названия")[:45]
         kind = _content_label(row)
         lines.append(f"\n• <b>{label}</b> · {kind} · ID {int(row['id'])}")
-        buttons.append([
-            InlineKeyboardButton(
-                text=f"➕ {label}",
-                callback_data=f"owner:catalog_add:{int(row['id'])}",
-            )
-        ])
+        buttons.append([InlineKeyboardButton(text=f"➕ {label}", callback_data=f"owner:catalog_add:{int(row['id'])}")])
     buttons.append([InlineKeyboardButton(text="🔄 Обновить", callback_data="owner:catalog_recovery")])
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="owner:menu")])
     await call.message.edit_text("".join(lines)[:4096], reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
@@ -158,7 +146,8 @@ async def catalog_add(call: CallbackQuery) -> None:
         if status == "deleted":
             await call.answer("Произведение удалено", show_alert=True)
             return
-        now = __import__("app.db", fromlist=["utc_now"]).utc_now()
+        from app.db import utc_now
+        now = utc_now()
         await db.execute("UPDATE books SET publication_status='published', rights_checked=1, updated_at=? WHERE id=?", (now, book_id))
         await db.execute("UPDATE chapters SET status='published', updated_at=? WHERE book_id=? AND status!='deleted'", (now, book_id))
         await db.execute("UPDATE graphic_chapters SET status='published', updated_at=? WHERE book_id=? AND status!='deleted'", (now, book_id))
@@ -250,8 +239,5 @@ async def owner_user_card(call: CallbackQuery) -> None:
     else:
         lines.append("• оплат пока нет")
 
-    await call.message.edit_text(
-        "\n".join(lines)[:4096],
-        reply_markup=owner_search_menu(),
-    )
+    await call.message.edit_text("\n".join(lines)[:4096], reply_markup=owner_search_menu())
     await call.answer()
