@@ -13,6 +13,7 @@ from app.db import connect as app_connect, utc_now
 logger = logging.getLogger(__name__)
 
 _OWNER_IMPORT: ContextVar[bool] = ContextVar("voxlyra_owner_import", default=False)
+_REIMPORT_ACTIVE: ContextVar[bool] = ContextVar("voxlyra_reimport_active", default=False)
 _OWNER_COMIC_IMPORT: ContextVar[bool] = ContextVar("voxlyra_owner_comic_import", default=False)
 _INSTALLED = False
 
@@ -47,7 +48,9 @@ class _ConnectionProxy:
     async def execute(self, sql: str, parameters: Any = None):
         text = " ".join(str(sql or "").split()).lower()
         hide = False
-        if _OWNER_IMPORT.get() and "from library_import_batches" in text and "where archive_hash=?" in text:
+        if _REIMPORT_ACTIVE.get() and "from library_import_batches" in text and "where archive_hash=?" in text:
+            # A repeated upload is a new import attempt, not a fatal duplicate.
+            # The per-item importer below decides whether to skip or replace.
             hide = True
         if _OWNER_COMIC_IMPORT.get() and "from books" in text and "normalized_title=?" in text:
             hide = "select id from books where publication_status!='deleted' and normalized_title=?" in text
@@ -59,7 +62,7 @@ class _ConnectionProxy:
 
 
 @asynccontextmanager
-async def _owner_connect():
+async def _import_connect():
     async with app_connect() as db:
         yield _ConnectionProxy(db)
 
@@ -252,41 +255,38 @@ async def install_owner_import_overrides() -> None:
 
     lm._validate_import_rights = validate_override
 
-    async def owner_comics(*, zip_path, folders, batch_id, actor_user_id, result):
-        if not settings.is_system_owner(int(actor_user_id)):
-            return await original_comics(
-                zip_path=zip_path, folders=folders, batch_id=batch_id,
-                actor_user_id=actor_user_id, result=result,
-            )
+    async def reimport_comics(*, zip_path, folders, batch_id, actor_user_id, result):
         replacements = await _find_existing_comics(zip_path, folders)
-        token = _OWNER_COMIC_IMPORT.set(True)
+        token_reimport = _REIMPORT_ACTIVE.set(True)
+        token_comic = _OWNER_COMIC_IMPORT.set(True)
         try:
             imported = await original_comics(
                 zip_path=zip_path, folders=folders, batch_id=batch_id,
                 actor_user_id=actor_user_id, result=result,
             )
         finally:
-            _OWNER_COMIC_IMPORT.reset(token)
+            _OWNER_COMIC_IMPORT.reset(token_comic)
+            _REIMPORT_ACTIVE.reset(token_reimport)
         await _merge_replaced_comics(batch_id, replacements)
         return imported
 
-    lm._import_bulk_comics = owner_comics
-    # The importer keeps a module-local reference to connect(), so patching the
-    # manager connection is what makes the duplicate checks task-local and safe.
-    lm.connect = _owner_connect
+    lm._import_bulk_comics = reimport_comics
+    lm.connect = _import_connect
 
     async def import_wrapper(zip_path, archive_name, actor_user_id, progress_callback=None):
         owner = settings.is_system_owner(int(actor_user_id))
-        token = _OWNER_IMPORT.set(owner)
+        token_reimport = _REIMPORT_ACTIVE.set(True)
+        token_owner = _OWNER_IMPORT.set(owner)
         try:
             result = await original_import(zip_path, archive_name, actor_user_id, progress_callback)
             if owner:
                 await _publish_owner_batch(int(result.batch_id))
             return result
         finally:
-            _OWNER_IMPORT.reset(token)
+            _OWNER_IMPORT.reset(token_owner)
+            _REIMPORT_ACTIVE.reset(token_reimport)
 
     lm.import_library_zip = import_wrapper
     queue.import_library_zip = import_wrapper
     _INSTALLED = True
-    logger.info("Owner import override installed: trusted licence bypass, repeat import and owner auto-publish enabled")
+    logger.info("Owner/import recovery installed: owner licence bypass, repeat imports and progress-safe comic replacement")
