@@ -41,7 +41,6 @@ def _vk_confirmation_keyboard() -> str:
                         "hash": "settings",
                         "label": "✅ Проверить и подтвердить",
                     },
-                    "color": "positive",
                 }
             ]],
         },
