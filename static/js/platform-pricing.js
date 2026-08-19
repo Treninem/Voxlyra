@@ -73,7 +73,9 @@
 
   function nativeizeAll() {
     if (!isVK()) return;
-    priceInputs().forEach(nativeizeInput);
+    priceInputs()
+      .filter((input) => !input.closest('[hidden]'))
+      .forEach(nativeizeInput);
   }
 
   function canonicalizeInput(input) {
@@ -102,7 +104,7 @@
 
   function canonicalizeAll() {
     if (!isVK()) return;
-    priceInputs().forEach(canonicalizeInput);
+    priceInputs().filter((input) => input.dataset.voxPriceState === 'native').forEach(canonicalizeInput);
   }
 
   function restoreAllSoon() {
