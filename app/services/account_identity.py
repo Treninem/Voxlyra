@@ -162,6 +162,28 @@ async def _merge_reader_data(db: Any, source_id: int, target_id: int) -> None:
         except Exception:
             pass
 
+    # TTS progress has an additional voice_code uniqueness dimension. Without
+    # this explicit merge the generic UPDATE OR IGNORE below keeps the older
+    # canonical row and deletes a farther secondary position for the same voice.
+    try:
+        await db.execute(
+            """UPDATE tts_progress
+               SET position_seconds=MAX(
+                   position_seconds,
+                   COALESCE((
+                       SELECT s.position_seconds
+                       FROM tts_progress s
+                       WHERE s.user_id=?
+                         AND s.chapter_id=tts_progress.chapter_id
+                         AND s.voice_code=tts_progress.voice_code
+                   ),0)
+               )
+               WHERE user_id=?""",
+            (source_id, target_id),
+        )
+    except Exception:
+        pass
+
     try:
         await db.execute(
             "UPDATE user_achievements SET progress_value=MAX(progress_value, COALESCE((SELECT s.progress_value FROM user_achievements s WHERE s.user_id=? AND s.achievement_code=user_achievements.achievement_code),0)) WHERE user_id=?",
@@ -216,6 +238,35 @@ async def _merge_reader_data(db: Any, source_id: int, target_id: int) -> None:
                 ),
             )
             await db.execute("DELETE FROM bonus_wallets WHERE user_id=?", (source_id,))
+    except Exception:
+        pass
+
+    # Referral ownership uses referrer_user_id/referred_user_id rather than the
+    # generic user_id column. Canonicalize both sides explicitly. Existing
+    # canonical attribution wins so one person never receives two invite links,
+    # and a TG<->VK merge cannot create a self-referral.
+    try:
+        await db.execute(
+            "UPDATE referrals SET referrer_user_id=? WHERE referrer_user_id=?",
+            (target_id, source_id),
+        )
+        target_referral = await (
+            await db.execute(
+                "SELECT id FROM referrals WHERE referred_user_id=? LIMIT 1",
+                (target_id,),
+            )
+        ).fetchone()
+        if target_referral:
+            await db.execute("DELETE FROM referrals WHERE referred_user_id=?", (source_id,))
+        else:
+            await db.execute(
+                "UPDATE referrals SET referred_user_id=? WHERE referred_user_id=?",
+                (target_id, source_id),
+            )
+        await db.execute(
+            "DELETE FROM referrals WHERE referrer_user_id=? AND referred_user_id=?",
+            (target_id, target_id),
+        )
     except Exception:
         pass
 
