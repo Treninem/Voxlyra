@@ -130,6 +130,16 @@ async def identity_status(user_id: int) -> dict[str, Any]:
     }
 
 
+async def _linked_external(db: Any, user_id: int, platform: str) -> str:
+    row = await (
+        await db.execute(
+            "SELECT external_id FROM external_identities WHERE user_id=? AND platform=? ORDER BY id LIMIT 1",
+            (int(user_id), str(platform)),
+        )
+    ).fetchone()
+    return str(row["external_id"]) if row else ""
+
+
 async def _account_summary(db: Any, user_id: int) -> dict[str, int]:
     result: dict[str, int] = {}
     for label, table in (
@@ -146,82 +156,126 @@ async def _account_summary(db: Any, user_id: int) -> dict[str, int]:
 
 
 async def _merge_reader_data(db: Any, source_id: int, target_id: int) -> None:
-    """Move cross-platform reader data without duplicating paid access."""
-    # Progress conflicts keep the furthest known position/page.
+    """Atomically move cross-platform user value to one canonical account.
+
+    This function runs inside the caller's transaction. Core tables deliberately
+    do not swallow SQL errors: a failed balance/progress/referral move must abort
+    the entire account link instead of committing a half-merged identity.
+    """
     progress = {
         "reading_progress": ("chapter_id", "position_percent"),
         "listening_progress": ("audio_chapter_id", "position_seconds"),
         "graphic_reading_progress": ("graphic_chapter_id", "page_number"),
     }
     for table, (key, value) in progress.items():
-        try:
-            await db.execute(
-                f"UPDATE {table} SET {value}=MAX({value}, COALESCE((SELECT s.{value} FROM {table} s WHERE s.user_id=? AND s.{key}={table}.{key}),0)) WHERE user_id=?",
-                (source_id, target_id),
-            )
-        except Exception:
-            pass
-
-    try:
         await db.execute(
-            "UPDATE user_achievements SET progress_value=MAX(progress_value, COALESCE((SELECT s.progress_value FROM user_achievements s WHERE s.user_id=? AND s.achievement_code=user_achievements.achievement_code),0)) WHERE user_id=?",
+            f"UPDATE {table} SET {value}=MAX({value}, COALESCE((SELECT s.{value} FROM {table} s WHERE s.user_id=? AND s.{key}={table}.{key}),0)) WHERE user_id=?",
             (source_id, target_id),
         )
-    except Exception:
-        pass
 
-    # Paid wallet balances are additive; the transaction ledger is moved below.
-    try:
-        source_wallet = await (await db.execute("SELECT balance_stars FROM reader_wallets WHERE user_id=?", (source_id,))).fetchone()
-        if source_wallet:
-            await db.execute(
-                "INSERT INTO reader_wallets(user_id,balance_stars,created_at,updated_at) VALUES(?,?,?,?) "
-                "ON CONFLICT(user_id) DO UPDATE SET balance_stars=reader_wallets.balance_stars+excluded.balance_stars,updated_at=excluded.updated_at",
-                (target_id, int(source_wallet["balance_stars"] or 0), utc_now(), utc_now()),
-            )
-            await db.execute("DELETE FROM reader_wallets WHERE user_id=?", (source_id,))
-    except Exception:
-        pass
+    # TTS has an extra voice_code uniqueness dimension.
+    await db.execute(
+        """UPDATE tts_progress
+           SET position_seconds=MAX(
+               position_seconds,
+               COALESCE((
+                   SELECT s.position_seconds
+                   FROM tts_progress s
+                   WHERE s.user_id=?
+                     AND s.chapter_id=tts_progress.chapter_id
+                     AND s.voice_code=tts_progress.voice_code
+               ),0)
+           )
+           WHERE user_id=?""",
+        (source_id, target_id),
+    )
 
-    # Bonus points are money-like value too. The old generic UPDATE OR IGNORE
-    # would keep only the canonical row when both accounts had a wallet, silently
-    # dropping the secondary balance. Merge it explicitly before generic tables.
-    try:
-        source_bonus = await (
-            await db.execute(
-                "SELECT balance,last_daily_bonus_at FROM bonus_wallets WHERE user_id=?",
-                (source_id,),
-            )
-        ).fetchone()
-        if source_bonus:
-            now = utc_now()
-            await db.execute(
-                """INSERT INTO bonus_wallets(user_id,balance,last_daily_bonus_at,created_at,updated_at)
-                   VALUES(?,?,?,?,?)
-                   ON CONFLICT(user_id) DO UPDATE SET
-                       balance=bonus_wallets.balance+excluded.balance,
-                       last_daily_bonus_at=CASE
-                           WHEN bonus_wallets.last_daily_bonus_at IS NULL THEN excluded.last_daily_bonus_at
-                           WHEN excluded.last_daily_bonus_at IS NULL THEN bonus_wallets.last_daily_bonus_at
-                           WHEN excluded.last_daily_bonus_at>bonus_wallets.last_daily_bonus_at THEN excluded.last_daily_bonus_at
-                           ELSE bonus_wallets.last_daily_bonus_at
-                       END,
-                       updated_at=excluded.updated_at""",
-                (
-                    target_id,
-                    int(source_bonus["balance"] or 0),
-                    source_bonus["last_daily_bonus_at"],
-                    now,
-                    now,
-                ),
-            )
-            await db.execute("DELETE FROM bonus_wallets WHERE user_id=?", (source_id,))
-    except Exception:
-        pass
+    await db.execute(
+        "UPDATE user_achievements SET progress_value=MAX(progress_value, COALESCE((SELECT s.progress_value FROM user_achievements s WHERE s.user_id=? AND s.achievement_code=user_achievements.achievement_code),0)) WHERE user_id=?",
+        (source_id, target_id),
+    )
 
-    # Every user-owned table is discovered from SQLite. UPDATE OR IGNORE moves
-    # non-conflicting rows; an existing canonical row wins a duplicate key.
-    tables = await (await db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'" )).fetchall()
+    # Paid wallet balances are additive; the transaction ledger moves below.
+    source_wallet = await (
+        await db.execute("SELECT balance_stars FROM reader_wallets WHERE user_id=?", (source_id,))
+    ).fetchone()
+    if source_wallet:
+        now = utc_now()
+        await db.execute(
+            "INSERT INTO reader_wallets(user_id,balance_stars,created_at,updated_at) VALUES(?,?,?,?) "
+            "ON CONFLICT(user_id) DO UPDATE SET balance_stars=reader_wallets.balance_stars+excluded.balance_stars,updated_at=excluded.updated_at",
+            (target_id, int(source_wallet["balance_stars"] or 0), now, now),
+        )
+        await db.execute("DELETE FROM reader_wallets WHERE user_id=?", (source_id,))
+
+    # Bonus points are also additive money-like value.
+    source_bonus = await (
+        await db.execute(
+            "SELECT balance,last_daily_bonus_at FROM bonus_wallets WHERE user_id=?",
+            (source_id,),
+        )
+    ).fetchone()
+    if source_bonus:
+        now = utc_now()
+        await db.execute(
+            """INSERT INTO bonus_wallets(user_id,balance,last_daily_bonus_at,created_at,updated_at)
+               VALUES(?,?,?,?,?)
+               ON CONFLICT(user_id) DO UPDATE SET
+                   balance=bonus_wallets.balance+excluded.balance,
+                   last_daily_bonus_at=CASE
+                       WHEN bonus_wallets.last_daily_bonus_at IS NULL THEN excluded.last_daily_bonus_at
+                       WHEN excluded.last_daily_bonus_at IS NULL THEN bonus_wallets.last_daily_bonus_at
+                       WHEN excluded.last_daily_bonus_at>bonus_wallets.last_daily_bonus_at THEN excluded.last_daily_bonus_at
+                       ELSE bonus_wallets.last_daily_bonus_at
+                   END,
+                   updated_at=excluded.updated_at""",
+            (
+                target_id,
+                int(source_bonus["balance"] or 0),
+                source_bonus["last_daily_bonus_at"],
+                now,
+                now,
+            ),
+        )
+        await db.execute("DELETE FROM bonus_wallets WHERE user_id=?", (source_id,))
+
+    # Referral ownership is live account state and uses non-generic column names.
+    await db.execute(
+        "UPDATE referrals SET referrer_user_id=? WHERE referrer_user_id=?",
+        (target_id, source_id),
+    )
+    target_referral = await (
+        await db.execute(
+            "SELECT id FROM referrals WHERE referred_user_id=? LIMIT 1",
+            (target_id,),
+        )
+    ).fetchone()
+    if target_referral:
+        # One person may only have one inviter. Existing canonical attribution
+        # wins; already-paid bonuses remain preserved in bonus ledgers/wallets.
+        await db.execute("DELETE FROM referrals WHERE referred_user_id=?", (source_id,))
+    else:
+        await db.execute(
+            "UPDATE referrals SET referred_user_id=? WHERE referred_user_id=?",
+            (target_id, source_id),
+        )
+    await db.execute(
+        "DELETE FROM referrals WHERE referrer_user_id=? AND referred_user_id=?",
+        (target_id, target_id),
+    )
+
+    # A successful merge supersedes every legacy one-time code created by either
+    # side so a compatibility client cannot attach another opposite identity.
+    await db.execute(
+        "UPDATE account_link_codes SET used_at=? WHERE used_at IS NULL AND source_user_id IN (?,?)",
+        (utc_now(), source_id, target_id),
+    )
+
+    # Move remaining ordinary user-owned rows. For duplicate keys the canonical
+    # row wins; purchases and money ledgers are never deleted as duplicates.
+    tables = await (
+        await db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+    ).fetchall()
     protected = {
         "users", "external_identities", "account_link_codes", "reader_wallets",
         "bonus_wallets", "author_profiles",
@@ -234,42 +288,51 @@ async def _merge_reader_data(db: Any, source_id: int, target_id: int) -> None:
         if "user_id" not in {str(row["name"]) for row in columns}:
             continue
         await db.execute(f"UPDATE OR IGNORE {table} SET user_id=? WHERE user_id=?", (target_id, source_id))
-        # Remaining duplicates represent the same logical item already present
-        # on the chosen primary account. Paid purchase rows normally have no
-        # user-scoped UNIQUE key and are moved, never deleted.
         if table not in {"purchases", "reader_wallet_transactions", "wallet_topups"}:
             await db.execute(f"DELETE FROM {table} WHERE user_id=?", (source_id,))
 
-    # Preserve the author cabinet. If both sides have one, move source books to
-    # the target author profile and retain only the chosen public profile.
-    source_author = await (await db.execute("SELECT id FROM author_profiles WHERE user_id=?", (source_id,))).fetchone()
-    target_author = await (await db.execute("SELECT id FROM author_profiles WHERE user_id=?", (target_id,))).fetchone()
+    # Preserve the author cabinet. If both sides have one, move source content to
+    # the Telegram-canonical author profile but keep the dormant source profile
+    # for recoverability if a future schema contains an unreassignable reference.
+    source_author = await (
+        await db.execute("SELECT id FROM author_profiles WHERE user_id=?", (source_id,))
+    ).fetchone()
+    target_author = await (
+        await db.execute("SELECT id FROM author_profiles WHERE user_id=?", (target_id,))
+    ).fetchone()
     if source_author and target_author:
         source_author_id, target_author_id = int(source_author["id"]), int(target_author["id"])
-        author_tables = await (await db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'" )).fetchall()
+        author_tables = await (
+            await db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+        ).fetchall()
         for table_row in author_tables:
             table = str(table_row["name"])
             if table == "author_profiles" or not table.replace("_", "").isalnum():
                 continue
             columns = await (await db.execute(f"PRAGMA table_info({table})")).fetchall()
             if "author_id" in {str(row["name"]) for row in columns}:
-                await db.execute(f"UPDATE OR IGNORE {table} SET author_id=? WHERE author_id=?", (target_author_id, source_author_id))
-        # Never delete the secondary author profile here: a future schema may
-        # contain a protected row that could not be reassigned. Keeping the
-        # dormant row makes the merge recoverable and prevents cascade loss.
+                await db.execute(
+                    f"UPDATE OR IGNORE {table} SET author_id=? WHERE author_id=?",
+                    (target_author_id, source_author_id),
+                )
     elif source_author:
         await db.execute("UPDATE author_profiles SET user_id=? WHERE id=?", (target_id, int(source_author["id"])))
 
 
 async def create_link_code(user_id: int, platform: str, *, ttl_minutes: int = 10) -> dict[str, Any]:
     await ensure_identity_schema()
-    # Eight characters are short enough to type and have enough entropy for a
-    # ten-minute, single-use code. Only the SHA-256 hash is stored.
+    source_platform = str(platform or "").strip().lower()
+    if source_platform not in {"telegram", "vk"}:
+        raise AccountLinkError("Не удалось определить текущую платформу.")
+    opposite_platform = "vk" if source_platform == "telegram" else "telegram"
+
     alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
     code = "".join(secrets.choice(alphabet) for _ in range(8))
     now_dt = _now_dt()
     expires_dt = now_dt + timedelta(minutes=max(3, min(30, int(ttl_minutes))))
     async with connect() as db:
+        if await _linked_external(db, int(user_id), opposite_platform):
+            raise AccountLinkError("Этот профиль уже связан с аккаунтом второй платформы.")
         await db.execute(
             "DELETE FROM account_link_codes WHERE source_user_id=? OR expires_at<=? OR used_at IS NOT NULL",
             (int(user_id), now_dt.isoformat()),
@@ -277,25 +340,32 @@ async def create_link_code(user_id: int, platform: str, *, ttl_minutes: int = 10
         await db.execute(
             """INSERT INTO account_link_codes(code_hash,source_user_id,source_platform,expires_at,used_at,created_at)
                VALUES(?,?,?,?,NULL,?)""",
-            (_code_hash(code), int(user_id), str(platform or "unknown"), expires_dt.isoformat(), now_dt.isoformat()),
+            (_code_hash(code), int(user_id), source_platform, expires_dt.isoformat(), now_dt.isoformat()),
         )
         await db.commit()
     return {"code": code, "expires_at": expires_dt.isoformat(), "ttl_minutes": int(ttl_minutes)}
 
 
 async def consume_link_code(*, current_user_id: int, current_platform: str, external_id: int | str, code: str, strategy: str = "") -> dict[str, Any]:
+    """Compatibility consumer for old clients.
+
+    Possession of the code on the verified opposite platform is already the
+    confirmation step, so legacy choices are accepted for compatibility but no
+    longer change merge semantics: data is merged and Telegram stays canonical.
+    """
     await ensure_identity_schema()
     normalized = str(code or "").strip().upper().replace("-", "")
     if len(normalized) != 8:
         raise AccountLinkError("Код привязки должен состоять из 8 символов.")
     now = _now_dt().isoformat()
     async with connect() as db:
-        cur = await db.execute(
-            """SELECT * FROM account_link_codes
-               WHERE code_hash=? AND used_at IS NULL AND expires_at>? LIMIT 1""",
-            (_code_hash(normalized), now),
-        )
-        row = await cur.fetchone()
+        row = await (
+            await db.execute(
+                """SELECT * FROM account_link_codes
+                   WHERE code_hash=? AND used_at IS NULL AND expires_at>? LIMIT 1""",
+                (_code_hash(normalized), now),
+            )
+        ).fetchone()
         if not row:
             raise AccountLinkError("Код не найден, уже использован или истёк.")
         source_user_id = int(row["source_user_id"])
@@ -307,56 +377,55 @@ async def consume_link_code(*, current_user_id: int, current_platform: str, exte
         if source_platform == platform:
             raise AccountLinkError("Код нужно использовать на другой платформе.")
 
-        accounts_differ = source_user_id != int(current_user_id)
-        strategy = str(strategy or "").strip().lower()
-        if accounts_differ and strategy not in {"merge", "keep_telegram", "keep_vk"}:
-            return {
-                "ok": True, "requires_decision": True,
-                "source_platform": source_platform, "current_platform": platform,
-                "source": await _account_summary(db, source_user_id),
-                "current": await _account_summary(db, int(current_user_id)),
-            }
+        source_other = await _linked_external(db, source_user_id, platform)
+        if source_other and source_other != external:
+            raise AccountLinkError("Исходный профиль уже связан с другим аккаунтом второй платформы.")
+        current_other = await _linked_external(db, int(current_user_id), source_platform)
+        if current_other and int(current_user_id) != source_user_id:
+            raise AccountLinkError("Текущий профиль уже связан с другим аккаунтом второй платформы.")
 
-        # Serialize the final decision. The same single-use code cannot be
-        # consumed concurrently by two devices with different strategies.
+        accounts_differ = source_user_id != int(current_user_id)
+        # Ignore legacy merge/keep_telegram/keep_vk choices. The current product
+        # contract is one safe automatic merge with Telegram as canonical.
+        strategy = "legacy_auto_merge" if accounts_differ else "legacy_link"
+
         await db.execute("BEGIN IMMEDIATE")
-        locked = await (await db.execute(
-            "SELECT used_at,expires_at FROM account_link_codes WHERE code_hash=?", (_code_hash(normalized),)
-        )).fetchone()
+        locked = await (
+            await db.execute(
+                "SELECT used_at,expires_at FROM account_link_codes WHERE code_hash=?",
+                (_code_hash(normalized),),
+            )
+        ).fetchone()
         if not locked or locked["used_at"] is not None or str(locked["expires_at"]) <= now:
+            await db.rollback()
             raise AccountLinkError("Код уже использован другим устройством или истёк.")
 
-        # Telegram existed before the VK adapter and may already contain years of
-        # purchases/progress. Whichever direction the code is entered, a verified
-        # Telegram account is therefore the canonical row. This prevents a user
-        # who generated the code in fresh VK from accidentally hiding the older
-        # Telegram library behind a synthetic VK user.
         telegram_user_id = int(current_user_id) if platform == "telegram" else source_user_id
         vk_user_id = int(current_user_id) if platform == "vk" else source_user_id
-        canonical_user_id = telegram_user_id if strategy != "keep_vk" else vk_user_id
+        canonical_user_id = telegram_user_id
         secondary_user_id = vk_user_id if canonical_user_id == telegram_user_id else telegram_user_id
         snapshot = {
             "source": await _account_summary(db, source_user_id),
             "current": await _account_summary(db, int(current_user_id)),
         }
-        if strategy == "merge" and accounts_differ:
+        if accounts_differ:
             await _merge_reader_data(db, secondary_user_id, canonical_user_id)
 
         if platform == "telegram" and source_platform == "vk":
-            cur = await db.execute(
-                "SELECT external_id FROM external_identities WHERE user_id=? AND platform='vk' ORDER BY id LIMIT 1",
-                (source_user_id,),
-            )
-            source_vk = await cur.fetchone()
+            source_vk = await (
+                await db.execute(
+                    "SELECT external_id FROM external_identities WHERE user_id=? AND platform='vk' ORDER BY id LIMIT 1",
+                    (source_user_id,),
+                )
+            ).fetchone()
             if not source_vk:
+                await db.rollback()
                 raise AccountLinkError("VK-аккаунт для этого кода не найден. Создайте новый код.")
             await db.execute(
                 "UPDATE external_identities SET user_id=?,updated_at=? WHERE platform='vk' AND external_id=?",
                 (canonical_user_id, now, str(source_vk["external_id"])),
             )
         else:
-            # Normal flow: code created in Telegram and consumed in VK. Repoint
-            # the verified VK identity to the existing Telegram user.
             await db.execute(
                 """INSERT INTO external_identities(platform,external_id,user_id,created_at,updated_at)
                    VALUES(?,?,?,?,?)
@@ -364,7 +433,6 @@ async def consume_link_code(*, current_user_id: int, current_platform: str, exte
                         user_id=excluded.user_id, updated_at=excluded.updated_at""",
                 (platform, external, canonical_user_id, now, now),
             )
-        # Whichever account was selected, both verified identities must point to it.
         await db.execute(
             "UPDATE external_identities SET user_id=?,updated_at=? WHERE user_id IN (?,?) AND platform IN ('telegram','vk')",
             (canonical_user_id, now, source_user_id, int(current_user_id)),
@@ -375,7 +443,7 @@ async def consume_link_code(*, current_user_id: int, current_platform: str, exte
         )
         await db.execute(
             "INSERT INTO account_merge_events(canonical_user_id,secondary_user_id,strategy,source_platform,current_platform,snapshot_json,created_at) VALUES(?,?,?,?,?,?,?)",
-            (canonical_user_id, secondary_user_id, strategy or "link", source_platform, platform, json.dumps(snapshot, ensure_ascii=False), now),
+            (canonical_user_id, secondary_user_id, strategy, source_platform, platform, json.dumps(snapshot, ensure_ascii=False), now),
         )
         await db.commit()
     user = await get_user_by_id(canonical_user_id)
