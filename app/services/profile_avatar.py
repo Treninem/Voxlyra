@@ -63,12 +63,15 @@ def _prepare_custom_avatar(content: bytes) -> bytes:
         raise ValueError("Аватар должен быть не больше 8 МБ.")
     try:
         with Image.open(io.BytesIO(content)) as source:
-            source.load()
+            # Inspect dimensions from the image header before decoding pixel data.
+            # This prevents an oversized compressed image from consuming large
+            # amounts of memory before our own pixel limit can reject it.
             width, height = source.size
             if width < 64 or height < 64:
                 raise ValueError("Аватар должен быть не меньше 64×64 пикселей.")
             if width * height > _CUSTOM_AVATAR_MAX_PIXELS:
                 raise ValueError("Изображение слишком большое.")
+            source.load()
             image = ImageOps.exif_transpose(source)
             if image.mode not in {"RGB", "RGBA"}:
                 image = image.convert("RGBA" if "A" in image.getbands() else "RGB")
@@ -81,7 +84,7 @@ def _prepare_custom_avatar(content: bytes) -> bytes:
             output = io.BytesIO()
             image.save(output, format="WEBP", quality=90, method=6)
             payload = output.getvalue()
-    except (UnidentifiedImageError, OSError) as exc:
+    except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as exc:
         raise ValueError("Поддерживаются фотографии JPG, PNG и WEBP.") from exc
     if not payload:
         raise ValueError("Не удалось подготовить аватар.")

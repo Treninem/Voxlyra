@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from aiogram import Bot
 from fastapi import APIRouter, File, Header, HTTPException, UploadFile
 from fastapi.responses import FileResponse
@@ -16,6 +18,7 @@ from app.services.publication import post_book_to_channel
 from app.services.tma_auth import TMAAuthError, authenticate_init_data
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 _MAX_UPLOAD_BYTES = 8 * 1024 * 1024
 _NO_CACHE = {
     "Cache-Control": "private, no-store, no-cache, must-revalidate, max-age=0",
@@ -99,19 +102,26 @@ async def repost_book_to_all_platform_channels(
             headers=_NO_CACHE,
         )
 
-    # Run the two platform deliveries independently. One unavailable platform
-    # must never prevent the other platform from receiving the manual repost.
-    vk_status = await post_book_to_vk_wall(
-        int(book_id),
-        actor_user_id=user.app_user_id,
-        force=True,
-    )
+    # Deliver to both platforms independently. Unexpected failures in one path
+    # must not prevent the other platform from receiving the manual repost.
+    vk_status = "failed"
+    vk_error = ""
+    try:
+        vk_status = await post_book_to_vk_wall(
+            int(book_id),
+            actor_user_id=user.app_user_id,
+            force=True,
+        )
+    except Exception as exc:
+        vk_error = f"{type(exc).__name__}: {exc}"[:1000]
+        logger.exception("Unexpected VK repost failure book_id=%s", int(book_id))
 
     telegram_status = "not_configured"
     telegram_error = ""
     if settings.BOT_TOKEN:
-        bot = Bot(token=settings.BOT_TOKEN)
+        bot: Bot | None = None
         try:
+            bot = Bot(token=settings.BOT_TOKEN)
             tg_result = await post_book_to_channel(
                 bot,
                 int(book_id),
@@ -120,19 +130,32 @@ async def repost_book_to_all_platform_channels(
             )
             telegram_status = str(tg_result.channel_status or "failed")
             telegram_error = str(tg_result.channel_error or "")
+        except Exception as exc:
+            telegram_status = "failed"
+            telegram_error = f"{type(exc).__name__}: {exc}"[:1000]
+            logger.exception("Unexpected Telegram repost failure book_id=%s", int(book_id))
         finally:
-            await bot.session.close()
+            if bot is not None:
+                try:
+                    await bot.session.close()
+                except Exception:
+                    logger.exception("Could not close Telegram bot session after repost book_id=%s", int(book_id))
 
-    await record_owner_channel_promotion(
-        int(book_id),
-        user.app_user_id,
-        sent=telegram_status == "sent",
-        error=telegram_error,
-    )
+    try:
+        await record_owner_channel_promotion(
+            int(book_id),
+            user.app_user_id,
+            sent=telegram_status == "sent",
+            error=telegram_error,
+        )
+    except Exception:
+        # Delivery outcome must still be returned even if a secondary audit write fails.
+        logger.exception("Could not record owner channel promotion book_id=%s", int(book_id))
+
     return {
         "ok": telegram_status == "sent" and vk_status == "sent",
         "book_id": int(book_id),
         "requested_from": user.platform,
         "telegram": {"status": telegram_status, "error": telegram_error},
-        "vk": {"status": str(vk_status)},
+        "vk": {"status": str(vk_status), "error": vk_error},
     }

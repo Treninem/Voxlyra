@@ -38,6 +38,27 @@ def test_custom_avatar_is_canonical_profile_scoped_and_normalized(tmp_path, monk
     asyncio.run(scenario())
 
 
+def test_custom_avatar_rejects_oversized_dimensions_before_pixel_decode(monkeypatch):
+    from app.services import profile_avatar
+
+    class OversizedImage:
+        size = (7000, 6000)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def load(self):
+            raise AssertionError("oversized image must be rejected before decoding")
+
+    monkeypatch.setattr(profile_avatar.Image, "open", lambda _stream: OversizedImage())
+
+    with pytest.raises(ValueError, match="слишком большое"):
+        profile_avatar._prepare_custom_avatar(b"not-empty")
+
+
 def test_personal_cabinet_exposes_custom_avatar_controls_and_platform_fallback():
     template = (ROOT / "templates" / "library.html").read_text(encoding="utf-8")
     script = (ROOT / "static" / "js" / "profile-avatar.js").read_text(encoding="utf-8")
@@ -104,6 +125,107 @@ async def test_manual_repost_calls_telegram_and_vk_regardless_of_login(monkeypat
     assert result["vk"]["status"] == "sent"
     assert ("telegram", 55, 71, True) in calls
     assert ("vk", 55, 71, True) in calls
+
+
+@pytest.mark.asyncio
+async def test_manual_repost_still_sends_telegram_when_vk_raises(monkeypatch):
+    from app import profile_avatar_web as web
+
+    user = SimpleNamespace(app_user_id=71, telegram_id=2097006037, platform="vk")
+    calls: list[tuple] = []
+
+    async def fake_owner(_init_data):
+        return user
+
+    async def fake_book(book_id):
+        return {"id": int(book_id), "publication_status": "published"}
+
+    async def fake_vk(*_args, **_kwargs):
+        calls.append(("vk",))
+        raise RuntimeError("vk exploded")
+
+    async def fake_tg(_bot, book_id, *, actor_user_id, force=False):
+        calls.append(("telegram", int(book_id), int(actor_user_id), bool(force)))
+        return SimpleNamespace(channel_status="sent", channel_error="")
+
+    async def fake_record(*_args, **_kwargs):
+        calls.append(("record",))
+
+    class FakeSession:
+        async def close(self):
+            calls.append(("bot_closed",))
+
+    class FakeBot:
+        def __init__(self, token=None, **_kwargs):
+            calls.append(("bot", token))
+            self.session = FakeSession()
+
+    monkeypatch.setattr(web, "_current_owner", fake_owner)
+    monkeypatch.setattr(web, "get_book", fake_book)
+    monkeypatch.setattr(web, "post_book_to_vk_wall", fake_vk)
+    monkeypatch.setattr(web, "post_book_to_channel", fake_tg)
+    monkeypatch.setattr(web, "record_owner_channel_promotion", fake_record)
+    monkeypatch.setattr(web, "Bot", FakeBot)
+    monkeypatch.setattr(web.settings, "BOT_TOKEN", "test-token")
+
+    result = await web.repost_book_to_all_platform_channels(55, "signed-launch-data")
+
+    assert result["ok"] is False
+    assert result["vk"]["status"] == "failed"
+    assert "vk exploded" in result["vk"]["error"]
+    assert result["telegram"]["status"] == "sent"
+    assert ("telegram", 55, 71, True) in calls
+
+
+@pytest.mark.asyncio
+async def test_manual_repost_still_sends_vk_when_telegram_raises(monkeypatch):
+    from app import profile_avatar_web as web
+
+    user = SimpleNamespace(app_user_id=71, telegram_id=2097006037, platform="telegram")
+    calls: list[tuple] = []
+
+    async def fake_owner(_init_data):
+        return user
+
+    async def fake_book(book_id):
+        return {"id": int(book_id), "publication_status": "published"}
+
+    async def fake_vk(book_id, *, actor_user_id, force=False):
+        calls.append(("vk", int(book_id), int(actor_user_id), bool(force)))
+        return "sent"
+
+    async def fake_tg(*_args, **_kwargs):
+        calls.append(("telegram",))
+        raise RuntimeError("telegram exploded")
+
+    async def fake_record(book_id, user_id, *, sent, error=""):
+        calls.append(("record", int(book_id), int(user_id), bool(sent), str(error)))
+
+    class FakeSession:
+        async def close(self):
+            calls.append(("bot_closed",))
+
+    class FakeBot:
+        def __init__(self, token=None, **_kwargs):
+            calls.append(("bot", token))
+            self.session = FakeSession()
+
+    monkeypatch.setattr(web, "_current_owner", fake_owner)
+    monkeypatch.setattr(web, "get_book", fake_book)
+    monkeypatch.setattr(web, "post_book_to_vk_wall", fake_vk)
+    monkeypatch.setattr(web, "post_book_to_channel", fake_tg)
+    monkeypatch.setattr(web, "record_owner_channel_promotion", fake_record)
+    monkeypatch.setattr(web, "Bot", FakeBot)
+    monkeypatch.setattr(web.settings, "BOT_TOKEN", "test-token")
+
+    result = await web.repost_book_to_all_platform_channels(55, "signed-launch-data")
+
+    assert result["ok"] is False
+    assert result["vk"]["status"] == "sent"
+    assert result["telegram"]["status"] == "failed"
+    assert "telegram exploded" in result["telegram"]["error"]
+    assert ("vk", 55, 71, True) in calls
+    assert any(call[0] == "record" and call[3] is False for call in calls if call)
 
 
 def test_owner_repost_button_is_routed_to_cross_platform_endpoint_before_legacy_handler():
