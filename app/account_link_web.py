@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Header, HTTPException, Request
 
 from app.db import add_audit, connect
@@ -17,6 +19,7 @@ from app.services.smart_account_link import (
 from app.services.tma_auth import TMAAuthError, authenticate_init_data
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 _NO_CACHE = {
     "Cache-Control": "private, no-store, no-cache, must-revalidate, max-age=0",
     "Pragma": "no-cache",
@@ -35,13 +38,26 @@ def _link_error(exc: AccountLinkError) -> HTTPException:
     return HTTPException(status_code=409, detail=str(exc), headers=_NO_CACHE)
 
 
+async def _safe_audit(*args) -> None:
+    try:
+        await add_audit(*args)
+    except Exception:
+        # Account-link state is committed transactionally before secondary audit
+        # metadata is written. Never turn a successful request/merge into a
+        # misleading HTTP error only because the journal write failed.
+        logger.exception("Could not write account-link audit event")
+
+
 @router.post("/api/account-link/request", include_in_schema=False)
 async def create_account_link_request(
     request: Request,
     x_telegram_init_data: str | None = Header(default=None),
 ):
     user = await _current_user(x_telegram_init_data)
-    payload = await request.json()
+    try:
+        payload = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Некорректный запрос привязки.", headers=_NO_CACHE) from exc
     target = str((payload or {}).get("target") or "").strip()
     try:
         result = await create_smart_link_request(
@@ -65,7 +81,7 @@ async def create_account_link_request(
     await set_link_request_delivery(str(result["token"]), delivered=delivered, error=error)
     result["delivery_status"] = "sent" if delivered else "failed"
     result["delivery_error"] = error
-    await add_audit(
+    await _safe_audit(
         user.app_user_id,
         "cross_platform_link_request_created",
         "account",
@@ -139,7 +155,7 @@ async def confirm_account_link_request(
         )
     except AccountLinkError as exc:
         raise _link_error(exc) from exc
-    await add_audit(
+    await _safe_audit(
         int(result["canonical_user_id"]),
         "cross_platform_accounts_smart_merged",
         "account",
