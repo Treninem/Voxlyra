@@ -82,7 +82,7 @@ async def reset_custom_profile_avatar(
     return {"ok": True, "removed": bool(removed), "fallback": user.platform}
 
 
-@router.post("/api/control/book/{book_id}/repost-platforms", include_in_schema=False)
+@router.post("/api/control/repost-platforms/{book_id}", include_in_schema=False)
 async def repost_book_to_all_platform_channels(
     book_id: int,
     x_telegram_init_data: str | None = Header(default=None),
