@@ -18,6 +18,12 @@
       <span class="collector-profile-badge" id="libraryCollectorBadge" hidden>Ур. 1 · Новичок</span>
     </div>
     <strong class="library-profile-name" id="libraryProfileName" hidden></strong>
+    <div class="form-actions profile-avatar-actions" id="profileAvatarActions">
+      <button class="button-link secondary compact-button" id="profileAvatarChoose" type="button">Сменить фото</button>
+      <button class="secondary compact-button" id="profileAvatarReset" type="button" hidden>Фото из платформы</button>
+      <input id="profileAvatarFile" type="file" accept="image/jpeg,image/png,image/webp" hidden>
+    </div>
+    <small class="muted" id="profileAvatarHint">По умолчанию используется фото из Telegram или VK. Можно установить свой общий аватар VoxLyra.</small>
     <p>Продолжение чтения, личный дневник с поиском, фильтрами, выборочным восстановлением, резервными точками и безопасной отменой, цели, полки и покупки.</p>
   </div>
 </section>
@@ -63,3 +69,4 @@
   <div id="libraryContent">{{ empty_state('chapter-loading', 'Собираем вашу полку', 'Это займёт всего мгновение.', extra_class='loading-card') }}</div>
 </section>
 {% endblock %}
+{% block scripts %}<script src="/static/js/profile-avatar.js?v={{ asset_version }}"></script>{% endblock %}
