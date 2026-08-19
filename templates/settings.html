@@ -82,19 +82,16 @@
 <section class="settings-group-title"><h2>🔗 Telegram + VK</h2></section>
 <section class="settings-panel" id="crossPlatformAccountPanel">
   <article class="setting-card">
-    <div class="setting-head"><div><h3>Одна библиотека на двух платформах</h3><p>Привяжите Telegram и VK один раз. После этого книги, полки, прогресс, покупки, награды и авторский кабинет будут использовать одну учётную запись VoxLyra.</p></div></div>
+    <div class="setting-head"><div><h3>Один аккаунт VoxLyra</h3><p>Введите username или ID своего аккаунта на второй платформе. VoxLyra отправит туда запрос, и данные объединятся только после подтверждения владельцем второго аккаунта.</p></div></div>
     <div id="crossPlatformStatus"><p class="muted">Проверяем привязку…</p></div>
-    <div class="segmented two">
-      <button type="button" id="crossPlatformCreateCode">Создать код</button>
-      <button type="button" id="crossPlatformRefresh">Обновить</button>
-    </div>
-    <div id="crossPlatformCodeBox" hidden></div>
-    <form id="crossPlatformConsumeForm" class="settings-inline-form">
-      <input id="crossPlatformCodeInput" maxlength="8" autocomplete="one-time-code" placeholder="Код из другой платформы">
-      <button type="submit" class="secondary">Привязать</button>
+    <form id="smartAccountLinkForm" class="settings-inline-form">
+      <input id="smartAccountLinkTarget" maxlength="96" autocomplete="off" placeholder="@username или ID второй платформы">
+      <button type="submit" id="smartAccountLinkSubmit" class="secondary">Отправить подтверждение</button>
     </form>
-    <div id="crossPlatformMergeChoice" hidden></div>
-    <p class="muted">Код действует 10 минут и используется один раз. Откройте VoxLyra на второй платформе и введите его здесь.</p>
+    <div id="smartAccountLinkState" hidden></div>
+    <div id="smartAccountLinkIncoming" hidden></div>
+    <button type="button" id="crossPlatformRefresh" class="secondary full">Обновить статус</button>
+    <p class="muted" id="smartAccountLinkHint">Username или ID нужен только для отправки запроса. Само объединение выполняется только после подтверждения на втором аккаунте.</p>
   </article>
 </section>
 
@@ -125,4 +122,7 @@
 <section class="settings-panel">
   <article class="setting-card danger-zone"><div><h3>Сброс настроек</h3><p>Вернуть оформление, чтение, аудио и уведомления к исходным значениям.</p></div><button type="button" id="resetLocalSettings" class="secondary full">Сбросить настройки</button></article>
 </section>
+{% endblock %}
+{% block scripts %}
+<script src="/static/js/account-linking.js?v={{ asset_version }}"></script>
 {% endblock %}
