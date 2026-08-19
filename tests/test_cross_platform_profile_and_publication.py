@@ -115,8 +115,8 @@ def test_owner_repost_button_is_routed_to_cross_platform_endpoint_before_legacy_
     assert "book:repost:" in control
     assert '[data-action^="book:repost:"]' in adapter
     assert "event.stopImmediatePropagation()" in adapter
-    assert "/repost-platforms" in adapter
-    assert '/api/control/book/{book_id}/repost-platforms' in router
+    assert "/api/control/repost-platforms/" in adapter
+    assert '/api/control/repost-platforms/{book_id}' in router
     assert "post_book_to_vk_wall" in router
     assert "post_book_to_channel" in router
     assert "force=True" in router
