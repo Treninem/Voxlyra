@@ -32,7 +32,7 @@
     const oldDisabled = button.disabled;
     button.disabled = true;
     try {
-      const result = await window.apiFetch(`/api/control/book/${bookId}/repost-platforms`, { method: 'POST' });
+      const result = await window.apiFetch(`/api/control/repost-platforms/${bookId}`, { method: 'POST' });
       const tg = statusText('Telegram', result?.telegram?.status);
       const vk = statusText('VK', result?.vk?.status);
       window.notify?.(`${tg} · ${vk}`);
