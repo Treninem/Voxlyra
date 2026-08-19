@@ -130,6 +130,16 @@ async def identity_status(user_id: int) -> dict[str, Any]:
     }
 
 
+async def _linked_external(db: Any, user_id: int, platform: str) -> str:
+    row = await (
+        await db.execute(
+            "SELECT external_id FROM external_identities WHERE user_id=? AND platform=? ORDER BY id LIMIT 1",
+            (int(user_id), str(platform)),
+        )
+    ).fetchone()
+    return str(row["external_id"]) if row else ""
+
+
 async def _account_summary(db: Any, user_id: int) -> dict[str, int]:
     result: dict[str, int] = {}
     for label, table in (
@@ -270,6 +280,17 @@ async def _merge_reader_data(db: Any, source_id: int, target_id: int) -> None:
     except Exception:
         pass
 
+    # A successful merge supersedes every legacy one-time code created by either
+    # account. This closes the compatibility-only path that could otherwise be
+    # used for a second opposite-platform link during the old code's TTL.
+    try:
+        await db.execute(
+            "UPDATE account_link_codes SET used_at=? WHERE used_at IS NULL AND source_user_id IN (?,?)",
+            (utc_now(), source_id, target_id),
+        )
+    except Exception:
+        pass
+
     # Every user-owned table is discovered from SQLite. UPDATE OR IGNORE moves
     # non-conflicting rows; an existing canonical row wins a duplicate key.
     tables = await (await db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'" )).fetchall()
@@ -314,6 +335,11 @@ async def _merge_reader_data(db: Any, source_id: int, target_id: int) -> None:
 
 async def create_link_code(user_id: int, platform: str, *, ttl_minutes: int = 10) -> dict[str, Any]:
     await ensure_identity_schema()
+    source_platform = str(platform or "").strip().lower()
+    if source_platform not in {"telegram", "vk"}:
+        raise AccountLinkError("Не удалось определить текущую платформу.")
+    opposite_platform = "vk" if source_platform == "telegram" else "telegram"
+
     # Eight characters are short enough to type and have enough entropy for a
     # ten-minute, single-use code. Only the SHA-256 hash is stored.
     alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
@@ -321,6 +347,8 @@ async def create_link_code(user_id: int, platform: str, *, ttl_minutes: int = 10
     now_dt = _now_dt()
     expires_dt = now_dt + timedelta(minutes=max(3, min(30, int(ttl_minutes))))
     async with connect() as db:
+        if await _linked_external(db, int(user_id), opposite_platform):
+            raise AccountLinkError("Этот профиль уже связан с аккаунтом второй платформы.")
         await db.execute(
             "DELETE FROM account_link_codes WHERE source_user_id=? OR expires_at<=? OR used_at IS NOT NULL",
             (int(user_id), now_dt.isoformat()),
@@ -328,7 +356,7 @@ async def create_link_code(user_id: int, platform: str, *, ttl_minutes: int = 10
         await db.execute(
             """INSERT INTO account_link_codes(code_hash,source_user_id,source_platform,expires_at,used_at,created_at)
                VALUES(?,?,?,?,NULL,?)""",
-            (_code_hash(code), int(user_id), str(platform or "unknown"), expires_dt.isoformat(), now_dt.isoformat()),
+            (_code_hash(code), int(user_id), source_platform, expires_dt.isoformat(), now_dt.isoformat()),
         )
         await db.commit()
     return {"code": code, "expires_at": expires_dt.isoformat(), "ttl_minutes": int(ttl_minutes)}
@@ -357,6 +385,16 @@ async def consume_link_code(*, current_user_id: int, current_platform: str, exte
             raise AccountLinkError("Не удалось определить текущую платформу.")
         if source_platform == platform:
             raise AccountLinkError("Код нужно использовать на другой платформе.")
+
+        # Compatibility codes must obey the same one-TG/one-VK ownership model
+        # as the new signed request flow. A stale or crafted old client may not
+        # attach a second account of either platform to an already-linked user.
+        source_other = await _linked_external(db, source_user_id, platform)
+        if source_other and source_other != external:
+            raise AccountLinkError("Исходный профиль уже связан с другим аккаунтом второй платформы.")
+        current_other = await _linked_external(db, int(current_user_id), source_platform)
+        if current_other and int(current_user_id) != source_user_id:
+            raise AccountLinkError("Текущий профиль уже связан с другим аккаунтом второй платформы.")
 
         accounts_differ = source_user_id != int(current_user_id)
         strategy = str(strategy or "").strip().lower()
