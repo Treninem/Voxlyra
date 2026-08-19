@@ -167,6 +167,7 @@ def test_settings_use_request_confirmation_instead_of_manual_merge_choice():
     script = (root / "static" / "js" / "account-linking.js").read_text(encoding="utf-8")
     router = (root / "app" / "account_link_web.py").read_text(encoding="utf-8")
     notifications = (root / "app" / "services" / "account_link_notifications.py").read_text(encoding="utf-8")
+    vk_source = (root / "app" / "services" / "vk_api.py").read_text(encoding="utf-8")
 
     assert 'id="smartAccountLinkTarget"' in template
     assert '@username или ID' in template
@@ -182,3 +183,5 @@ def test_settings_use_request_confirmation_instead_of_manual_merge_choice():
     assert "source_platform=? AND source_external_id=?" in router
     assert "Ничего не объединится автоматически по одному username или ID" in notifications
     assert "Проверить и подтвердить" in notifications
+    assert "создайте код на одной платформе" not in vk_source.casefold()
+    assert "По одному username или ID данные не сливаются" in vk_source
