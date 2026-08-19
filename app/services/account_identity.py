@@ -170,7 +170,7 @@ async def _merge_reader_data(db: Any, source_id: int, target_id: int) -> None:
     except Exception:
         pass
 
-    # Wallet balances are additive; the transaction ledger is moved below.
+    # Paid wallet balances are additive; the transaction ledger is moved below.
     try:
         source_wallet = await (await db.execute("SELECT balance_stars FROM reader_wallets WHERE user_id=?", (source_id,))).fetchone()
         if source_wallet:
@@ -183,10 +183,49 @@ async def _merge_reader_data(db: Any, source_id: int, target_id: int) -> None:
     except Exception:
         pass
 
+    # Bonus points are money-like value too. The old generic UPDATE OR IGNORE
+    # would keep only the canonical row when both accounts had a wallet, silently
+    # dropping the secondary balance. Merge it explicitly before generic tables.
+    try:
+        source_bonus = await (
+            await db.execute(
+                "SELECT balance,last_daily_bonus_at FROM bonus_wallets WHERE user_id=?",
+                (source_id,),
+            )
+        ).fetchone()
+        if source_bonus:
+            now = utc_now()
+            await db.execute(
+                """INSERT INTO bonus_wallets(user_id,balance,last_daily_bonus_at,created_at,updated_at)
+                   VALUES(?,?,?,?,?)
+                   ON CONFLICT(user_id) DO UPDATE SET
+                       balance=bonus_wallets.balance+excluded.balance,
+                       last_daily_bonus_at=CASE
+                           WHEN bonus_wallets.last_daily_bonus_at IS NULL THEN excluded.last_daily_bonus_at
+                           WHEN excluded.last_daily_bonus_at IS NULL THEN bonus_wallets.last_daily_bonus_at
+                           WHEN excluded.last_daily_bonus_at>bonus_wallets.last_daily_bonus_at THEN excluded.last_daily_bonus_at
+                           ELSE bonus_wallets.last_daily_bonus_at
+                       END,
+                       updated_at=excluded.updated_at""",
+                (
+                    target_id,
+                    int(source_bonus["balance"] or 0),
+                    source_bonus["last_daily_bonus_at"],
+                    now,
+                    now,
+                ),
+            )
+            await db.execute("DELETE FROM bonus_wallets WHERE user_id=?", (source_id,))
+    except Exception:
+        pass
+
     # Every user-owned table is discovered from SQLite. UPDATE OR IGNORE moves
     # non-conflicting rows; an existing canonical row wins a duplicate key.
     tables = await (await db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'" )).fetchall()
-    protected = {"users", "external_identities", "account_link_codes", "reader_wallets", "author_profiles"}
+    protected = {
+        "users", "external_identities", "account_link_codes", "reader_wallets",
+        "bonus_wallets", "author_profiles",
+    }
     for table_row in tables:
         table = str(table_row["name"])
         if table in protected or not table.replace("_", "").isalnum():

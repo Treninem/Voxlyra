@@ -232,8 +232,10 @@ async def github_source_upload_finish(
 # Public pull bridge for the two explicitly approved canonical owner books only.
 # The destination repository is public content storage, therefore no write token
 # is exposed and no arbitrary book id/title/path can be requested.
+from app.account_link_web import router as account_link_web_router
 from app.canonical_source_export_web import router as canonical_source_export_router
 from app.profile_avatar_web import router as profile_avatar_router
 
 router.include_router(canonical_source_export_router)
 router.include_router(profile_avatar_router)
+router.include_router(account_link_web_router)
