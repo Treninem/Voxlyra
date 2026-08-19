@@ -156,7 +156,8 @@ async def test_manual_repost_still_sends_telegram_when_vk_raises(monkeypatch):
             calls.append(("bot_closed",))
 
     class FakeBot:
-        def __init__(self, _token):
+        def __init__(self, token=None, **_kwargs):
+            calls.append(("bot", token))
             self.session = FakeSession()
 
     monkeypatch.setattr(web, "_current_owner", fake_owner)
@@ -205,7 +206,8 @@ async def test_manual_repost_still_sends_vk_when_telegram_raises(monkeypatch):
             calls.append(("bot_closed",))
 
     class FakeBot:
-        def __init__(self, _token):
+        def __init__(self, token=None, **_kwargs):
+            calls.append(("bot", token))
             self.session = FakeSession()
 
     monkeypatch.setattr(web, "_current_owner", fake_owner)
