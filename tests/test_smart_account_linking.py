@@ -62,6 +62,14 @@ async def test_confirmation_smart_merges_into_telegram_and_keeps_furthest_progre
             (vk_id, 7, now, now),
         )
         await db.execute(
+            "INSERT INTO bonus_wallets(user_id,balance,created_at,updated_at) VALUES(?,?,?,?)",
+            (tg_id, 100, now, now),
+        )
+        await db.execute(
+            "INSERT INTO bonus_wallets(user_id,balance,created_at,updated_at) VALUES(?,?,?,?)",
+            (vk_id, 40, now, now),
+        )
+        await db.execute(
             "INSERT INTO purchases(user_id,amount_stars,status,created_at) VALUES(?,?,?,?)",
             (vk_id, 5, "paid", now),
         )
@@ -96,6 +104,9 @@ async def test_confirmation_smart_merges_into_telegram_and_keeps_furthest_progre
         assert [(int(row["user_id"]), int(row["position_percent"])) for row in progress] == [(tg_id, 82)]
         wallet = await (await db.execute("SELECT balance_stars FROM reader_wallets WHERE user_id=?", (tg_id,))).fetchone()
         assert int(wallet["balance_stars"]) == 17
+        bonus = await (await db.execute("SELECT balance FROM bonus_wallets WHERE user_id=?", (tg_id,))).fetchone()
+        assert int(bonus["balance"]) == 140
+        assert await (await db.execute("SELECT id FROM bonus_wallets WHERE user_id=?", (vk_id,))).fetchone() is None
         purchase = await (await db.execute("SELECT user_id FROM purchases WHERE amount_stars=5", ())).fetchone()
         assert int(purchase["user_id"]) == tg_id
         identities = await (
@@ -167,5 +178,7 @@ def test_settings_use_request_confirmation_instead_of_manual_merge_choice():
     assert "/confirm`" not in script  # endpoint is assembled from the requested action
     assert '/api/account-link/request/{token}/confirm' in router
     assert '/api/account-link/request/{token}/reject' in router
+    assert 'result.get("delivery_status") == "sent"' in router
+    assert "source_platform=? AND source_external_id=?" in router
     assert "Ничего не объединится автоматически по одному username или ID" in notifications
     assert "Проверить и подтвердить" in notifications
