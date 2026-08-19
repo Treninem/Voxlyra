@@ -175,10 +175,11 @@ async def test_confirmation_smart_merges_into_telegram_and_keeps_all_reader_valu
 @pytest.mark.asyncio
 async def test_referral_merge_keeps_existing_canonical_attribution_and_removes_self_link(tmp_path):
     from app.db import connect, init_db, upsert_user, utc_now
-    from app.services.account_identity import _merge_reader_data
+    from app.services.account_identity import _merge_reader_data, ensure_identity_schema
 
     settings.DATABASE_PATH = str(tmp_path / "referral-conflict.sqlite3")
     await init_db()
+    await ensure_identity_schema()
     canonical = await upsert_user(telegram_id=910001, username="canonical", full_name="Canonical")
     secondary = await upsert_user(telegram_id=910002, username="secondary", full_name="Secondary")
     first_inviter = await upsert_user(telegram_id=910003, username="first", full_name="First")
