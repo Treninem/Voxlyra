@@ -117,8 +117,117 @@ async def test_stale_legacy_code_cannot_attach_second_vk_to_linked_telegram(tmp_
         ).fetchall()
         other_mapping = await (
             await db.execute(
-                "SELECT user_id FROM external_identities WHERE platform='vk' AND external_id='330003'",
+                "SELECT user_id FROM external_identities WHERE platform='vk' AND external_id='330003'"
             )
         ).fetchone()
     assert [str(row["external_id"]) for row in linked_vk] == ["230002"]
     assert int(other_mapping["user_id"]) == vk_other_id
+
+
+@pytest.mark.asyncio
+async def test_legacy_keep_vk_choice_is_forced_to_safe_telegram_canonical_merge(tmp_path):
+    from app.db import connect, init_db, upsert_user, utc_now
+    from app.services.account_identity import consume_link_code, create_link_code, identity_status, resolve_external_identity
+
+    settings.DATABASE_PATH = str(tmp_path / "legacy-keep-vk.sqlite3")
+    await init_db()
+    tg = await upsert_user(telegram_id=140001, username="tg_history", full_name="TG History")
+    vk = await upsert_user(telegram_id=settings.vk_identity_id(240002), username="vk_fresh", full_name="VK Fresh")
+    tg_id, vk_id = int(tg["id"]), int(vk["id"])
+    await resolve_external_identity("telegram", 140001, tg_id)
+    await resolve_external_identity("vk", 240002, vk_id)
+    now = utc_now()
+    async with connect() as db:
+        await db.execute(
+            "INSERT INTO reader_wallets(user_id,balance_stars,created_at,updated_at) VALUES(?,?,?,?)",
+            (tg_id, 11, now, now),
+        )
+        await db.execute(
+            "INSERT INTO reader_wallets(user_id,balance_stars,created_at,updated_at) VALUES(?,?,?,?)",
+            (vk_id, 4, now, now),
+        )
+        await db.commit()
+
+    legacy = await create_link_code(tg_id, "telegram")
+    result = await consume_link_code(
+        current_user_id=vk_id,
+        current_platform="vk",
+        external_id=240002,
+        code=legacy["code"],
+        strategy="keep_vk",  # accepted from an old client, but no longer honored
+    )
+
+    assert result["canonical_user_id"] == tg_id
+    assert (await identity_status(tg_id))["linked"] is True
+    async with connect() as db:
+        wallet = await (
+            await db.execute("SELECT balance_stars FROM reader_wallets WHERE user_id=?", (tg_id,))
+        ).fetchone()
+        old_wallet = await (
+            await db.execute("SELECT balance_stars FROM reader_wallets WHERE user_id=?", (vk_id,))
+        ).fetchone()
+    assert int(wallet["balance_stars"]) == 15
+    assert old_wallet is None
+
+
+@pytest.mark.asyncio
+async def test_critical_merge_failure_rolls_back_identity_and_balances(tmp_path):
+    from app.db import connect, init_db, upsert_user, utc_now
+    from app.services.account_identity import identity_status, resolve_external_identity
+    from app.services.smart_account_link import create_smart_link_request, confirm_smart_link_request, get_source_link_request
+
+    settings.DATABASE_PATH = str(tmp_path / "atomic-merge.sqlite3")
+    await init_db()
+    tg = await upsert_user(telegram_id=150001, username="tg_atomic", full_name="TG Atomic")
+    vk = await upsert_user(telegram_id=settings.vk_identity_id(250002), username="vk_atomic", full_name="VK Atomic")
+    tg_id, vk_id = int(tg["id"]), int(vk["id"])
+    await resolve_external_identity("telegram", 150001, tg_id)
+    await resolve_external_identity("vk", 250002, vk_id)
+    now = utc_now()
+    async with connect() as db:
+        await db.execute(
+            "INSERT INTO reader_wallets(user_id,balance_stars,created_at,updated_at) VALUES(?,?,?,?)",
+            (tg_id, 20, now, now),
+        )
+        await db.execute(
+            "INSERT INTO reader_wallets(user_id,balance_stars,created_at,updated_at) VALUES(?,?,?,?)",
+            (vk_id, 9, now, now),
+        )
+        await db.execute(
+            f"""CREATE TRIGGER force_wallet_merge_failure
+                BEFORE DELETE ON reader_wallets
+                WHEN OLD.user_id={vk_id}
+                BEGIN
+                    SELECT RAISE(ABORT, 'forced wallet merge failure');
+                END"""
+        )
+        await db.commit()
+
+    request = await create_smart_link_request(
+        source_user_id=vk_id,
+        source_platform="vk",
+        source_external_id=250002,
+        source_username="vk_atomic",
+        source_full_name="VK Atomic",
+        target_reference="150001",
+    )
+    with pytest.raises(Exception, match="forced wallet merge failure"):
+        await confirm_smart_link_request(
+            token=request["token"],
+            target_user_id=tg_id,
+            target_platform="telegram",
+            target_external_id=150001,
+        )
+
+    assert (await identity_status(tg_id))["linked"] is False
+    assert (await identity_status(vk_id))["linked"] is False
+    assert (await get_source_link_request(vk_id, request["token"]))["status"] == "pending"
+    async with connect() as db:
+        tg_wallet = await (
+            await db.execute("SELECT balance_stars FROM reader_wallets WHERE user_id=?", (tg_id,))
+        ).fetchone()
+        vk_wallet = await (
+            await db.execute("SELECT balance_stars FROM reader_wallets WHERE user_id=?", (vk_id,))
+        ).fetchone()
+    assert int(tg_wallet["balance_stars"]) == 20
+    assert int(vk_wallet["balance_stars"]) == 9
