@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Header, HTTPException, Request
 
-from app.db import add_audit
+from app.db import add_audit, connect
 from app.services.account_identity import AccountLinkError
 from app.services.account_link_notifications import notify_link_decision, send_link_confirmation_request
 from app.services.smart_account_link import (
@@ -56,6 +56,10 @@ async def create_account_link_request(
         raise _link_error(exc) from exc
     if result.get("already_linked"):
         return result
+    # A repeated click within the reuse window returns the same pending request.
+    # If its notification was already delivered, do not spam the target account.
+    if result.get("delivery_status") == "sent":
+        return result
 
     delivered, error = await send_link_confirmation_request(result)
     await set_link_request_delivery(str(result["token"]), delivered=delivered, error=error)
@@ -79,9 +83,33 @@ async def account_link_request_status(
 ):
     user = await _current_user(x_telegram_init_data)
     result = await get_source_link_request(user.app_user_id, token)
-    if not result:
-        raise HTTPException(status_code=404, detail="Запрос не найден.", headers=_NO_CACHE)
-    return result
+    if result:
+        return result
+
+    # After a successful merge the source external identity immediately resolves
+    # to the canonical Telegram user. The historical request still stores the
+    # pre-merge source_user_id, so authorize the old request by the same verified
+    # source platform identity instead of making the source tab look "lost".
+    async with connect() as db:
+        row = await (
+            await db.execute(
+                """SELECT token,status,delivery_status,delivery_error,expires_at,updated_at
+                   FROM account_link_requests
+                   WHERE token=? AND source_platform=? AND source_external_id=? LIMIT 1""",
+                (str(token), str(user.platform), str(user.external_id)),
+            )
+        ).fetchone()
+    if row:
+        return {
+            "ok": True,
+            "token": str(row["token"]),
+            "status": str(row["status"]),
+            "delivery_status": str(row["delivery_status"]),
+            "delivery_error": str(row["delivery_error"] or ""),
+            "expires_at": str(row["expires_at"]),
+            "updated_at": str(row["updated_at"]),
+        }
+    raise HTTPException(status_code=404, detail="Запрос не найден.", headers=_NO_CACHE)
 
 
 @router.get("/api/account-link/incoming", include_in_schema=False)
