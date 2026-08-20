@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import mimetypes
+import os
 from pathlib import Path
 
 from app.config import settings
@@ -103,12 +104,26 @@ async def should_retry_vk_wall_post(book_id: int) -> bool:
     return await _vk_wall_post_state(book_id) == "vk_wall_post_failed"
 
 
+def _vk_media_token() -> str:
+    """Return the user token used only for VK photo upload.
+
+    VK community tokens can publish wall text but photos.getWallUploadServer may
+    reject group authorization with error 27. A dedicated user token is therefore
+    supported through VK_MEDIA_TOKEN. Group token remains a compatibility fallback
+    for deployments where VK still permits group-authenticated photo upload.
+    """
+    return str(os.getenv("VK_MEDIA_TOKEN") or settings.VK_GROUP_TOKEN or "").strip()
+
+
 async def _vk_upload_wall_cover(path: Path) -> str:
     group_id = int(settings.VK_GROUP_ID or 0)
+    media_token = _vk_media_token()
+    if not media_token:
+        raise RuntimeError("VK media token is not configured")
     upload = await vk_api_call(
         "photos.getWallUploadServer",
         {"group_id": group_id},
-        token=settings.VK_GROUP_TOKEN,
+        token=media_token,
     )
     import httpx
 
@@ -129,12 +144,37 @@ async def _vk_upload_wall_cover(path: Path) -> str:
             "server": payload["server"],
             "hash": payload["hash"],
         },
-        token=settings.VK_GROUP_TOKEN,
+        token=media_token,
     )
     if not saved:
         return ""
     photo = saved[0]
     return f"photo{int(photo['owner_id'])}_{int(photo['id'])}"
+
+
+async def _record_vk_cover_failure(
+    book_id: int,
+    actor_user_id: int | None,
+    error: Exception | str,
+) -> None:
+    """Record a terminal VK publication failure when the required cover is unavailable."""
+    detail = str(error)[:1000]
+    await add_audit(
+        actor_user_id,
+        "vk_wall_cover_failed",
+        "book",
+        str(int(book_id)),
+        detail,
+        "cover_required",
+    )
+    await add_audit(
+        actor_user_id,
+        "vk_wall_post_failed",
+        "book",
+        str(int(book_id)),
+        detail,
+        "cover_required",
+    )
 
 
 async def post_book_to_vk_wall(
@@ -147,7 +187,8 @@ async def post_book_to_vk_wall(
 
     The caller is the shared publication workflow, so the upload origin does not
     matter: Telegram, VK, owner import, Library Manager and GitHub converge here.
-    Failures are audited but never roll back an approved book.
+    A visible cover is mandatory: a failed cover lookup/upload is audited as a
+    failed VK publication and wall.post is not called, preventing text-only posts.
     """
     book_id = int(book_id)
     if (
@@ -182,6 +223,7 @@ async def post_book_to_vk_wall(
         "from_group": 1,
         "message": message,
     }
+
     try:
         cover = await ensure_book_cover_file(
             book_id=book_id,
@@ -189,19 +231,16 @@ async def post_book_to_vk_wall(
             cover_path=str(book["cover_path"] or ""),
             bot=None,
         )
-        if cover and cover.is_file():
-            attachment = await _vk_upload_wall_cover(cover)
-            if attachment:
-                params["attachments"] = attachment
+        if not cover or not cover.is_file():
+            raise RuntimeError("Book cover file is unavailable")
+        attachment = await _vk_upload_wall_cover(cover)
+        if not attachment:
+            raise RuntimeError("VK did not return a saved wall photo")
+        params["attachments"] = attachment
     except Exception as exc:
-        await add_audit(
-            actor_user_id,
-            "vk_wall_cover_failed",
-            "book",
-            str(book_id),
-            str(exc)[:1000],
-            "cover_optional",
-        )
+        await _record_vk_cover_failure(book_id, actor_user_id, exc)
+        return "failed"
+
     try:
         response = await vk_api_call("wall.post", params, token=settings.VK_GROUP_TOKEN)
         post_id = int((response or {}).get("post_id") or 0) if isinstance(response, dict) else int(response or 0)
