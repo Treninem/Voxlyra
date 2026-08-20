@@ -36,7 +36,7 @@
     const heading = title.querySelector('h2');
     if (!heading) return '';
     const clean = String(heading.textContent || '')
-      .replace(/^[^\p{L}\p{N}]+/u, '')
+      .replace(/^[^A-Za-zА-Яа-яЁё0-9]+/, '')
       .trim();
     if (clean) heading.textContent = clean;
     return clean;
@@ -50,13 +50,13 @@
       const panel = title.nextElementSibling;
       if (!(panel instanceof HTMLElement) || !panel.classList.contains('settings-panel')) return null;
       const label = cleanSettingsHeading(title) || `Раздел ${index + 1}`;
-      const key = `voxlyra:settings-section:${index}`;
+      const key = `voxlyra-settings-section-${index}`;
+      if (!panel.id) panel.id = key;
       title.classList.add('settings-accordion-title');
       title.setAttribute('role', 'button');
       title.setAttribute('tabindex', '0');
-      title.setAttribute('aria-controls', panel.id || key);
-      if (!panel.id) panel.id = key;
-      return { title, panel, label, index };
+      title.setAttribute('aria-controls', panel.id);
+      return { title, panel, label };
     }).filter(Boolean);
 
     if (!sections.length) return;
@@ -64,17 +64,18 @@
     function sectionForHash() {
       const hash = String(window.location.hash || '').replace(/^#/, '');
       if (!hash) return null;
-      return sections.find(({ panel }) => panel.id === hash || panel.querySelector(`#${CSS.escape(hash)}`));
+      const target = document.getElementById(hash);
+      if (!target) return null;
+      return sections.find(({ panel }) => panel === target || panel.contains(target)) || null;
     }
 
-    function openSection(target, { scroll = false } = {}) {
+    function openSection(target) {
       sections.forEach((section) => {
         const open = section === target;
         section.panel.hidden = !open;
         section.title.classList.toggle('open', open);
         section.title.setAttribute('aria-expanded', open ? 'true' : 'false');
       });
-      if (scroll) target.title.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
 
     const requested = sectionForHash();
@@ -82,7 +83,7 @@
     openSection(requested || firstUseful);
 
     sections.forEach((section) => {
-      const activate = () => openSection(section, { scroll: false });
+      const activate = () => openSection(section);
       section.title.addEventListener('click', activate);
       section.title.addEventListener('keydown', (event) => {
         if (event.key !== 'Enter' && event.key !== ' ') return;
