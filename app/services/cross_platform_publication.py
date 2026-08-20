@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import mimetypes
-import os
 from pathlib import Path
 
 from app.config import settings
@@ -112,7 +111,7 @@ def _vk_media_token() -> str:
     supported through VK_MEDIA_TOKEN. Group token remains a compatibility fallback
     for deployments where VK still permits group-authenticated photo upload.
     """
-    return str(os.getenv("VK_MEDIA_TOKEN") or settings.VK_GROUP_TOKEN or "").strip()
+    return str(settings.VK_MEDIA_TOKEN or settings.VK_GROUP_TOKEN or "").strip()
 
 
 async def _vk_upload_wall_cover(path: Path) -> str:
