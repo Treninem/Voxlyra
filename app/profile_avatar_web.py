@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 
 from aiogram import Bot
-from fastapi import APIRouter, Body, File, Header, HTTPException, UploadFile
+from fastapi import APIRouter, File, Header, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
 from app.config import settings
@@ -106,7 +106,7 @@ async def reset_custom_profile_avatar(
 async def repost_book_to_all_platform_channels(
     book_id: int,
     x_telegram_init_data: str | None = Header(default=None),
-    payload: dict[str, object] | None = Body(default=None),
+    payload: dict[str, object] | None = None,
 ):
     """Owner action: repeat a published book in both platforms or one selected platform."""
     user = await _current_owner(x_telegram_init_data)
