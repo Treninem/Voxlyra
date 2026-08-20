@@ -48,13 +48,13 @@ def test_vk_chapter_pricing_is_vk_only(monkeypatch):
 
 def test_vk_media_token_prefers_dedicated_user_token(monkeypatch):
     monkeypatch.setattr(cpp.settings, "VK_GROUP_TOKEN", "group-token")
-    monkeypatch.setenv("VK_MEDIA_TOKEN", "user-media-token")
+    monkeypatch.setattr(cpp.settings, "VK_MEDIA_TOKEN", "user-media-token")
     assert cpp._vk_media_token() == "user-media-token"
 
 
 def test_vk_media_token_keeps_group_token_as_compatibility_fallback(monkeypatch):
     monkeypatch.setattr(cpp.settings, "VK_GROUP_TOKEN", "group-token")
-    monkeypatch.delenv("VK_MEDIA_TOKEN", raising=False)
+    monkeypatch.setattr(cpp.settings, "VK_MEDIA_TOKEN", "")
     assert cpp._vk_media_token() == "group-token"
 
 
