@@ -14,11 +14,16 @@ def test_legal_ui_hides_technical_hashes():
 def test_comics_have_dedicated_catalog_and_author_entry():
     webapp = Path("app/webapp.py").read_text(encoding="utf-8")
     base = Path("templates/base.html").read_text(encoding="utf-8")
+    catalog = Path("templates/catalog.html").read_text(encoding="utf-8")
     comics = Path("templates/comics.html").read_text(encoding="utf-8")
     author = Path("templates/author.html").read_text(encoding="utf-8")
     js = Path("static/js/author.js").read_text(encoding="utf-8")
     assert '@app.get("/comics"' in webapp
-    assert 'href="/comics"' in base
+    # The simplified Mini App deliberately keeps only four permanent bottom
+    # destinations. Comics remain a first-level format shortcut on Home rather
+    # than occupying another permanent navigation slot.
+    assert 'href="/comics"' in catalog
+    assert 'data-nav="comics"' not in base
     for code in ("comic", "manga", "manhwa", "webtoon", "graphic_novel"):
         assert f'data-catalog-filter="{code}"' in comics
     assert 'newGraphicProject' in author
