@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 from PIL import Image
 
 
@@ -117,14 +118,102 @@ async def test_manual_repost_calls_telegram_and_vk_regardless_of_login(monkeypat
     monkeypatch.setattr(web, "Bot", FakeBot)
     monkeypatch.setattr(web.settings, "BOT_TOKEN", "test-token")
 
+    # No body keeps backwards compatibility and defaults to both platforms.
     result = await web.repost_book_to_all_platform_channels(55, "signed-launch-data")
 
     assert result["ok"] is True
+    assert result["target"] == "both"
     assert result["requested_from"] == entry_platform
     assert result["telegram"]["status"] == "sent"
     assert result["vk"]["status"] == "sent"
     assert ("telegram", 55, 71, True) in calls
     assert ("vk", 55, 71, True) in calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("target", "expected_telegram", "expected_vk"),
+    [
+        ("telegram", "sent", "skipped"),
+        ("tg", "sent", "skipped"),
+        ("vk", "skipped", "sent"),
+    ],
+)
+async def test_manual_repost_can_target_one_platform(monkeypatch, target, expected_telegram, expected_vk):
+    from app import profile_avatar_web as web
+
+    user = SimpleNamespace(app_user_id=71, telegram_id=2097006037, platform="telegram")
+    calls: list[tuple] = []
+
+    async def fake_owner(_init_data):
+        return user
+
+    async def fake_book(book_id):
+        return {"id": int(book_id), "publication_status": "published"}
+
+    async def fake_vk(book_id, *, actor_user_id, force=False):
+        calls.append(("vk", int(book_id), int(actor_user_id), bool(force)))
+        return "sent"
+
+    async def fake_tg(_bot, book_id, *, actor_user_id, force=False):
+        calls.append(("telegram", int(book_id), int(actor_user_id), bool(force)))
+        return SimpleNamespace(channel_status="sent", channel_error="")
+
+    async def fake_record(book_id, user_id, *, sent, error=""):
+        calls.append(("record", int(book_id), int(user_id), bool(sent), str(error)))
+
+    class FakeSession:
+        async def close(self):
+            calls.append(("bot_closed",))
+
+    class FakeBot:
+        def __init__(self, token=None, **_kwargs):
+            calls.append(("bot", token))
+            self.session = FakeSession()
+
+    monkeypatch.setattr(web, "_current_owner", fake_owner)
+    monkeypatch.setattr(web, "get_book", fake_book)
+    monkeypatch.setattr(web, "post_book_to_vk_wall", fake_vk)
+    monkeypatch.setattr(web, "post_book_to_channel", fake_tg)
+    monkeypatch.setattr(web, "record_owner_channel_promotion", fake_record)
+    monkeypatch.setattr(web, "Bot", FakeBot)
+    monkeypatch.setattr(web.settings, "BOT_TOKEN", "test-token")
+
+    result = await web.repost_book_to_all_platform_channels(55, "signed-launch-data", {"target": target})
+
+    assert result["ok"] is True
+    assert result["telegram"]["status"] == expected_telegram
+    assert result["vk"]["status"] == expected_vk
+    if expected_telegram == "sent":
+        assert any(call[0] == "telegram" for call in calls if call)
+        assert any(call[0] == "record" for call in calls if call)
+    else:
+        assert not any(call[0] == "telegram" for call in calls if call)
+        assert not any(call[0] == "record" for call in calls if call)
+    if expected_vk == "sent":
+        assert any(call[0] == "vk" for call in calls if call)
+    else:
+        assert not any(call[0] == "vk" for call in calls if call)
+
+
+@pytest.mark.asyncio
+async def test_manual_repost_rejects_unknown_target_before_delivery(monkeypatch):
+    from app import profile_avatar_web as web
+
+    user = SimpleNamespace(app_user_id=71, telegram_id=2097006037, platform="vk")
+
+    async def fake_owner(_init_data):
+        return user
+
+    async def forbidden_book(_book_id):
+        raise AssertionError("invalid target must fail before looking up the book")
+
+    monkeypatch.setattr(web, "_current_owner", fake_owner)
+    monkeypatch.setattr(web, "get_book", forbidden_book)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await web.repost_book_to_all_platform_channels(55, "signed-launch-data", {"target": "other"})
+    assert exc_info.value.status_code == 400
 
 
 @pytest.mark.asyncio
@@ -238,7 +327,13 @@ def test_owner_repost_button_is_routed_to_cross_platform_endpoint_before_legacy_
     assert '[data-action^="book:repost:"]' in adapter
     assert "event.stopImmediatePropagation()" in adapter
     assert "/api/control/repost-platforms/" in adapter
+    assert "JSON.stringify({ target })" in adapter
+    assert "Telegram + VK" in adapter
+    assert "Только Telegram" in adapter
+    assert "Только VK" in adapter
+    assert "По умолчанию выбраны обе платформы" in adapter
     assert '/api/control/repost-platforms/{book_id}' in router
+    assert 'raw = str((payload or {}).get("target") or "both")' in router
     assert "post_book_to_vk_wall" in router
     assert "post_book_to_channel" in router
     assert "force=True" in router
