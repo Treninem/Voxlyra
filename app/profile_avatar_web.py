@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 
 from aiogram import Bot
-from fastapi import APIRouter, File, Header, HTTPException, UploadFile
+from fastapi import APIRouter, Body, File, Header, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
 from app.config import settings
@@ -40,6 +40,23 @@ async def _current_owner(init_data: str | None):
     if not settings.is_owner_identity(user.telegram_id):
         raise HTTPException(status_code=403, detail="Это действие доступно только владельцу.", headers=_NO_CACHE)
     return user
+
+
+def _repost_target(payload: dict[str, object] | None) -> str:
+    raw = str((payload or {}).get("target") or "both").strip().lower()
+    aliases = {
+        "both": "both",
+        "all": "both",
+        "telegram+vk": "both",
+        "tg+vk": "both",
+        "telegram": "telegram",
+        "tg": "telegram",
+        "vk": "vk",
+    }
+    target = aliases.get(raw)
+    if target is None:
+        raise HTTPException(status_code=400, detail="Неизвестная платформа переопубликации.", headers=_NO_CACHE)
+    return target
 
 
 @router.get("/api/me/custom-avatar", include_in_schema=False)
@@ -89,9 +106,14 @@ async def reset_custom_profile_avatar(
 async def repost_book_to_all_platform_channels(
     book_id: int,
     x_telegram_init_data: str | None = Header(default=None),
+    payload: dict[str, object] | None = Body(default=None),
 ):
-    """Owner action: repeat one published book in Telegram and VK regardless of login origin."""
+    """Owner action: repeat a published book in both platforms or one selected platform."""
     user = await _current_owner(x_telegram_init_data)
+    target = _repost_target(payload)
+    publish_vk = target in {"both", "vk"}
+    publish_telegram = target in {"both", "telegram"}
+
     book = await get_book(int(book_id))
     if not book:
         raise HTTPException(status_code=404, detail="Книга не найдена.", headers=_NO_CACHE)
@@ -102,60 +124,72 @@ async def repost_book_to_all_platform_channels(
             headers=_NO_CACHE,
         )
 
-    # Deliver to both platforms independently. Unexpected failures in one path
-    # must not prevent the other platform from receiving the manual repost.
-    vk_status = "failed"
+    # Requested platforms are delivered independently. With the default target
+    # both paths run even if one fails; a single-platform repost never touches
+    # the platform that the owner did not select.
+    vk_status = "skipped"
     vk_error = ""
-    try:
-        vk_status = await post_book_to_vk_wall(
-            int(book_id),
-            actor_user_id=user.app_user_id,
-            force=True,
-        )
-    except Exception as exc:
-        vk_error = f"{type(exc).__name__}: {exc}"[:1000]
-        logger.exception("Unexpected VK repost failure book_id=%s", int(book_id))
-
-    telegram_status = "not_configured"
-    telegram_error = ""
-    if settings.BOT_TOKEN:
-        bot: Bot | None = None
+    if publish_vk:
+        vk_status = "failed"
         try:
-            bot = Bot(token=settings.BOT_TOKEN)
-            tg_result = await post_book_to_channel(
-                bot,
+            vk_status = await post_book_to_vk_wall(
                 int(book_id),
                 actor_user_id=user.app_user_id,
                 force=True,
             )
-            telegram_status = str(tg_result.channel_status or "failed")
-            telegram_error = str(tg_result.channel_error or "")
         except Exception as exc:
-            telegram_status = "failed"
-            telegram_error = f"{type(exc).__name__}: {exc}"[:1000]
-            logger.exception("Unexpected Telegram repost failure book_id=%s", int(book_id))
-        finally:
-            if bot is not None:
-                try:
-                    await bot.session.close()
-                except Exception:
-                    logger.exception("Could not close Telegram bot session after repost book_id=%s", int(book_id))
+            vk_error = f"{type(exc).__name__}: {exc}"[:1000]
+            logger.exception("Unexpected VK repost failure book_id=%s", int(book_id))
 
-    try:
-        await record_owner_channel_promotion(
-            int(book_id),
-            user.app_user_id,
-            sent=telegram_status == "sent",
-            error=telegram_error,
-        )
-    except Exception:
-        # Delivery outcome must still be returned even if a secondary audit write fails.
-        logger.exception("Could not record owner channel promotion book_id=%s", int(book_id))
+    telegram_status = "skipped"
+    telegram_error = ""
+    if publish_telegram:
+        telegram_status = "not_configured"
+        if settings.BOT_TOKEN:
+            bot: Bot | None = None
+            try:
+                bot = Bot(token=settings.BOT_TOKEN)
+                tg_result = await post_book_to_channel(
+                    bot,
+                    int(book_id),
+                    actor_user_id=user.app_user_id,
+                    force=True,
+                )
+                telegram_status = str(tg_result.channel_status or "failed")
+                telegram_error = str(tg_result.channel_error or "")
+            except Exception as exc:
+                telegram_status = "failed"
+                telegram_error = f"{type(exc).__name__}: {exc}"[:1000]
+                logger.exception("Unexpected Telegram repost failure book_id=%s", int(book_id))
+            finally:
+                if bot is not None:
+                    try:
+                        await bot.session.close()
+                    except Exception:
+                        logger.exception("Could not close Telegram bot session after repost book_id=%s", int(book_id))
+
+        try:
+            await record_owner_channel_promotion(
+                int(book_id),
+                user.app_user_id,
+                sent=telegram_status == "sent",
+                error=telegram_error,
+            )
+        except Exception:
+            # Delivery outcome must still be returned even if a secondary audit write fails.
+            logger.exception("Could not record owner channel promotion book_id=%s", int(book_id))
+
+    requested_statuses = []
+    if publish_telegram:
+        requested_statuses.append(telegram_status)
+    if publish_vk:
+        requested_statuses.append(str(vk_status))
 
     return {
-        "ok": telegram_status == "sent" and vk_status == "sent",
+        "ok": bool(requested_statuses) and all(status == "sent" for status in requested_statuses),
         "book_id": int(book_id),
         "requested_from": user.platform,
+        "target": target,
         "telegram": {"status": telegram_status, "error": telegram_error},
         "vk": {"status": str(vk_status), "error": vk_error},
     }
