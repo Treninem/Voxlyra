@@ -46,6 +46,18 @@ def test_vk_chapter_pricing_is_vk_only(monkeypatch):
     assert "Stars" not in text
 
 
+def test_vk_media_token_prefers_dedicated_user_token(monkeypatch):
+    monkeypatch.setattr(cpp.settings, "VK_GROUP_TOKEN", "group-token")
+    monkeypatch.setattr(cpp.settings, "VK_MEDIA_TOKEN", "user-media-token")
+    assert cpp._vk_media_token() == "user-media-token"
+
+
+def test_vk_media_token_keeps_group_token_as_compatibility_fallback(monkeypatch):
+    monkeypatch.setattr(cpp.settings, "VK_GROUP_TOKEN", "group-token")
+    monkeypatch.setattr(cpp.settings, "VK_MEDIA_TOKEN", "")
+    assert cpp._vk_media_token() == "group-token"
+
+
 @pytest.mark.asyncio
 async def test_vk_retry_only_follows_latest_failed_terminal_state(monkeypatch):
     async def failed(book_id):
@@ -80,14 +92,7 @@ def _published_book():
     }
 
 
-@pytest.mark.asyncio
-async def test_vk_wall_post_uses_group_wall_and_vk_mini_app(monkeypatch):
-    monkeypatch.setattr(cpp.settings, "VK_ENABLED", True)
-    monkeypatch.setattr(cpp.settings, "VK_APP_ID", 123456)
-    monkeypatch.setattr(cpp.settings, "VK_GROUP_ID", 987654)
-    monkeypatch.setattr(cpp.settings, "VK_GROUP_TOKEN", "test-token")
-    monkeypatch.setattr(cpp.settings, "VK_VOTES_PER_STAR", 2.0)
-
+async def _install_vk_book_fakes(monkeypatch, *, cover):
     async def fake_book(book_id):
         assert book_id == 77
         return _published_book()
@@ -101,8 +106,31 @@ async def test_vk_wall_post_uses_group_wall_and_vk_mini_app(monkeypatch):
     async def not_sent(book_id):
         return False
 
-    async def no_cover(**kwargs):
-        return None
+    async def fake_cover(**kwargs):
+        return cover
+
+    monkeypatch.setattr(cpp, "get_book", fake_book)
+    monkeypatch.setattr(cpp, "get_book_options", fake_options)
+    monkeypatch.setattr(cpp, "count_chapters_for_book", fake_chapters)
+    monkeypatch.setattr(cpp, "_was_vk_wall_post_sent", not_sent)
+    monkeypatch.setattr(cpp, "ensure_book_cover_file", fake_cover)
+
+
+@pytest.mark.asyncio
+async def test_vk_wall_post_requires_uploaded_cover_attachment(tmp_path, monkeypatch):
+    monkeypatch.setattr(cpp.settings, "VK_ENABLED", True)
+    monkeypatch.setattr(cpp.settings, "VK_APP_ID", 123456)
+    monkeypatch.setattr(cpp.settings, "VK_GROUP_ID", 987654)
+    monkeypatch.setattr(cpp.settings, "VK_GROUP_TOKEN", "test-token")
+    monkeypatch.setattr(cpp.settings, "VK_VOTES_PER_STAR", 2.0)
+
+    cover = tmp_path / "cover.jpg"
+    cover.write_bytes(b"cover")
+    await _install_vk_book_fakes(monkeypatch, cover=cover)
+
+    async def fake_upload(path):
+        assert path == cover
+        return "photo-987654_123"
 
     calls = []
 
@@ -115,11 +143,7 @@ async def test_vk_wall_post_uses_group_wall_and_vk_mini_app(monkeypatch):
     async def fake_audit(*args):
         audits.append(args)
 
-    monkeypatch.setattr(cpp, "get_book", fake_book)
-    monkeypatch.setattr(cpp, "get_book_options", fake_options)
-    monkeypatch.setattr(cpp, "count_chapters_for_book", fake_chapters)
-    monkeypatch.setattr(cpp, "_was_vk_wall_post_sent", not_sent)
-    monkeypatch.setattr(cpp, "ensure_book_cover_file", no_cover)
+    monkeypatch.setattr(cpp, "_vk_upload_wall_cover", fake_upload)
     monkeypatch.setattr(cpp, "vk_api_call", fake_vk)
     monkeypatch.setattr(cpp, "add_audit", fake_audit)
 
@@ -130,11 +154,70 @@ async def test_vk_wall_post_uses_group_wall_and_vk_mini_app(monkeypatch):
     assert method == "wall.post"
     assert params["owner_id"] == -987654
     assert params["from_group"] == 1
+    assert params["attachments"] == "photo-987654_123"
     assert "https://vk.com/app123456#book_77" in params["message"]
     assert "14 голосов VK" in params["message"]
     assert "Stars" not in params["message"]
     assert token == "test-token"
     assert any(item[1] == "vk_wall_post_sent" for item in audits)
+
+
+@pytest.mark.asyncio
+async def test_vk_wall_does_not_publish_without_cover(monkeypatch):
+    monkeypatch.setattr(cpp.settings, "VK_ENABLED", True)
+    monkeypatch.setattr(cpp.settings, "VK_APP_ID", 123456)
+    monkeypatch.setattr(cpp.settings, "VK_GROUP_ID", 987654)
+    monkeypatch.setattr(cpp.settings, "VK_GROUP_TOKEN", "test-token")
+    await _install_vk_book_fakes(monkeypatch, cover=None)
+
+    calls = []
+    audits = []
+
+    async def forbidden_vk(method, params, *, token=""):
+        calls.append((method, params, token))
+        raise AssertionError("wall.post must not run without a cover")
+
+    async def fake_audit(*args):
+        audits.append(args)
+
+    monkeypatch.setattr(cpp, "vk_api_call", forbidden_vk)
+    monkeypatch.setattr(cpp, "add_audit", fake_audit)
+
+    assert await cpp.post_book_to_vk_wall(77, actor_user_id=9) == "failed"
+    assert calls == []
+    assert any(item[1] == "vk_wall_cover_failed" and item[5] == "cover_required" for item in audits)
+    assert any(item[1] == "vk_wall_post_failed" and item[5] == "cover_required" for item in audits)
+
+
+@pytest.mark.asyncio
+async def test_vk_wall_does_not_publish_when_cover_upload_fails(tmp_path, monkeypatch):
+    monkeypatch.setattr(cpp.settings, "VK_ENABLED", True)
+    monkeypatch.setattr(cpp.settings, "VK_APP_ID", 123456)
+    monkeypatch.setattr(cpp.settings, "VK_GROUP_ID", 987654)
+    monkeypatch.setattr(cpp.settings, "VK_GROUP_TOKEN", "test-token")
+
+    cover = tmp_path / "cover.jpg"
+    cover.write_bytes(b"cover")
+    await _install_vk_book_fakes(monkeypatch, cover=cover)
+
+    async def broken_upload(path):
+        raise RuntimeError("VK photo upload unavailable")
+
+    async def forbidden_vk(*args, **kwargs):
+        raise AssertionError("wall.post must not run after cover upload failure")
+
+    audits = []
+
+    async def fake_audit(*args):
+        audits.append(args)
+
+    monkeypatch.setattr(cpp, "_vk_upload_wall_cover", broken_upload)
+    monkeypatch.setattr(cpp, "vk_api_call", forbidden_vk)
+    monkeypatch.setattr(cpp, "add_audit", fake_audit)
+
+    assert await cpp.post_book_to_vk_wall(77, actor_user_id=None) == "failed"
+    assert any(item[1] == "vk_wall_cover_failed" for item in audits)
+    assert any(item[1] == "vk_wall_post_failed" for item in audits)
 
 
 @pytest.mark.asyncio
@@ -158,45 +241,3 @@ async def test_vk_wall_post_is_idempotent(monkeypatch):
     monkeypatch.setattr(cpp, "vk_api_call", forbidden_vk)
 
     assert await cpp.post_book_to_vk_wall(77, actor_user_id=None) == "already_sent"
-
-
-@pytest.mark.asyncio
-async def test_vk_wall_failure_is_audited_but_does_not_raise(monkeypatch):
-    monkeypatch.setattr(cpp.settings, "VK_ENABLED", True)
-    monkeypatch.setattr(cpp.settings, "VK_APP_ID", 123456)
-    monkeypatch.setattr(cpp.settings, "VK_GROUP_ID", 987654)
-    monkeypatch.setattr(cpp.settings, "VK_GROUP_TOKEN", "test-token")
-
-    async def fake_book(book_id):
-        return _published_book()
-
-    async def fake_options(book_id):
-        return {"genres": []}
-
-    async def fake_chapters(book_id):
-        return 1
-
-    async def not_sent(book_id):
-        return False
-
-    async def no_cover(**kwargs):
-        return None
-
-    async def broken_vk(*args, **kwargs):
-        raise RuntimeError("VK unavailable")
-
-    audits = []
-
-    async def fake_audit(*args):
-        audits.append(args)
-
-    monkeypatch.setattr(cpp, "get_book", fake_book)
-    monkeypatch.setattr(cpp, "get_book_options", fake_options)
-    monkeypatch.setattr(cpp, "count_chapters_for_book", fake_chapters)
-    monkeypatch.setattr(cpp, "_was_vk_wall_post_sent", not_sent)
-    monkeypatch.setattr(cpp, "ensure_book_cover_file", no_cover)
-    monkeypatch.setattr(cpp, "vk_api_call", broken_vk)
-    monkeypatch.setattr(cpp, "add_audit", fake_audit)
-
-    assert await cpp.post_book_to_vk_wall(77, actor_user_id=None) == "failed"
-    assert any(item[1] == "vk_wall_post_failed" for item in audits)

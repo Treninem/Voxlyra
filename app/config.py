@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     VK_SERVICE_TOKEN: str = ""
     VK_GROUP_ID: int = 0
     VK_GROUP_TOKEN: str = ""
+    # Отдельный пользовательский токен только для загрузки обложек на стену.
+    # wall.post продолжает использовать более узкий VK_GROUP_TOKEN.
+    VK_MEDIA_TOKEN: str = ""
     VK_OWNER_IDS: str = ""
     VK_API_VERSION: str = "5.199"
     VK_LAUNCH_MAX_AGE_SECONDS: int = 86400
